@@ -129,14 +129,31 @@ directly rather than a custom class.
 
 ---
 
-## Bonus: interactive sorting visualizer
+## Bonus: interactive visualizers
 
-There's a tiny browser-based visualizer in [`frontend/sorting-visualizer.html`](frontend/sorting-visualizer.html)
-that animates Bubble, Quick, and Merge sort as colored bars. Just open the
-file in any modern browser — no server needed.
+The `frontend/` folder has a suite of browser-based visualizers — open
+[`frontend/index.html`](frontend/index.html) for the hub page, or jump
+directly to any individual file. **No server needed** — just double-click.
 
-It's a prototype to show what a full visual frontend for these fundamentals
-could look like.
+| Visualizer | What it shows |
+|---|---|
+| [`index.html`](frontend/index.html) | Hub page linking to all visualizers |
+| [`inheritance-visualizer.html`](frontend/inheritance-visualizer.html) | Click any class in the hierarchy to see what it inherits/overrides |
+| [`polymorphism-visualizer.html`](frontend/polymorphism-visualizer.html) | Shapes & animals + vtable diagram + overriding vs overloading + gotchas |
+| [`linked-list-visualizer.html`](frontend/linked-list-visualizer.html) | Nodes &amp; arrows, plus a race: LinkedList.addFirst() vs ArrayList shift cost |
+| [`stack-queue-visualizer.html`](frontend/stack-queue-visualizer.html) | LIFO/FIFO + interactive browser history & print spooler demos |
+| [`bst-visualizer.html`](frontend/bst-visualizer.html) | Insert/search/traverse + balanced vs degenerate side-by-side + 3 traversal orders |
+| [`hashmap-visualizer.html`](frontend/hashmap-visualizer.html) | Buckets, collisions, chaining, live load factor &amp; auto-resize |
+| [`graph-visualizer.html`](frontend/graph-visualizer.html) | BFS, DFS, and BFS-shortest-path lighting up the route from A to B |
+| [`sorting-visualizer.html`](frontend/sorting-visualizer.html) | Five sorts with reference cards & race-mode comparison |
+| [`searching-visualizer.html`](frontend/searching-visualizer.html) | Linear vs Binary, with code, real-world use, scaling table |
+| [`recursion-visualizer.html`](frontend/recursion-visualizer.html) | Call stack + naive-vs-memoized fib + animated Tower of Hanoi |
+| [`big-o-visualizer.html`](frontend/big-o-visualizer.html) | Growth curves, per-complexity examples, time-at-scale, 7-question quiz |
+| [`concurrency-visualizer.html`](frontend/concurrency-visualizer.html) | Two threads, one counter — watch a race condition happen live |
+
+Each visualizer is a single self-contained HTML file (no build step,
+no dependencies). They mirror the corresponding Java implementations
+in the support packages.
 
 ---
 
