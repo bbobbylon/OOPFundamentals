@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Spring Boot — Caching Internals (Deep Dive)</title>
+  <style>
+    :root{--bg:#0f172a;--panel:#1e293b;--panel2:#162032;--border:#1a2744;--text:#e2e8f0;--muted:#64748b;--accent:#6db33f;--blue:#22d3ee;--green:#4ade80;--purple:#a78bfa;--amber:#f59e0b;--red:#f87171;--orange:#fb923c}
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.6}
+    h1{font-size:26px;font-weight:800;background:linear-gradient(90deg,#6db33f,#a78bfa);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:4px}
+    h2{font-size:15px;font-weight:700;color:var(--blue);margin:0 0 12px;letter-spacing:.03em}
+    h3{font-size:12px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px}
+    .page{max-width:1100px;margin:0 auto;padding:28px 22px 60px}
+    .subtitle{color:var(--muted);font-size:13px;margin-bottom:24px}
+    .grid{display:grid;gap:14px;margin-bottom:36px}
+    .grid-2{grid-template-columns:repeat(auto-fit,minmax(440px,1fr))}
+    .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px 20px}
+    .card-accent{border-left:3px solid var(--accent)}.card-blue{border-left:3px solid var(--blue)}
+    .card-green{border-left:3px solid var(--green)}.card-purple{border-left:3px solid var(--purple)}
+    .card-amber{border-left:3px solid var(--amber)}.card-red{border-left:3px solid var(--red)}
+    pre{background:#0a0f1e;border:1px solid var(--border);border-radius:8px;padding:12px 15px;font-family:ui-monospace,"Cascadia Code","Fira Code",monospace;font-size:12px;line-height:1.65;overflow-x:auto;margin:8px 0}
+    .kw{color:#c792ea}.fn{color:#82aaff}.str{color:#c3e88d}.cm{color:#546e7a;font-style:italic}
+    .type{color:#f78c6c}.op{color:#89ddff}.num{color:#f78c6c}.dec{color:#ffcb6b}.attr{color:#c792ea}
+    code{background:rgba(255,255,255,.07);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-family:ui-monospace,monospace;font-size:11px;color:var(--accent)}
+    section{margin-bottom:40px}
+    table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+    th{background:var(--panel2);color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.07em;padding:8px 10px;text-align:left;border-bottom:1px solid var(--border)}
+    td{padding:8px 10px;border-bottom:1px solid rgba(26,39,68,.5);vertical-align:top}
+    tr:last-child td{border-bottom:none}
+    .note{font-size:11px;color:var(--muted);margin-top:6px}
+    ul.tight{margin:6px 0 0 18px;font-size:12.5px}ul.tight li{margin:5px 0}
+    .pill{font-family:ui-monospace,monospace;font-size:11px;background:#0a0f1e;border:1px solid var(--border);border-radius:6px;padding:2px 7px;color:var(--purple)}
+    .xlink{font-size:11.5px;color:var(--blue)}
+    .good{color:#86efac}.bad{color:#fca5a5}.warn{color:#fcd34d}
+    /* ── cache playground ── */
+    .cachewrap{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+    @media(max-width:820px){.cachewrap{grid-template-columns:1fr}}
+    .btns{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:8px}
+    .btns .grouplbl{width:100%;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:6px 0 1px}
+    .btns button{padding:8px 11px;border-radius:8px;border:1px solid var(--border);background:var(--panel2);color:var(--text);font-size:12px;font-weight:700;cursor:pointer;font-family:ui-monospace,monospace}
+    .btns button.read{border-color:#0c4a6e}.btns button.put{border-color:#3a2a08;color:#fcd34d}
+    .btns button.evict{border-color:#5b1717;color:#fca5a5}.btns button.ghost{color:var(--muted);font-family:inherit}
+    .store{background:#0a0f1e;border:1px solid var(--border);border-radius:9px;padding:12px 14px;min-height:150px}
+    .store h4{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:8px}
+    .crow{display:flex;align-items:center;gap:8px;font-family:ui-monospace,monospace;font-size:12px;padding:6px 9px;border-radius:7px;border:1px solid var(--border);background:var(--panel2);margin-bottom:6px;transition:all .2s}
+    .crow .ck{color:#c4b5fd}.crow .arr{color:var(--muted)}.crow .cv{color:#c3e88d}
+    .crow.flashhit{border-color:var(--green);background:rgba(74,222,128,.14)}
+    .crow.flashput{border-color:var(--amber);background:rgba(245,158,11,.14)}
+    .crow.flashnew{border-color:var(--blue);background:rgba(34,211,238,.14)}
+    .empty{color:var(--muted);font-size:12px;font-style:italic}
+    .stats{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+    .stat{flex:1;min-width:120px;background:#0a0f1e;border:1px solid var(--border);border-radius:9px;padding:10px 12px;text-align:center}
+    .stat .v{font-family:ui-monospace,monospace;font-size:22px;font-weight:800}
+    .stat .l{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-top:2px}
+    .stat.db .v{color:var(--red)}.stat.hit .v{color:var(--green)}.stat.rate .v{color:var(--blue)}
+    .log{background:#0a0f1e;border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-family:ui-monospace,monospace;font-size:11px;line-height:1.7;max-height:160px;overflow-y:auto;margin-top:8px}
+    .log .ll{opacity:0;animation:fadein .3s forwards}
+    @keyframes fadein{to{opacity:1}}
+    .log .grn{color:#86efac}.log .blu{color:#7dd3fc}.log .amb{color:#fcd34d}.log .red{color:#fca5a5}.log .mut{color:var(--muted)}
+    .flow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:8px 0;font-size:11px}
+    .flow-node{background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:7px 11px;font-weight:600}
+    .flow-arrow{color:var(--muted)}
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <h1>Caching Internals</h1>
+  <p class="subtitle"><code>@Cacheable</code> looks like a one-line speedup, but underneath it's a <strong>proxy</strong> doing cache-aside: check a store by a generated <strong>key</strong>, return the hit, or run your method on a miss and store the result. Knowing the key rules, the <code>@CachePut</code>/<code>@CacheEvict</code> companions, and the (familiar) proxy gotcha is the difference between a cache that helps and one that serves stale data.</p>
+
+  <!-- 1 -->
+  <section>
+    <h2>1. What <code>@Cacheable</code> does — cache-aside, via a proxy</h2>
+    <div class="grid grid-2">
+      <div class="card card-green">
+        <h3>The annotation</h3>
+        <pre><span class="dec">@EnableCaching</span>            <span class="cm">// turn it on (once)</span>
+<span class="dec">@Configuration</span> <span class="kw">class</span> <span class="type">CacheConfig</span> {}
+
+<span class="dec">@Service</span>
+<span class="kw">class</span> <span class="type">UserService</span> {
+  <span class="dec">@Cacheable</span>(<span class="str">"users"</span>)              <span class="cm">// cache name</span>
+  <span class="kw">public</span> <span class="type">User</span> <span class="fn">getUser</span>(<span class="type">Long</span> id) {
+    <span class="cm">// only runs on a MISS (the "slow" part)</span>
+    <span class="kw">return</span> repo.<span class="fn">findById</span>(id).<span class="fn">orElseThrow</span>();
+  }
+}</pre>
+      </div>
+      <div class="card card-blue">
+        <h3>What the proxy does on each call</h3>
+        <div class="flow">
+          <span class="flow-node">call</span><span class="flow-arrow">→</span>
+          <span class="flow-node" style="border-color:var(--accent);color:var(--accent)">proxy</span><span class="flow-arrow">→</span>
+          <span class="flow-node" style="border-color:var(--blue);color:var(--blue)">key in cache?</span>
+        </div>
+        <ul class="tight">
+          <li><b>Hit:</b> return the stored value — <b>your method never runs</b>.</li>
+          <li><b>Miss:</b> run the method, store the result under the key, return it.</li>
+        </ul>
+        <p class="note">This is "cache-aside" (lazy population). Because it's a <b>proxy</b>, the same rule as <code>@Transactional</code>/<code>@Async</code> holds: it only engages on calls <em>through</em> the bean, never on self-invocation.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2 INTERACTIVE -->
+  <section>
+    <h2>2. Interactive: hit / miss playground</h2>
+    <div class="card">
+      <p style="font-size:12px;color:var(--muted);margin-bottom:10px">Cache name <code>users</code>, key = the <code>id</code> argument. Read users, then read again (hit!). Use <code>@CachePut</code> to refresh an entry and <code>@CacheEvict</code> to drop it. Watch the <b>DB executions</b> counter — that's what the cache is saving.</p>
+      <div class="stats">
+        <div class="stat db"><div class="v" id="s-db">0</div><div class="l">DB executions (misses + puts)</div></div>
+        <div class="stat hit"><div class="v" id="s-hit">0</div><div class="l">cache hits</div></div>
+        <div class="stat rate"><div class="v" id="s-rate">–</div><div class="l">hit rate</div></div>
+      </div>
+      <div class="cachewrap">
+        <div>
+          <div class="btns" id="btns">
+            <div class="grouplbl">@Cacheable — read (runs only on miss)</div>
+            <button class="read" data-act="get" data-id="1">getUser(1)</button>
+            <button class="read" data-act="get" data-id="2">getUser(2)</button>
+            <button class="read" data-act="get" data-id="3">getUser(3)</button>
+            <div class="grouplbl">@CachePut — always runs, refreshes entry</div>
+            <button class="put" data-act="put" data-id="1">updateUser(1)</button>
+            <div class="grouplbl">@CacheEvict — drop entries</div>
+            <button class="evict" data-act="evict" data-id="1">evict(1)</button>
+            <button class="evict" data-act="evictall">evictAll()</button>
+            <button class="ghost" data-act="reset">↺ reset</button>
+          </div>
+        </div>
+        <div class="store">
+          <h4>Cache: <code>users</code></h4>
+          <div id="store"></div>
+        </div>
+      </div>
+      <div class="log" id="log"><span class="mut" style="color:var(--muted)">Tip: click getUser(1) twice — first is a MISS (runs the method), second is a HIT (method skipped).</span></div>
+    </div>
+  </section>
+
+  <!-- 3 -->
+  <section>
+    <h2>3. The three core annotations</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>Annotation</th><th>Runs the method?</th><th>Effect on the cache</th><th>Use for</th></tr></thead>
+        <tbody>
+          <tr><td class="pill">@Cacheable</td><td>only on a <b>miss</b></td><td>stores the result; serves it on later calls</td><td>expensive reads</td></tr>
+          <tr><td class="pill">@CachePut</td><td><b>always</b></td><td>runs, then <b>overwrites</b> the entry with the new result</td><td>updates that should refresh the cache</td></tr>
+          <tr><td class="pill">@CacheEvict</td><td>always (by default)</td><td><b>removes</b> the key (or <code>allEntries=true</code> clears the cache)</td><td>deletes / invalidation</td></tr>
+        </tbody>
+      </table>
+      <p class="note" style="margin-top:8px"><b>Don't</b> put <code>@Cacheable</code> on a method that mutates — it won't run on a hit, so your write silently disappears. Reads = <code>@Cacheable</code>; writes = <code>@CachePut</code> or <code>@CacheEvict</code>.</p>
+    </div>
+  </section>
+
+  <!-- 4 -->
+  <section>
+    <h2>4. How the key is generated</h2>
+    <div class="grid grid-2">
+      <div class="card card-blue">
+        <h3>Default: <code>SimpleKeyGenerator</code></h3>
+        <ul class="tight">
+          <li><b>No args</b> → <code>SimpleKey.EMPTY</code> (one shared entry).</li>
+          <li><b>One arg</b> → the arg itself is the key (our <code>id</code>).</li>
+          <li><b>Many args</b> → a <code>SimpleKey(arg1, arg2, …)</code>.</li>
+        </ul>
+        <p class="note">⚠️ Keys must have correct <code>equals/hashCode</code>. Two args that collide, or a mutable key, will cross-serve or never hit.</p>
+      </div>
+      <div class="card card-purple">
+        <h3>Take control with SpEL</h3>
+        <pre><span class="dec">@Cacheable</span>(value=<span class="str">"users"</span>, key=<span class="str">"#id"</span>)
+<span class="dec">@Cacheable</span>(value=<span class="str">"users"</span>, key=<span class="str">"#user.id"</span>)
+<span class="dec">@Cacheable</span>(value=<span class="str">"users"</span>,
+   key=<span class="str">"#root.methodName + ':' + #id"</span>)
+
+<span class="cm">// only cache some calls / some results</span>
+<span class="dec">@Cacheable</span>(value=<span class="str">"users"</span>,
+   condition=<span class="str">"#id &gt; 0"</span>,        <span class="cm">// before (on args)</span>
+   unless=<span class="str">"#result == null"</span>)   <span class="cm">// after (on result)</span></pre>
+        <p class="note">Or supply a <code>keyGenerator</code> bean for a project-wide strategy.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5 -->
+  <section>
+    <h2>5. Two traps: self-invocation &amp; the cache stampede</h2>
+    <div class="grid grid-2">
+      <div class="card card-red">
+        <h3>Self-invocation (yet again)</h3>
+        <pre><span class="dec">@Service</span> <span class="kw">class</span> <span class="type">UserService</span> {
+  <span class="kw">public</span> <span class="type">User</span> <span class="fn">load</span>(<span class="type">Long</span> id){
+    <span class="kw">return</span> <span class="fn">getUser</span>(id);  <span class="cm">// ⛔ "this" — proxy skipped</span>
+  }
+  <span class="dec">@Cacheable</span>(<span class="str">"users"</span>) <span class="kw">public</span> <span class="type">User</span> <span class="fn">getUser</span>(<span class="type">Long</span> id){…}
+}</pre>
+        <p class="note bad" style="color:#fca5a5">The internal call bypasses the proxy → <b>no caching at all</b>. Call through an injected reference instead.</p>
+        <p class="xlink">↪ Same proxy rule as the <b>@Async</b> and <b>Transactions</b> deep-dives.</p>
+      </div>
+      <div class="card card-amber">
+        <h3>Stampede → <code>sync = true</code></h3>
+        <pre><span class="dec">@Cacheable</span>(value=<span class="str">"users"</span>, sync=<span class="kw">true</span>)
+<span class="kw">public</span> <span class="type">User</span> <span class="fn">getUser</span>(<span class="type">Long</span> id){…}</pre>
+        <p style="font-size:12.5px;color:var(--muted)">On a cold key, many concurrent requests all miss at once and all run the expensive method — a "cache stampede". <code>sync=true</code> lets <b>one</b> thread compute while the others <b>wait</b> for that result.</p>
+        <p class="note">Trade-off: <code>sync</code> serializes that key and can't combine with <code>unless</code>/multiple caches.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6 -->
+  <section>
+    <h2>6. The provider abstraction &amp; TTL</h2>
+    <div class="card card-green">
+      <p style="font-size:12.5px;color:var(--muted);margin-bottom:8px">Your annotations target Spring's <code>CacheManager</code>/<code>Cache</code> SPI — the actual store is pluggable. <b>Crucially, <code>@Cacheable</code> has no TTL or size attribute</b>; expiry and eviction are configured on the <em>provider</em>.</p>
+      <table>
+        <thead><tr><th>Provider</th><th>Good for</th><th>TTL / eviction</th></tr></thead>
+        <tbody>
+          <tr><td><code>ConcurrentMapCacheManager</code></td><td>the default / dev — a plain <code>Map</code></td><td class="bad">none — grows unbounded, no TTL</td></tr>
+          <tr><td><b>Caffeine</b></td><td>fast in-process (single app)</td><td><code>expireAfterWrite</code>, <code>maximumSize</code></td></tr>
+          <tr><td><b>Redis</b></td><td>shared across instances (distributed)</td><td><code>entryTtl(...)</code> per cache</td></tr>
+        </tbody>
+      </table>
+      <pre><span class="cm"># Caffeine via properties</span>
+<span class="attr">spring.cache.type</span>: caffeine
+<span class="attr">spring.cache.caffeine.spec</span>: <span class="str">maximumSize=10000,expireAfterWrite=5m</span></pre>
+      <p class="note">So "my cache never expires" is almost always the <code>ConcurrentMapCacheManager</code> default — switch to Caffeine or Redis the moment you need TTL or bounded size.</p>
+    </div>
+  </section>
+
+  <!-- 7 -->
+  <section>
+    <h2>7. One-sentence recap</h2>
+    <div class="card card-accent">
+      <p style="font-size:14px">🗃️ <code>@Cacheable</code> (with <code>@EnableCaching</code>) is a <strong>proxy doing cache-aside</strong> — return the value for the generated <strong>key</strong> on a hit, run the method and store it on a miss — paired with <code>@CachePut</code> (always run, refresh) and <code>@CacheEvict</code> (invalidate); keys come from the args via <code>SimpleKeyGenerator</code> or your <strong>SpEL <code>key=</code></strong>, <strong>self-invocation bypasses it</strong> (same proxy rule), <code>sync=true</code> guards against stampedes, and <strong>TTL/size live on the provider</strong> (Caffeine/Redis), not the annotation.</p>
+    </div>
+  </section>
+
+</div>
+
+<script>
+// ── cache hit/miss playground ───────────────────────────────────────────────
+const NAMES={1:'Bjorn',2:'Freya',3:'Sven'};
+let srcVer={1:1,2:1,3:1};   // "database" version per id
+let cache={};               // id -> {name, v}
+let dbCalls=0, hits=0;
+
+function valStr(v){ return 'User('+v.name+', v'+v.v+')'; }
+function renderStore(flashId, cls){
+  const host=document.getElementById('store'); host.innerHTML='';
+  const ids=Object.keys(cache);
+  if(!ids.length){ host.innerHTML='<div class="empty">(empty — every read will be a miss)</div>'; return; }
+  ids.forEach(id=>{
+    const el=document.createElement('div'); el.className='crow'; el.id='cr-'+id;
+    if(String(flashId)===String(id)&&cls) el.classList.add(cls);
+    el.innerHTML='<span class="ck">users::'+id+'</span><span class="arr">→</span><span class="cv">'+valStr(cache[id])+'</span>';
+    host.appendChild(el);
+  });
+}
+function renderStats(){
+  document.getElementById('s-db').textContent=dbCalls;
+  document.getElementById('s-hit').textContent=hits;
+  const reads=hits+countMisses;
+  document.getElementById('s-rate').textContent = reads? Math.round(hits/reads*100)+'%' : '–';
+}
+let countMisses=0; // reads that missed (for hit-rate over reads only)
+function logLine(html,cls){
+  const log=document.getElementById('log');
+  if(log.querySelector('.mut')) log.innerHTML='';
+  const d=document.createElement('div'); d.className='ll '+(cls||''); d.innerHTML=html; log.prepend(d);
+}
+function get(id){
+  if(cache[id]){
+    hits++; logLine('<span class="grn">HIT  getUser('+id+') → '+valStr(cache[id])+' — method NOT executed</span>');
+    renderStore(id,'flashhit');
+  } else {
+    dbCalls++; countMisses++;
+    cache[id]={name:NAMES[id], v:srcVer[id]};
+    logLine('<span class="blu">MISS getUser('+id+') → executed method (DB read), stored users::'+id+' = '+valStr(cache[id])+'</span>');
+    renderStore(id,'flashnew');
+  }
+  renderStats();
+}
+function put(id){
+  srcVer[id]++; dbCalls++;
+  cache[id]={name:NAMES[id], v:srcVer[id]};
+  logLine('<span class="amb">@CachePut updateUser('+id+') → method ALWAYS ran (DB write), cache refreshed to '+valStr(cache[id])+'</span>');
+  renderStore(id,'flashput'); renderStats();
+}
+function evict(id){
+  if(cache[id]){ delete cache[id]; logLine('<span class="red">@CacheEvict evict('+id+') → removed users::'+id+' (next read = miss)</span>'); }
+  else logLine('<span class="mut">evict('+id+') → key not in cache, nothing to remove</span>');
+  renderStore();
+}
+function evictAll(){
+  cache={}; logLine('<span class="red">@CacheEvict(allEntries=true) → cleared the entire users cache</span>'); renderStore();
+}
+function reset(){
+  srcVer={1:1,2:1,3:1}; cache={}; dbCalls=0; hits=0; countMisses=0;
+  document.getElementById('log').innerHTML='<span class="mut" style="color:var(--muted)">Reset. Try: getUser(1), getUser(1) [hit], updateUser(1) [refresh], getUser(1) [hit, new version], evict(1), getUser(1) [miss again].</span>';
+  renderStore(); renderStats();
+}
+document.getElementById('btns').addEventListener('click', e=>{
+  const b=e.target.closest('button'); if(!b) return;
+  const act=b.dataset.act, id=b.dataset.id;
+  if(act==='get') get(id);
+  else if(act==='put') put(id);
+  else if(act==='evict') evict(id);
+  else if(act==='evictall') evictAll();
+  else if(act==='reset') reset();
+});
+renderStore(); renderStats();
+</script>
+</body>
+</html>
