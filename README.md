@@ -157,6 +157,204 @@ in the support packages.
 
 ---
 
+# Deploying the Dev Learning Hub (DevHub)
+
+Beyond the static visualizers, this repo ships a full **Dev Learning Hub** web
+app with user accounts and cross-device progress sync:
+
+- **`frontend/`** — the hub app (`app.html`): 200+ interactive visualizers, a
+  searchable sidebar, progress tracking, streaks, and a sign-in/register modal.
+- **`backend/`** — a Spring Boot 4 API (`devhub-backend`): registration, JWT
+  login, and per-user topic progress, backed by H2 (local) or PostgreSQL (prod).
+
+You can run it three ways. Pick the one you need:
+
+| Mode | Backend | Accounts? | Use it for |
+|---|---|---|---|
+| **Visualizers only** | none | no | Just browsing — open `frontend/index.html` |
+| **Local full stack** | `localhost:8081` (H2) | yes (local) | Developing / trying the whole app |
+| **Deployed** | cloud host (Postgres) | yes (real) | Sharing a live URL anyone can sign up to |
+
+### Architecture
+
+```
+   Browser                 GitHub Pages              Cloud host (Render)
+ ┌──────────┐   HTTPS   ┌────────────────┐   HTTPS  ┌────────────────────┐
+ │ app.html │──────────▶│  frontend/     │─────────▶│  devhub-backend    │
+ │  + JWT   │◀──────────│  (static)      │◀─────────│  Spring Boot 4 API │
+ └──────────┘           │  config.js ────┼──┐       │  /api/auth/*       │
+                        └────────────────┘  │       │  /api/progress/*   │
+                          config.js tells    │       └─────────┬──────────┘
+                          the frontend where  └──set DEVHUB_API_BASE       │
+                          the backend lives                          ┌─────▼─────┐
+                                                                     │ PostgreSQL │
+                                                                     └───────────┘
+```
+
+The **one wire** connecting frontend to backend is `frontend/config.js` →
+`window.DEVHUB_API_BASE`. Set it to your backend's URL and everything connects.
+
+---
+
+## Prerequisites
+
+| Tool | Why | Check |
+|---|---|---|
+| **Java 21** | build/run the backend | `java -version` |
+| **Git + GitHub account** | host the frontend on Pages | `git --version` |
+| **A backend host** | run the API in the cloud | [Render](https://render.com) free tier (used below); Railway or Fly.io also work |
+| **A static file server** | serve the frontend locally | VS Code "Live Server", or Python 3, or `npx serve` |
+
+Maven is **not** required — the repo ships the Maven wrapper (`mvnw` / `mvnw.cmd`).
+
+---
+
+## Part 1 — Run the full stack locally
+
+**Terminal 1 — start the backend** (in-memory H2, resets on restart, port 8081):
+
+Windows (PowerShell or cmd):
+```
+.\mvnw.cmd -f backend\pom.xml spring-boot:run
+```
+macOS / Linux:
+```
+./mvnw -f backend/pom.xml spring-boot:run
+```
+Verify it's up: open <http://localhost:8081/actuator/health> → `{"status":"UP"}`.
+(Dev DB browser: <http://localhost:8081/h2-console>, JDBC URL `jdbc:h2:mem:devhubdb`, user `sa`, no password.)
+
+**Terminal 2 — serve the frontend on port 5500.** Don't just double-click
+`app.html` — a `file://` page is blocked from calling the API by CORS. Serve it
+from port **5500**, which the backend already allow-lists:
+
+Windows (Python):
+```
+cd frontend
+py -m http.server 5500
+```
+macOS / Linux (Python 3):
+```
+cd frontend
+python3 -m http.server 5500
+```
+No Python? Use Node: `npx serve -l 5500 frontend` — or in VS Code, right-click
+`app.html` → **Open with Live Server** (defaults to port 5500).
+
+Open <http://localhost:5500/app.html>. Leave `frontend/config.js` set to `null`
+for local dev (it then auto-targets `http://localhost:8081`). You can now
+register a local account and everything syncs to the local H2 database.
+
+---
+
+## Part 2 — Deploy the backend (Render + PostgreSQL)
+
+> Render's free tier is used here because it has a one-click Postgres and builds
+> straight from the included `backend/Dockerfile`. Railway and Fly.io follow the
+> same shape — point them at the `backend/` dir and set the same env vars.
+
+1. **Push your repo to GitHub** (if you haven't already).
+
+2. **Create the database:** Render dashboard → **New + → PostgreSQL** → give it a
+   name → **Create**. When it's ready, open its **Info** page and note: *hostname*,
+   *port* (5432), *database*, *username*, *password*.
+
+3. **Create the web service:** **New + → Web Service** → connect your repo, then:
+   - **Root Directory:** `backend`
+   - **Runtime:** `Docker` (auto-detected from `backend/Dockerfile`)
+   - **Instance Type:** `Free`
+
+4. **Add environment variables** (service → **Environment**):
+
+   | Key | Value | Notes |
+   |---|---|---|
+   | `SPRING_PROFILES_ACTIVE` | `prod` | switches to Postgres |
+   | `DATABASE_URL` | `jdbc:postgresql://HOST:5432/DBNAME` | ⚠ **must** start with `jdbc:postgresql://` — see below |
+   | `DATABASE_USERNAME` | *(your db user)* | |
+   | `DATABASE_PASSWORD` | *(your db password)* | |
+   | `JWT_SECRET` | *(random 32+ char string)* | signs login tokens — keep it secret |
+   | `CORS_ALLOWED_ORIGINS` | `https://YOURNAME.github.io` | your Pages origin (Part 3); no trailing slash |
+
+   > **The `DATABASE_URL` gotcha:** Render shows a URL like
+   > `postgres://user:pass@host:5432/db`. Java/JDBC needs a different shape — build
+   > `DATABASE_URL` as `jdbc:postgresql://HOST:5432/DBNAME` (host + db only) and put
+   > the user/password in their own variables. Don't paste Render's raw URL.
+
+5. **Deploy.** First build takes ~3–5 min. When live, check
+   `https://YOUR-SERVICE.onrender.com/actuator/health` → `{"status":"UP"}`. On
+   first boot the app auto-creates the `users` and `topic_progress` tables.
+
+**Good to know:**
+- **HTTPS is automatic** on Render — and *required*, because GitHub Pages is HTTPS
+  and browsers block HTTPS→HTTP "mixed content" requests.
+- **Free tier sleeps** after ~15 min idle; the next request wakes it (~50s cold
+  start). During that wait the app falls back to anonymous mode — just retry once
+  it's awake.
+- **Generate a `JWT_SECRET`:** any long random string, e.g.
+  `openssl rand -base64 48` (macOS/Linux) or
+  `[Convert]::ToBase64String((1..48|%{Get-Random -Max 256}))` (PowerShell).
+
+---
+
+## Part 3 — Deploy the frontend (GitHub Pages)
+
+1. **Point the frontend at your backend.** Edit `frontend/config.js`:
+   ```js
+   window.DEVHUB_API_BASE = 'https://YOUR-SERVICE.onrender.com';
+   ```
+   (HTTPS, no trailing slash.)
+
+2. **Commit & push to `master`.** The included workflow
+   (`.github/workflows/deploy.yml`) publishes the `frontend/` folder to Pages on
+   every push.
+
+3. **Enable Pages once:** repo **Settings → Pages → Source: GitHub Actions**.
+
+4. **Open your app** at:
+   - Project page: `https://YOURNAME.github.io/REPO-NAME/app.html`
+   - or user page (repo named `YOURNAME.github.io`): `https://YOURNAME.github.io/app.html`
+
+5. **Match CORS:** ensure the backend's `CORS_ALLOWED_ORIGINS` equals your Pages
+   **origin** exactly — scheme + host only, e.g. `https://YOURNAME.github.io`
+   (no path, no trailing slash). Change it on Render and redeploy if needed.
+
+---
+
+## Part 4 — Register / sign up
+
+The app is usable anonymously immediately (progress saved in the browser). To get
+an account and sync across devices:
+
+1. In the deployed app, click **Sign in** (top-right) → **Register** tab.
+2. Enter a **username** (3+ chars), **email**, and **password** (8+ chars) →
+   **Create account**. You're signed in right away (a JWT is stored in your
+   browser).
+3. If you had anonymous progress, a banner offers to **import** it into your new
+   account — one click and it's synced server-side.
+4. On your next visit (or another device), click **Sign in** with the same
+   credentials and your progress loads from the server.
+
+There's no seed/admin user — the **first person to register is the first account**.
+Passwords are stored bcrypt-hashed in your Postgres database; the API never
+returns them.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause & fix |
+|---|---|
+| Browser console: **CORS** / "blocked by Access-Control-Allow-Origin" | `CORS_ALLOWED_ORIGINS` ≠ your Pages origin. Set it to exactly `https://YOURNAME.github.io` and redeploy the backend. |
+| Console: **"Mixed Content … was loaded over HTTPS but requested an insecure resource"** | `config.js` points to an `http://` URL. It must be `https://`. |
+| Login spins ~50s, then works | Render free-tier **cold start** — normal after idle. |
+| Login fails but the app still works | Backend unreachable or `config.js` URL wrong → app fell back to **anonymous** mode. Verify `DEVHUB_API_BASE` and that `/actuator/health` is `UP`. |
+| Backend log: **"relation 'users' does not exist"** | Tables weren't created. Confirm `SPRING_PROFILES_ACTIVE=prod`; prod uses `ddl-auto: update` which creates them on boot. Check the DB env vars are correct. |
+| Backend won't start / DB connection errors | `DATABASE_URL` must be `jdbc:postgresql://HOST:5432/DBNAME`; username/password in their own vars (not embedded in the URL). |
+| Logged in, then every call is **401** | `JWT_SECRET` changed between deploys → old tokens are invalid. Sign out and back in. |
+| Docker build can't find the jar | Build from the `backend/` directory (that's the Docker context); `Root Directory: backend` on Render handles this. |
+
+---
+
 ## What's deliberately NOT covered
 
 Topics worth learning eventually, but outside the scope of "entry-level interview":
