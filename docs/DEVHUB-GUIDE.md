@@ -4,7 +4,7 @@
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **240+ browser visualizers** across **10 tracks**, plus a
+DevHub is a learning hub: **240+ browser visualizers** across **11 tracks**, plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
 copy-paste **command-line runbook** (build/run, the auth round-trip via curl, and
@@ -29,6 +29,7 @@ Or jump straight to any file linked below.
 | 🛠️ **Dev Tools** | Git, Maven, Docker | open via the hub |
 | ☁️ **Cloud — AWS** | core AWS services for app developers | open via the hub |
 | 🔐 **Identity & Auth** | OAuth2/OIDC, Entra ID, Ping, tokens & claims | open via the hub |
+| 🐛 **Debugging** | find bugs faster: CORS, 401-vs-403, JWTs (more stacks coming) | [CORS Failures](../frontend/debugging-cors-visualizer.html) |
 
 Pages are tagged **beginner → intermediate → advanced → expert**. The deepest
 ones are the **`*-deep`** / **`*-lab`** companion pages (34 of them) — each takes a
@@ -88,6 +89,10 @@ single view where you watch all of it happen at once.
 - **"I want Spring internals"** → [Auto-Configuration Magic](../frontend/spring-boot-auto-configuration-deep-visualizer.html)
   → [Request Lifecycle](../frontend/spring-boot-request-lifecycle-visualizer.html)
   → [Transactions: Propagation & Isolation](../frontend/spring-boot-transactions-deep-visualizer.html).
+- **"Something's broken"** → 🐛 [CORS Failures](../frontend/debugging-cors-visualizer.html)
+  · [Auth 401 vs 403](../frontend/debugging-auth-401-403-visualizer.html)
+  · [JWTs: decode & diagnose](../frontend/debugging-jwt-visualizer.html) — symptom→fix
+  diagnosers, paired with the [HELP.md command-line runbook](../HELP.md#command-line-runbook).
 
 ---
 
@@ -110,7 +115,7 @@ hub feel like a wiki rather than a pile of pages.
 
 ---
 
-*This guide is updated as new tracks and deep-dives land. Last refreshed with the
-**CIAM round-trip** completion — BFF & Token Relay, OpenAPI → Typed Client, and the
-Full-Stack Request Round-Trip capstone — on top of the Spring **Security & Identity**
-section (method security, multi-IDM claim mapping, `@HttpExchange` clients).*
+*This guide is updated as new tracks and deep-dives land. Last refreshed with the new
+**🐛 Debugging track** (CORS failures, 401-vs-403, JWT decode & diagnose) — on top of
+the completed **CIAM round-trip** (BFF & Token Relay, OpenAPI → Typed Client, Full-Stack
+Round-Trip capstone) and the Spring **Security & Identity** section.*

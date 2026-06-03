@@ -163,7 +163,7 @@ Beyond the static visualizers, this repo ships a full **Dev Learning Hub** web
 app with user accounts and cross-device progress sync:
 
 - **`frontend/`** — the hub app (`app.html`): 240+ interactive visualizers across
-  10 tracks, a searchable sidebar, progress tracking, streaks, and a sign-in/register modal.
+  11 tracks, a searchable sidebar, progress tracking, streaks, and a sign-in/register modal.
 - **`backend/`** — a Spring Boot 4 API (`devhub-backend`): registration, JWT
   login, and per-user topic progress, backed by H2 (local) or PostgreSQL (prod).
 
