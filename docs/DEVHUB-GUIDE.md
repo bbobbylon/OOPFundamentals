@@ -1,6 +1,6 @@
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 240 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 240+ pages.** Pick a *path* below and follow it.
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
@@ -58,14 +58,22 @@ browser all the way to a guarded database call.
 7. [Spring · Multi-IDM Claim Mapping](../frontend/spring-boot-multi-idm-claims-deep-visualizer.html) — accepting **Ping + Entra + Keycloak** at once, normalized to one authority model.
 8. [Spring · Declarative HTTP Clients (`@HttpExchange`)](../frontend/spring-boot-http-exchange-deep-visualizer.html) — calling the IDM's / downstream APIs, relaying the user's token vs acting as the app.
 
-**The one-line story:** the SPA logs in with **OIDC + PKCE** → holds a short-lived
-**access token** and attaches it as a **Bearer** → the Spring **filter chain**
-validates it and maps claims to authorities → **`@PreAuthorize`** decides if the call
-is allowed → and when the API needs to call *another* service, it relays the right
-token. Client guards are the polite "you can't see this"; the server is the lock.
+**Boundary & contract**
 
-> *Coming next on this path:* **BFF / Token Relay**, **OpenAPI → typed Angular client**,
-> and a **full-stack request round-trip** overview tying the two halves together.
+9. [Spring · BFF & Token Relay](../frontend/spring-boot-bff-token-relay-deep-visualizer.html) — keep tokens off the browser entirely: an httpOnly cookie to the BFF, a server-side bearer relay onward.
+10. [Angular · OpenAPI → Typed Client](../frontend/angular-openapi-client-deep-visualizer.html) — generate the API client from Spring's published spec so the frontend/backend contract can't silently drift.
+
+**The capstone**
+
+11. [Full-Stack Request Round-Trip](../frontend/fullstack-request-roundtrip-deep-visualizer.html) — trace one authenticated `GET /api/users` through *every* layer above, with **200 / 401→refresh / 403** scenarios. This is where the whole path converges.
+
+**The one-line story:** the SPA logs in with **OIDC + PKCE** → holds a short-lived
+**access token** and attaches it as a **Bearer** (or, with a **BFF**, keeps it off the
+browser entirely) → the Spring **filter chain** validates it and maps claims to
+authorities → **`@PreAuthorize`** decides if the call is allowed → and when the API
+needs to call *another* service, it relays the right token. Client guards are the
+polite "you can't see this"; the server is the lock. The **Round-Trip** page is the
+single view where you watch all of it happen at once.
 
 ---
 
@@ -103,5 +111,6 @@ hub feel like a wiki rather than a pile of pages.
 ---
 
 *This guide is updated as new tracks and deep-dives land. Last refreshed with the
-Spring **Security & Identity** section (method security, multi-IDM claim mapping,
-`@HttpExchange` clients).*
+**CIAM round-trip** completion — BFF & Token Relay, OpenAPI → Typed Client, and the
+Full-Stack Request Round-Trip capstone — on top of the Spring **Security & Identity**
+section (method security, multi-IDM claim mapping, `@HttpExchange` clients).*
