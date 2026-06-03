@@ -99,6 +99,9 @@ single view where you watch all of it happen at once.
   Angular-side: [ExpressionChanged Error](../frontend/angular-debugging-change-detection-deep-visualizer.html)
   · [Debugging RxJS](../frontend/angular-debugging-rxjs-deep-visualizer.html)
   · [Browser & Angular DevTools](../frontend/angular-debugging-devtools-deep-visualizer.html).
+  Technique: [Reading Stack Traces](../frontend/debugging-stack-traces-visualizer.html)
+  · [The Debugging Method](../frontend/debugging-method-visualizer.html) (reproduce → bisect)
+  · [Log vs Debugger](../frontend/debugging-logging-vs-stepping-visualizer.html).
 
 ---
 
@@ -121,7 +124,8 @@ hub feel like a wiki rather than a pile of pages.
 
 ---
 
-*This guide is updated as new tracks and deep-dives land. Last refreshed with the new
-**🐛 Debugging track** (CORS failures, 401-vs-403, JWT decode & diagnose) — on top of
-the completed **CIAM round-trip** (BFF & Token Relay, OpenAPI → Typed Client, Full-Stack
-Round-Trip capstone) and the Spring **Security & Identity** section.*
+*This guide is updated as new tracks and deep-dives land. Last refreshed with the
+**🐛 Debugging track** fully fleshed out — auth/HTTP diagnosers (CORS, 401-vs-403, JWT),
+Spring-side (proxies, actuator/logs, remote debug), Angular-side (ExpressionChanged, RxJS,
+DevTools), and technique (reading stack traces, the debugging method/bisect, log-vs-debugger)
+— on top of the completed **CIAM round-trip** and the Spring **Security & Identity** section.*
