@@ -93,6 +93,9 @@ single view where you watch all of it happen at once.
   · [Auth 401 vs 403](../frontend/debugging-auth-401-403-visualizer.html)
   · [JWTs: decode & diagnose](../frontend/debugging-jwt-visualizer.html) — symptom→fix
   diagnosers, paired with the [HELP.md command-line runbook](../HELP.md#command-line-runbook).
+  Spring-side: [Debugging Proxies](../frontend/spring-boot-debugging-proxies-deep-visualizer.html)
+  (`@Transactional`/`@Async` silently not firing) · [Actuator & Logs](../frontend/spring-boot-debugging-actuator-deep-visualizer.html)
+  · [Remote Debug & Breakpoints](../frontend/spring-boot-debugging-remote-deep-visualizer.html).
 
 ---
 
