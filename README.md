@@ -162,10 +162,16 @@ in the support packages.
 Beyond the static visualizers, this repo ships a full **Dev Learning Hub** web
 app with user accounts and cross-device progress sync:
 
-- **`frontend/`** — the hub app (`app.html`): 200+ interactive visualizers, a
-  searchable sidebar, progress tracking, streaks, and a sign-in/register modal.
+- **`frontend/`** — the hub app (`app.html`): 240+ interactive visualizers across
+  10 tracks, a searchable sidebar, progress tracking, streaks, and a sign-in/register modal.
 - **`backend/`** — a Spring Boot 4 API (`devhub-backend`): registration, JWT
   login, and per-user topic progress, backed by H2 (local) or PostgreSQL (prod).
+
+> **📖 New to the hub? Start with the [DevHub Guided Tour](docs/DEVHUB-GUIDE.md).**
+> It maps the 10 tracks and hands you ready-made learning paths — including a featured
+> *"how a CIAM app works, end to end"* walkthrough (Angular OIDC login → tokens →
+> guards → Spring filter chain → method security) — so you're never staring at 240
+> files wondering where to begin.
 
 You can run it three ways. Pick the one you need:
 
@@ -355,19 +361,21 @@ returns them.
 
 ---
 
-## What's deliberately NOT covered
+## Scope — the Java walkthrough vs. DevHub
 
-Topics worth learning eventually, but outside the scope of "entry-level interview":
+The **Java console walkthrough** (the 26 sections above) stays tightly focused on
+entry-level fundamentals. It deliberately leaves a few things to dedicated study:
 
-- Build tools deep dive (Maven/Gradle internals)
-- Advanced concurrency (locks, semaphores, `CompletableFuture` pipelines)
-- Memory model details (`volatile`, happens-before)
-- JPA/Hibernate (we use raw JDBC instead)
-- Spring framework specifics beyond DI concepts
-- Frontend frameworks (React, Vue, etc.)
-- Cloud and containerization (Docker, Kubernetes, AWS)
+- Build-tool internals (Maven/Gradle), the Java memory model (`volatile`,
+  happens-before), and advanced concurrency (locks, semaphores, `CompletableFuture`).
 
-Each of these deserves its own project.
+Other topics it skips **because the DevHub hub now covers them as full interactive
+tracks** — see the [DevHub Guided Tour](docs/DEVHUB-GUIDE.md):
+
+- **Spring** (REST, JPA/Hibernate, security &amp; identity, async) → 🍃 Spring Boot track
+- **Frontend frameworks** → 🅰️ Angular + 🔷 TypeScript tracks
+- **Cloud &amp; containerization** (AWS, Docker) → ☁️ Cloud and 🛠️ Dev Tools tracks
+- **OAuth2 / OIDC, Entra ID, Ping** → 🔐 Identity &amp; Auth + the Spring *Security &amp; Identity* pages
 
 ---
 
