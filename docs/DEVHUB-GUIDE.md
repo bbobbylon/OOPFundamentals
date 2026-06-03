@@ -102,6 +102,10 @@ single view where you watch all of it happen at once.
   Technique: [Reading Stack Traces](../frontend/debugging-stack-traces-visualizer.html)
   · [The Debugging Method](../frontend/debugging-method-visualizer.html) (reproduce → bisect)
   · [Log vs Debugger](../frontend/debugging-logging-vs-stepping-visualizer.html).
+- **"Hardening the auth backend"** → 🍃 [Rate Limiting & Lockout](../frontend/spring-boot-rate-limiting-deep-visualizer.html)
+  · [Refresh Token Rotation](../frontend/spring-boot-refresh-token-rotation-deep-visualizer.html)
+  (reuse detection) · [CSRF Protection](../frontend/spring-boot-csrf-deep-visualizer.html)
+  (and when a JWT-header API doesn't need it).
 
 ---
 

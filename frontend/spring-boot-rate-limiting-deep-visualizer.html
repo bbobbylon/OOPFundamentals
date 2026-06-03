@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Spring — Rate Limiting &amp; Account Lockout</title>
+  <style>
+    :root{--bg:#0f172a;--panel:#1e293b;--panel2:#162032;--border:#1a2744;--text:#e2e8f0;--muted:#64748b;--accent:#6db33f;--blue:#22d3ee;--green:#4ade80;--purple:#a78bfa;--amber:#f59e0b;--red:#f87171;--orange:#fb923c}
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.6}
+    h1{font-size:25px;font-weight:800;background:linear-gradient(90deg,#6db33f,#a78bfa);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:4px}
+    h2{font-size:15px;font-weight:700;color:var(--blue);margin:0 0 12px;letter-spacing:.03em}
+    h3{font-size:12px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px}
+    .page{max-width:1100px;margin:0 auto;padding:28px 22px 60px}
+    .subtitle{color:var(--muted);font-size:13px;margin-bottom:24px}
+    .grid{display:grid;gap:14px;margin-bottom:36px}
+    .grid-2{grid-template-columns:repeat(auto-fit,minmax(440px,1fr))}
+    .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px 20px}
+    .card-accent{border-left:3px solid var(--accent)}.card-blue{border-left:3px solid var(--blue)}
+    .card-green{border-left:3px solid var(--green)}.card-purple{border-left:3px solid var(--purple)}
+    .card-amber{border-left:3px solid var(--amber)}.card-red{border-left:3px solid var(--red)}
+    pre{background:#0a0f1e;border:1px solid var(--border);border-radius:8px;padding:12px 15px;font-family:ui-monospace,monospace;font-size:12px;line-height:1.65;overflow-x:auto;margin:8px 0}
+    .kw{color:#c792ea}.fn{color:#82aaff}.str{color:#c3e88d}.cm{color:#546e7a;font-style:italic}
+    .type{color:#f78c6c}.op{color:#89ddff}.num{color:#f78c6c}.dec{color:#ffcb6b}.attr{color:#c792ea}
+    code{background:rgba(255,255,255,.07);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-family:ui-monospace,monospace;font-size:11px;color:var(--accent)}
+    section{margin-bottom:40px}
+    table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+    th{background:var(--panel2);color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.07em;padding:8px 10px;text-align:left;border-bottom:1px solid var(--border)}
+    td{padding:8px 10px;border-bottom:1px solid rgba(26,39,68,.5);vertical-align:top}
+    tr:last-child td{border-bottom:none}
+    .note{font-size:11px;color:var(--muted);margin-top:6px}
+    ul.tight{margin:6px 0 0 18px;font-size:12.5px}ul.tight li{margin:5px 0}
+    .pill{font-family:ui-monospace,monospace;font-size:11px;background:#0a0f1e;border:1px solid var(--border);border-radius:6px;padding:2px 7px;color:var(--purple)}
+    .xlink{font-size:11.5px;color:var(--blue)}
+    .good{color:#86efac}.bad{color:#fca5a5}.warn{color:#fcd34d}
+    .bucketwrap{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px}
+    .tokens{display:flex;gap:5px}
+    .tk{width:24px;height:30px;border-radius:5px;background:#1e293b;border:1px solid var(--border);transition:all .25s}
+    .tk.full{background:rgba(109,179,63,.35);border-color:#6db33f}
+    .cap{font-family:ui-monospace,monospace;font-size:12px;color:var(--muted)}
+    .ctrls{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+    .ctrls button{padding:9px 14px;border-radius:9px;border:1px solid var(--border);background:var(--panel2);color:var(--text);font-size:12.5px;font-weight:700;cursor:pointer}
+    .ctrls button.primary{border-color:var(--accent);background:rgba(109,179,63,.16);color:#bbf7a0}
+    .ctrls button.ghost{color:var(--muted)}
+    .log{background:#0a0f1e;border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-family:ui-monospace,monospace;font-size:11px;line-height:1.7;max-height:190px;overflow-y:auto}
+    .log .ll{opacity:0;animation:fadein .3s forwards}@keyframes fadein{to{opacity:1}}
+    .log .grn{color:#86efac}.log .red{color:#fca5a5}.log .amb{color:#fcd34d}.log .mut{color:var(--muted)}
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <h1>Rate Limiting &amp; Account Lockout</h1>
+  <p class="subtitle">Your <code>/api/auth/login</code> is a magnet for <strong>brute-force</strong> and <strong>credential-stuffing</strong> attacks — without a throttle, an attacker can try millions of passwords. Two related defenses: <strong>rate limiting</strong> (cap requests per window, return <code>429</code>) and <strong>account lockout</strong> (too many failed logins → temporarily refuse). The trick is stopping attackers without handing them a way to lock out real users.</p>
+
+  <!-- 1 -->
+  <section>
+    <h2>1. Two controls, different keys</h2>
+    <div class="card card-accent">
+      <table>
+        <thead><tr><th>Control</th><th>Counts</th><th>Keyed by</th><th>Response</th></tr></thead>
+        <tbody>
+          <tr><td><b>Rate limit</b></td><td>requests per window</td><td>IP / API key / client</td><td><code>429 Too Many Requests</code> + <code>Retry-After</code></td></tr>
+          <tr><td><b>Account lockout</b></td><td>consecutive <em>failed</em> logins</td><td>username/account</td><td>temporary refuse (e.g. <code>423</code>)</td></tr>
+        </tbody>
+      </table>
+      <p class="note">Rate limiting blunts volume; lockout blunts targeting one account. Use <b>both</b> — but lock carefully (see the trap below).</p>
+    </div>
+  </section>
+
+  <!-- 2 INTERACTIVE -->
+  <section>
+    <h2>2. Interactive: a token-bucket rate limiter</h2>
+    <div class="card">
+      <div class="bucketwrap">
+        <span class="cap">bucket:</span>
+        <div class="tokens" id="tokens"></div>
+        <span class="cap" id="cap"></span>
+      </div>
+      <div class="ctrls">
+        <button class="primary" id="attempt">▶ POST /api/auth/login</button>
+        <button id="adv">⏩ wait 4s (refill +2)</button>
+        <button class="ghost" id="reset">↺ reset</button>
+      </div>
+      <div class="log" id="log"></div>
+    </div>
+    <p class="note">Each request spends a token. Empty bucket → <code>429</code> with a <code>Retry-After</code>. Tokens refill over time (here, +2 every 4s, cap 5) — so a steady, human pace is fine but a burst gets throttled. Hammer it to see the block.</p>
+  </section>
+
+  <!-- 3 -->
+  <section>
+    <h2>3. How you'd build it</h2>
+    <div class="grid grid-2">
+      <div class="card card-blue">
+        <h3>Token bucket (bucket4j)</h3>
+        <pre><span class="kw">var</span> limit = <span class="type">Bandwidth</span>.<span class="fn">classic</span>(<span class="num">5</span>,
+   <span class="type">Refill</span>.<span class="fn">greedy</span>(<span class="num">5</span>, <span class="type">Duration</span>.<span class="fn">ofMinutes</span>(<span class="num">1</span>)));
+<span class="kw">var</span> bucket = <span class="type">Bucket</span>.<span class="fn">builder</span>().<span class="fn">addLimit</span>(limit).<span class="fn">build</span>();
+
+<span class="kw">if</span> (!bucket.<span class="fn">tryConsume</span>(<span class="num">1</span>))
+   <span class="kw">return</span> <span class="type">ResponseEntity</span>.<span class="fn">status</span>(<span class="num">429</span>)
+       .<span class="fn">header</span>(<span class="str">"Retry-After"</span>, <span class="str">"60"</span>).<span class="fn">build</span>();</pre>
+        <p class="note">Put it in a <b>filter</b> (or API gateway) keyed by client IP / API key, before the controller.</p>
+      </div>
+      <div class="card card-purple">
+        <h3>Distributed &amp; lockout</h3>
+        <ul class="tight">
+          <li><b>One instance ≠ the limit.</b> In-memory counters don't share across pods — back the bucket with <b>Redis</b> (bucket4j has a Redis store).</li>
+          <li><b>Lockout</b>: count failures per account in the DB/cache; after N, refuse for M minutes; reset on success.</li>
+          <li><b>Gateway option</b>: Spring Cloud Gateway's <code>RequestRateLimiter</code> filter (Redis) does it before your app.</li>
+          <li><b>Or let the IDM do it</b>: Entra/Ping "smart lockout" if it owns the login.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4 -->
+  <section>
+    <h2>4. The lockout trap (and better defenses)</h2>
+    <div class="card card-amber">
+      <ul class="tight">
+        <li><b>Naive lockout is a DoS on your users.</b> If "5 fails → lock account", an attacker can <em>deliberately</em> lock any victim out by failing on purpose. Don't lock purely on username.</li>
+        <li><b>Prefer graduated friction:</b> throttle + <b>exponential backoff</b> per IP+account, then <b>CAPTCHA</b>, then short lockouts — not an instant hard lock.</li>
+        <li><b>Constant-time &amp; vague:</b> don't reveal "wrong password" vs "no such user", and keep timing even, or you leak which usernames exist.</li>
+        <li><b>Always return <code>Retry-After</code></b> on <code>429</code> so well-behaved clients back off correctly.</li>
+      </ul>
+      <p class="xlink">↪ Where this sits in the request path: <b>Spring · Security Filter Chain</b>. The status codes: <b>Debugging · Auth 401 vs 403</b> (and <code>429</code>).</p>
+    </div>
+  </section>
+
+  <!-- 5 -->
+  <section>
+    <h2>5. One-sentence recap</h2>
+    <div class="card card-accent">
+      <p style="font-size:14px">🚦 Protect auth endpoints with a <strong>rate limit</strong> (a token bucket — e.g. bucket4j in a filter — keyed by IP/API-key, returning <code>429</code> + <code>Retry-After</code>, backed by <strong>Redis</strong> when you run more than one instance) plus careful <strong>account lockout</strong> on failed logins — but avoid naive username-only locks (an attacker can weaponize them to DoS real users); prefer <strong>throttling + exponential backoff + CAPTCHA</strong>, keep responses vague and constant-time, and let the IDM's smart-lockout help when it owns login.</p>
+    </div>
+  </section>
+
+</div>
+
+<script>
+// ── token-bucket rate limiter sim ───────────────────────────────────────────
+const CAP=5;
+let tokens=CAP, attempt=0, timers=[];
+function renderBucket(){
+  const host=document.getElementById('tokens'); host.innerHTML='';
+  for(let i=0;i<CAP;i++){ const d=document.createElement('div'); d.className='tk'+(i<tokens?' full':''); host.appendChild(d); }
+  document.getElementById('cap').textContent=tokens+' / '+CAP+' tokens';
+}
+function logLine(html,cls){ const l=document.getElementById('log'); if(l.querySelector('.start'))l.innerHTML=''; const d=document.createElement('div'); d.className='ll '+(cls||''); d.innerHTML=html; l.prepend(d); }
+function doAttempt(){
+  attempt++;
+  if(tokens>0){ tokens--; logLine('→ attempt #'+attempt+' &nbsp;<span class="grn">401 Unauthorized</span> (bad credentials — but allowed through; '+tokens+' tokens left)','grn'); }
+  else { logLine('→ attempt #'+attempt+' &nbsp;<span class="red">429 Too Many Requests</span> &nbsp;Retry-After: 4s &nbsp;<span class="mut">(bucket empty — request rejected before the controller)</span>','red'); }
+  renderBucket();
+}
+function advance(){ const before=tokens; tokens=Math.min(CAP, tokens+2); logLine('⏩ +4s → bucket refilled '+before+' → '+tokens,'amb'); renderBucket(); }
+function reset(){ tokens=CAP; attempt=0; document.getElementById('log').innerHTML='<span class="mut start">Spend tokens by attempting login. Empty the bucket to see a 429, then wait to refill.</span>'; renderBucket(); }
+document.getElementById('attempt').onclick=doAttempt;
+document.getElementById('adv').onclick=advance;
+document.getElementById('reset').onclick=reset;
+reset();
+</script>
+</body>
+</html>
