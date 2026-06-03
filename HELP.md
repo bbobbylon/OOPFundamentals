@@ -2,7 +2,7 @@
 
 > Full step-by-step walkthrough (with screenshots-worthy detail, env vars, and a
 > troubleshooting table) lives in **[README.md → "Deploying the Dev Learning Hub"](README.md#deploying-the-dev-learning-hub-devhub)**.
-> This is the condensed cheat-sheet.
+> This is the condensed cheat-sheet. Below it: a full **[Command-Line Runbook](#command-line-runbook)**.
 
 **The one wire:** `frontend/config.js` → `window.DEVHUB_API_BASE` tells the
 frontend where the backend is. `null` = local dev (`http://localhost:8081`); set
@@ -37,8 +37,9 @@ docker build -t devhub-backend .
 | `SPRING_PROFILES_ACTIVE` | `prod` | switches H2 → PostgreSQL |
 | `DATABASE_URL` | `jdbc:postgresql://host:5432/devhub` | must start with `jdbc:postgresql://` |
 | `DATABASE_USERNAME` / `DATABASE_PASSWORD` | — | keep out of the URL |
-| `JWT_SECRET` | 32+ random chars | signs login tokens |
+| `JWT_SECRET` | 32+ random chars | signs login tokens (HS256) |
 | `CORS_ALLOWED_ORIGINS` | `https://yourname.github.io` | your Pages origin, no trailing slash |
+| `PORT` | `8080` | injected by the host; `application-prod.yml` reads it |
 
 ### Deploy checklist
 
@@ -50,69 +51,266 @@ docker build -t devhub-backend .
 
 ---
 
-# Getting Started
+# Command-Line Runbook
 
-### Reference Documentation
+Real, copy-paste commands for building, running, deploying, and **debugging a
+deployment**. Where Windows and Unix differ, both are shown.
 
-For further reference, please consider the following sections:
+> **⚠ Windows `curl` gotcha.** In PowerShell, `curl` is an *alias* for
+> `Invoke-WebRequest` (different flags, different output). For the `curl` examples
+> below, either use **`curl.exe`** (ships with Windows 10+) or use the
+> **`Invoke-RestMethod`** (`irm`) versions shown alongside. On macOS/Linux, plain
+> `curl` is correct.
 
-* [Official Apache Maven documentation](https://maven.apache.org/guides/index.html)
-* [Spring Boot Maven Plugin Reference Guide](https://docs.spring.io/spring-boot/4.0.6/maven-plugin)
-* [Create an OCI image](https://docs.spring.io/spring-boot/4.0.6/maven-plugin/build-image.html)
-* [Azure Actuator](https://aka.ms/spring/docs/actuator)
-* [Spring Boot Actuator](https://docs.spring.io/spring-boot/4.0.6/reference/actuator/index.html)
-* [Azure Active Directory](https://microsoft.github.io/spring-cloud-azure/current/reference/html/index.html#spring-security-with-azure-active-directory)
-* [Spring Batch JDBC](https://docs.spring.io/spring-boot/4.0.6/how-to/batch.html)
-* [Rest Repositories](https://docs.spring.io/spring-boot/4.0.6/how-to/data-access.html#howto.data-access.exposing-spring-data-repositories-as-rest)
-* [Spring Boot DevTools](https://docs.spring.io/spring-boot/4.0.6/reference/using/devtools.html)
-* [Spring for GraphQL](https://docs.spring.io/spring-boot/4.0.6/reference/web/spring-graphql.html)
-* [Netflix DGS](https://netflix.github.io/dgs/)
-* [OAuth2 Authorization Server](https://docs.spring.io/spring-boot/4.0.6/reference/web/spring-security.html#web.security.oauth2.authorization-server)
-* [OAuth2 Client](https://docs.spring.io/spring-boot/4.0.6/reference/web/spring-security.html#web.security.oauth2.client)
-* [OAuth2 Resource Server](https://docs.spring.io/spring-boot/4.0.6/reference/web/spring-security.html#web.security.oauth2.server)
-* [Spring REST Docs](https://docs.spring.io/spring-restdocs/docs/current/reference/htmlsingle/)
-* [Spring Security](https://docs.spring.io/spring-boot/4.0.6/reference/web/spring-security.html)
-* [Anthropic Claude](https://docs.spring.io/spring-ai/reference/api/chat/anthropic-chat.html)
-* [DeepSeek](https://docs.spring.io/spring-ai/reference/api/chat/deepseek-chat.html)
-* [Ollama](https://docs.spring.io/spring-ai/reference/api/chat/ollama-chat.html)
-* [OpenAI](https://docs.spring.io/spring-ai/reference/api/chat/openai-chat.html)
-* [HTTP Client](https://docs.spring.io/spring-boot/4.0.6/reference/io/rest-client.html#io.rest-client.restclient)
-* [Reactive HTTP Client](https://docs.spring.io/spring-boot/4.0.6/reference/io/rest-client.html#io.rest-client.webclient)
-* [Spring Web](https://docs.spring.io/spring-boot/4.0.6/reference/web/servlet.html)
-* [Spring Reactive Web](https://docs.spring.io/spring-boot/4.0.6/reference/web/reactive.html)
-* [WebSocket](https://docs.spring.io/spring-boot/4.0.6/reference/messaging/websockets.html)
+## API map (what you're calling)
 
-### Guides
+| Method & path | Auth? | Body | Returns |
+|---|---|---|---|
+| `POST /api/auth/register` | public | `{username,email,password}` | `201 {token,username,email,expiresAt}` |
+| `POST /api/auth/login` | public | `{username,password}` | `200 {token,username,email,expiresAt}` |
+| `GET /api/auth/me` | **Bearer** | — | `{username,email,createdAt}` |
+| `GET /api/progress` | **Bearer** | — | `[ ...progress ]` |
+| `GET /api/progress/stats` | **Bearer** | — | `{learned,visited,notStarted,...}` |
+| `PUT /api/progress/{topicId}` | **Bearer** | `{status}` | updated entry |
+| `DELETE /api/progress` | **Bearer** | — | `204` |
+| `GET /actuator/health` | public | — | `{"status":"UP"}` |
 
-The following guides illustrate how to use some features concretely:
+`status` ∈ `NOT_STARTED | VISITED | LEARNED`. `topicId` is a page file name, e.g.
+`encapsulation-visualizer.html`. Tokens are HS256 and **expire after 24h**.
 
-* [Building a RESTful Web Service with Spring Boot Actuator](https://spring.io/guides/gs/actuator-service/)
-* [Securing a Java Web App with the Spring Boot Starter for Azure Active Directory](https://aka.ms/spring/msdocs/aad)
-* [Accessing JPA Data with REST](https://spring.io/guides/gs/accessing-data-rest/)
-* [Accessing Neo4j Data with REST](https://spring.io/guides/gs/accessing-neo4j-data-rest/)
-* [Accessing MongoDB Data with REST](https://spring.io/guides/gs/accessing-mongodb-data-rest/)
-* [Building a GraphQL service](https://spring.io/guides/gs/graphql-server/)
-* [Accessing data with MySQL](https://spring.io/guides/gs/accessing-data-mysql/)
-* [Securing a Web Application](https://spring.io/guides/gs/securing-web/)
-* [Spring Boot and OAuth2](https://spring.io/guides/tutorials/spring-boot-oauth2/)
-* [Authenticating a User with LDAP](https://spring.io/guides/gs/authenticating-ldap/)
-* [Building a RESTful Web Service](https://spring.io/guides/gs/rest-service/)
-* [Serving Web Content with Spring MVC](https://spring.io/guides/gs/serving-web-content/)
-* [Building REST services with Spring](https://spring.io/guides/tutorials/rest/)
-* [Building a Reactive RESTful Web Service](https://spring.io/guides/gs/reactive-rest-service/)
-* [Using WebSocket to build an interactive web application](https://spring.io/guides/gs/messaging-stomp-websocket/)
+## Build · run · test (backend)
 
-### Additional Links
+```text
+# Run locally — dev profile → H2 in-memory, port 8081
+.\mvnw.cmd -f backend\pom.xml spring-boot:run            # Windows
+./mvnw -f backend/pom.xml spring-boot:run                # macOS/Linux
 
-These additional references should also help you:
+# Run the tests
+.\mvnw.cmd -f backend\pom.xml test
 
-* [Azure Active Directory Sample](https://aka.ms/spring/samples/latest/aad)
+# Package the fat jar → backend/target/devhub-backend-0.0.1-SNAPSHOT.jar
+.\mvnw.cmd -f backend\pom.xml -DskipTests clean package
 
-### Maven Parent overrides
+# Run the packaged jar directly
+java -jar backend\target\devhub-backend-0.0.1-SNAPSHOT.jar
+```
 
-Due to Maven's design, elements are inherited from the parent POM to the project POM.
-While most of the inheritance is fine, it also inherits unwanted elements like `<license>` and `<developers>` from the
-parent.
-To prevent this, the project POM contains empty overrides for these elements.
-If you manually switch to a different parent and actually want the inheritance, you need to remove those overrides.
+Run the jar with the **prod** profile against a local Postgres (PowerShell):
 
+```powershell
+$env:SPRING_PROFILES_ACTIVE = "prod"
+$env:DATABASE_URL      = "jdbc:postgresql://localhost:5432/devhub"
+$env:DATABASE_USERNAME = "devhub"
+$env:DATABASE_PASSWORD = "secret"
+$env:JWT_SECRET        = "a-long-random-string-at-least-32-chars"
+java -jar backend\target\devhub-backend-0.0.1-SNAPSHOT.jar
+```
+
+The OOP **console walkthrough** (separate from the backend, uses the root pom):
+
+```text
+.\mvnw.cmd -q exec:java -Dexec.mainClass=com.bob.oopfundamentals.OopFundamentalsApplication
+```
+
+## Smoke-test the API (local or deployed)
+
+Set the base URL once, then reuse it:
+
+```powershell
+# PowerShell
+$BASE = "http://localhost:8081"            # or "https://your-service.onrender.com"
+Invoke-RestMethod "$BASE/actuator/health"  # → status : UP
+```
+```bash
+# bash
+BASE=http://localhost:8081
+curl -s "$BASE/actuator/health"            # → {"status":"UP"}
+```
+
+## The full auth round-trip from the CLI
+
+The fastest proof a deployment works end-to-end: **register → login → capture the
+JWT → call a protected endpoint.**
+
+**PowerShell** (native, no extra tools):
+```powershell
+$BASE = "http://localhost:8081"
+
+# Register (201) → returns { token, username, email, expiresAt }
+$reg   = @{ username="cli-user"; email="cli@example.com"; password="password123" } | ConvertTo-Json
+$auth  = Invoke-RestMethod -Method Post "$BASE/api/auth/register" -ContentType application/json -Body $reg
+$token = $auth.token
+
+# …next time, log in instead:
+# $login = @{ username="cli-user"; password="password123" } | ConvertTo-Json
+# $token = (Invoke-RestMethod -Method Post "$BASE/api/auth/login" -ContentType application/json -Body $login).token
+
+# Call PROTECTED endpoints with the bearer token
+$H = @{ Authorization = "Bearer $token" }
+Invoke-RestMethod "$BASE/api/auth/me"        -Headers $H
+Invoke-RestMethod "$BASE/api/progress/stats" -Headers $H
+
+# Mark a topic learned (status: NOT_STARTED | VISITED | LEARNED)
+$pb = @{ status = "LEARNED" } | ConvertTo-Json
+Invoke-RestMethod -Method Put "$BASE/api/progress/encapsulation-visualizer.html" `
+  -Headers $H -ContentType application/json -Body $pb
+```
+
+**bash / `curl.exe`** (uses `jq` to grab the token; or just eyeball the JSON):
+```bash
+BASE=http://localhost:8081
+
+TOKEN=$(curl -s -X POST "$BASE/api/auth/register" -H 'Content-Type: application/json' \
+  -d '{"username":"cli-user","email":"cli@example.com","password":"password123"}' | jq -r .token)
+
+# …or log in:
+# TOKEN=$(curl -s -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+#   -d '{"username":"cli-user","password":"password123"}' | jq -r .token)
+
+curl -s "$BASE/api/auth/me"        -H "Authorization: Bearer $TOKEN"
+curl -s "$BASE/api/progress/stats" -H "Authorization: Bearer $TOKEN"
+curl -s -X PUT "$BASE/api/progress/encapsulation-visualizer.html" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"status":"LEARNED"}'
+```
+
+> **Expected:** health → `UP`; register → `201`; a protected call **without** a token
+> → `401`; **with** a valid token → `200`. That sequence passing = the whole stack
+> (CORS, JWT, DB) is wired correctly.
+
+## Inspect the local database (H2, dev profile)
+
+Dev uses in-memory H2 — open the web console:
+
+- URL: <http://localhost:8081/h2-console>
+- JDBC URL: `jdbc:h2:mem:devhubdb` · User: `sa` · Password: *(blank)*
+- Tables: `users`, `topic_progress`
+
+Data resets on every restart (`ddl-auto: create-drop`). Prod (Postgres) persists and
+auto-creates the tables on first boot (`ddl-auto: update`).
+
+## Docker — mirror the cloud build locally
+
+```powershell
+cd backend
+docker build -t devhub-backend .
+
+# Run it the way Render does: prod profile + Postgres + secrets.
+# host.docker.internal reaches a Postgres running on your host from in the container.
+docker run --rm -p 8080:8080 `
+  -e SPRING_PROFILES_ACTIVE=prod `
+  -e DATABASE_URL=jdbc:postgresql://host.docker.internal:5432/devhub `
+  -e DATABASE_USERNAME=devhub -e DATABASE_PASSWORD=secret `
+  -e JWT_SECRET=a-long-random-string-at-least-32-chars `
+  -e CORS_ALLOWED_ORIGINS=http://localhost:5500 `
+  devhub-backend
+```
+```text
+docker ps                       # find the container id
+docker logs -f <container>      # follow logs
+docker exec -it <container> sh  # shell inside
+```
+(On macOS/Linux, swap the trailing backticks for `\` line continuations.)
+
+## Generate a `JWT_SECRET`
+
+```powershell
+# PowerShell
+[Convert]::ToBase64String((1..48 | ForEach-Object { Get-Random -Maximum 256 }))
+```
+```bash
+# macOS/Linux
+openssl rand -base64 48
+```
+
+## Deploy — trigger & watch GitHub Pages (frontend)
+
+```text
+# Pages publishes frontend/ on every push to master (.github/workflows/deploy.yml)
+git add -A
+git commit -m "deploy"
+git push origin master
+
+# Watch the Actions run (needs the GitHub CLI `gh`)
+gh run list --workflow=deploy.yml
+gh run watch
+```
+
+---
+
+# Troubleshooting the deployment (symptom → command)
+
+Commands that pinpoint each row of the README's troubleshooting table.
+
+### "Is the backend even up?"
+```bash
+curl -i "$BASE/actuator/health"     # 200 {"status":"UP"} = alive
+```
+On Render's free tier the service **sleeps after ~15 min idle**; the first request
+then takes ~50s (cold start) and may time out once — just retry.
+
+### CORS error in the browser console
+The API only allows the origins in `CORS_ALLOWED_ORIGINS` (applied to `/api/**`).
+Reproduce the browser's **preflight** from the CLI and read the response headers:
+```bash
+curl -i -X OPTIONS "$BASE/api/auth/login" \
+  -H "Origin: https://yourname.github.io" \
+  -H "Access-Control-Request-Method: POST"
+```
+```powershell
+curl.exe -i -X OPTIONS "$BASE/api/auth/login" -H "Origin: https://yourname.github.io" -H "Access-Control-Request-Method: POST"
+```
+- `Access-Control-Allow-Origin` must **echo your exact origin** (scheme + host).
+- Matched **exactly** — `https://name.github.io/` (trailing slash) ≠ `https://name.github.io`.
+- Missing / wrong → fix `CORS_ALLOWED_ORIGINS` on the backend and redeploy.
+
+### "Mixed content … insecure resource" (blocked)
+`config.js` points at an `http://` URL while the page is HTTPS. It must be `https://`:
+```text
+type frontend\config.js     # Windows — confirm what the frontend targets
+cat  frontend/config.js     # macOS/Linux
+```
+
+### 401s — "every call is 401 after a redeploy"
+- A `401` on a **protected** call with no/old token is expected — re-login for a fresh one.
+- If `JWT_SECRET` **changed between deploys**, every previously issued token is invalid
+  (they're HS256-signed with that secret) → sign out and back in. Tokens also expire
+  after **24h** (`app.jwt.expiration-ms`).
+- Decode a token's payload (base64, no signature check) to read `sub`/`exp`:
+```powershell
+# PowerShell — decode the middle (2nd) dot-separated segment
+$p = "<jwt>".Split(".")[1].Replace('-','+').Replace('_','/'); while ($p.Length % 4) { $p += "=" }
+[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p))
+```
+```bash
+# bash — paste just the payload segment (between the two dots)
+echo "<payload-segment>" | base64 -d
+```
+
+### Backend won't start / DB connection errors
+- `DATABASE_URL` must be JDBC-shaped: `jdbc:postgresql://HOST:5432/DBNAME` (host + db
+  only); username/password in their **own** vars — not embedded in the URL.
+- `relation "users" does not exist` → confirm `SPRING_PROFILES_ACTIVE=prod` (prod's
+  `ddl-auto: update` creates `users` + `topic_progress` on first boot).
+- Test Postgres reachability directly:
+```bash
+psql "postgresql://USER:PASSWORD@HOST:5432/DBNAME" -c "\dt"   # list tables
+```
+
+### Login works but the app stays "anonymous"
+The frontend couldn't reach the API, so it fell back to anonymous mode. Verify the
+wire and the health endpoint:
+```bash
+cat frontend/config.js                 # DEVHUB_API_BASE must be your backend's HTTPS URL
+curl -s "$BASE/actuator/health"        # must be UP
+```
+
+---
+
+### Upstream docs (the parts this project actually uses)
+
+- [Spring Boot Actuator](https://docs.spring.io/spring-boot/4.0.6/reference/actuator/index.html)
+- [Spring Security](https://docs.spring.io/spring-boot/4.0.6/reference/web/spring-security.html)
+- [OAuth2 Resource Server](https://docs.spring.io/spring-boot/4.0.6/reference/web/spring-security.html#web.security.oauth2.server)
+- [RestClient / declarative HTTP clients](https://docs.spring.io/spring-boot/4.0.6/reference/io/rest-client.html#io.rest-client.restclient)
+- [Spring Boot Maven Plugin](https://docs.spring.io/spring-boot/4.0.6/maven-plugin) · [Build an OCI image](https://docs.spring.io/spring-boot/4.0.6/maven-plugin/build-image.html)

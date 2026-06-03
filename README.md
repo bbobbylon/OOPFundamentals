@@ -348,6 +348,10 @@ returns them.
 
 ## Troubleshooting
 
+> 💻 For the **command-line versions** of these checks — curl / PowerShell one-liners
+> to test health, run the full auth round-trip, reproduce a CORS preflight, and decode
+> a JWT — see the [Command-Line Runbook in HELP.md](HELP.md#command-line-runbook).
+
 | Symptom | Cause & fix |
 |---|---|
 | Browser console: **CORS** / "blocked by Access-Control-Allow-Origin" | `CORS_ALLOWED_ORIGINS` ≠ your Pages origin. Set it to exactly `https://YOURNAME.github.io` and redeploy the backend. |

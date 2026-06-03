@@ -6,7 +6,9 @@
 
 DevHub is a learning hub: **240+ browser visualizers** across **10 tracks**, plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
-the map. To *run* it (locally or deployed), see the main [README](../README.md).
+the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
+copy-paste **command-line runbook** (build/run, the auth round-trip via curl, and
+deployment troubleshooting), see [HELP.md](../HELP.md#command-line-runbook).
 
 The fastest way in: open **`frontend/app.html`** — the hub — and use the sidebar.
 Or jump straight to any file linked below.
