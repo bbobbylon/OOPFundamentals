@@ -96,6 +96,9 @@ single view where you watch all of it happen at once.
   Spring-side: [Debugging Proxies](../frontend/spring-boot-debugging-proxies-deep-visualizer.html)
   (`@Transactional`/`@Async` silently not firing) · [Actuator & Logs](../frontend/spring-boot-debugging-actuator-deep-visualizer.html)
   · [Remote Debug & Breakpoints](../frontend/spring-boot-debugging-remote-deep-visualizer.html).
+  Angular-side: [ExpressionChanged Error](../frontend/angular-debugging-change-detection-deep-visualizer.html)
+  · [Debugging RxJS](../frontend/angular-debugging-rxjs-deep-visualizer.html)
+  · [Browser & Angular DevTools](../frontend/angular-debugging-devtools-deep-visualizer.html).
 
 ---
 
