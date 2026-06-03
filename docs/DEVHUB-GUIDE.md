@@ -106,6 +106,9 @@ single view where you watch all of it happen at once.
   · [Refresh Token Rotation](../frontend/spring-boot-refresh-token-rotation-deep-visualizer.html)
   (reuse detection) · [CSRF Protection](../frontend/spring-boot-csrf-deep-visualizer.html)
   (and when a JWT-header API doesn't need it).
+- **"Building the auth-aware Angular app"** → 🅰️ [Auth State (Signals)](../frontend/angular-auth-state-signals-deep-visualizer.html)
+  · [Reactive Forms (Auth)](../frontend/angular-auth-forms-deep-visualizer.html) (live, typeable)
+  · [Lazy Loading & Preloading](../frontend/angular-lazy-loading-deep-visualizer.html).
 
 ---
 
