@@ -131,13 +131,15 @@ directly rather than a custom class.
 
 ## Bonus: interactive visualizers
 
-The `frontend/` folder has a suite of browser-based visualizers — open
-[`frontend/index.html`](frontend/index.html) for the hub page, or jump
-directly to any individual file. **No server needed** — just double-click.
+The `frontend/` folder has a suite of browser-based visualizers. The full **Dev
+Hub** lives at `app.html` — serve it (see [Deploying the Dev Learning
+Hub](#deploying-the-dev-learning-hub-devhub) below); opening `index.html` now
+redirects there. Individual visualizer files also open standalone — **just
+double-click**, no server needed.
 
 | Visualizer | What it shows |
 |---|---|
-| [`index.html`](frontend/index.html) | Hub page linking to all visualizers |
+| [`app.html`](frontend/app.html) | The full Dev Hub — searchable, progress, 240+ pages (serve it; `index.html` redirects here) |
 | [`inheritance-visualizer.html`](frontend/inheritance-visualizer.html) | Click any class in the hierarchy to see what it inherits/overrides |
 | [`polymorphism-visualizer.html`](frontend/polymorphism-visualizer.html) | Shapes & animals + vtable diagram + overriding vs overloading + gotchas |
 | [`linked-list-visualizer.html`](frontend/linked-list-visualizer.html) | Nodes &amp; arrows, plus a race: LinkedList.addFirst() vs ArrayList shift cost |
@@ -177,7 +179,7 @@ You can run it three ways. Pick the one you need:
 
 | Mode | Backend | Accounts? | Use it for |
 |---|---|---|---|
-| **Visualizers only** | none | no | Just browsing — open `frontend/index.html` |
+| **Visualizers only** | none | no | Just browsing — open `frontend/app.html` (served), or double-click any single visualizer file |
 | **Local full stack** | `localhost:8081` (H2) | yes (local) | Developing / trying the whole app |
 | **Deployed** | cloud host (Postgres) | yes (real) | Sharing a live URL anyone can sign up to |
 
@@ -217,6 +219,30 @@ Maven is **not** required — the repo ships the Maven wrapper (`mvnw` / `mvnw.c
 
 ## Part 1 — Run the full stack locally
 
+### Quickest: one command (starts both halves)
+
+From the **project root**, this starts the backend and frontend together, waits for
+the backend to be healthy, and opens the hub:
+
+Git Bash / macOS / Linux:
+```
+./startapp.sh
+```
+Windows PowerShell:
+```
+.\dev.ps1
+```
+
+Both **reuse an already-running backend** on `:8081` (safe to run when you already
+have one going), serve the frontend on `:5500`, and open
+**<http://localhost:5500/app>** — the hub. Press **Ctrl+C** to stop what the
+script started. Useful flags: `--frontend-only` / `-FrontendOnly` (skip the backend —
+fast, just browse the pages) and `--no-browser` / `-NoBrowser`.
+
+Prefer to run the halves by hand? The manual steps follow.
+
+### Manual — two terminals
+
 **Terminal 1 — start the backend** (in-memory H2, resets on restart, port 8081):
 
 Windows (PowerShell or cmd):
@@ -232,23 +258,37 @@ Verify it's up: open <http://localhost:8081/actuator/health> → `{"status":"UP"
 
 **Terminal 2 — serve the frontend on port 5500.** Don't just double-click
 `app.html` — a `file://` page is blocked from calling the API by CORS. Serve it
-from port **5500**, which the backend already allow-lists:
+from port **5500**, which the backend already allow-lists. **`cd` into `frontend`
+first**, then run the bundled dev server:
 
 Windows (Python):
 ```
 cd frontend
-py -m http.server 5500
+py devserver.py 5500
 ```
 macOS / Linux (Python 3):
 ```
 cd frontend
-python3 -m http.server 5500
+python3 devserver.py 5500
 ```
-No Python? Use Node: `npx serve -l 5500 frontend` — or in VS Code, right-click
-`app.html` → **Open with Live Server** (defaults to port 5500).
 
-Open <http://localhost:5500/app.html>. Leave `frontend/config.js` set to `null`
-for local dev (it then auto-targets `http://localhost:8081`). You can now
+Then open the hub at **<http://localhost:5500/app>**.
+
+> **Why `devserver.py` and not `python -m http.server`?** `devserver.py` is a tiny
+> stdlib static server that adds **clean-URL** support: a request for `/app` serves
+> `app.html`. That dodges a genuinely confusing trap — `npx serve` 301-redirects
+> `/app.html` → `/app`, **browsers cache that 301 permanently**, and afterwards a
+> plain `http.server` returns **404 on `/app`** (there's no such file on disk). Once
+> a browser has that cached redirect, it rewrites `/app.html` → `/app` *before it
+> even contacts the server*, so the hub won't load. `devserver.py` resolves both
+> `/app` and `/app.html` and never issues a 301, so it loads either way and can't
+> poison the cache. (No Python? `npx serve -l 5500` from inside `frontend/` also does
+> clean URLs — open `/app`.)
+
+The bare URL **<http://localhost:5500/>** redirects to the hub — `index.html` is now a
+tiny redirect stub that forwards to **`/app.html`** (the hub itself). The old landing
+page is archived at **<http://localhost:5500/index-legacy.html>**. Leave `frontend/config.js` set to
+`null` for local dev (it then auto-targets `http://localhost:8081`). You can now
 register a local account and everything syncs to the local H2 database.
 
 ---

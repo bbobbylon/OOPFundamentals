@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>TypeScript — Narrowing: Control-Flow Analysis Internals</title>
+  <style>
+    :root{--bg:#0f172a;--panel:#1e293b;--panel2:#162032;--border:#1a2744;--text:#e2e8f0;--muted:#64748b;--accent:#3178c6;--blue:#22d3ee;--green:#4ade80;--purple:#a78bfa;--amber:#f59e0b;--red:#f87171;--orange:#fb923c;--java:#f89820}
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.6}
+    h1{font-size:26px;font-weight:800;background:linear-gradient(90deg,#3178c6,#22d3ee);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:4px}
+    h2{font-size:15px;font-weight:700;color:var(--blue);margin:0 0 12px;letter-spacing:.03em}
+    h3{font-size:12px;font-weight:700;color:#5b9bd5;text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px}
+    .page{max-width:1100px;margin:0 auto;padding:28px 22px 60px}
+    .subtitle{color:var(--muted);font-size:13px;margin-bottom:24px}
+    .grid{display:grid;gap:14px;margin-bottom:36px}
+    .grid-2{grid-template-columns:repeat(auto-fit,minmax(440px,1fr))}
+    .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px 20px}
+    .card-accent{border-left:3px solid var(--accent)}.card-blue{border-left:3px solid var(--blue)}
+    .card-green{border-left:3px solid var(--green)}.card-purple{border-left:3px solid var(--purple)}
+    .card-amber{border-left:3px solid var(--amber)}.card-red{border-left:3px solid var(--red)}
+    .card-java{border-left:3px solid var(--java)}
+    pre{background:#0a0f1e;border:1px solid var(--border);border-radius:8px;padding:12px 15px;font-family:ui-monospace,"Cascadia Code","Fira Code",monospace;font-size:12px;line-height:1.65;overflow-x:auto;margin:8px 0}
+    .kw{color:#c792ea}.fn{color:#82aaff}.str{color:#c3e88d}.cm{color:#546e7a;font-style:italic}
+    .type{color:#f78c6c}.op{color:#89ddff}.num{color:#f78c6c}.dec{color:#ffcb6b}
+    code{background:rgba(255,255,255,.07);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-family:ui-monospace,monospace;font-size:11px;color:#5b9bd5}
+    section{margin-bottom:40px}
+    p{font-size:13px}
+    table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+    th{background:var(--panel2);color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.07em;padding:8px 10px;text-align:left;border-bottom:1px solid var(--border)}
+    td{padding:8px 10px;border-bottom:1px solid rgba(26,39,68,.5);vertical-align:top}
+    tr:last-child td{border-bottom:none}
+    .note{font-size:11px;color:var(--muted);margin-top:6px}
+    ul.tight{margin:6px 0 0 18px;font-size:12.5px}ul.tight li{margin:4px 0}
+    .pill{font-family:ui-monospace,monospace;font-size:11px;background:#0a0f1e;border:1px solid var(--border);border-radius:6px;padding:2px 7px;color:var(--purple)}
+    /* ── re-widening playground ── */
+    .toggles{display:flex;gap:22px;flex-wrap:wrap;margin-bottom:12px}
+    .tgrp .pl{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:700;margin-bottom:6px}
+    .seg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+    .seg button{background:var(--panel2);color:var(--muted);border:none;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:ui-monospace,monospace;transition:all .15s}
+    .seg button.on{background:var(--accent);color:#fff}
+    .codeblock{position:relative}
+    .flowtype{display:inline-block;font-family:ui-monospace,monospace;font-size:10.5px;padding:1px 7px;border-radius:9px;margin-left:8px;vertical-align:middle}
+    .flowtype.narrow{background:#052e16;color:#86efac;border:1px solid #134d28}
+    .flowtype.wide{background:#3b0a0a;color:#fca5a5;border:1px solid #5b1717}
+    .verdict{border-radius:10px;padding:13px 16px;border:1px solid var(--border);background:#0a0f1e;font-size:12.5px;margin-top:10px}
+    .vbadge{font-size:11px;font-weight:800;padding:3px 10px;border-radius:9px;margin-left:auto}
+    .vbadge.ok{background:#052e16;color:var(--green);border:1px solid #134d28}
+    .vbadge.no{background:#3b0a0a;color:var(--red);border:1px solid #5b1717}
+    .vhead{display:flex;align-items:center;gap:10px;font-size:13px;font-weight:800;margin-bottom:8px;font-family:ui-monospace,monospace}
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <h1>Narrowing — Control-Flow Analysis Internals</h1>
+  <p class="subtitle">The <a href="typescript-narrowing-visualizer.html" style="color:var(--blue)">Narrowing</a> page walks the happy path. This companion shows the machinery underneath — the flow graph, aliased guards, and the spots where a narrowing you "earned" gets quietly thrown away: across closures and after a function call touches a property.</p>
+
+  <!-- 1 -->
+  <section>
+    <h2>1. The flow graph mental model</h2>
+    <div class="card card-accent">
+      <p style="color:var(--muted);margin-bottom:8px">TS builds a <strong>control-flow graph</strong> of your function. At each node, every variable has a <strong>flow type</strong> — the narrowest type still possible given the path taken to get there. "Narrowing" is just reading that flow type; an <code>if</code> splits the graph and each branch carries a different flow type.</p>
+      <pre><span class="kw">function</span> <span class="fn">f</span>(x: <span class="type">string</span> | <span class="type">number</span> | <span class="kw">null</span>) {
+  <span class="cm">// node A — flow type: string | number | null</span>
+  <span class="kw">if</span> (x == <span class="kw">null</span>) <span class="kw">return</span>;
+  <span class="cm">// node B — flow type: string | number   (null path left the graph)</span>
+  <span class="kw">if</span> (<span class="kw">typeof</span> x === <span class="str">"string"</span>) {
+    <span class="cm">// node C — flow type: string</span>
+  } <span class="kw">else</span> {
+    <span class="cm">// node D — flow type: number</span>
+  }
+}</pre>
+    </div>
+  </section>
+
+  <!-- 2 -->
+  <section>
+    <h2>2. Aliased guards — narrowing through a <code>const</code></h2>
+    <div class="grid grid-2">
+      <div class="card card-green">
+        <h3>✅ Store the check in a <code>const</code></h3>
+        <p style="color:var(--muted);margin-bottom:8px">Since TS 4.4, a guard saved in a <code>const</code> still narrows where it's used — the compiler tracks that the const <em>is</em> that condition.</p>
+        <pre><span class="kw">function</span> <span class="fn">f</span>(x: <span class="type">string</span> | <span class="type">number</span>) {
+  <span class="kw">const</span> isStr = <span class="kw">typeof</span> x === <span class="str">"string"</span>;
+  <span class="kw">if</span> (isStr) {
+    x.<span class="fn">toUpperCase</span>();  <span class="cm">// ✅ x: string</span>
+  }
+}</pre>
+      </div>
+      <div class="card card-red">
+        <h3>❌ …but only with <code>const</code></h3>
+        <p style="color:var(--muted);margin-bottom:8px">A <code>let</code> could be reassigned between the check and the use, so the link is dropped. Same for a discriminant copied into a <code>let</code>.</p>
+        <pre><span class="kw">function</span> <span class="fn">f</span>(x: <span class="type">string</span> | <span class="type">number</span>) {
+  <span class="kw">let</span> isStr = <span class="kw">typeof</span> x === <span class="str">"string"</span>;
+  <span class="kw">if</span> (isStr) {
+    x.<span class="fn">toUpperCase</span>();  <span class="cm">// ❌ x is still string | number</span>
+  }
+}</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3 INTERACTIVE -->
+  <section>
+    <h2>3. Interactive — the closure re-widening trap</h2>
+    <div class="card">
+      <p style="color:var(--muted);margin-bottom:10px">A narrowing holds in straight-line code, but inside a <strong>callback</strong> the compiler has to assume the variable <em>might</em> have changed by the time the callback runs. Whether the narrowing survives depends on whether it could have been reassigned — i.e. <code>const</code> vs <code>let</code>. Flip the switches and watch the flow type at the access site.</p>
+      <div class="toggles">
+        <div class="tgrp">
+          <div class="pl">declaration</div>
+          <div class="seg" id="decl-seg">
+            <button class="on" data-v="let">let x</button>
+            <button data-v="const">const x</button>
+          </div>
+        </div>
+        <div class="tgrp">
+          <div class="pl">where is x used?</div>
+          <div class="seg" id="site-seg">
+            <button class="on" data-v="inline">straight-line</button>
+            <button data-v="callback">inside a callback</button>
+          </div>
+        </div>
+      </div>
+      <pre id="cfaCode" class="codeblock"></pre>
+      <div class="verdict" id="cfaVerdict"></div>
+    </div>
+  </section>
+
+  <!-- 4 -->
+  <section>
+    <h2>4. The other re-widener: a call between guard and use</h2>
+    <div class="card card-amber">
+      <p style="color:var(--muted);margin-bottom:8px">Narrowing a <strong>property access</strong> (<code>obj.x</code>) is fragile: any function call in between could have reassigned that property, so TS resets it to the declared type. (Narrowing of a plain <em>local variable</em> is <em>not</em> reset by a call — only by reassigning the variable itself.)</p>
+      <pre><span class="kw">type</span> <span class="type">Box</span> = { val: <span class="type">string</span> | <span class="kw">null</span> };
+
+<span class="kw">function</span> <span class="fn">use</span>(b: <span class="type">Box</span>) {
+  <span class="kw">if</span> (b.val !== <span class="kw">null</span>) {
+    <span class="cm">// here b.val: string</span>
+    <span class="fn">doStuff</span>();          <span class="cm">// 💥 could have set b.val = null</span>
+    b.val.<span class="fn">toUpperCase</span>();  <span class="cm">// ❌ Object is possibly 'null'</span>
+  }
+}
+
+<span class="cm">// ✅ pin it in a local — locals aren't reset by calls</span>
+<span class="kw">function</span> <span class="fn">use2</span>(b: <span class="type">Box</span>) {
+  <span class="kw">const</span> v = b.val;
+  <span class="kw">if</span> (v !== <span class="kw">null</span>) {
+    <span class="fn">doStuff</span>();
+    v.<span class="fn">toUpperCase</span>();    <span class="cm">// ✅ v is string, immune to the call</span>
+  }
+}</pre>
+      <p class="note">This is why "copy to a <code>const</code> first" is the universal fix for both the closure case and the property case.</p>
+    </div>
+  </section>
+
+  <!-- 5 -->
+  <section>
+    <h2>5. Discriminants &amp; assertion flow</h2>
+    <div class="grid grid-2">
+      <div class="card card-purple">
+        <h3>Discriminant must be a stable reference</h3>
+        <p style="color:var(--muted);margin-bottom:8px">Switching on <code>shape.kind</code> narrows <code>shape</code> only while it's read as the same reference. Destructure the tag into a <code>const</code> and the link to the object's other fields is lost.</p>
+        <pre><span class="kw">function</span> <span class="fn">area</span>(s: <span class="type">Shape</span>) {
+  <span class="kw">const</span> { kind } = s;     <span class="cm">// kind copied out…</span>
+  <span class="kw">if</span> (kind === <span class="str">"circle"</span>)
+    s.radius;             <span class="cm">// ❌ s not narrowed — narrow on s.kind instead</span>
+}</pre>
+      </div>
+      <div class="card card-blue">
+        <h3>Assertions cut the graph</h3>
+        <p style="color:var(--muted);margin-bottom:8px">A call to an <code>asserts</code> function narrows for the <em>rest of the scope</em> (it either threw or the fact holds). A function returning <code>never</code> marks code after it unreachable.</p>
+        <pre><span class="kw">function</span> <span class="fn">f</span>(x: <span class="kw">unknown</span>) {
+  <span class="fn">assert</span>(<span class="kw">typeof</span> x === <span class="str">"string"</span>);
+  x.<span class="fn">toUpperCase</span>();   <span class="cm">// ✅ x: string from here down</span>
+}</pre>
+        <p class="note">Assertion signatures only work on <code>function</code> declarations — not arrow consts (the flow effect isn't carried).</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6 -->
+  <section>
+    <h2>6. Pitfalls cheat-sheet</h2>
+    <div class="card card-red">
+      <table>
+        <thead><tr><th>Code</th><th>What resets the narrowing</th><th>Fix</th></tr></thead>
+        <tbody>
+          <tr><td><code>let</code> captured in a callback</td><td>Callback may run after a reassignment</td><td>Use <code>const</code>, or copy to a <code>const</code></td></tr>
+          <tr><td><code>obj.x</code> used after a call</td><td>The call might mutate <code>obj.x</code></td><td>Copy <code>obj.x</code> to a local first</td></tr>
+          <tr><td>guard stored in <code>let</code></td><td>Could be reassigned before use</td><td>Make the guard a <code>const</code></td></tr>
+          <tr><td>destructured discriminant</td><td>Narrowing the copy doesn't narrow the object</td><td>Switch on <code>obj.kind</code> directly</td></tr>
+          <tr><td>variable reassigned in a branch</td><td>Flow type recomputed from the new value</td><td>Expected — re-check after reassigning</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- recap -->
+  <section>
+    <h2>7. One-sentence recap</h2>
+    <div class="card card-accent">
+      <p style="font-size:14px">Narrowing is the <strong>flow type</strong> a variable carries at each node of the control-flow graph; it survives in straight-line code (and through a <code>const</code>-aliased guard), but the compiler conservatively <strong>re-widens</strong> when a value could have changed out from under it — a <code>let</code> captured in a <strong>callback</strong>, or a <code>obj.x</code> <strong>property</strong> read after any function call — and the one fix for both is to <strong>copy the value into a local <code>const</code></strong> before you rely on it.</p>
+    </div>
+  </section>
+
+</div>
+
+<script>
+// ── closure re-widening playground ─────────────────────────────────────────
+let decl = 'let';      // 'let' | 'const'
+let site = 'inline';   // 'inline' | 'callback'
+
+function evaluate() {
+  // straight-line: narrowing always holds
+  if (site === 'inline') {
+    return { ok: true, flow: 'string', wide: false,
+      msg: 'Straight-line code: the flow type from the <code>if (x !== null)</code> guard carries straight through. No reassignment happened between the guard and the use.' };
+  }
+  // callback:
+  if (decl === 'const') {
+    return { ok: true, flow: 'string', wide: false,
+      msg: 'A <code>const</code> can never be reassigned, so even though the callback may run later, <code>x</code> is guaranteed to still be the narrowed <code>string</code>. The narrowing is closure-safe.' };
+  }
+  return { ok: false, flow: 'string | null', wide: true,
+    msg: 'A <code>let</code> could be reassigned between now and whenever the callback fires, so the compiler resets <code>x</code> to its declared type inside the closure — even though, at a glance, nothing reassigns it. Copy it to a <code>const</code> first.' };
+}
+
+function renderCode() {
+  const ev = evaluate();
+  const declKw = decl === 'let' ? '<span class="kw">let</span>' : '<span class="kw">const</span>';
+  const ft = `<span class="flowtype ${ev.wide ? 'wide' : 'narrow'}">x: ${ev.flow}</span>`;
+  let access;
+  if (site === 'inline') {
+    access = `  x.<span class="fn">toUpperCase</span>();${ft}`;
+  } else {
+    access =
+`  run(() => {
+    x.<span class="fn">toUpperCase</span>();${ft}
+  });`;
+  }
+  document.getElementById('cfaCode').innerHTML =
+`${declKw} x: <span class="type">string</span> | <span class="kw">null</span> = <span class="fn">maybe</span>();
+<span class="kw">if</span> (x !== <span class="kw">null</span>) {
+  <span class="cm">// guard narrows x to: string</span>
+${access}
+}`;
+}
+
+function render() {
+  document.querySelectorAll('#decl-seg button').forEach(b => {
+    b.classList.toggle('on', b.dataset.v === decl);
+    b.onclick = () => { decl = b.dataset.v; render(); };
+  });
+  document.querySelectorAll('#site-seg button').forEach(b => {
+    b.classList.toggle('on', b.dataset.v === site);
+    b.onclick = () => { site = b.dataset.v; render(); };
+  });
+  renderCode();
+  const ev = evaluate();
+  document.getElementById('cfaVerdict').innerHTML =
+    `<div class="vhead">x at the access site &nbsp;<span class="pill" style="color:${ev.wide ? '#fca5a5' : '#86efac'}">${ev.flow}</span>` +
+    `<span class="vbadge ${ev.ok ? 'ok' : 'no'}">${ev.ok ? '✓ NARROWING HOLDS' : '✗ RE-WIDENED'}</span></div>` +
+    `<div style="color:var(--muted)">${ev.msg}</div>`;
+}
+render();
+</script>
+</body>
+</html>
