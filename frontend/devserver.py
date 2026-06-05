@@ -49,6 +49,15 @@ class CleanUrlHandler(SimpleHTTPRequestHandler):
             return
         return super().do_GET()
 
+    def end_headers(self):
+        # Dev convenience: never let the browser cache HTML/JS/CSS, so edits always
+        # show on reload (no more "I changed it but still see the old page"). Also
+        # stops a stale index.html/app.html from re-creating the nested-hub bug.
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        super().end_headers()
+
 
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 5500
