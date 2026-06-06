@@ -115,25 +115,47 @@ single view where you watch all of it happen at once.
 
 ## How the deep-dive pages are built (for contributors)
 
-Each visualizer is **one self-contained HTML file** — inline CSS + vanilla JS, no
-dependencies, no build. The `*-deep` / `*-lab` companions follow a consistent shape:
+Each visualizer is **one self-contained HTML file** — vanilla JS, no dependencies, no
+build. The `*-deep` / `*-lab` companions follow a consistent shape:
 
-- A dark theme with a per-track accent (Spring green, Angular red, TypeScript blue).
+- A dark theme from the **shared design system** in [`frontend/devhub.css`](../frontend/devhub.css):
+  every page links it (`<link rel="stylesheet" href="devhub.css">`) and picks its
+  **track accent** with one body class — `<body class="track-angular">`. The accent
+  re-themes headings, buttons, and card borders for the whole page. Page-specific
+  styles stay inline.
 - Numbered sections: intro → **one interactive** → reference tables/code → a "gotchas"
   card → a one-sentence recap.
 - The interactive is a small state machine that animates **~800 ms per step** so each
   step reads as a beat, not a flash.
 - Syntax-highlighted code via `<span>` classes (`.kw`, `.fn`, `.str`, `.type`, …).
 
-To add one: create `frontend/<name>-deep-visualizer.html`, then register it in the
-`TRACKS` array in `frontend/app.html` (track → section → `{ title, file, level }`).
-Cross-link related pages so a learner can follow a thread — that's what makes the
-hub feel like a wiki rather than a pile of pages.
+The track → body-class → accent map (defined once in `devhub.css`):
+
+| Track | `<body>` class | Accent |
+|---|---|---|
+| ☕ Java — OOP & Language | `track-java` | coffee orange |
+| 🌲 Data Structures & Algorithms | `track-data` | amber |
+| 🍃 Spring Boot | `track-spring` | Spring green |
+| 🅰️ Angular | `track-angular` | Angular red |
+| 🔷 TypeScript | `track-ts` | TS blue |
+| ⚙️ App Configuration | `track-config` | indigo |
+| 🎯 Interview Prep | `track-interview` | rose → gold |
+| 🛠️ Dev Tools | `track-tools` | teal |
+| ☁️ Cloud — AWS | `track-cloud` | AWS orange |
+| 🔐 Identity & Auth | `track-identity` | cyan |
+| &nbsp;&nbsp;↳ Ping pages (`ping-*`) | `track-ping` | Ping red |
+| 🐛 Debugging | `track-debug` | orange |
+
+To add one: create `frontend/<name>-deep-visualizer.html`, link `devhub.css` and set
+the right `track-*` body class, then register it in the `TRACKS` array in
+`frontend/app.html` (track → section → `{ title, file, level }`). Cross-link related
+pages so a learner can follow a thread — that's what makes the hub feel like a wiki
+rather than a pile of pages.
 
 ---
 
 *This guide is updated as new tracks and deep-dives land. Last refreshed with the
-**🐛 Debugging track** fully fleshed out — auth/HTTP diagnosers (CORS, 401-vs-403, JWT),
-Spring-side (proxies, actuator/logs, remote debug), Angular-side (ExpressionChanged, RxJS,
-DevTools), and technique (reading stack traces, the debugging method/bisect, log-vs-debugger)
-— on top of the completed **CIAM round-trip** and the Spring **Security & Identity** section.*
+**shared `devhub.css` design system** rolled across all 272 visualizers — every page now
+links one stylesheet and declares its track accent via a `<body class="track-*">` (see
+the map above) — on top of the **🐛 Debugging track**, the completed **CIAM round-trip**,
+and the Spring **Security & Identity** section.*
