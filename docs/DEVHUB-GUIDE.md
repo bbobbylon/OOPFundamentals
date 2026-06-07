@@ -123,10 +123,22 @@ build. The `*-deep` / `*-lab` companions follow a consistent shape:
   **track accent** with one body class — `<body class="track-angular">`. The accent
   re-themes headings, buttons, and card borders for the whole page. Page-specific
   styles stay inline.
-- Numbered sections: intro → **one interactive** → reference tables/code → a "gotchas"
+- Numbered sections: a hero **animated walk** → reference tables/code → a "gotchas"
   card → a one-sentence recap.
-- The interactive is a small state machine that animates **~800 ms per step** so each
-  step reads as a beat, not a flash.
+- The hero is the house style across the flow / lifecycle pages — an **extreme-viz**
+  panel with four parts working together:
+  1. a **vertical rail of stages** the concept passes through (request → interceptors →
+     network; or operator → operator; or router event → router event),
+  2. a **gliding chip** that travels the rail — and it can *turn around*, so motion
+     itself encodes meaning: a response flowing back **up** the interceptor chain, a
+     cached request **short-circuiting** before the network, a `switchMap` **cancelling**
+     an in-flight call,
+  3. a **scenario switcher** (happy path / blocked / error / edge case), and
+  4. a **live inspector** that prints the *real object* at each step — the actual
+     `HttpRequest`/`HttpResponse`, the `router.events` payload, the RxJS Next/Error/
+     Complete notification — not a cartoon. Showing real data is the whole point: it's
+     how a visual learner reads state changing.
+- Steps animate at **~800 ms+** each so every step reads as a beat, not a flash.
 - Syntax-highlighted code via `<span>` classes (`.kw`, `.fn`, `.str`, `.type`, …).
 
 The track → body-class → accent map (defined once in `devhub.css`):
@@ -155,7 +167,11 @@ rather than a pile of pages.
 ---
 
 *This guide is updated as new tracks and deep-dives land. Last refreshed with the
-**shared `devhub.css` design system** rolled across all 272 visualizers — every page now
-links one stylesheet and declares its track accent via a `<body class="track-*">` (see
-the map above) — on top of the **🐛 Debugging track**, the completed **CIAM round-trip**,
-and the Spring **Security & Identity** section.*
+**extreme-viz hero** standardized across the Angular flow pages — an animated step-walk
+with a gliding chip and a **live inspector of the real per-step objects** (router events,
+RxJS stream notifications, `HttpRequest`/`HttpResponse`) across happy-path / blocked /
+error / edge-case scenarios — now on **Routing**, **Advanced Routing**, the **RxJS
+Operators Lab**, and **HTTP & Interceptors**. Built on the **shared `devhub.css` design
+system** (every page links one stylesheet and declares its track accent via a
+`<body class="track-*">`, see the map above), the **🐛 Debugging track**, the completed
+**CIAM round-trip**, and the Spring **Security & Identity** section.*

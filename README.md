@@ -166,6 +166,8 @@ app with user accounts and cross-device progress sync:
 
 - **`frontend/`** — the hub app (`app.html`): 240+ interactive visualizers across
   11 tracks, a searchable sidebar, progress tracking, streaks, and a sign-in/register modal.
+  The flow / lifecycle pages default to an **animated step-walk with a live inspector** of
+  the real objects at each step (router events, RxJS stream values, `HttpRequest`/`HttpResponse`).
 - **`backend/`** — a Spring Boot 4 API (`devhub-backend`): registration, JWT
   login, and per-user topic progress, backed by H2 (local) or PostgreSQL (prod).
 
