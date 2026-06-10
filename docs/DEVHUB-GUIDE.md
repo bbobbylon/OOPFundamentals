@@ -20,7 +20,7 @@ Or jump straight to any file linked below.
 
 | Track | What it covers | Good first page |
 |---|---|---|
-| ☕ **Java — OOP & Language** | encapsulation, inheritance, polymorphism, generics, concurrency, JVM | [`inheritance-visualizer.html`](../frontend/inheritance-visualizer.html) |
+| ☕ **Java — OOP & Language** | encapsulation, inheritance, polymorphism, generics, concurrency, JVM, **Head First design patterns** | [`inheritance-visualizer.html`](../frontend/inheritance-visualizer.html) |
 | 🌲 **Data Structures & Algorithms** | lists, trees, graphs, sorting, searching, Big-O | [`big-o-visualizer.html`](../frontend/big-o-visualizer.html) |
 | 🍃 **Spring Boot** | REST, JPA, security, identity, async, production patterns | [`spring-boot-architecture-visualizer.html`](../frontend/spring-boot-architecture-visualizer.html) |
 | 🅰️ **Angular** | components, signals, RxJS, HTTP, auth, change detection | [`angular-signals-visualizer.html`](../frontend/angular-signals-visualizer.html) |
@@ -166,12 +166,21 @@ rather than a pile of pages.
 
 ---
 
-*This guide is updated as new tracks and deep-dives land. Last refreshed with the
-**extreme-viz hero** standardized across the Angular flow pages — an animated step-walk
-with a gliding chip and a **live inspector of the real per-step objects** (router events,
-RxJS stream notifications, `HttpRequest`/`HttpResponse`) across happy-path / blocked /
-error / edge-case scenarios — now on **Routing**, **Advanced Routing**, the **RxJS
-Operators Lab**, and **HTTP & Interceptors**. Built on the **shared `devhub.css` design
-system** (every page links one stylesheet and declares its track accent via a
-`<body class="track-*">`, see the map above), the **🐛 Debugging track**, the completed
-**CIAM round-trip**, and the Spring **Security & Identity** section.*
+*This guide is updated as new tracks and deep-dives land. Last refreshed with a big
+**extreme-viz hero** wave — an animated step-walk with a gliding chip and a **live
+inspector of the real per-step objects** across happy-path / blocked / error / edge-case
+scenarios. The hero is now the lead element on the **Component Lifecycle** (SimpleChanges,
+@ViewChild timing, OnPush mutation), **Signals** (set→dirty→recompute→effect, equality
+gate), the whole **RxJS family** (Observable lifecycle, the operator pipe, multicasting's
+shared-execution counter, custom-operator internals), **Pagination** (the full HttpParams →
+Spring `Pageable` → `Page<T>` round-trip), and state management (**NgRx** action→reducer→
+selector, **SignalStore** `patchState`, and a **State-Patterns** hero that runs the *same*
+update through all four architectures) — on top of the earlier Routing / RxJS Lab / HTTP
+set. Also new: a **Head First Design Patterns** sub-track in ☕ Java
+([Strategy / SimUDuck](../frontend/head-first-strategy-visualizer.html),
+[Observer / Weather Station](../frontend/head-first-observer-visualizer.html)) that retells
+the book's chapters with the same animated hero, plus an inline SVG **favicon** for the hub.
+Built on the **shared `devhub.css` design system** (every page links one stylesheet and
+declares its track accent via a `<body class="track-*">`, see the map above), the **🐛
+Debugging track**, the completed **CIAM round-trip**, and the Spring **Security & Identity**
+section.*
