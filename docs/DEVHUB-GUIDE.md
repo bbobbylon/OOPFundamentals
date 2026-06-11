@@ -176,10 +176,17 @@ shared-execution counter, custom-operator internals), **Pagination** (the full H
 Spring `Pageable` → `Page<T>` round-trip), and state management (**NgRx** action→reducer→
 selector, **SignalStore** `patchState`, and a **State-Patterns** hero that runs the *same*
 update through all four architectures) — on top of the earlier Routing / RxJS Lab / HTTP
-set. Also new: a **Head First Design Patterns** sub-track in ☕ Java
-([Strategy / SimUDuck](../frontend/head-first-strategy-visualizer.html),
-[Observer / Weather Station](../frontend/head-first-observer-visualizer.html)) that retells
-the book's chapters with the same animated hero, plus an inline SVG **favicon** for the hub.
+set. Also new: a **Head First Design Patterns** sub-track in ☕ Java — **9 chapters** retold with
+the book's voice (Brain Power, "no Dumb Questions", design-principle boxes) and the same
+animated hero: [Strategy / SimUDuck](../frontend/head-first-strategy-visualizer.html),
+[Observer / Weather Station](../frontend/head-first-observer-visualizer.html),
+[Decorator / Starbuzz](../frontend/head-first-decorator-visualizer.html),
+[Factory / Pizza Store](../frontend/head-first-factory-visualizer.html),
+[Singleton / Chocolate Boiler](../frontend/head-first-singleton-visualizer.html),
+[Command / Remote Control](../frontend/head-first-command-visualizer.html),
+[Adapter &amp; Facade](../frontend/head-first-adapter-facade-visualizer.html),
+[Template Method / Coffee &amp; Tea](../frontend/head-first-template-method-visualizer.html), and
+[State / Gumball Machine](../frontend/head-first-state-visualizer.html) — plus an inline SVG **favicon** for the hub.
 Built on the **shared `devhub.css` design system** (every page links one stylesheet and
 declares its track accent via a `<body class="track-*">`, see the map above), the **🐛
 Debugging track**, the completed **CIAM round-trip**, and the Spring **Security & Identity**
