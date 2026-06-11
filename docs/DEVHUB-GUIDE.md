@@ -1,11 +1,11 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 280 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 281 pages.** Pick a *path* below and follow it.
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **280 browser visualizers** across **11 tracks**, plus a
+DevHub is a learning hub: **281 browser visualizers** across **12 tracks**, plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
 copy-paste **command-line runbook** (build/run, the auth round-trip via curl, and
@@ -34,6 +34,7 @@ Or jump straight to any file linked below.
 | ☁️ **Cloud — AWS** | core AWS services for app developers | open via the hub |
 | 🔐 **Identity & Auth** | OAuth2/OIDC, Entra ID, Ping, tokens & claims | open via the hub |
 | 🐛 **Debugging** | find bugs faster: CORS, 401-vs-403, JWTs (more stacks coming) | [CORS Failures](../frontend/debugging-cors-visualizer.html) |
+| 🧪 **Playgrounds** | live, hands-on sandboxes — fire real requests, read real responses | [API Playground](../frontend/api-playground-visualizer.html) |
 
 Pages are tagged **beginner → intermediate → advanced → expert**. The deepest
 ones are the **`*-deep`** / **`*-lab`** companion pages (34 of them) — each takes a
@@ -216,5 +217,8 @@ lifecycle walked through the Ping product chain), **[PingFederate Admin](../fron
 **[Ping](../frontend/ping-integration-visualizer.html)** + **[Entra](../frontend/entra-spring-angular-visualizer.html)**
 full-stack integrations (the happy round-trip plus the classic **401-issuer / CORS / 403-claim-mapping** failures,
 **MSAL silent refresh**, app-role assignment, and **On-Behalf-Of** to Microsoft Graph). And the **sidebar was
-reorganized into a two-level accordion** so each track's pages sit inside collapsible sub-sections — 280 pages no
-longer land as one scary list.*
+reorganized into a two-level accordion** so each track's pages sit inside collapsible sub-sections — pages no
+longer land as one scary list. And a new **🧪 Playgrounds** track debuts with the
+**[API Playground](../frontend/api-playground-visualizer.html)** — a real in-browser HTTP client (every Send is a live
+`fetch()`, with status/timing/headers/body + CORS &amp; auth explainers), the first of a planned family of concept
+sandboxes (Spring Boot, IDM/JWT).*
