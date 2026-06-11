@@ -139,7 +139,7 @@ double-click**, no server needed.
 
 | Visualizer | What it shows |
 |---|---|
-| [`app.html`](frontend/app.html) | The full Dev Hub — searchable, progress, 240+ pages (serve it; `index.html` redirects here) |
+| [`app.html`](frontend/app.html) | The full Dev Hub — searchable, progress, **280 pages grouped into collapsible sub-sections** (serve it; `index.html` redirects here) |
 | [`inheritance-visualizer.html`](frontend/inheritance-visualizer.html) | Click any class in the hierarchy to see what it inherits/overrides |
 | [`polymorphism-visualizer.html`](frontend/polymorphism-visualizer.html) | Shapes & animals + vtable diagram + overriding vs overloading + gotchas |
 | [`linked-list-visualizer.html`](frontend/linked-list-visualizer.html) | Nodes &amp; arrows, plus a race: LinkedList.addFirst() vs ArrayList shift cost |
@@ -164,17 +164,21 @@ in the support packages.
 Beyond the static visualizers, this repo ships a full **Dev Learning Hub** web
 app with user accounts and cross-device progress sync:
 
-- **`frontend/`** — the hub app (`app.html`): 240+ interactive visualizers across
-  11 tracks, a searchable sidebar, progress tracking, streaks, and a sign-in/register modal.
+- **`frontend/`** — the hub app (`app.html`): 280 interactive visualizers across
+  11 tracks, a searchable **two-level sidebar** (each track's pages are grouped into
+  **collapsible sub-sections**, so you're never faced with hundreds of links at once),
+  progress tracking, streaks, and a sign-in/register modal.
   The flow / lifecycle pages default to an **animated step-walk with a live inspector** of
-  the real objects at each step (router events, RxJS stream values, `HttpRequest`/`HttpResponse`).
+  the real objects at each step (router events, RxJS stream values, `HttpRequest`/`HttpResponse`,
+  and — across the **Identity & Auth** track — OAuth/OIDC redirects, JWT claims, SCIM payloads,
+  and Conditional-Access decisions).
 - **`backend/`** — a Spring Boot 4 API (`devhub-backend`): registration, JWT
   login, and per-user topic progress, backed by H2 (local) or PostgreSQL (prod).
 
 > **📖 New to the hub? Start with the [DevHub Guided Tour](docs/DEVHUB-GUIDE.md).**
-> It maps the 10 tracks and hands you ready-made learning paths — including a featured
+> It maps the 11 tracks and hands you ready-made learning paths — including a featured
 > *"how a CIAM app works, end to end"* walkthrough (Angular OIDC login → tokens →
-> guards → Spring filter chain → method security) — so you're never staring at 240
+> guards → Spring filter chain → method security) — so you're never staring at 280
 > files wondering where to begin.
 
 You can run it three ways. Pick the one you need:

@@ -55,6 +55,14 @@
     .check-detail { color: var(--muted); margin-top: 4px; line-height: 1.5; display: none; }
     .check-item.open .check-detail { display: block; }
     .check-detail code { font-family: monospace; color: var(--accent); background: #1e293b; padding: 1px 4px; border-radius: 3px; font-size: 11px; }
+    /* per-page node-role badges for the shared rt-* hero (kit lives in devhub.css) */
+    .who-SPA{background:rgba(129,140,248,.16);color:#a5b4fc}
+    .who-IDP{background:rgba(0,120,212,.24);color:#6cb6ff}
+    .who-API{background:rgba(109,179,63,.20);color:#a6e07f}
+    .who-JWKS{background:rgba(34,211,238,.14);color:#7dd3fc}
+    .who-TOKEN{background:rgba(250,204,21,.16);color:#fde047}
+    .who-GRAPH{background:rgba(167,139,250,.16);color:#c4b5fd}
+    .who-BAD{background:rgba(248,113,113,.16);color:#fca5a5}
   </style>
   <link rel="stylesheet" href="devhub.css" />
 </head>
@@ -63,6 +71,37 @@
   <a class="back" href="entra-id-index.html">← Entra ID</a>
   <h1>Spring Boot + Angular + Entra ID</h1>
   <p class="sub">Full-stack integration: Angular authenticates users with MSAL, obtains JWT access tokens, and sends them to Spring Boot APIs that validate them with Entra ID.</p>
+
+  <!-- ── HERO: animated MSAL↔Entra↔Spring round-trip · happy path, silent refresh, app-role 403, On-Behalf-Of · live inspector ── -->
+  <div class="panel" style="border:1px solid #22d3ee">
+    <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:#22d3ee">▶ Watch the Entra full-stack round-trip — four real moments</h2>
+    <p style="font-size:13px;color:var(--muted);margin:6px 0 12px">This is the same pieces as the code below, in motion. Pick a scenario and press ▶ — the chip is the request or token in flight, and the inspector shows the <b>real artifacts</b>: the MSAL token (with <code>aud</code>, <code>scp</code>, <code>roles</code>), the silent-refresh exchange, the app-role check, and the On-Behalf-Of grant to Microsoft Graph. These four are the Entra-specific things the generic round-trip doesn't show.</p>
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="scenseg">
+        <button data-s="happy" class="on">200 happy path</button>
+        <button data-s="refresh">silent refresh</button>
+        <button data-s="forbidden">403 app role</button>
+        <button data-s="obo">On-Behalf-Of</button>
+      </span>
+      <button class="rt-run" id="run">▶ Play</button>
+      <span class="rt-pill" id="reqPill">GET /api/users · 200</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="rtDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="rtDir">▶ READY</span>
+        <div class="rt-cap" id="rtCap">Press ▶ to begin…</div>
+        <div class="rt-payload" id="rtPayload"></div>
+        <div class="rt-headers" id="rtHeaders"></div>
+        <div class="rt-result" id="rtResult"></div>
+      </div>
+    </div>
+    <div class="rt-legend">
+      <span>🅰️ Angular (MSAL) · 🟦 Entra · 🎫 token · 🍃 Spring API · 📊 Microsoft Graph</span>
+      <span><span style="color:#86efac">green = flows / fixed</span> · <span style="color:#fca5a5">red = where it breaks</span></span>
+    </div>
+  </div>
 
   <!-- SECTION 1: Architecture -->
   <h2>1 — Full-Stack Architecture</h2>
@@ -346,6 +385,235 @@ function toggleCheck(item) {
   icon.textContent = wasDone ? item.querySelector('.check-title').textContent[0] : '✓';
   item.classList.toggle('open');
 }
+</script>
+
+<!-- ── animated MSAL↔Entra↔Spring round-trip · happy / silent-refresh / app-role-403 / On-Behalf-Of (isolated IIFE) ── -->
+<script>
+(function(){
+  const HDR={
+    h0:{t:'MSAL signs the user in',b:`Angular uses @azure/msal-angular (Redirect flow).
+MsalGuard triggers login; the SPA requests the API's
+scope:  api://<api-client-id>/Users.Read`},
+    h1:{t:'Entra issues the tokens',b:`{
+  "id_token":  "eyJ…",    ← who the user is (for the SPA)
+  "access_token": "eyJ…"  ← aud = api://<api-client-id>
+}  the access token carries scp and (if assigned) roles.`},
+    h2:{t:'MsalInterceptor attaches the Bearer',b:`the protectedResourceMap matches the API URL, so MSAL
+adds the token automatically:
+  GET http://localhost:8080/api/users
+  Authorization: Bearer eyJ…`},
+    h3:{t:'Spring validates via Entra JWKS',b:`issuer-uri → Entra v2 discovery → JWKS.
+signature ✓ · iss ✓ · <span class="hl-ok">aud = api client-id ✓</span> · exp ✓
+audience is the #1 thing to check: the token must be
+minted FOR this API, not for Graph or another API.`},
+    h4:{t:'@PreAuthorize evaluates scope + role',b:`the converter maps scp → SCOPE_Users.Read and
+roles → APPROLE_Admin.
+  @PreAuthorize("hasAuthority('SCOPE_Users.Read')
+                or hasAuthority('APPROLE_Admin')") → granted`},
+    h5:{t:'200 OK',b:`200 [ { "id":1, "name":"Alice" }, … ]
+<span class="hl-ok">two app registrations, one token audience, scope-OR-role
+authorization — the Entra full-stack contract.</span>`},
+    r0:{t:'the access token is about to expire',b:`MSAL caches tokens in sessionStorage with an expiry:
+  "expiresOn": 1734019200   (≈ 60 min lifetime)
+the user is still active; we must not bounce them
+through a full interactive login.`},
+    r1:{t:'a call comes back 401 (expired)',b:`GET /api/users →
+  <span class="hl-bad">401 invalid_token (the JWT is expired)</span>
+or MSAL pre-empts this by checking the expiry before
+it even sends the request.`},
+    r2:{t:'MSAL acquireTokenSilent()',b:`MSAL renews WITHOUT user interaction:
+  msal.acquireTokenSilent({ scopes:[ "api://…/Users.Read" ] })
+it uses a cached refresh token (or a hidden iframe
+against Entra) — no redirect, no password.`},
+    r3:{t:'Entra returns a fresh access token',b:`200 { "access_token":"eyJ…(new)", "expires_in":3600 }
+the user saw nothing. if the refresh token were ALSO
+expired, only THEN would MSAL fall back to a redirect.`},
+    r4:{t:'retry the original request → 200',b:`the interceptor replays GET /api/users with the new
+Bearer → <span class="hl-ok">200 OK</span>.
+this silent loop is what "stay logged in" really is.`},
+    f0:{t:'a privileged call: DELETE a user',b:`DELETE http://localhost:8080/api/users/42
+  Authorization: Bearer eyJ…
+the user is logged in and the token is valid —
+but deleting users needs an admin app role.`},
+    f1:{t:'the token validates fine',b:`signature ✓ iss ✓ aud ✓ exp ✓ → authenticated.
+this is NOT an authentication problem. authorization
+is what decides whether this account may delete.`},
+    f2:{t:'but the roles claim is empty',b:`this user was never ASSIGNED the app role in Entra:
+  "roles": []    ← no "Admin"
+app roles only appear in the token after assignment in
+Enterprise Applications → Users and groups.`},
+    f3:{t:'@PreAuthorize(APPROLE_Admin) denies',b:`@PreAuthorize("hasAuthority('APPROLE_Admin')")
+authorities = [SCOPE_Users.Read]   (no APPROLE_Admin)
+  <span class="hl-bad">access denied</span>`},
+    f4:{t:'403 Forbidden',b:`403, not 401: Entra knew exactly who this is — they
+simply lack the role. a 401 would mean the token was
+missing or invalid.`},
+    f5:{t:'fix: assign the app role in Entra',b:`define the app role on the API registration, then in
+the Enterprise App assign the user/group to "Admin".
+the NEXT token carries "roles":["Admin"] →
+<span class="hl-ok">APPROLE_Admin → the delete is allowed.</span>`},
+    o0:{t:'Angular calls your API',b:`GET http://localhost:8080/api/me/profile
+  Authorization: Bearer eyJ…   (aud = your API)
+an ordinary call — but this endpoint needs data that
+lives in Microsoft Graph.`},
+    o1:{t:'the API must call Graph AS the user',b:`the user's token is for YOUR api (aud = api://your-api).
+you cannot send it to Graph — wrong audience.
+you also must not act as the app: you need the USER's
+Graph permissions (read THEIR profile).`},
+    o2:{t:'On-Behalf-Of exchange at Entra',b:`POST /oauth2/v2.0/token
+  grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer
+  requested_token_use=on_behalf_of
+  assertion=<the user's access token>
+  scope=https://graph.microsoft.com/User.Read`},
+    o3:{t:'Entra returns a Graph token',b:`200 { "access_token":"eyJ…", "aud":"graph.microsoft.com" }
+a NEW token, minted for Graph, still carrying the
+user's identity — not the app's.`},
+    o4:{t:'call Microsoft Graph with the new token',b:`GET https://graph.microsoft.com/v1.0/me
+  Authorization: Bearer eyJ…(graph)
+Graph returns THIS user's profile, honoring their
+own consented permissions.`},
+    o5:{t:'combine and return to Angular',b:`your API merges its own data with the Graph result and
+responds 200.
+<span class="hl-ok">On-Behalf-Of = an API calls a downstream API as the
+original user. audience is exchanged, identity is kept.</span>`},
+  };
+  const SCEN={
+    happy:{ req:'GET /api/users · 200',
+      intro:'The MSAL + Entra round-trip: Angular logs in, gets a token whose audience is your API, and Spring validates it against Entra\'s JWKS and authorizes on scope or app role.',
+      result:{cls:'ok', text:`✅ The Entra full-stack contract: two app registrations (SPA + API), the SPA requests the API's scope, Entra mints an access token with aud = the API, and Spring validates signature + issuer + audience + expiry before mapping scp → SCOPE_ and roles → APPROLE_ for @PreAuthorize. Audience is the claim people forget — the token must be minted for THIS API.`},
+      nodes:[
+        {id:'login',icon:'🅰️',label:'MSAL signs the user in',sub:'requests API scope',who:'SPA'},
+        {id:'idp',icon:'🟦',label:'Entra issues tokens',sub:'scp + roles',who:'IDP'},
+        {id:'bear',icon:'🎫',label:'MsalInterceptor adds Bearer',sub:'protectedResourceMap',who:'TOKEN'},
+        {id:'jwks',icon:'🔑',label:'Spring validates via Entra JWKS',sub:'aud = API id',who:'JWKS'},
+        {id:'authz',icon:'🛡️',label:'@PreAuthorize: scope OR role',sub:'granted',who:'API'},
+        {id:'ok',icon:'✅',label:'200 OK — data returned',sub:'the contract',who:'SPA'},
+      ],
+      steps:[
+        {node:'login',chip:'MSAL login',dir:'start',sn:'the user signs in',pay:'MsalGuard triggers a redirect login and the SPA requests the API\'s scope (api://<api-id>/Users.Read).',view:'h0'},
+        {node:'idp',chip:'tokens',tone:'ok',dir:'🟦 issued',sn:'Entra issues tokens',pay:'Entra returns an id_token for the SPA and an access_token whose audience is the API registration.',view:'h1'},
+        {node:'bear',chip:'+ Bearer',tone:'ok',dir:'🎫 attach',sn:'interceptor attaches it',pay:'Because the URL matches the protectedResourceMap, MsalInterceptor adds the Bearer automatically.',view:'h2'},
+        {node:'jwks',chip:'aud ✓',tone:'ok',dir:'🔑 validate',sn:'validate via JWKS',pay:'Spring checks signature, issuer, expiry, and — crucially — that aud is THIS API, via Entra\'s JWKS.',view:'h3'},
+        {node:'authz',chip:'granted',tone:'ok',dir:'🛡️ authz',sn:'scope or role passes',pay:'The converter maps scp → SCOPE_Users.Read and roles → APPROLE_*, and @PreAuthorize allows the call.',view:'h4'},
+        {node:'ok',chip:'200 ✓',tone:'ok',dir:'✅ response',sn:'200 OK',pay:'Data returns to Angular. Two registrations, one token audience, scope-or-role authorization — the Entra contract.',view:'h5'},
+      ]},
+    refresh:{ req:'silent token refresh (MSAL)',
+      intro:'When the short-lived access token expires, MSAL renews it silently — with a refresh token or a hidden iframe — so the user is never bounced back to a login page.',
+      result:{cls:'ok', text:`✅ Access tokens are short-lived on purpose; MSAL hides that. acquireTokenSilent renews them without UI (a cached refresh token, or a hidden iframe against Entra), and the interceptor retries the original call. Only when the refresh token itself expires does MSAL fall back to an interactive redirect. This is the loop behind every "stay logged in" experience.`},
+      nodes:[
+        {id:'exp',icon:'⏰',label:'access token near expiry',sub:'expiresOn cached',who:'TOKEN'},
+        {id:'401',icon:'🚧',label:'API call → 401 expired',sub:'or pre-empted',who:'API'},
+        {id:'silent',icon:'🅰️',label:'MSAL acquireTokenSilent()',sub:'no redirect',who:'SPA'},
+        {id:'fresh',icon:'🟦',label:'Entra returns a fresh token',sub:'user sees nothing',who:'IDP'},
+        {id:'retry',icon:'✅',label:'retry original request → 200',sub:'silent loop',who:'API'},
+      ],
+      steps:[
+        {node:'exp',chip:'expiring',dir:'state',sn:'the token is aging',pay:'MSAL caches each token with an expiry; this access token (≈60 min) is about to lapse while the user is active.',view:'r0'},
+        {node:'401',chip:'401',tone:'bad',dir:'🚧 expired',sn:'a call returns 401',pay:'GET /api/users returns 401 invalid_token — or MSAL pre-empts it by noticing the expiry first.',view:'r1'},
+        {node:'silent',chip:'silent',tone:'ok',dir:'🅰️ renew',sn:'acquire silently',pay:'MSAL calls acquireTokenSilent — using a cached refresh token or a hidden iframe at Entra. No redirect, no password.',view:'r2'},
+        {node:'fresh',chip:'new token',tone:'ok',dir:'🟦 issued',sn:'a fresh token',pay:'Entra returns a new access token; the user saw nothing. Only if the refresh token were also dead would MSAL redirect.',view:'r3'},
+        {node:'retry',chip:'200 ✓',tone:'ok',dir:'✅ retry',sn:'retry succeeds',pay:'The interceptor replays the original request with the new Bearer → 200. That silent loop is "stay logged in."',view:'r4'},
+      ]},
+    forbidden:{ req:'403 · missing app role',
+      intro:'Authentication succeeds but a privileged call is forbidden: the user was never assigned the Entra app role, so APPROLE_Admin is missing from their authorities.',
+      result:{cls:'warn', text:`⚠️ Entra app roles only appear in a token after you ASSIGN the user (or group) to that role in the Enterprise Application — defining the role on the registration isn't enough. A 403 with a valid token means authorization, not authentication: the account is known but lacks the role. Assign it, and the next token carries roles:["Admin"] → APPROLE_Admin.`},
+      nodes:[
+        {id:'del',icon:'🅰️',label:'DELETE /api/users/42 + Bearer',sub:'valid token',who:'SPA'},
+        {id:'valid',icon:'🍃',label:'the token validates fine',sub:'authenticated',who:'API'},
+        {id:'noroles',icon:'🚫',label:'roles claim is empty',sub:'no Admin',who:'API'},
+        {id:'deny',icon:'⛔',label:'@PreAuthorize(APPROLE_Admin) denies',sub:'no app role',who:'API'},
+        {id:'forb',icon:'🚷',label:'403 Forbidden',sub:'authz, not authn',who:'BAD'},
+        {id:'assign',icon:'🟦',label:'fix: assign the app role',sub:'Enterprise App',who:'IDP'},
+      ],
+      steps:[
+        {node:'del',chip:'DELETE',dir:'privileged',sn:'a privileged call',pay:'The user is logged in with a valid token and tries to delete a user — an operation that needs an admin app role.',view:'f0'},
+        {node:'valid',chip:'authn ✓',tone:'ok',dir:'🍃 authn',sn:'token validates',pay:'Signature, issuer, audience, expiry all pass — this is authenticated, so the problem is authorization, not identity.',view:'f1'},
+        {node:'noroles',chip:'roles []',tone:'bad',dir:'🚫 no role',sn:'no app role',pay:'The token\'s roles claim is empty — this user was never assigned the app role in Entra, so it never appears.',view:'f2'},
+        {node:'deny',chip:'denied',tone:'bad',dir:'⛔ denied',sn:'@PreAuthorize denies',pay:'hasAuthority(\'APPROLE_Admin\') needs that role, but the user only has SCOPE_Users.Read — denied.',view:'f3'},
+        {node:'forb',chip:'403',tone:'bad',dir:'🚷 forbidden',sn:'403 Forbidden',pay:'403 (not 401): Entra knew exactly who this is; they just lack the role. A 401 would mean the token was missing or invalid.',view:'f4'},
+        {node:'assign',chip:'assign ✓',tone:'ok',dir:'🟦 fix',sn:'assign the role',pay:'Assign the user to the Admin app role in the Enterprise App; the next token carries roles:["Admin"] and the delete is allowed.',view:'f5'},
+      ]},
+    obo:{ req:'On-Behalf-Of → Microsoft Graph',
+      intro:'Your API needs to call Microsoft Graph as the signed-in user. The On-Behalf-Of flow exchanges the incoming token for a Graph token that keeps the user\'s identity.',
+      result:{cls:'ok', text:`✅ On-Behalf-Of is the Entra answer to "my API must call another API as the user." You can't forward the incoming token (its audience is your API) and you shouldn't act as the app (you need the user's permissions). OBO exchanges the user's token at Entra for a downstream token (aud = Graph) that preserves their identity — the server-side mirror of audience discipline.`},
+      nodes:[
+        {id:'call',icon:'🅰️',label:'Angular calls your API',sub:'aud = your API',who:'SPA'},
+        {id:'need',icon:'🍃',label:'API must call Graph as the user',sub:'wrong aud to reuse',who:'API'},
+        {id:'obo',icon:'🟦',label:'On-Behalf-Of exchange at Entra',sub:'jwt-bearer grant',who:'IDP'},
+        {id:'gtok',icon:'🎫',label:'Entra returns a Graph token',sub:'aud = graph',who:'TOKEN'},
+        {id:'graph',icon:'📊',label:'call Microsoft Graph',sub:'/v1.0/me',who:'GRAPH'},
+        {id:'ret',icon:'✅',label:'combine & return to Angular',sub:'identity preserved',who:'API'},
+      ],
+      steps:[
+        {node:'call',chip:'call API',dir:'start',sn:'an ordinary call',pay:'Angular calls /api/me/profile with a Bearer whose audience is your API — but this endpoint needs Graph data.',view:'o0'},
+        {node:'need',chip:'needs Graph',tone:'ok',dir:'🍃 downstream',sn:'the API needs Graph',pay:'The incoming token is for your API, not Graph (wrong audience), and you need the user\'s own Graph permissions.',view:'o1'},
+        {node:'obo',chip:'OBO',tone:'ok',dir:'🟦 exchange',sn:'On-Behalf-Of',pay:'Your API posts the user\'s token to Entra with the jwt-bearer grant and requested_token_use=on_behalf_of.',view:'o2'},
+        {node:'gtok',chip:'graph token',tone:'ok',dir:'🎫 issued',sn:'a Graph token',pay:'Entra returns a new token whose audience is Graph, still carrying the user\'s identity — not the app\'s.',view:'o3'},
+        {node:'graph',chip:'GET /me',tone:'ok',dir:'📊 Graph',sn:'call Graph',pay:'The API calls graph.microsoft.com/v1.0/me with the new token; Graph honors the user\'s own consented permissions.',view:'o4'},
+        {node:'ret',chip:'200 ✓',tone:'ok',dir:'✅ response',sn:'combine & return',pay:'The API merges its data with the Graph result and returns 200. OBO exchanges audience while preserving identity.',view:'o5'},
+      ]},
+  };
+
+  let scen='happy', running=false, timers=[];
+  function clearT(){ timers.forEach(clearTimeout); timers=[]; }
+  function nodeEl(id){ return document.querySelector('.rt-node[data-node="'+id+'"]'); }
+  function nodeCenter(id){ const n=nodeEl(id); return n.offsetTop + n.offsetHeight/2; }
+  function setDisabled(on){ document.querySelectorAll('#scenseg button').forEach(b=>b.disabled=on); document.getElementById('run').disabled=on; }
+  function renderNodes(scenKey){
+    const nodes=SCEN[scenKey].nodes;
+    let html='<div class="rt-rail"></div><div class="rt-chip" id="rtChip">req</div>';
+    nodes.forEach(function(n){
+      html+='<div class="rt-node" data-node="'+n.id+'"><span class="ic">'+n.icon+'</span>'
+        +'<div style="flex:1;min-width:0"><div class="nl">'+n.label+'</div><div class="ns">'+n.sub+'</div></div>'
+        +'<span class="who who-'+n.who+'">'+n.who+'</span></div>';
+    });
+    document.getElementById('rtDiagram').innerHTML=html;
+  }
+  function resetStage(){
+    renderNodes(scen);
+    const s=SCEN[scen];
+    const chip=document.getElementById('rtChip');
+    chip.style.transition='none'; chip.style.top=nodeCenter(s.steps[0].node)+'px'; chip.style.opacity='0';
+    chip.classList.remove('ok','bad'); void chip.offsetWidth; chip.style.transition='';
+    document.getElementById('rtResult').className='rt-result';
+    const dir=document.getElementById('rtDir'); dir.textContent='▶ READY'; dir.className='rt-dir';
+    document.getElementById('rtCap').textContent='Press ▶ to walk this scenario…';
+    document.getElementById('rtPayload').textContent=s.intro;
+    document.getElementById('rtHeaders').innerHTML='<span class="ht">live tokens & exchanges</span>— the MSAL token claims, the silent-refresh call, the app-role check and the OBO grant appear here per step —';
+    document.getElementById('reqPill').textContent=s.req;
+  }
+  function applyStep(steps,i){
+    const st=steps[i];
+    document.querySelectorAll('.rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
+    const n=nodeEl(st.node);
+    n.classList.remove('vchk','vskip'); n.classList.add(st.tone==='bad'?'vskip':'vchk');
+    n.classList.add('cur'); if(st.tone==='bad') n.classList.add('curbad');
+    void n.offsetWidth; n.classList.add('rtpulse');
+    const chip=document.getElementById('rtChip');
+    chip.textContent=st.chip; chip.classList.remove('ok','bad'); if(st.tone) chip.classList.add(st.tone);
+    chip.style.opacity='1'; chip.style.top=nodeCenter(st.node)+'px';
+    const dir=document.getElementById('rtDir'); dir.textContent=st.dir; dir.className='rt-dir'+(st.tone==='bad'?' bad':'');
+    document.getElementById('rtCap').textContent=st.sn;
+    document.getElementById('rtPayload').textContent=st.pay;
+    const h=HDR[st.view]; document.getElementById('rtHeaders').innerHTML='<span class="ht">'+h.t+'</span>'+h.b;
+  }
+  function run(){
+    if(running) return; running=true; clearT(); resetStage(); setDisabled(true);
+    const s=SCEN[scen]; let i=0;
+    function tick(){
+      if(i>=s.steps.length){ const r=document.getElementById('rtResult'); r.className='rt-result show '+s.result.cls; r.textContent=s.result.text; running=false; setDisabled(false); return; }
+      applyStep(s.steps,i); i++; timers.push(setTimeout(tick,2000));
+    }
+    timers.push(setTimeout(tick,300));
+  }
+  document.querySelectorAll('#scenseg button').forEach(b=>b.onclick=()=>{
+    if(running) return; scen=b.dataset.s;
+    document.querySelectorAll('#scenseg button').forEach(x=>x.classList.toggle('on',x===b));
+    resetStage();
+  });
+  document.getElementById('run').onclick=run;
+  resetStage();
+})();
 </script>
 </body>
 </html>

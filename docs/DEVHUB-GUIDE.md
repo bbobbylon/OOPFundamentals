@@ -1,17 +1,20 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 240+ pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 280 pages.** Pick a *path* below and follow it.
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **240+ browser visualizers** across **11 tracks**, plus a
+DevHub is a learning hub: **280 browser visualizers** across **11 tracks**, plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
 copy-paste **command-line runbook** (build/run, the auth round-trip via curl, and
 deployment troubleshooting), see [HELP.md](../HELP.md#command-line-runbook).
 
-The fastest way in: open **`frontend/app.html`** — the hub — and use the sidebar.
+The fastest way in: open **`frontend/app.html`** — the hub — and use the sidebar. The
+sidebar is a **two-level accordion**: open a track to reveal its **sub-sections**, then open a
+sub-section to see its pages — so you browse a handful of named groups, never a wall of 280 links.
+(Search still spans everything, and opens the matching sections for you.)
 Or jump straight to any file linked below.
 
 ---
@@ -205,4 +208,13 @@ Built on the **shared `devhub.css` design system** — the `rt-*` **extreme-viz 
 every page links one stylesheet and declares its track accent via a `<body class="track-*">` (see the map above).
 Also: the **🐛 Debugging track**, the completed **CIAM round-trip**, the Spring **Security & Identity**
 section, and a fixed **GitHub Pages deploy** workflow (`enablement: true` + Node-24 action versions; see the
-[README deploy steps](../README.md#part-3--deploy-the-frontend-github-pages)).*
+[README deploy steps](../README.md#part-3--deploy-the-frontend-github-pages)). Most recently the **🔐 Identity & Auth**
+track got the hero treatment end-to-end: the **Entra** and **Ping/IDM** overviews (a user sign-in,
+app-only/**Managed-Identity**, **hybrid AD sync**, and a **risky adaptive sign-in**; and the **Joiner-Mover-Leaver**
+lifecycle walked through the Ping product chain), **[PingFederate Admin](../frontend/ping-admin-visualizer.html)**
+(the admin config running at request time — adapters, token policy, key rotation, the Admin API), and the
+**[Ping](../frontend/ping-integration-visualizer.html)** + **[Entra](../frontend/entra-spring-angular-visualizer.html)**
+full-stack integrations (the happy round-trip plus the classic **401-issuer / CORS / 403-claim-mapping** failures,
+**MSAL silent refresh**, app-role assignment, and **On-Behalf-Of** to Microsoft Graph). And the **sidebar was
+reorganized into a two-level accordion** so each track's pages sit inside collapsible sub-sections — 280 pages no
+longer land as one scary list.*

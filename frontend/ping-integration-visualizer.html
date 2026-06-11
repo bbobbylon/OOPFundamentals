@@ -57,6 +57,13 @@
     .table td { padding: 6px 10px; border-bottom: 1px solid #1e2d40; vertical-align: top; }
     .table tr:hover td { background: #1a2840; }
     .table td:first-child { color: var(--accent); font-family: monospace; white-space: nowrap; }
+    /* per-page node-role badges for the shared rt-* hero (kit lives in devhub.css) */
+    .who-SPA{background:rgba(129,140,248,.16);color:#a5b4fc}
+    .who-IDP{background:rgba(190,21,34,.22);color:#fda4af}
+    .who-API{background:rgba(109,179,63,.20);color:#a6e07f}
+    .who-JWKS{background:rgba(34,211,238,.14);color:#7dd3fc}
+    .who-TOKEN{background:rgba(250,204,21,.16);color:#fde047}
+    .who-BAD{background:rgba(248,113,113,.16);color:#fca5a5}
   </style>
   <link rel="stylesheet" href="devhub.css" />
 </head>
@@ -65,6 +72,37 @@
   <a class="back" href="ping-idm-index.html">← Ping Identity</a>
   <h1>Spring Boot + Angular + Ping</h1>
   <p class="sub">Full-stack integration using PingFederate as the OAuth2/OIDC provider. Angular authenticates users through PingFederate; Spring Boot validates JWT access tokens issued by PingFederate.</p>
+
+  <!-- ── HERO: animated Angular→Ping→Spring round-trip · happy path + the 3 classic failures · live per-hop inspector ── -->
+  <div class="panel" style="border:1px solid var(--accent)">
+    <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:#ff6070">▶ Watch one API call — working, and the 3 ways it breaks</h2>
+    <p style="font-size:13px;color:var(--muted);margin:6px 0 12px">Integration bugs almost always live in <b>one specific hop</b>. Pick a scenario and press ▶ — the chip is the request (or response) in flight, and the inspector shows the <b>real artifacts</b>: the Bearer header, the JWT's iss/aud/exp/groups claims, the CORS preflight, and the authority mapping. The last three scenarios reproduce the page's top support tickets — and end on the fix.</p>
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="scenseg">
+        <button data-s="happy" class="on">200 happy path</button>
+        <button data-s="issuer">401 issuer</button>
+        <button data-s="cors">CORS blocked</button>
+        <button data-s="preauth">403 @PreAuthorize</button>
+      </span>
+      <button class="rt-run" id="run">▶ Play</button>
+      <span class="rt-pill" id="reqPill">GET /api/users · 200</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="rtDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="rtDir">▶ READY</span>
+        <div class="rt-cap" id="rtCap">Press ▶ to begin…</div>
+        <div class="rt-payload" id="rtPayload"></div>
+        <div class="rt-headers" id="rtHeaders"></div>
+        <div class="rt-result" id="rtResult"></div>
+      </div>
+    </div>
+    <div class="rt-legend">
+      <span>🅰️ Angular · 🎫 Bearer token · 🍃 Spring API · 🔑 Ping JWKS · ⛔ rejection</span>
+      <span><span style="color:#86efac">green = flows / fixed</span> · <span style="color:#fca5a5">red = where it breaks</span></span>
+    </div>
+  </div>
 
   <!-- SECTION 1: Architecture -->
   <h2>1 — Architecture Overview</h2>
@@ -300,6 +338,223 @@ function showTab(name) {
     el.classList.toggle('active', ['spring-yml','spring-sec','angular-ts','angular-http'][i] === name);
   });
 }
+</script>
+
+<!-- ── animated Angular→Ping→Spring round-trip · happy path + the 3 classic failures (isolated IIFE) ── -->
+<script>
+(function(){
+  const HDR={
+    h0:{t:'Angular has logged in via PingFederate',b:`the user completed Auth Code + PKCE at PingFederate.
+the SPA holds an access_token (JWT) in memory:
+  scope: openid api:read    groups: ["Engineering"]`},
+    h1:{t:'the HTTP interceptor attaches the Bearer',b:`auth.interceptor.ts adds the header to API calls:
+  GET http://localhost:8080/api/users
+  Authorization: Bearer eyJraWQiOiJwZktleS0yMDI0Ii…`},
+    h2:{t:'Spring (resource server) receives it',b:`the BearerTokenAuthenticationFilter extracts the JWT.
+Spring needs the public key to verify the signature —
+identified by the token header's kid.`},
+    h3:{t:'verify the signature via Ping JWKS',b:`Spring fetched PingFederate's JWKS once and cached it:
+  GET /ext/oauth/jwks → { keys:[ { kid:"pfKey-2024" } ] }
+signature ✓ · iss ✓ · aud ✓ · exp ✓ (not expired)`},
+    h4:{t:'claims → authorities, @PreAuthorize passes',b:`JwtAuthenticationConverter maps groups → ROLE_Engineering.
+  @PreAuthorize("hasRole('Engineering')") → granted
+the method runs and builds the response.`},
+    h5:{t:'200 OK — data returned',b:`200 [ { "id": 1, "name": "Alice" }, … ]
+<span class="hl-ok">the whole chain lined up: login → Bearer →
+signature → issuer/audience → authority → method.</span>`},
+    i0:{t:'the SPA sends a request + Bearer',b:`GET /api/users
+  Authorization: Bearer eyJ…
+the token looks fine — it even decodes cleanly on jwt.io.
+so why a 401?`},
+    i1:{t:'Spring starts validating the JWT',b:`Spring checks, in order: signature, issuer, audience, expiry.
+issuer-uri in application.yml:
+  https://pingfederate.company.com/ext/oauth/discovery`},
+    i2:{t:'the signature is actually fine',b:`the kid matches a key in the JWKS → signature ✓.
+this is the trap: the crypto is correct, so people
+assume the token is "valid". validation has more checks.`},
+    i3:{t:'but the iss claim does not match',b:`token says:   "iss": "https://pingfederate.company.com"
+config wants: ".../ext/oauth/discovery"
+  <span class="hl-bad">iss mismatch → token rejected</span>
+the OIDC discovery doc's "issuer" field is the ground truth.`},
+    i4:{t:'401 Unauthorized',b:`401 { "error": "invalid_token",
+   "error_description": "An error occurred while
+   attempting to decode the Jwt: iss claim is not valid" }
+<span class="hl-ok">fix: set issuer-uri to the EXACT iss the token carries.</span>`},
+    c0:{t:'the browser sends a CORS preflight',b:`a cross-origin POST/PUT triggers a preflight FIRST:
+  OPTIONS /api/users
+  Origin: http://localhost:4200
+  Access-Control-Request-Method: POST
+no Authorization header is sent on the preflight.`},
+    c1:{t:'Spring Security sees OPTIONS first',b:`if the filter chain authenticates everything,
+the unauthenticated OPTIONS is rejected before the
+CORS filter can answer it. classic ordering bug.`},
+    c2:{t:'no Access-Control-Allow-Origin header',b:`the response has no CORS headers (or is a 401).
+<span class="hl-bad">the browser sees no allow-origin → it blocks</span>
+the REAL request from ever being sent.`},
+    c3:{t:'"blocked by CORS policy" in the console',b:`the network tab shows the OPTIONS, then the real
+call never leaves the browser. it is NOT a server
+500 — the browser enforced this.`},
+    c4:{t:'fix: allow OPTIONS + a CORS source',b:`.cors(c -> c.configurationSource(corsSource()))
+.authorizeHttpRequests(a -> a
+  .requestMatchers(HttpMethod.OPTIONS,"/**").permitAll())
+<span class="hl-ok">now the preflight is answered with allow-origin.</span>`},
+    p0:{t:'a request with a perfectly valid token',b:`GET /api/admin/users
+  Authorization: Bearer eyJ…
+the token is signed, fresh, right issuer & audience.
+authentication will succeed — watch authorization.`},
+    p1:{t:'authentication succeeds',b:`signature ✓ iss ✓ aud ✓ exp ✓ → the user is
+authenticated. so far this is a 200-track request.
+now @PreAuthorize evaluates.`},
+    p2:{t:'but the roles claim was never mapped',b:`Spring's default authorities come from "scope"/"scp".
+PingFederate put the roles in a custom claim:
+  "groups": ["Engineering"]   ← never read
+so the user has NO ROLE_ authorities at all.`},
+    p3:{t:'@PreAuthorize denies the call',b:`@PreAuthorize("hasRole('Engineering')")
+authorities = [SCOPE_openid, SCOPE_api:read]
+  <span class="hl-bad">no ROLE_Engineering → access denied</span>`},
+    p4:{t:'403 Forbidden (not 401)',b:`403 means: we know who you are, but you may not.
+(401 would mean we don't know who you are.)
+the distinction tells you it is an AUTHZ bug.`},
+    p5:{t:'fix: map the right claim',b:`var conv = new JwtGrantedAuthoritiesConverter();
+conv.setAuthoritiesClaimName("groups");
+conv.setAuthorityPrefix("ROLE_");
+<span class="hl-ok">now groups → ROLE_Engineering and the call passes.</span>`},
+  };
+  const SCEN={
+    happy:{ req:'GET /api/users · 200',
+      intro:'The integration working end to end: Angular attaches the Ping token, Spring validates it against Ping\'s JWKS, maps claims to authorities, and returns data.',
+      result:{cls:'ok', text:`✅ This is the contract: Angular logs in at PingFederate and attaches the access token as a Bearer; Spring validates signature (via JWKS) + issuer + audience + expiry, maps the groups claim to authorities, and @PreAuthorize allows the method. Every failure scenario here is just one of these links breaking.`},
+      nodes:[
+        {id:'spa',icon:'🅰️',label:'Angular logged in via Ping',sub:'holds access_token',who:'SPA'},
+        {id:'int',icon:'🎫',label:'interceptor attaches Bearer',sub:'Authorization header',who:'TOKEN'},
+        {id:'api',icon:'🍃',label:'Spring receives the request',sub:'resource server',who:'API'},
+        {id:'jwks',icon:'🔑',label:'verify signature via JWKS',sub:'sig·iss·aud·exp',who:'JWKS'},
+        {id:'authz',icon:'🛡️',label:'claims → authorities · @PreAuthorize',sub:'granted',who:'API'},
+        {id:'ok',icon:'✅',label:'200 OK — data returned',sub:'chain lined up',who:'SPA'},
+      ],
+      steps:[
+        {node:'spa',chip:'logged in',dir:'start',sn:'logged in',pay:'The user completed Auth Code + PKCE at PingFederate; the SPA holds an access token (JWT) with a groups claim.',view:'h0'},
+        {node:'int',chip:'+ Bearer',tone:'ok',dir:'🎫 attach',sn:'interceptor attaches it',pay:'The Angular HTTP interceptor adds Authorization: Bearer to the outbound API call.',view:'h1'},
+        {node:'api',chip:'received',tone:'ok',dir:'🍃 request',sn:'Spring receives it',pay:'Spring\'s bearer-token filter extracts the JWT and needs the public key (named by the token\'s kid) to verify it.',view:'h2'},
+        {node:'jwks',chip:'verify ✓',tone:'ok',dir:'🔑 JWKS',sn:'signature verified',pay:'Spring matches the kid in its cached Ping JWKS and checks signature, issuer, audience, and expiry — all good.',view:'h3'},
+        {node:'authz',chip:'granted',tone:'ok',dir:'🛡️ authz',sn:'@PreAuthorize passes',pay:'The converter maps groups → ROLE_Engineering, so hasRole(\'Engineering\') is granted and the method runs.',view:'h4'},
+        {node:'ok',chip:'200 ✓',tone:'ok',dir:'✅ response',sn:'200 OK',pay:'The data flows back to Angular. The whole chain lined up: login → Bearer → signature → issuer/audience → authority → method.',view:'h5'},
+      ]},
+    issuer:{ req:'401 · issuer mismatch',
+      intro:'The most common integration 401: the token is signed correctly but its iss claim does not match Spring\'s configured issuer-uri, so validation fails after the signature check.',
+      result:{cls:'warn', text:`⚠️ A valid signature is not a valid token. Spring also checks iss, aud, and exp. The classic mismatch: PingFederate issues iss = "https://host" but issuer-uri is set to the discovery URL (or vice-versa). Read the OIDC discovery document's "issuer" field and set issuer-uri to exactly that. (Also check aud, and a clock within 5 minutes.)`},
+      nodes:[
+        {id:'spa',icon:'🅰️',label:'SPA sends request + Bearer',sub:'token looks fine',who:'SPA'},
+        {id:'api',icon:'🍃',label:'Spring validates the JWT',sub:'sig·iss·aud·exp',who:'API'},
+        {id:'jwks',icon:'🔑',label:'signature is actually fine',sub:'kid matches',who:'JWKS'},
+        {id:'iss',icon:'🚫',label:'iss ≠ configured issuer-uri',sub:'token rejected',who:'BAD'},
+        {id:'401',icon:'⛔',label:'401 Unauthorized',sub:'invalid_token',who:'BAD'},
+      ],
+      steps:[
+        {node:'spa',chip:'+ Bearer',dir:'start',sn:'a valid-looking token',pay:'The SPA sends a Bearer that decodes cleanly on jwt.io — so why a 401? The crypto is not the whole story.',view:'i0'},
+        {node:'api',chip:'validate',tone:'ok',dir:'🍃 validate',sn:'Spring validates it',pay:'Spring checks signature, issuer, audience, and expiry in turn, against the issuer-uri in application.yml.',view:'i1'},
+        {node:'jwks',chip:'sig ✓',tone:'ok',dir:'🔑 signature',sn:'signature is fine',pay:'The kid matches a JWKS key, so the signature verifies. This is the trap — correct crypto is not a valid token.',view:'i2'},
+        {node:'iss',chip:'iss ✗',tone:'bad',dir:'🚫 mismatch',sn:'the iss does not match',pay:'The token\'s iss is the bare host, but the config expects the discovery URL. The discovery doc\'s issuer field is ground truth.',view:'i3'},
+        {node:'401',chip:'401',tone:'bad',dir:'⛔ rejected',sn:'401 Unauthorized',pay:'Spring returns 401 invalid_token: "iss claim is not valid." Fix: set issuer-uri to the exact iss the token carries.',view:'i4'},
+      ]},
+    cors:{ req:'CORS · preflight blocked',
+      intro:'A cross-origin call is blocked before it is even sent: the browser\'s preflight OPTIONS is rejected by Spring Security before the CORS filter can answer it.',
+      result:{cls:'warn', text:`⚠️ CORS errors are browser-enforced, not server crashes. The fix is two parts: register a CorsConfigurationSource that allows the Angular origin, and make sure Spring Security doesn't reject the unauthenticated preflight — permit OPTIONS (or rely on Spring's CORS support). Then the preflight returns Access-Control-Allow-Origin and the real request proceeds.`},
+      nodes:[
+        {id:'pre',icon:'🅰️',label:'browser sends preflight OPTIONS',sub:'no Authorization',who:'SPA'},
+        {id:'sec',icon:'🍃',label:'Spring Security sees OPTIONS first',sub:'ordering bug',who:'API'},
+        {id:'nocors',icon:'🚫',label:'no Access-Control-Allow-Origin',sub:'browser distrusts it',who:'BAD'},
+        {id:'block',icon:'⛔',label:'"blocked by CORS policy"',sub:'real call never sent',who:'BAD'},
+        {id:'fix',icon:'🔧',label:'fix: permit OPTIONS + CORS source',sub:'preflight answered',who:'API'},
+      ],
+      steps:[
+        {node:'pre',chip:'OPTIONS',dir:'preflight',sn:'a CORS preflight',pay:'A cross-origin POST triggers a preflight OPTIONS first, carrying Origin and Access-Control-Request-Method — and no Authorization.',view:'c0'},
+        {node:'sec',chip:'too early',tone:'bad',dir:'🍃 intercept',sn:'Security sees it first',pay:'If the filter chain authenticates everything, the unauthenticated OPTIONS is rejected before the CORS filter can answer.',view:'c1'},
+        {node:'nocors',chip:'no ACAO',tone:'bad',dir:'🚫 no header',sn:'no allow-origin',pay:'The response carries no Access-Control-Allow-Origin (or is a 401), so the browser refuses to trust it.',view:'c2'},
+        {node:'block',chip:'blocked',tone:'bad',dir:'⛔ blocked',sn:'the browser blocks it',pay:'The real request never leaves the browser. This is browser-enforced — not a server 500 — which is why it confuses people.',view:'c3'},
+        {node:'fix',chip:'fixed ✓',tone:'ok',dir:'🔧 fix',sn:'the fix',pay:'Register a CORS source and permit OPTIONS in the security config; now the preflight is answered with allow-origin.',view:'c4'},
+      ]},
+    preauth:{ req:'403 · claim not mapped',
+      intro:'Authentication succeeds but every @PreAuthorize fails: Spring never mapped PingFederate\'s custom groups claim to authorities, so the user has no roles.',
+      result:{cls:'warn', text:`⚠️ A 403 with a perfectly valid token is an authorization-mapping bug, not an authentication bug. Spring reads authorities from scope/scp by default; if your IdP puts roles in a custom claim (groups, memberOf), wire a JwtAuthenticationConverter to read it with the right prefix. Tip: 401 = "who are you?", 403 = "I know you, but no."`},
+      nodes:[
+        {id:'spa',icon:'🅰️',label:'request with a valid token',sub:'auth will succeed',who:'SPA'},
+        {id:'authn',icon:'🍃',label:'authentication succeeds',sub:'200-track so far',who:'API'},
+        {id:'nomap',icon:'🚫',label:'roles claim never mapped',sub:'groups ignored',who:'BAD'},
+        {id:'deny',icon:'⛔',label:'@PreAuthorize denies',sub:'no ROLE_ authority',who:'BAD'},
+        {id:'forb',icon:'🚷',label:'403 Forbidden',sub:'authz, not authn',who:'BAD'},
+        {id:'fix',icon:'🔧',label:'fix: map the groups claim',sub:'converter',who:'API'},
+      ],
+      steps:[
+        {node:'spa',chip:'+ Bearer',dir:'start',sn:'a valid token',pay:'The token is signed, fresh, right issuer and audience — authentication will pass. Watch authorization instead.',view:'p0'},
+        {node:'authn',chip:'authn ✓',tone:'ok',dir:'🍃 authn',sn:'authentication passes',pay:'Signature, iss, aud, exp all check out, so the user is authenticated — this is a 200-track request so far.',view:'p1'},
+        {node:'nomap',chip:'groups ✗',tone:'bad',dir:'🚫 unmapped',sn:'the claim is ignored',pay:'Spring\'s default authorities come from scope/scp; PingFederate put the roles in a custom groups claim that is never read.',view:'p2'},
+        {node:'deny',chip:'denied',tone:'bad',dir:'⛔ denied',sn:'@PreAuthorize denies',pay:'hasRole(\'Engineering\') needs ROLE_Engineering, but the user only has SCOPE_ authorities — so access is denied.',view:'p3'},
+        {node:'forb',chip:'403',tone:'bad',dir:'🚷 forbidden',sn:'403 Forbidden',pay:'403 (not 401) means we know who you are but you may not — the status itself tells you it is an authorization bug.',view:'p4'},
+        {node:'fix',chip:'fixed ✓',tone:'ok',dir:'🔧 fix',sn:'the fix',pay:'Configure a JwtAuthenticationConverter to read the groups claim with a ROLE_ prefix; now hasRole passes.',view:'p5'},
+      ]},
+  };
+
+  let scen='happy', running=false, timers=[];
+  function clearT(){ timers.forEach(clearTimeout); timers=[]; }
+  function nodeEl(id){ return document.querySelector('.rt-node[data-node="'+id+'"]'); }
+  function nodeCenter(id){ const n=nodeEl(id); return n.offsetTop + n.offsetHeight/2; }
+  function setDisabled(on){ document.querySelectorAll('#scenseg button').forEach(b=>b.disabled=on); document.getElementById('run').disabled=on; }
+  function renderNodes(scenKey){
+    const nodes=SCEN[scenKey].nodes;
+    let html='<div class="rt-rail"></div><div class="rt-chip" id="rtChip">req</div>';
+    nodes.forEach(function(n){
+      html+='<div class="rt-node" data-node="'+n.id+'"><span class="ic">'+n.icon+'</span>'
+        +'<div style="flex:1;min-width:0"><div class="nl">'+n.label+'</div><div class="ns">'+n.sub+'</div></div>'
+        +'<span class="who who-'+n.who+'">'+n.who+'</span></div>';
+    });
+    document.getElementById('rtDiagram').innerHTML=html;
+  }
+  function resetStage(){
+    renderNodes(scen);
+    const s=SCEN[scen];
+    const chip=document.getElementById('rtChip');
+    chip.style.transition='none'; chip.style.top=nodeCenter(s.steps[0].node)+'px'; chip.style.opacity='0';
+    chip.classList.remove('ok','bad'); void chip.offsetWidth; chip.style.transition='';
+    document.getElementById('rtResult').className='rt-result';
+    const dir=document.getElementById('rtDir'); dir.textContent='▶ READY'; dir.className='rt-dir';
+    document.getElementById('rtCap').textContent='Press ▶ to walk this scenario…';
+    document.getElementById('rtPayload').textContent=s.intro;
+    document.getElementById('rtHeaders').innerHTML='<span class="ht">live request artifacts</span>— the Bearer header, JWT claims, CORS preflight and authority mapping appear here per step —';
+    document.getElementById('reqPill').textContent=s.req;
+  }
+  function applyStep(steps,i){
+    const st=steps[i];
+    document.querySelectorAll('.rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
+    const n=nodeEl(st.node);
+    n.classList.remove('vchk','vskip'); n.classList.add(st.tone==='bad'?'vskip':'vchk');
+    n.classList.add('cur'); if(st.tone==='bad') n.classList.add('curbad');
+    void n.offsetWidth; n.classList.add('rtpulse');
+    const chip=document.getElementById('rtChip');
+    chip.textContent=st.chip; chip.classList.remove('ok','bad'); if(st.tone) chip.classList.add(st.tone);
+    chip.style.opacity='1'; chip.style.top=nodeCenter(st.node)+'px';
+    const dir=document.getElementById('rtDir'); dir.textContent=st.dir; dir.className='rt-dir'+(st.tone==='bad'?' bad':'');
+    document.getElementById('rtCap').textContent=st.sn;
+    document.getElementById('rtPayload').textContent=st.pay;
+    const h=HDR[st.view]; document.getElementById('rtHeaders').innerHTML='<span class="ht">'+h.t+'</span>'+h.b;
+  }
+  function run(){
+    if(running) return; running=true; clearT(); resetStage(); setDisabled(true);
+    const s=SCEN[scen]; let i=0;
+    function tick(){
+      if(i>=s.steps.length){ const r=document.getElementById('rtResult'); r.className='rt-result show '+s.result.cls; r.textContent=s.result.text; running=false; setDisabled(false); return; }
+      applyStep(s.steps,i); i++; timers.push(setTimeout(tick,2000));
+    }
+    timers.push(setTimeout(tick,300));
+  }
+  document.querySelectorAll('#scenseg button').forEach(b=>b.onclick=()=>{
+    if(running) return; scen=b.dataset.s;
+    document.querySelectorAll('#scenseg button').forEach(x=>x.classList.toggle('on',x===b));
+    resetStage();
+  });
+  document.getElementById('run').onclick=run;
+  resetStage();
+})();
 </script>
 </body>
 </html>
