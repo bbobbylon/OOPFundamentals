@@ -68,6 +68,12 @@
     .table td { padding: 6px 10px; border-bottom: 1px solid #1e2d40; vertical-align: top; }
     .table tr:hover td { background: #1a2840; }
     .table td:first-child { color: var(--accent); font-family: monospace; }
+    /* per-page node-role badges for the shared rt-* hero (kit lives in devhub.css) */
+    .who-SOURCE{background:rgba(148,163,184,.18);color:#cbd5e1}
+    .who-IDM{background:rgba(167,139,250,.16);color:#c4b5fd}
+    .who-SCIM{background:rgba(34,211,238,.14);color:#7dd3fc}
+    .who-TARGET{background:rgba(74,222,128,.16);color:#86efac}
+    .who-BAD{background:rgba(248,113,113,.16);color:#fca5a5}
   </style>
   <link rel="stylesheet" href="devhub.css" />
 </head>
@@ -76,6 +82,37 @@
   <a class="back" href="ping-idm-index.html">← Ping Identity</a>
   <h1>Provisioning &amp; Identity Lifecycle</h1>
   <p class="sub">PingIDM (formerly ForgeRock Identity Management) automates the full identity lifecycle — from hire to terminate — across all enterprise systems.</p>
+
+  <!-- ── HERO: animated identity-lifecycle walk · event chip + live SCIM payload inspector ── -->
+  <div class="panel" style="border:1px solid #ff6070">
+    <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:#ff6070">▶ Onboard, change, offboard — watch identity sync across systems</h2>
+    <p style="font-size:13px;color:var(--muted);margin:6px 0 12px">When HR hires, moves, or terminates someone, PingIDM propagates that to every connected app — automatically. Pick a lifecycle event and press ▶ — the chip is the change in flight, and the inspector shows the <b>real SCIM payloads</b>: the source-of-truth record, the <code>POST/PATCH/DELETE /Users</code> calls to each target, and why <b>de-provisioning is the security-critical one</b>.</p>
+    <div class="rt-ctlbar">
+      <span class="lbl">event:</span>
+      <span class="userseg" id="scenseg">
+        <button data-s="hire" class="on">new hire (provision)</button>
+        <button data-s="change">role change (update)</button>
+        <button data-s="terminate">termination (deprovision)</button>
+        <button data-s="reconcile">reconciliation</button>
+      </span>
+      <button class="rt-run" id="run">▶ Play</button>
+      <span class="rt-pill" id="reqPill">HR → apps · new hire</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="rtDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="rtDir">▶ READY</span>
+        <div class="rt-cap" id="rtCap">Press ▶ to run a lifecycle event…</div>
+        <div class="rt-payload" id="rtPayload"></div>
+        <div class="rt-headers" id="rtHeaders"></div>
+        <div class="rt-result" id="rtResult"></div>
+      </div>
+    </div>
+    <div class="rt-legend">
+      <span>🏢 source of truth (HR) · 🟪 PingIDM · 🔄 SCIM call · 🎯 target app · 🚪 access revoked</span>
+      <span><span style="color:#86efac">green = synced / access granted</span> · <span style="color:#fca5a5">red = access removed / drift</span></span>
+    </div>
+  </div>
 
   <!-- SECTION 1: Identity Lifecycle -->
   <h2>1 — The Identity Lifecycle</h2>
@@ -269,6 +306,213 @@ function showStage(name) {
     event.currentTarget.classList.add('active');
   }
 }
+</script>
+
+<!-- ── animated identity-lifecycle walk · event chip + live SCIM payload inspector (isolated IIFE) ── -->
+<script>
+(function(){
+  const HDR={
+    h0:{t:'a new hire appears in HR (the source)', b:`Workday creates: { givenName:"Ada", familyName:"Lin",
+  dept:"Engineering", title:"SWE", start:"2026-07-01" }
+HR is the SYSTEM OF RECORD — identity flows
+OUT from here, never edited downstream by hand`},
+    h1:{t:'PingIDM detects the new record', b:`IDM polls/streams the HR connector →
+sees a create event. it applies mapping +
+business rules (username format, default groups,
+which apps this role should get)`},
+    h2:{t:'provision to Active Directory', b:`SCIM POST /Users  → AD connector
+{ "userName":"ada.lin", "active":true,
+  "emails":[{"value":"ada.lin@acme.com"}] }
+→ <span class="hl-ok">AD account created</span>`},
+    h3:{t:'provision to the SaaS apps', m:'', b:`POST /Users → Salesforce, Jira, GitHub…
+each gets the right entitlements for an
+Engineering SWE (role-based provisioning).
+one HR event → many target accounts`},
+    h4:{t:'day-one access, automatically', b:`Ada logs in on her first morning with
+accounts already waiting in every app.
+<span class="hl-ok">zero manual tickets.</span> birthright access
+is granted by RULE, not by a human.`},
+    c0:{t:'Ada transfers: Engineering → Security', m:'', b:`HR updates: { dept:"Security", title:"Sec Engineer" }
+a CHANGE event, not a create`},
+    c1:{t:'IDM recomputes entitlements', b:`mapping rules re-evaluate:
+  + add: Security group, PagerDuty
+  − remove: old Engineering-only repos
+the diff is what drives the downstream calls`},
+    c2:{t:'PATCH the targets (not recreate)', b:`SCIM PATCH /Users/{id}
+{ "Operations":[
+   {"op":"add","path":"groups","value":"Security"},
+   {"op":"remove","path":"groups","value":"Eng-repos"}]}`},
+    c3:{t:'least privilege is maintained', b:`the OLD access is REMOVED, not just the new
+access added. without the removal, people
+accumulate entitlements forever (privilege creep)`},
+    c4:{t:'move = add AND subtract', b:`a role change is the easiest lifecycle step to
+get wrong — teams add the new access and
+forget to revoke the old. IDM does both from
+one source change, keeping least privilege.`},
+    t0:{t:'Ada is terminated in HR', b:`Workday sets: { active:false, term:"2026-09-30" }
+the single most security-critical lifecycle event`},
+    t1:{t:'IDM fans out a deprovision', b:`one termination → revoke EVERYWHERE.
+the danger is a missed system: an orphaned
+account is a way back in after someone leaves`},
+    t2:{t:'disable AD + revoke sessions', b:`SCIM PATCH /Users/{id} { "active": <span class="hl-bad">false</span> }
++ kill active SSO sessions / refresh tokens →
+<span class="hl-bad">she can no longer authenticate</span>`},
+    t3:{t:'deprovision every SaaS app', m:'', b:`DELETE/deactivate /Users/{id} in Salesforce,
+Jira, GitHub, VPN… driven from the ONE event.
+nothing is left enabled`},
+    t4:{t:'no orphaned access', b:`<span class="hl-ok">access removed across all systems, minutes after
+termination.</span> automated deprovisioning is the
+control auditors care about most — manual
+offboarding always misses something.`},
+    r0:{t:'drift happens out-of-band', b:`someone adds a user to a group DIRECTLY in
+Salesforce, bypassing IDM. now the target
+no longer matches the source of truth`},
+    r1:{t:'reconciliation compares source ↔ target', b:`IDM runs a recon job: read all source identities,
+read all target accounts, DIFF them.
+finds: 1 extra account, 1 unmanaged group`},
+    r2:{t:'classify each difference', b:`per record:
+  in source not target → <span class="hl-ok">provision (create)</span>
+  in target not source → <span class="hl-bad">orphan (remove)</span>
+  attributes differ → update to match source`},
+    r3:{t:'remediate back to the source of truth', b:`IDM applies the corrections so target == source.
+the out-of-band group add is reverted (or
+flagged for review, per policy)`},
+    r4:{t:'recon = the safety net', b:`live sync handles events; reconciliation catches
+what live sync missed — outages, manual changes,
+new connectors. run it on a schedule so target
+systems can’t silently drift from the truth.`},
+  };
+  const SCEN={
+    hire:{ req:'HR → apps · new hire',
+      intro:'A new hire lands in HR (the source of truth). PingIDM detects it, applies mapping rules, and provisions accounts into AD and every SaaS app via SCIM — so day-one access is automatic.',
+      result:{cls:'ok', text:`✅ Provisioning flows OUTWARD from the system of record (HR): IDM detects the create, applies mapping + role rules, and POSTs SCIM /Users to each target (AD, Salesforce, Jira…). One HR event becomes many correctly-entitled accounts, so a new hire has birthright access on day one — granted by rule, not by manual tickets.`},
+      nodes:[
+        {id:'hr',icon:'🏢',label:'HR creates the record',sub:'system of record',who:'SOURCE'},
+        {id:'idm',icon:'🟪',label:'IDM applies mapping rules',sub:'username, groups, apps',who:'IDM'},
+        {id:'ad',icon:'🔄',label:'SCIM POST → Active Directory',sub:'account created',who:'SCIM'},
+        {id:'saas',icon:'🎯',label:'POST → Salesforce, Jira…',sub:'role-based entitlements',who:'TARGET'},
+        {id:'day1',icon:'✅',label:'day-one access',sub:'zero tickets',who:'TARGET'},
+      ],
+      steps:[
+        {node:'hr',chip:'new hire',dir:'source',sn:'HR creates the record',pay:'Workday is the system of record. Identity flows out from here — never hand-edited downstream.',view:'h0'},
+        {node:'idm',chip:'map rules',tone:'ok',dir:'🟪 IDM',sn:'IDM applies rules',pay:'It sees the create event and computes the username, default groups, and which apps this role gets.',view:'h1'},
+        {node:'ad',chip:'POST /Users',tone:'ok',dir:'🔄 SCIM',sn:'provision AD',pay:'SCIM POST /Users to the AD connector creates the account with the mapped attributes.',view:'h2'},
+        {node:'saas',chip:'→ SaaS',tone:'ok',dir:'🎯 targets',sn:'provision the apps',pay:'POST /Users to Salesforce, Jira, GitHub — each with the right entitlements for the role.',view:'h3'},
+        {node:'day1',chip:'access ✓',tone:'ok',dir:'✅ done',sn:'day-one access',pay:'Ada logs in on her first morning with every account already waiting. No manual tickets.',view:'h4'},
+      ]},
+    change:{ req:'HR → apps · role change',
+      intro:'Ada transfers from Engineering to Security. IDM recomputes her entitlements and PATCHes the targets — adding the new access AND removing the old, keeping least privilege.',
+      result:{cls:'warn', text:`⚠️ A move is the easiest lifecycle event to get wrong: teams add the new access and forget to revoke the old, causing privilege creep. IDM recomputes the entitlement diff from one source change and SCIM-PATCHes targets to ADD the new and REMOVE the old — maintaining least privilege automatically.`},
+      nodes:[
+        {id:'hr',icon:'🏢',label:'HR: Eng → Security',sub:'a change event',who:'SOURCE'},
+        {id:'diff',icon:'🟪',label:'IDM recomputes entitlements',sub:'+ add / − remove',who:'IDM'},
+        {id:'patch',icon:'🔄',label:'SCIM PATCH /Users/{id}',sub:'add + remove groups',who:'SCIM'},
+        {id:'lp',icon:'🎯',label:'old access removed',sub:'least privilege',who:'TARGET'},
+        {id:'creep',icon:'⚠️',label:'no privilege creep',sub:'add AND subtract',who:'BAD'},
+      ],
+      steps:[
+        {node:'hr',chip:'transfer',dir:'source',sn:'HR records the move',pay:'Workday updates dept and title — a change event, not a create.',view:'c0'},
+        {node:'diff',chip:'recompute',tone:'ok',dir:'🟪 diff',sn:'IDM diffs entitlements',pay:'Mapping rules re-evaluate: add Security group + PagerDuty, remove Engineering-only repos.',view:'c1'},
+        {node:'patch',chip:'PATCH',tone:'ok',dir:'🔄 SCIM',sn:'patch the targets',pay:'SCIM PATCH with add/remove operations updates each app in place (not recreate).',view:'c2'},
+        {node:'lp',chip:'old removed',tone:'ok',dir:'🎯 revoke',sn:'old access goes',pay:'The OLD access is removed, not just the new added — without this, entitlements accumulate forever.',view:'c3'},
+        {node:'creep',chip:'no creep ✓',tone:'ok',dir:'⚠️ lesson',sn:'least privilege kept',pay:'A role change must add AND subtract. IDM does both from one source change automatically.',view:'c4'},
+      ]},
+    terminate:{ req:'HR → apps · termination',
+      intro:"Ada is terminated in HR. This is the security-critical event: IDM fans out a deprovision to disable AD, kill her sessions, and remove every SaaS account — so no orphaned access remains.",
+      result:{cls:'warn', text:`⚠️ De-provisioning is the most security-critical lifecycle event: a single missed system leaves an orphaned account — a way back in after someone leaves. From one termination, IDM disables AD, revokes active sessions/refresh tokens, and deactivates every SaaS account, minutes after the HR change. Automated deprovisioning is the control auditors scrutinize most — manual offboarding always misses something.`},
+      nodes:[
+        {id:'hr',icon:'🏢',label:'HR: active = false',sub:'termination',who:'SOURCE'},
+        {id:'fan',icon:'🟪',label:'IDM fans out deprovision',sub:'revoke everywhere',who:'IDM'},
+        {id:'ad',icon:'🚪',label:'disable AD + kill sessions',sub:'can no longer auth',who:'BAD'},
+        {id:'saas',icon:'🔄',label:'deactivate every SaaS app',sub:'from the one event',who:'SCIM'},
+        {id:'clean',icon:'✅',label:'no orphaned access',sub:'audit-critical',who:'TARGET'},
+      ],
+      steps:[
+        {node:'hr',chip:'terminate',tone:'bad',dir:'source',sn:'HR terminates',pay:'Workday sets active:false — the single most security-critical lifecycle event.',view:'t0'},
+        {node:'fan',chip:'fan out',dir:'🟪 deprovision',sn:'IDM fans out',pay:'One termination must revoke access EVERYWHERE; a missed system is an orphaned account.',view:'t1'},
+        {node:'ad',chip:'disable',tone:'bad',dir:'🚪 revoke',sn:'disable AD',pay:'SCIM PATCH active:false plus killing SSO sessions and refresh tokens — she can no longer authenticate.',view:'t2'},
+        {node:'saas',chip:'deactivate',tone:'bad',dir:'🔄 SCIM',sn:'remove SaaS access',pay:'DELETE/deactivate /Users in Salesforce, Jira, GitHub, VPN — all from the one event.',view:'t3'},
+        {node:'clean',chip:'clean ✓',tone:'ok',dir:'✅ done',sn:'no orphans',pay:'Access removed across all systems minutes after termination. The control auditors care about most.',view:'t4'},
+      ]},
+    reconcile:{ req:'IDM · reconciliation',
+      intro:"Someone added a user to a group directly in Salesforce, bypassing IDM. A reconciliation job diffs source vs target, classifies each difference, and remediates back to the source of truth.",
+      result:{cls:'ok', text:`✅ Live sync handles events; RECONCILIATION catches what it missed — outages, out-of-band manual changes, newly connected systems. IDM reads all source identities and all target accounts, diffs them (in-source-not-target → provision; in-target-not-source → orphan/remove; attributes differ → update), and remediates so targets match the source of truth. Run it on a schedule so systems can't silently drift.`},
+      nodes:[
+        {id:'drift',icon:'🌫️',label:'out-of-band change',sub:'direct edit in target',who:'BAD'},
+        {id:'recon',icon:'🟪',label:'recon: source ↔ target',sub:'read both, diff',who:'IDM'},
+        {id:'class',icon:'🔍',label:'classify each difference',sub:'create / remove / update',who:'SCIM'},
+        {id:'fix',icon:'🛠️',label:'remediate to the source',sub:'target == source',who:'TARGET'},
+        {id:'net',icon:'🥅',label:'recon = the safety net',sub:'catches drift',who:'TARGET'},
+      ],
+      steps:[
+        {node:'drift',chip:'drift',tone:'bad',dir:'problem',sn:'out-of-band change',pay:'A user is added to a group directly in Salesforce, bypassing IDM. Target no longer matches source.',view:'r0'},
+        {node:'recon',chip:'diff',tone:'ok',dir:'🟪 reconcile',sn:'compare both sides',pay:'IDM reads all source identities and all target accounts and diffs them.',view:'r1'},
+        {node:'class',chip:'classify',dir:'🔍 classify',sn:'classify differences',pay:'In source not target → provision; in target not source → orphan; attributes differ → update.',view:'r2'},
+        {node:'fix',chip:'remediate',tone:'ok',dir:'🛠️ fix',sn:'fix to the source',pay:'IDM corrects the targets so target == source; the out-of-band add is reverted or flagged per policy.',view:'r3'},
+        {node:'net',chip:'safety net',tone:'ok',dir:'🥅 recap',sn:'the safety net',pay:'Reconciliation catches what live sync missed. Run it on a schedule so targets can\'t drift from the truth.',view:'r4'},
+      ]},
+  };
+
+  let scen='hire', running=false, timers=[];
+  function clearT(){ timers.forEach(clearTimeout); timers=[]; }
+  function nodeEl(id){ return document.querySelector('.rt-node[data-node="'+id+'"]'); }
+  function nodeCenter(id){ const n=nodeEl(id); return n.offsetTop + n.offsetHeight/2; }
+  function setDisabled(on){ document.querySelectorAll('#scenseg button').forEach(b=>b.disabled=on); document.getElementById('run').disabled=on; }
+  function renderNodes(scenKey){
+    const nodes=SCEN[scenKey].nodes;
+    let html='<div class="rt-rail"></div><div class="rt-chip" id="rtChip">evt</div>';
+    nodes.forEach(function(n){
+      html+='<div class="rt-node" data-node="'+n.id+'"><span class="ic">'+n.icon+'</span>'
+        +'<div style="flex:1;min-width:0"><div class="nl">'+n.label+'</div><div class="ns">'+n.sub+'</div></div>'
+        +'<span class="who who-'+n.who+'">'+n.who+'</span></div>';
+    });
+    document.getElementById('rtDiagram').innerHTML=html;
+  }
+  function resetStage(){
+    renderNodes(scen);
+    const s=SCEN[scen];
+    const chip=document.getElementById('rtChip');
+    chip.style.transition='none'; chip.style.top=nodeCenter(s.steps[0].node)+'px'; chip.style.opacity='0';
+    chip.classList.remove('ok','bad'); void chip.offsetWidth; chip.style.transition='';
+    document.getElementById('rtResult').className='rt-result';
+    const dir=document.getElementById('rtDir'); dir.textContent='▶ READY'; dir.className='rt-dir';
+    document.getElementById('rtCap').textContent='Press ▶ to run a lifecycle event…';
+    document.getElementById('rtPayload').textContent=s.intro;
+    document.getElementById('rtHeaders').innerHTML='<span class="ht">SCIM payload</span>— the source record and the POST/PATCH/DELETE to each target appear here per step —';
+    document.getElementById('reqPill').textContent=s.req;
+  }
+  function applyStep(steps,i){
+    const st=steps[i];
+    document.querySelectorAll('.rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
+    const n=nodeEl(st.node);
+    n.classList.remove('vchk','vskip'); n.classList.add(st.tone==='bad'?'vskip':'vchk');
+    n.classList.add('cur'); if(st.tone==='bad') n.classList.add('curbad');
+    void n.offsetWidth; n.classList.add('rtpulse');
+    const chip=document.getElementById('rtChip');
+    chip.textContent=st.chip; chip.classList.remove('ok','bad'); if(st.tone) chip.classList.add(st.tone);
+    chip.style.opacity='1'; chip.style.top=nodeCenter(st.node)+'px';
+    const dir=document.getElementById('rtDir'); dir.textContent=st.dir; dir.className='rt-dir'+(st.tone==='bad'?' bad':'');
+    document.getElementById('rtCap').textContent=st.sn;
+    document.getElementById('rtPayload').textContent=st.pay;
+    const h=HDR[st.view]; document.getElementById('rtHeaders').innerHTML='<span class="ht">'+h.t+'</span>'+h.b;
+  }
+  function run(){
+    if(running) return; running=true; clearT(); resetStage(); setDisabled(true);
+    const s=SCEN[scen]; let i=0;
+    function tick(){
+      if(i>=s.steps.length){ const r=document.getElementById('rtResult'); r.className='rt-result show '+s.result.cls; r.textContent=s.result.text; running=false; setDisabled(false); return; }
+      applyStep(s.steps,i); i++; timers.push(setTimeout(tick,2000));
+    }
+    timers.push(setTimeout(tick,300));
+  }
+  document.querySelectorAll('#scenseg button').forEach(b=>b.onclick=()=>{
+    if(running) return; scen=b.dataset.s;
+    document.querySelectorAll('#scenseg button').forEach(x=>x.classList.toggle('on',x===b));
+    resetStage();
+  });
+  document.getElementById('run').onclick=run;
+  resetStage();
+})();
 </script>
 </body>
 </html>

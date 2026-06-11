@@ -61,6 +61,13 @@
     .cmp p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
     .cmp code { font-family: monospace; color: var(--accent); font-size: 11px;
       background: #1e293b; padding: 1px 4px; border-radius: 3px; }
+    /* per-page node-role badges for the shared rt-* hero (kit lives in devhub.css) */
+    .who-APP{background:rgba(167,139,250,.16);color:#c4b5fd}
+    .who-BROWSER{background:rgba(148,163,184,.18);color:#cbd5e1}
+    .who-IDP{background:rgba(34,211,238,.14);color:#7dd3fc}
+    .who-API{background:rgba(74,222,128,.16);color:#86efac}
+    .who-TOKEN{background:rgba(250,204,21,.16);color:#fde047}
+    .who-BAD{background:rgba(248,113,113,.16);color:#fca5a5}
   </style>
   <link rel="stylesheet" href="devhub.css" />
 </head>
@@ -69,6 +76,37 @@
   <a class="back" href="entra-id-index.html">← Entra ID</a>
   <h1>OAuth2 &amp; OIDC Flows</h1>
   <p class="sub">How your Angular app and Spring Boot API authenticate users through Microsoft Entra ID.</p>
+
+  <!-- ── HERO: animated Auth Code + PKCE walk · request/token chip + live per-hop payload inspector ── -->
+  <div class="panel" style="border:1px solid #22d3ee">
+    <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:#22d3ee">▶ Watch a real login — Authorization Code + PKCE, redirect by redirect</h2>
+    <p style="font-size:13px;color:var(--muted);margin:6px 0 12px">A SPA login isn't one call — it's a choreography of redirects between your app, the browser, and Entra. Pick a scenario and press ▶ — the chip is the request or token in flight, and the inspector shows the <b>real payloads</b>: the <code>/authorize</code> query, the PKCE <code>code_challenge</code>, the <code>/token</code> exchange body, and the three tokens you get back (and what each is for).</p>
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="scenseg">
+        <button data-s="login" class="on">Auth Code + PKCE</button>
+        <button data-s="pkce">why PKCE</button>
+        <button data-s="tokens">the 3 tokens</button>
+        <button data-s="refresh">silent refresh</button>
+      </span>
+      <button class="rt-run" id="run">▶ Play</button>
+      <span class="rt-pill" id="reqPill">SPA login · auth code</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="rtDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="rtDir">▶ READY</span>
+        <div class="rt-cap" id="rtCap">Press ▶ to begin the login flow…</div>
+        <div class="rt-payload" id="rtPayload"></div>
+        <div class="rt-headers" id="rtHeaders"></div>
+        <div class="rt-result" id="rtResult"></div>
+      </div>
+    </div>
+    <div class="rt-legend">
+      <span>📱 your SPA · 🌐 browser redirect · 🟦 Entra (IdP) · 🔑 token endpoint · 🛡️ the API</span>
+      <span><span style="color:#86efac">green = flows correctly</span> · <span style="color:#fca5a5">red = attack blocked / token rejected</span></span>
+    </div>
+  </div>
 
   <!-- SECTION 1: OAuth2 vs OIDC -->
   <h2>1 — OAuth2 vs OpenID Connect (OIDC)</h2>
@@ -228,6 +266,227 @@ function resetPKCE() {
   pkceStep = -1;
   document.querySelectorAll('#pkce-steps .fstep').forEach(s => s.classList.remove('active'));
 }
+</script>
+
+<!-- ── animated Auth Code + PKCE walk · request/token chip + live per-hop payload inspector (isolated IIFE) ── -->
+<script>
+(function(){
+  const HDR={
+    l0:{t:'the SPA prepares to log in', b:`generate a one-time secret pair:
+  code_verifier  = random 64 chars (kept in the SPA)
+  code_challenge = BASE64URL(SHA256(code_verifier))
+also a random state + nonce (CSRF / replay guards)`},
+    l1:{t:'redirect the browser to /authorize', b:`GET https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize
+  ?client_id=...&redirect_uri=https://app/callback
+  &response_type=code&scope=openid profile api.read
+  &state=xyz&nonce=abc&code_challenge=...&code_challenge_method=S256`},
+    l2:{t:'the user authenticates at Entra', b:`Entra shows the login page (NOT your app):
+  password → MFA → (conditional access checks)
+your SPA never sees the credentials —
+that is the whole point of redirecting`},
+    l3:{t:'Entra redirects back with a CODE', b:`302 → https://app/callback?<span class="hl-ok">code=0.AAA…</span>&state=xyz
+the SPA verifies state matches (CSRF check),
+then has a short-lived authorization code
+(useless on its own)`},
+    l4:{t:'the SPA exchanges code at /token', b:`POST /oauth2/v2.0/token
+  grant_type=authorization_code
+  code=0.AAA…
+  <span class="hl-ok">code_verifier=</span>(the original secret)
+  client_id=...&redirect_uri=...`},
+    l5:{t:'Entra returns the tokens', b:`200 {
+  "id_token": "eyJ…",       ← who the user is (OIDC)
+  "access_token": "eyJ…",   ← call the API with this
+  "refresh_token": "0.Ag…", ← get new tokens later
+  "expires_in": 3600
+}  <span class="hl-ok">login complete</span>`},
+    p0:{t:'PKCE defends a public client', b:`a SPA can’t keep a client_secret (it ships in JS).
+so how do we stop a stolen authorization code
+from being redeemed by an attacker?`},
+    p1:{t:'the challenge is sent UP-FRONT', b:`/authorize carries code_challenge =
+  SHA256(code_verifier).
+Entra stores it against the issued code.
+the verifier itself NEVER leaves the SPA`},
+    p2:{t:'an attacker intercepts the code', b:`say malware grabs the redirect ?code=0.AAA…
+<span class="hl-bad">they have the code…</span> but not the code_verifier
+(it’s still only in the real SPA’s memory)`},
+    p3:{t:'attacker tries the token exchange', b:`POST /token  code=0.AAA…  code_verifier=<span class="hl-bad">???</span>
+they must guess a 64-char secret whose SHA256
+equals the stored challenge → infeasible`},
+    p4:{t:'Entra rejects the mismatch', b:`SHA256(their guess) ≠ stored code_challenge →
+<span class="hl-bad">invalid_grant</span>. the code is worthless without
+the verifier. <span class="hl-ok">PKCE binds the code to the SPA
+that started the flow.</span> always use it.`},
+    t0:{t:'three tokens, three jobs', b:`the /token response gave you THREE tokens —
+each answers a different question.
+do NOT mix them up`},
+    t1:{t:'id_token — WHO the user is', b:`a JWT for YOUR app to read (audience = client_id):
+  { sub, name, email, oid, nonce, exp }
+prove who logged in. <span class="hl-bad">never send it to an API</span> —
+it isn’t an API credential`},
+    t2:{t:'access_token — call the API', b:`a JWT for the RESOURCE (audience = api://...):
+  Authorization: Bearer eyJ…
+the API validates it (sig/iss/aud/exp/scope).
+short-lived (≈1h) on purpose`},
+    t3:{t:'refresh_token — get new ones', b:`opaque, long-lived, stored most safely OUT of
+the browser (a BFF cookie). exchange it at /token
+for a fresh access_token without a redirect`},
+    t4:{t:'audience is everything', b:`the #1 token bug: sending the id_token to the API,
+or an access_token minted for API-A to API-B.
+<span class="hl-ok">always check aud</span>: a token is only valid for the
+audience it was issued to.`},
+    r0:{t:'the access token is near expiry', b:`access_token expires_in: 3600 → it’s almost up.
+the user is still active; we don’t want to
+bounce them through a full login again`},
+    r1:{t:'API returns 401 (or we pre-empt it)', b:`GET /api/data → <span class="hl-bad">401 invalid_token (expired)</span>
+the interceptor catches it and starts a
+silent refresh instead of surfacing an error`},
+    r2:{t:'exchange the refresh token', b:`POST /token
+  grant_type=<span class="hl-ok">refresh_token</span>
+  refresh_token=0.Ag…
+  client_id=...&scope=openid api.read
+no user interaction, no redirect`},
+    r3:{t:'Entra issues a fresh access token', b:`200 { "access_token": "eyJ…(new)",
+      "refresh_token": "0.Ag…(rotated)",
+      "expires_in": 3600 }
+(refresh-token rotation: the old one is now dead)`},
+    r4:{t:'retry the original request', b:`replay GET /api/data with the new Bearer →
+<span class="hl-ok">200 OK</span>. the user never noticed.
+this is the silent-refresh loop behind every
+"stay logged in" experience.`},
+  };
+  const SCEN={
+    login:{ req:'SPA login · auth code',
+      intro:'The Authorization Code flow with PKCE: your SPA redirects to Entra, the user authenticates there, a code comes back, and the SPA exchanges it (with the PKCE verifier) for tokens.',
+      result:{cls:'ok', text:`✅ Authorization Code + PKCE is THE flow for SPAs and mobile apps: the user authenticates on Entra's domain (your app never touches the password), you get back a short-lived code, and you exchange it — proving you started the flow with the PKCE verifier — for id/access/refresh tokens. The implicit flow is dead; this is the current standard.`},
+      nodes:[
+        {id:'prep',icon:'📱',label:'SPA generates PKCE pair',sub:'verifier + challenge',who:'APP'},
+        {id:'auth',icon:'🌐',label:'redirect → /authorize',sub:'client_id, scope, challenge',who:'BROWSER'},
+        {id:'login',icon:'🟦',label:'user authenticates at Entra',sub:'password + MFA',who:'IDP'},
+        {id:'code',icon:'🎟️',label:'redirect back ?code=…',sub:'short-lived code',who:'BROWSER'},
+        {id:'xchg',icon:'🔑',label:'POST /token (code + verifier)',sub:'exchange',who:'APP'},
+        {id:'tok',icon:'✅',label:'id + access + refresh tokens',sub:'login complete',who:'TOKEN'},
+      ],
+      steps:[
+        {node:'prep',chip:'PKCE pair',dir:'prepare',sn:'the SPA prepares',pay:'It generates a code_verifier and its SHA256 code_challenge, plus state and nonce.',view:'l0'},
+        {node:'auth',chip:'→ /authorize',tone:'ok',dir:'▼ redirect',sn:'redirect to Entra',pay:'The browser is sent to Entra\'s /authorize with client_id, redirect_uri, scope, state, and the code_challenge.',view:'l1'},
+        {node:'login',chip:'authenticate',tone:'ok',dir:'🟦 at the IdP',sn:'the user logs in',pay:'Entra shows the login page (not your app); password, MFA, conditional access. Your SPA never sees credentials.',view:'l2'},
+        {node:'code',chip:'?code=…',tone:'ok',dir:'▲ redirect back',sn:'a code comes back',pay:'Entra redirects to your callback with a short-lived code; the SPA checks state matches.',view:'l3'},
+        {node:'xchg',chip:'POST /token',tone:'ok',dir:'🔑 exchange',sn:'exchange the code',pay:'The SPA POSTs the code AND the original code_verifier to /token.',view:'l4'},
+        {node:'tok',chip:'3 tokens ✓',tone:'ok',dir:'✅ tokens',sn:'tokens issued',pay:'Entra returns id_token, access_token, and refresh_token. The login is complete.',view:'l5'},
+      ]},
+    pkce:{ req:'login · why PKCE',
+      intro:"PKCE binds the authorization code to the app that started the flow. Even if an attacker steals the code, they can't redeem it without the verifier that never left your SPA.",
+      result:{cls:'warn', text:`⚠️ A SPA can't keep a client_secret (it ships in JavaScript), so a stolen authorization code would otherwise be redeemable by anyone. PKCE fixes this: the challenge (SHA256 of a secret verifier) is sent up front, and the token exchange must present the matching verifier. Steal the code, and without the verifier it's worthless — invalid_grant. Always use PKCE for public clients.`},
+      nodes:[
+        {id:'pub',icon:'📱',label:'public client — no secret',sub:'ships in JS',who:'APP'},
+        {id:'chal',icon:'🔒',label:'code_challenge sent up front',sub:'SHA256(verifier)',who:'IDP'},
+        {id:'steal',icon:'🦹',label:'attacker intercepts the code',sub:'but not the verifier',who:'BAD'},
+        {id:'try',icon:'❓',label:'attacker tries /token',sub:'verifier = ???',who:'BAD'},
+        {id:'reject',icon:'🛑',label:'mismatch → invalid_grant',sub:'code is useless',who:'BAD'},
+      ],
+      steps:[
+        {node:'pub',chip:'no secret',dir:'problem',sn:'a public client',pay:'A SPA can\'t hold a client_secret, so it needs another way to prove it owns the flow.',view:'p0'},
+        {node:'chal',chip:'challenge',tone:'ok',dir:'🔒 up front',sn:'challenge sent first',pay:'The /authorize request carries SHA256(verifier); Entra stores it against the code. The verifier stays in the SPA.',view:'p1'},
+        {node:'steal',chip:'code stolen',tone:'bad',dir:'🦹 attack',sn:'the code is intercepted',pay:'Malware grabs the ?code from the redirect — but the code_verifier is only in the real SPA\'s memory.',view:'p2'},
+        {node:'try',chip:'verifier?',tone:'bad',dir:'❓ guess',sn:'they need the verifier',pay:'To redeem the code they must present a verifier whose SHA256 matches the stored challenge.',view:'p3'},
+        {node:'reject',chip:'invalid_grant',tone:'bad',dir:'🛑 blocked',sn:'Entra rejects it',pay:'Their guess fails the hash check → invalid_grant. PKCE binds the code to the SPA that started the flow.',view:'p4'},
+      ]},
+    tokens:{ req:'login · the 3 tokens',
+      intro:"The /token response gives three tokens with three different jobs: id_token (who the user is), access_token (call the API), refresh_token (get new tokens). Mixing them up is the classic bug.",
+      result:{cls:'ok', text:`✅ id_token = proof of WHO logged in, for your app to read (audience = your client_id) — never send it to an API. access_token = the API credential (audience = the API), sent as a Bearer, short-lived. refresh_token = opaque, long-lived, best kept out of the browser. The #1 token bug is audience confusion — always validate aud; a token is only valid for the audience it was minted for.`},
+      nodes:[
+        {id:'three',icon:'🎫',label:'three tokens returned',sub:'three jobs',who:'TOKEN'},
+        {id:'id',icon:'🪪',label:'id_token → WHO',sub:'aud = client_id',who:'APP'},
+        {id:'access',icon:'🛡️',label:'access_token → call the API',sub:'aud = api://…',who:'API'},
+        {id:'refresh',icon:'🔄',label:'refresh_token → renew',sub:'keep out of browser',who:'TOKEN'},
+        {id:'aud',icon:'🎯',label:'always check aud',sub:'audience is everything',who:'IDP'},
+      ],
+      steps:[
+        {node:'three',chip:'3 tokens',dir:'returned',sn:'three at once',pay:'The token response carries id_token, access_token, and refresh_token — each for a different purpose.',view:'t0'},
+        {node:'id',chip:'who',tone:'ok',dir:'🪪 identity',sn:'the id_token',pay:'A JWT for your app (audience = client_id) describing the user. Never send it to an API.',view:'t1'},
+        {node:'access',chip:'Bearer',tone:'ok',dir:'🛡️ API',sn:'the access_token',pay:'A JWT for the resource (audience = the API), sent as Authorization: Bearer. Short-lived by design.',view:'t2'},
+        {node:'refresh',chip:'renew',tone:'ok',dir:'🔄 renew',sn:'the refresh_token',pay:'Opaque and long-lived; safest stored outside the browser (a BFF cookie). Used to get new tokens.',view:'t3'},
+        {node:'aud',chip:'aud ✓',tone:'ok',dir:'🎯 rule',sn:'audience is everything',pay:'Sending an id_token to an API, or a wrong-audience access token, is the classic bug. Always validate aud.',view:'t4'},
+      ]},
+    refresh:{ req:'silent refresh',
+      intro:"When the short-lived access token expires, the app exchanges the refresh token for a new one — no redirect, no re-login. This silent loop is behind every 'stay logged in' experience.",
+      result:{cls:'ok', text:`✅ Access tokens are short-lived (≈1h) on purpose. When one expires, an interceptor catches the 401 and exchanges the refresh_token at /token for a new access token — silently, with no user-visible redirect — then retries the original request. With refresh-token rotation, each refresh also issues a new refresh token and invalidates the old one. This is the silent-refresh loop every SPA relies on.`},
+      nodes:[
+        {id:'exp',icon:'⏰',label:'access token near expiry',sub:'expires_in: 3600',who:'TOKEN'},
+        {id:'401',icon:'🚧',label:'API → 401 expired',sub:'interceptor catches it',who:'API'},
+        {id:'ref',icon:'🔄',label:'POST /token (refresh_token)',sub:'no redirect',who:'APP'},
+        {id:'new',icon:'🔑',label:'fresh access token',sub:'+ rotated refresh',who:'IDP'},
+        {id:'retry',icon:'✅',label:'retry original request',sub:'user never noticed',who:'API'},
+      ],
+      steps:[
+        {node:'exp',chip:'expiring',dir:'state',sn:'the token is aging',pay:'The access token is short-lived and about to expire while the user is still active.',view:'r0'},
+        {node:'401',chip:'401',tone:'bad',dir:'🚧 expired',sn:'the API rejects it',pay:'GET /api/data returns 401 invalid_token; an HTTP interceptor catches it instead of surfacing an error.',view:'r1'},
+        {node:'ref',chip:'refresh',tone:'ok',dir:'🔄 exchange',sn:'use the refresh token',pay:'POST /token with grant_type=refresh_token — no user interaction, no redirect.',view:'r2'},
+        {node:'new',chip:'new token',tone:'ok',dir:'🔑 issued',sn:'fresh tokens',pay:'Entra returns a new access token (and, with rotation, a new refresh token; the old one is invalidated).',view:'r3'},
+        {node:'retry',chip:'200 ✓',tone:'ok',dir:'✅ retry',sn:'replay the request',pay:'The original GET is retried with the new Bearer → 200. The user never saw a thing.',view:'r4'},
+      ]},
+  };
+
+  let scen='login', running=false, timers=[];
+  function clearT(){ timers.forEach(clearTimeout); timers=[]; }
+  function nodeEl(id){ return document.querySelector('.rt-node[data-node="'+id+'"]'); }
+  function nodeCenter(id){ const n=nodeEl(id); return n.offsetTop + n.offsetHeight/2; }
+  function setDisabled(on){ document.querySelectorAll('#scenseg button').forEach(b=>b.disabled=on); document.getElementById('run').disabled=on; }
+  function renderNodes(scenKey){
+    const nodes=SCEN[scenKey].nodes;
+    let html='<div class="rt-rail"></div><div class="rt-chip" id="rtChip">req</div>';
+    nodes.forEach(function(n){
+      html+='<div class="rt-node" data-node="'+n.id+'"><span class="ic">'+n.icon+'</span>'
+        +'<div style="flex:1;min-width:0"><div class="nl">'+n.label+'</div><div class="ns">'+n.sub+'</div></div>'
+        +'<span class="who who-'+n.who+'">'+n.who+'</span></div>';
+    });
+    document.getElementById('rtDiagram').innerHTML=html;
+  }
+  function resetStage(){
+    renderNodes(scen);
+    const s=SCEN[scen];
+    const chip=document.getElementById('rtChip');
+    chip.style.transition='none'; chip.style.top=nodeCenter(s.steps[0].node)+'px'; chip.style.opacity='0';
+    chip.classList.remove('ok','bad'); void chip.offsetWidth; chip.style.transition='';
+    document.getElementById('rtResult').className='rt-result';
+    const dir=document.getElementById('rtDir'); dir.textContent='▶ READY'; dir.className='rt-dir';
+    document.getElementById('rtCap').textContent='Press ▶ to begin the login flow…';
+    document.getElementById('rtPayload').textContent=s.intro;
+    document.getElementById('rtHeaders').innerHTML='<span class="ht">per-hop payload</span>— the /authorize query, the /token body, and the tokens appear here per step —';
+    document.getElementById('reqPill').textContent=s.req;
+  }
+  function applyStep(steps,i){
+    const st=steps[i];
+    document.querySelectorAll('.rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
+    const n=nodeEl(st.node);
+    n.classList.remove('vchk','vskip'); n.classList.add(st.tone==='bad'?'vskip':'vchk');
+    n.classList.add('cur'); if(st.tone==='bad') n.classList.add('curbad');
+    void n.offsetWidth; n.classList.add('rtpulse');
+    const chip=document.getElementById('rtChip');
+    chip.textContent=st.chip; chip.classList.remove('ok','bad'); if(st.tone) chip.classList.add(st.tone);
+    chip.style.opacity='1'; chip.style.top=nodeCenter(st.node)+'px';
+    const dir=document.getElementById('rtDir'); dir.textContent=st.dir; dir.className='rt-dir'+(st.tone==='bad'?' bad':'');
+    document.getElementById('rtCap').textContent=st.sn;
+    document.getElementById('rtPayload').textContent=st.pay;
+    const h=HDR[st.view]; document.getElementById('rtHeaders').innerHTML='<span class="ht">'+h.t+'</span>'+h.b;
+  }
+  function run(){
+    if(running) return; running=true; clearT(); resetStage(); setDisabled(true);
+    const s=SCEN[scen]; let i=0;
+    function tick(){
+      if(i>=s.steps.length){ const r=document.getElementById('rtResult'); r.className='rt-result show '+s.result.cls; r.textContent=s.result.text; running=false; setDisabled(false); return; }
+      applyStep(s.steps,i); i++; timers.push(setTimeout(tick,2000));
+    }
+    timers.push(setTimeout(tick,300));
+  }
+  document.querySelectorAll('#scenseg button').forEach(b=>b.onclick=()=>{
+    if(running) return; scen=b.dataset.s;
+    document.querySelectorAll('#scenseg button').forEach(x=>x.classList.toggle('on',x===b));
+    resetStage();
+  });
+  document.getElementById('run').onclick=run;
+  resetStage();
+})();
 </script>
 </body>
 </html>
