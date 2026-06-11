@@ -226,6 +226,12 @@ openssl rand -base64 48
 ## Deploy — trigger & watch GitHub Pages (frontend)
 
 ```text
+# ONE-TIME, before the first push: Settings → Pages → Source: "GitHub Actions".
+# Without it the first run fails at "Setup Pages" with:
+#   Get Pages site failed … HttpError: Not Found
+# (the workflow sets enablement:true to self-create the site, but enabling it
+#  once in Settings is the guaranteed fix — re-run the failed job afterwards.)
+
 # Pages publishes frontend/ on every push to master (.github/workflows/deploy.yml)
 git add -A
 git commit -m "deploy"
@@ -234,6 +240,9 @@ git push origin master
 # Watch the Actions run (needs the GitHub CLI `gh`)
 gh run list --workflow=deploy.yml
 gh run watch
+
+# If it already failed once: enable Pages (above), then re-run that run:
+gh run rerun --failed
 ```
 
 ---

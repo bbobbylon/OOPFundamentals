@@ -352,11 +352,18 @@ register a local account and everything syncs to the local H2 database.
    ```
    (HTTPS, no trailing slash.)
 
-2. **Commit & push to `master`.** The included workflow
-   (`.github/workflows/deploy.yml`) publishes the `frontend/` folder to Pages on
-   every push.
+2. **Enable Pages once — do this BEFORE your first push.** Repo **Settings →
+   Pages → Build and deployment → Source: GitHub Actions**. This is what creates
+   the Pages "site"; skip it and the very first deploy fails at the *Setup Pages*
+   step with **`Get Pages site failed … HttpError: Not Found`** (the action can't
+   find a site that doesn't exist yet).
+   *(The workflow also sets `enablement: true` on `actions/configure-pages`, so it
+   will try to create the site automatically — but enabling it once in Settings is
+   the guaranteed path, especially on org repos that restrict Actions.)*
 
-3. **Enable Pages once:** repo **Settings → Pages → Source: GitHub Actions**.
+3. **Commit & push to `master`.** The included workflow
+   (`.github/workflows/deploy.yml`) publishes the `frontend/` folder to Pages on
+   every push. Watch it under the repo's **Actions** tab.
 
 4. **Open your app** at:
    - Project page: `https://YOURNAME.github.io/REPO-NAME/app.html`
@@ -396,6 +403,8 @@ returns them.
 
 | Symptom | Cause & fix |
 |---|---|
+| **Deploy workflow fails** at *Setup Pages*: `Get Pages site failed … HttpError: Not Found` | Pages was never enabled for the repo. **Settings → Pages → Source: GitHub Actions** (once), then re-run the failed job. The workflow's `enablement: true` tries to self-create it, but org-restricted repos still need the manual toggle. |
+| Deploy log warning: **"Node.js 20 actions are deprecated"** | Just a warning, not a failure — bump the action versions (this repo pins `checkout@v6`, `configure-pages@v6`, `upload-pages-artifact@v5`, `deploy-pages@v5`, which run on Node 24). |
 | Browser console: **CORS** / "blocked by Access-Control-Allow-Origin" | `CORS_ALLOWED_ORIGINS` ≠ your Pages origin. Set it to exactly `https://YOURNAME.github.io` and redeploy the backend. |
 | Console: **"Mixed Content … was loaded over HTTPS but requested an insecure resource"** | `config.js` points to an `http://` URL. It must be `https://`. |
 | Login spins ~50s, then works | Render free-tier **cold start** — normal after idle. |

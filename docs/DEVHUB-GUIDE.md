@@ -187,7 +187,22 @@ animated hero: [Strategy / SimUDuck](../frontend/head-first-strategy-visualizer.
 [Adapter &amp; Facade](../frontend/head-first-adapter-facade-visualizer.html),
 [Template Method / Coffee &amp; Tea](../frontend/head-first-template-method-visualizer.html), and
 [State / Gumball Machine](../frontend/head-first-state-visualizer.html) — plus an inline SVG **favicon** for the hub.
-Built on the **shared `devhub.css` design system** (every page links one stylesheet and
-declares its track accent via a `<body class="track-*">`, see the map above), the **🐛
-Debugging track**, the completed **CIAM round-trip**, and the Spring **Security & Identity**
-section.*
+The **🔷 TypeScript** core now carries the hero too — the per-step inspector shows the *type itself*
+transforming: [Narrowing/CFA](../frontend/typescript-narrowing-visualizer.html) (a union shrinking through
+guards), [Generics](../frontend/typescript-generics-visualizer.html), [Conditional Types](../frontend/typescript-conditional-types-visualizer.html)
+(`extends ? :` + `infer` + distribution), [Mapped Types](../frontend/typescript-mapped-types-visualizer.html),
+[Utility Types](../frontend/typescript-utility-types-visualizer.html), [Inference](../frontend/typescript-inference-visualizer.html),
+[Discriminated Unions](../frontend/typescript-discriminated-unions-visualizer.html), [Structural Typing](../frontend/typescript-structural-typing-deep-visualizer.html),
+[keyof / Indexed Access](../frontend/typescript-keyof-indexed-deep-visualizer.html), and [Template Literal Types](../frontend/typescript-template-literal-types-visualizer.html).
+And the **🍃 Spring Boot** core: [DI & the IoC container](../frontend/spring-boot-di-ioc-visualizer.html) (bean-graph wiring),
+[REST Controllers](../frontend/spring-boot-rest-api-visualizer.html) (the request round-trip + status codes),
+[Spring Security](../frontend/spring-boot-security-visualizer.html) (the filter chain — who decides 200/401/403),
+[Data JPA](../frontend/spring-boot-data-jpa-visualizer.html) (method→SQL→entity + the N+1 trap),
+[Validation](../frontend/spring-boot-validation-visualizer.html) (`@Valid` → ProblemDetail), and
+[Configuration & Profiles](../frontend/spring-boot-configuration-visualizer.html) (property-source precedence).
+Built on the **shared `devhub.css` design system** — the `rt-*` **extreme-viz hero kit now lives in
+`devhub.css` itself**, so a new page needs only its hero markup + engine (and a small `.who-*` badge block);
+every page links one stylesheet and declares its track accent via a `<body class="track-*">` (see the map above).
+Also: the **🐛 Debugging track**, the completed **CIAM round-trip**, the Spring **Security & Identity**
+section, and a fixed **GitHub Pages deploy** workflow (`enablement: true` + Node-24 action versions; see the
+[README deploy steps](../README.md#part-3--deploy-the-frontend-github-pages)).*
