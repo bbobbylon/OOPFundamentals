@@ -90,6 +90,13 @@
     .filter-row.reject{border-color:var(--bad);background:#1a0808;}
     .filter-row .filter-name{color:var(--blue);font-weight:700;}
     .filter-row .filter-result{font-size:11px;}
+    /* per-page node-role badges for the shared rt-* hero (kit lives in devhub.css) */
+    .who-CLIENT{background:rgba(148,163,184,.18);color:#cbd5e1}
+    .who-FILTER{background:rgba(167,139,250,.16);color:#c4b5fd}
+    .who-JWKS{background:rgba(34,211,238,.14);color:#7dd3fc}
+    .who-AUTHZ{background:rgba(245,158,11,.16);color:#fcd34d}
+    .who-API{background:rgba(109,179,63,.22);color:#a6e07f}
+    .who-BAD{background:rgba(248,113,113,.16);color:#fca5a5}
   </style>
   <link rel="stylesheet" href="devhub.css" />
 </head>
@@ -98,6 +105,37 @@
   <a class="back" href="spring-boot-index.html">← Spring Boot Index</a>
   <h1>Spring Boot OAuth2 Resource Server &amp; JWT Security</h1>
   <p class="sub">Secure your REST API with Bearer token authentication. Spring Security validates JWTs automatically — you just configure the JWKS URI and annotate your endpoints.</p>
+
+  <!-- ── HERO: animated Bearer-token validation walk · live per-step inspector of the real header/claims/JWKS/authorities ── -->
+  <div class="panel" style="border:1px solid var(--accent)">
+    <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch a Bearer token run the gauntlet — 200 vs the 3 rejections</h2>
+    <p style="font-size:13px;color:var(--muted);margin:6px 0 12px">Your Spring app is the <b>Resource Server</b>: it doesn't issue tokens, it <b>validates</b> them. Pick a scenario and press ▶ — the chip is the request in flight, and the inspector shows the <b>real artifacts</b>: the Bearer header, the JWKS signature check, the iss/aud/exp claims, the mapped authorities, and the <code>@PreAuthorize</code> verdict.</p>
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="scenseg">
+        <button data-s="happy" class="on">valid → 200</button>
+        <button data-s="expired">expired → 401</button>
+        <button data-s="signature">bad signature → 401</button>
+        <button data-s="forbidden">missing scope → 403</button>
+      </span>
+      <button class="rt-run" id="run">▶ Play</button>
+      <span class="rt-pill" id="reqPill">GET /api/orders · 200</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="rtDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="rtDir">▶ READY</span>
+        <div class="rt-cap" id="rtCap">Press ▶ to begin…</div>
+        <div class="rt-payload" id="rtPayload"></div>
+        <div class="rt-headers" id="rtHeaders"></div>
+        <div class="rt-result" id="rtResult"></div>
+      </div>
+    </div>
+    <div class="rt-legend">
+      <span>📱 client · 🧲 BearerTokenFilter · 🔑 JwtDecoder + JWKS · 🎫 authorities · 🛡️ @PreAuthorize · ✅ controller</span>
+      <span><span style="color:#86efac">green = validates &amp; flows</span> · <span style="color:#fca5a5">red = rejected (401 / 403)</span></span>
+    </div>
+  </div>
 
   <!-- SECTION 1 — OAuth2 Roles -->
   <h2>1. OAuth2 Roles — Where Does Spring Boot Fit?</h2>
@@ -548,6 +586,199 @@ function decodeJwt(){
 
   document.getElementById('jwtResult').style.display = 'block';
 }
+</script>
+
+<!-- ── animated Bearer-token validation walk · live per-step artifact inspector (isolated IIFE) ── -->
+<script>
+(function(){
+  const HDR={
+    h0:{t:'a client calls your API with a Bearer',b:`GET /api/orders
+  Authorization: Bearer eyJraWQiOiJrZXktMjAyNC0wMS…
+the token was issued by the Authorization Server (Keycloak /
+Auth0 / Entra). your app is only the RESOURCE SERVER.`},
+    h1:{t:'BearerTokenAuthenticationFilter extracts it',b:`the filter pulls the token out of the Authorization header
+and hands it to the JwtDecoder. a missing or malformed token
+→ 401 before anything else runs.`},
+    h2:{t:'JwtDecoder validates against JWKS',b:`first request: GET {issuer}/.well-known/jwks.json (then cached).
+match the token's kid → public key → verify the RS256 signature,
+then check: iss ✓  aud ✓  exp ✓ (not expired).`},
+    h3:{t:'claims → GrantedAuthorities',b:`JwtAuthenticationConverter maps the claims:
+  scope "read write" → SCOPE_read, SCOPE_write
+  roles ["ADMIN"]    → ROLE_ADMIN
+and sets the Authentication in the SecurityContext.`},
+    h4:{t:'@PreAuthorize checks the authority',b:`@PreAuthorize("hasAuthority('SCOPE_read')")
+the caller has SCOPE_read → granted. (a second gate after the
+URL rules, evaluated per method.)`},
+    h5:{t:'the controller runs → 200',b:`200 [ { "id": 1, … } ]
+<span class="hl-ok">no session, no per-request call to the auth server —
+just local signature verification. that's the JWT win.</span>`},
+    e0:{t:'a client calls with an old token',b:`GET /api/orders
+  Authorization: Bearer eyJ… (issued 3 hours ago)
+the token LOOKS fine and decodes cleanly.`},
+    e1:{t:'the filter extracts it as usual',b:`BearerTokenAuthenticationFilter doesn't judge validity —
+it just hands the token to the JwtDecoder.`},
+    e2:{t:'JwtDecoder checks exp → expired',b:`signature ✓ (the key is still in JWKS), BUT:
+  exp = 1718000000  ·  now = 1718007200
+  <span class="hl-bad">now > exp → token expired</span>
+exp is ALWAYS checked, even if you configure nothing else.`},
+    e3:{t:'401 Unauthorized',b:`401 + WWW-Authenticate: Bearer error="invalid_token",
+  error_description="Jwt expired at …"
+<span class="hl-ok">fix: the client silently refreshes and retries.</span>
+short-lived tokens are why expiry matters.`},
+    s0:{t:'a client sends an altered token',b:`GET /api/orders
+  Authorization: Bearer eyJ… (payload edited by an attacker)
+the claims now say roles:["ADMIN"] — but did the issuer sign THIS?`},
+    s1:{t:'the filter extracts it',b:`again, the filter just forwards it. nothing trusts the
+contents yet — the signature check is what decides.`},
+    s2:{t:'signature verification FAILS',b:`recompute the signature over header.payload with the public
+key whose kid matches → compare:
+  <span class="hl-bad">RSA/SHA mismatch → invalid signature</span>
+the attacker has no private key, so they can't re-sign.`},
+    s3:{t:'401 Unauthorized',b:`401 error="invalid_token". the edited claims are worthless
+without a valid signature.
+<span class="hl-ok">NEVER trust JWT claims before the signature verifies —
+that is the entire security model.</span>`},
+    f0:{t:'a valid token, but a write call',b:`POST /api/orders
+  Authorization: Bearer eyJ… (scope: "read")
+the token is genuine and in-date — authentication will pass.`},
+    f1:{t:'the token validates fine',b:`signature ✓ iss ✓ aud ✓ exp ✓ → authenticated.
+authorities = [SCOPE_read]. now authorization decides.`},
+    f2:{t:'@PreAuthorize needs SCOPE_write',b:`POST is guarded by
+  @PreAuthorize("hasAuthority('SCOPE_write')")
+the caller only has SCOPE_read →
+  <span class="hl-bad">AccessDeniedException</span>`},
+    f3:{t:'403 Forbidden (not 401)',b:`403 means: we know who you are, you just lack the scope.
+(401 would mean the token was missing or invalid.)
+<span class="hl-ok">the client must request the "write" scope at login
+to get a token that carries SCOPE_write.</span>`},
+  };
+  const SCEN={
+    happy:{ req:'GET /api/orders · 200',
+      intro:'A valid Bearer token: the filter extracts it, the JwtDecoder verifies it against the JWKS, claims become authorities, and @PreAuthorize lets the call through.',
+      result:{cls:'ok', text:`✅ The Resource Server validated the token locally: BearerTokenAuthenticationFilter extracted it, JwtDecoder verified the RS256 signature against the cached JWKS and checked iss/aud/exp, the converter mapped claims to authorities, and @PreAuthorize granted the call. No session, no per-request trip to the auth server — that's why stateless JWT scales.`},
+      nodes:[
+        {id:'client',icon:'📱',label:'client calls with Bearer',sub:'Authorization header',who:'CLIENT'},
+        {id:'filter',icon:'🧲',label:'BearerTokenAuthenticationFilter',sub:'extracts the token',who:'FILTER'},
+        {id:'decode',icon:'🔑',label:'JwtDecoder validates via JWKS',sub:'sig·iss·aud·exp',who:'JWKS'},
+        {id:'authz',icon:'🎫',label:'claims → authorities',sub:'SCOPE_ / ROLE_',who:'AUTHZ'},
+        {id:'method',icon:'🛡️',label:'@PreAuthorize',sub:'method security',who:'AUTHZ'},
+        {id:'ok',icon:'✅',label:'controller runs → 200',sub:'protected resource',who:'API'},
+      ],
+      steps:[
+        {node:'client',chip:'+ Bearer',dir:'request',sn:'the request arrives',pay:'A client sends GET /api/orders with a Bearer token issued by the Authorization Server.',view:'h0'},
+        {node:'filter',chip:'extract',tone:'ok',dir:'🧲 filter',sn:'the filter extracts it',pay:'BearerTokenAuthenticationFilter pulls the token from the header and passes it to the JwtDecoder.',view:'h1'},
+        {node:'decode',chip:'verify ✓',tone:'ok',dir:'🔑 JWKS',sn:'validate the token',pay:'The JwtDecoder verifies the signature against the cached JWKS and checks iss, aud, and exp.',view:'h2'},
+        {node:'authz',chip:'authorities',tone:'ok',dir:'🎫 map',sn:'claims → authorities',pay:'The converter maps scopes and roles to GrantedAuthorities and sets the SecurityContext.',view:'h3'},
+        {node:'method',chip:'granted',tone:'ok',dir:'🛡️ authz',sn:'@PreAuthorize passes',pay:'hasAuthority(\'SCOPE_read\') is satisfied, so method security allows the call.',view:'h4'},
+        {node:'ok',chip:'200 ✓',tone:'ok',dir:'✅ response',sn:'200 OK',pay:'The controller runs and returns the protected resource — all from local verification.',view:'h5'},
+      ]},
+    expired:{ req:'GET /api/orders · 401',
+      intro:'The token is well-formed and correctly signed, but it has expired — and Spring always checks exp, so the request is rejected before reaching a controller.',
+      result:{cls:'warn', text:`⚠️ A correctly-signed token is still rejected once it's past exp — Spring checks expiry unconditionally and returns 401 invalid_token ("Jwt expired"). This is by design: short-lived access tokens limit the damage of a leak. The client's job is to silently refresh and retry, which is invisible to the user.`},
+      nodes:[
+        {id:'client',icon:'📱',label:'client calls with an old token',sub:'issued 3h ago',who:'CLIENT'},
+        {id:'filter',icon:'🧲',label:'BearerTokenAuthenticationFilter',sub:'extracts the token',who:'FILTER'},
+        {id:'decode',icon:'🔑',label:'JwtDecoder: exp check',sub:'now > exp',who:'JWKS'},
+        {id:'reject',icon:'⛔',label:'401 Unauthorized',sub:'invalid_token (expired)',who:'BAD'},
+      ],
+      steps:[
+        {node:'client',chip:'+ Bearer',dir:'request',sn:'an old token',pay:'The token decodes cleanly and looks fine — but it was issued three hours ago.',view:'e0'},
+        {node:'filter',chip:'extract',tone:'ok',dir:'🧲 filter',sn:'the filter extracts it',pay:'The filter forwards the token to the JwtDecoder without judging validity.',view:'e1'},
+        {node:'decode',chip:'exp ✗',tone:'bad',dir:'🔑 expired',sn:'expiry fails',pay:'The signature is fine, but now > exp, so the JwtDecoder rejects it. exp is always checked.',view:'e2'},
+        {node:'reject',chip:'401',tone:'bad',dir:'⛔ rejected',sn:'401 Unauthorized',pay:'Spring returns 401 invalid_token. The client should silently refresh and retry.',view:'e3'},
+      ]},
+    signature:{ req:'GET /api/orders · 401',
+      intro:'An attacker edited the payload to grant themselves a role. The signature no longer matches, and without the issuer\'s private key they can\'t re-sign it — so it\'s rejected.',
+      result:{cls:'warn', text:`⚠️ Editing a JWT's claims is trivial (it's just base64), but it breaks the signature. The JwtDecoder recomputes the signature with the issuer's public key and rejects the mismatch with 401 — so the forged roles never take effect. This is the whole point: claims are only trustworthy after the signature verifies, which is why a Resource Server must verify every token.`},
+      nodes:[
+        {id:'client',icon:'📱',label:'altered token sent',sub:'payload edited',who:'CLIENT'},
+        {id:'filter',icon:'🧲',label:'BearerTokenAuthenticationFilter',sub:'extracts the token',who:'FILTER'},
+        {id:'decode',icon:'🔑',label:'JwtDecoder: signature check',sub:'recompute vs JWKS',who:'JWKS'},
+        {id:'reject',icon:'⛔',label:'401 Unauthorized',sub:'invalid signature',who:'BAD'},
+      ],
+      steps:[
+        {node:'client',chip:'+ Bearer',dir:'attack',sn:'a tampered token',pay:'An attacker edited the payload to add roles:["ADMIN"]. The question is whether the issuer signed THIS payload.',view:'s0'},
+        {node:'filter',chip:'extract',tone:'ok',dir:'🧲 filter',sn:'the filter extracts it',pay:'The filter forwards it — nothing trusts the contents until the signature is checked.',view:'s1'},
+        {node:'decode',chip:'sig ✗',tone:'bad',dir:'🔑 forged',sn:'signature fails',pay:'Recomputing the signature with the public key fails — the attacker has no private key to re-sign.',view:'s2'},
+        {node:'reject',chip:'401',tone:'bad',dir:'⛔ rejected',sn:'401 Unauthorized',pay:'401 invalid_token. The edited claims are worthless without a valid signature.',view:'s3'},
+      ]},
+    forbidden:{ req:'POST /api/orders · 403',
+      intro:'The token is genuine and in-date, so authentication passes — but it only carries SCOPE_read, and the write endpoint needs SCOPE_write. That\'s a 403, not a 401.',
+      result:{cls:'warn', text:`⚠️ A 403 on a valid token is authorization, not authentication. The token authenticated fine, but @PreAuthorize("hasAuthority('SCOPE_write')") failed because the caller only has SCOPE_read. The fix isn't on the server — the client must request the write scope at login so the issued token carries SCOPE_write. (401 = who are you; 403 = I know you, but no.)`},
+      nodes:[
+        {id:'client',icon:'📱',label:'POST with a read-only token',sub:'scope: read',who:'CLIENT'},
+        {id:'decode',icon:'🔑',label:'JwtDecoder validates fine',sub:'authenticated',who:'JWKS'},
+        {id:'method',icon:'🛡️',label:'@PreAuthorize needs SCOPE_write',sub:'has only SCOPE_read',who:'AUTHZ'},
+        {id:'reject',icon:'⛔',label:'403 Forbidden',sub:'AccessDenied',who:'BAD'},
+      ],
+      steps:[
+        {node:'client',chip:'POST',dir:'write call',sn:'a write request',pay:'A genuine, in-date token is used to POST /api/orders — but it was issued with scope "read".',view:'f0'},
+        {node:'decode',chip:'authn ✓',tone:'ok',dir:'🔑 valid',sn:'token validates',pay:'Signature, iss, aud, exp all pass — the caller is authenticated with authorities [SCOPE_read].',view:'f1'},
+        {node:'method',chip:'denied',tone:'bad',dir:'🛡️ denied',sn:'@PreAuthorize fails',pay:'The write endpoint needs SCOPE_write; the caller lacks it → AccessDeniedException.',view:'f2'},
+        {node:'reject',chip:'403',tone:'bad',dir:'⛔ forbidden',sn:'403 Forbidden',pay:'403, not 401 — the token is valid, it just lacks the scope. Request "write" at login to fix it.',view:'f3'},
+      ]},
+  };
+
+  let scen='happy', running=false, timers=[];
+  function clearT(){ timers.forEach(clearTimeout); timers=[]; }
+  function nodeEl(id){ return document.querySelector('.rt-node[data-node="'+id+'"]'); }
+  function nodeCenter(id){ const n=nodeEl(id); return n.offsetTop + n.offsetHeight/2; }
+  function setDisabled(on){ document.querySelectorAll('#scenseg button').forEach(b=>b.disabled=on); document.getElementById('run').disabled=on; }
+  function renderNodes(scenKey){
+    const nodes=SCEN[scenKey].nodes;
+    let html='<div class="rt-rail"></div><div class="rt-chip" id="rtChip">req</div>';
+    nodes.forEach(function(n){
+      html+='<div class="rt-node" data-node="'+n.id+'"><span class="ic">'+n.icon+'</span>'
+        +'<div style="flex:1;min-width:0"><div class="nl">'+n.label+'</div><div class="ns">'+n.sub+'</div></div>'
+        +'<span class="who who-'+n.who+'">'+n.who+'</span></div>';
+    });
+    document.getElementById('rtDiagram').innerHTML=html;
+  }
+  function resetStage(){
+    renderNodes(scen);
+    const s=SCEN[scen];
+    const chip=document.getElementById('rtChip');
+    chip.style.transition='none'; chip.style.top=nodeCenter(s.steps[0].node)+'px'; chip.style.opacity='0';
+    chip.classList.remove('ok','bad'); void chip.offsetWidth; chip.style.transition='';
+    document.getElementById('rtResult').className='rt-result';
+    const dir=document.getElementById('rtDir'); dir.textContent='▶ READY'; dir.className='rt-dir';
+    document.getElementById('rtCap').textContent='Press ▶ to validate this token…';
+    document.getElementById('rtPayload').textContent=s.intro;
+    document.getElementById('rtHeaders').innerHTML='<span class="ht">live token artifacts</span>— the Bearer header, JWKS signature check, claims and the @PreAuthorize verdict appear here per step —';
+    document.getElementById('reqPill').textContent=s.req;
+  }
+  function applyStep(steps,i){
+    const st=steps[i];
+    document.querySelectorAll('.rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
+    const n=nodeEl(st.node);
+    n.classList.remove('vchk','vskip'); n.classList.add(st.tone==='bad'?'vskip':'vchk');
+    n.classList.add('cur'); if(st.tone==='bad') n.classList.add('curbad');
+    void n.offsetWidth; n.classList.add('rtpulse');
+    const chip=document.getElementById('rtChip');
+    chip.textContent=st.chip; chip.classList.remove('ok','bad'); if(st.tone) chip.classList.add(st.tone);
+    chip.style.opacity='1'; chip.style.top=nodeCenter(st.node)+'px';
+    const dir=document.getElementById('rtDir'); dir.textContent=st.dir; dir.className='rt-dir'+(st.tone==='bad'?' bad':'');
+    document.getElementById('rtCap').textContent=st.sn;
+    document.getElementById('rtPayload').textContent=st.pay;
+    const h=HDR[st.view]; document.getElementById('rtHeaders').innerHTML='<span class="ht">'+h.t+'</span>'+h.b;
+  }
+  function run(){
+    if(running) return; running=true; clearT(); resetStage(); setDisabled(true);
+    const s=SCEN[scen]; let i=0;
+    function tick(){
+      if(i>=s.steps.length){ const r=document.getElementById('rtResult'); r.className='rt-result show '+s.result.cls; r.textContent=s.result.text; running=false; setDisabled(false); return; }
+      applyStep(s.steps,i); i++; timers.push(setTimeout(tick,2000));
+    }
+    timers.push(setTimeout(tick,300));
+  }
+  document.querySelectorAll('#scenseg button').forEach(b=>b.onclick=()=>{
+    if(running) return; scen=b.dataset.s;
+    document.querySelectorAll('#scenseg button').forEach(x=>x.classList.toggle('on',x===b));
+    resetStage();
+  });
+  document.getElementById('run').onclick=run;
+  resetStage();
+})();
 </script>
 </body>
 </html>
