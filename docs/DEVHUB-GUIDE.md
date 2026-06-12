@@ -1,11 +1,11 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 281 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 283 pages.** Pick a *path* below and follow it.
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **281 browser visualizers** across **12 tracks**, plus a
+DevHub is a learning hub: **283 browser visualizers** across **12 tracks**, plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
 copy-paste **command-line runbook** (build/run, the auth round-trip via curl, and
@@ -220,5 +220,9 @@ full-stack integrations (the happy round-trip plus the classic **401-issuer / CO
 reorganized into a two-level accordion** so each track's pages sit inside collapsible sub-sections — pages no
 longer land as one scary list. And a new **🧪 Playgrounds** track debuts with the
 **[API Playground](../frontend/api-playground-visualizer.html)** — a real in-browser HTTP client (every Send is a live
-`fetch()`, with status/timing/headers/body + CORS &amp; auth explainers), the first of a planned family of concept
-sandboxes (Spring Boot, IDM/JWT).*
+`fetch()`, with status/timing/headers/body + CORS &amp; auth explainers) and the
+**[JWT &amp; Auth Playground](../frontend/jwt-playground-visualizer.html)** (decode any token, really sign/verify it with
+Web Crypto, tamper a claim and watch the signature break, then map claims → Spring authorities and test `@PreAuthorize`) and the
+**[Spring Boot Playground](../frontend/spring-boot-playground-visualizer.html)** (a configurable security simulator — fire a
+request through the filter chain → URL authz → DispatcherServlet → `@PreAuthorize` and watch 200/401/403/404 flip as you change
+the caller's authorities, plus a Live tab against the real `:8081` backend).*
