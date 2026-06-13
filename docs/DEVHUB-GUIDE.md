@@ -312,6 +312,23 @@ And the **🍃 Spring Boot** track gained two new deep pages:
 The **🔐 Identity &amp; Auth** track gained an Authorization Patterns section:
 [RBAC &amp; Authorization Deep Dive](../frontend/rbac-deep-visualizer.html) (RBAC vs ABAC vs ReBAC / JWT claims design / Spring @PreAuthorize SpEL / hasPermission ABAC / multi-tenant RBAC with row-level data isolation).
 
+**Deep-dive hero wave** — 15 previously-thin companion pages now carry the full animated chip-walk + live inspector:
+**☕ Java/OOP core:** [SOLID/DIP](../frontend/solid-visualizer.html) (Spring DI container wires the concrete impl — tight-coupling vs prod vs test injection),
+[Exceptions](../frontend/exceptions-visualizer.html) (exception wrapping: always pass `e` as cause — one missing arg = hours of debugging),
+[Concurrency](../frontend/concurrency-visualizer.html) (deadlock: consistent lock order prevents the cycle — Thread A→X→Y, Thread B→X→Y),
+[Functional Java](../frontend/java-functional-visualizer.html) (stream pipeline lazy eval + compose/andThen order),
+[Optional](../frontend/java-optional-visualizer.html) (pipeline short-circuit when Optional becomes empty),
+[Strings](../frontend/java-strings-visualizer.html) (naive `+=` = O(n²) allocations; StringBuilder = single buffer O(n)),
+[File I/O & NIO](../frontend/java-io-nio-visualizer.html) (Files.readString auto-close vs try-with-resources vs descriptor leak).
+**🔷 TypeScript deep companions:** [Narrowing/CFA deep](../frontend/typescript-narrowing-cfa-deep-visualizer.html) (flow graph: null check prunes type below the guard),
+[Generic Inference deep](../frontend/typescript-generic-inference-deep-visualizer.html) (candidate collection → union on conflict → contextual flow inward),
+[Classes internals deep](../frontend/typescript-classes-internals-deep-visualizer.html) (`private` erased at runtime — bypass with `as any`; `#` is WeakMap, blocked even with cast),
+[Arrays & Tuples](../frontend/typescript-arrays-tuples-visualizer.html) (number[] vs [string,number] vs readonly as-const — what each does and does not enforce).
+**🍃 Spring Boot deep companions:** [CSRF deep](../frontend/spring-boot-csrf-deep-visualizer.html) (cookie auto-attach → CSRF works; JWT Bearer → SOP blocks; SameSite=Strict → cookie omitted),
+[Refresh Token Rotation deep](../frontend/spring-boot-refresh-token-rotation-deep-visualizer.html) (normal rotate RT#1→RT#2; reuse-detected revokes entire family),
+[Testing Security deep](../frontend/spring-boot-testing-security-deep-visualizer.html) (anonymous→401; jwt() user→403; jwt(ROLE_ADMIN)→200 — filter-chain walk-through),
+[Rate Limiting deep](../frontend/spring-boot-rate-limiting-deep-visualizer.html) (normal pass; burst→429 filter short-circuits; slow brute-force→5 failures→423 lockout).
+
 Three brand-new tracks launched — **300+ pages total**:
 
 **🐍 Python (6 pages):**
