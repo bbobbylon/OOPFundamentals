@@ -139,7 +139,7 @@ double-click**, no server needed.
 
 | Visualizer | What it shows |
 |---|---|
-| [`app.html`](frontend/app.html) | The full Dev Hub — searchable, progress, **283 pages grouped into collapsible sub-sections** (serve it; `index.html` redirects here) |
+| [`app.html`](frontend/app.html) | The full Dev Hub — searchable, progress, **300+ pages grouped into collapsible sub-sections** (serve it; `index.html` redirects here) |
 | [`api-playground-visualizer.html`](frontend/api-playground-visualizer.html) | 🧪 **API Playground** — a real in-browser HTTP client: build a request, **Send** fires a live `fetch()`, read the actual status/timing/headers/body; presets (jsonplaceholder, httpbin, GitHub, a CORS error, your local backend) + CORS/auth explainers |
 | [`jwt-playground-visualizer.html`](frontend/jwt-playground-visualizer.html) | 🧪 **JWT & Auth Playground** — paste/decode any JWT (claims explained, live expiry), really sign & verify it with Web Crypto, **tamper a claim and watch the signature break**, then map claims → Spring authorities and test `@PreAuthorize` |
 | [`spring-boot-playground-visualizer.html`](frontend/spring-boot-playground-visualizer.html) | 🧪 **Spring Boot Playground** — a configurable security simulator: fire a request through the filter chain → URL authz → DispatcherServlet → `@PreAuthorize` and watch **200/401/403/404** flip as you change the caller's authorities; plus a **Live** tab against the real `:8081` backend |
@@ -167,21 +167,26 @@ in the support packages.
 Beyond the static visualizers, this repo ships a full **Dev Learning Hub** web
 app with user accounts and cross-device progress sync:
 
-- **`frontend/`** — the hub app (`app.html`): 283 interactive visualizers across
-  12 tracks, a searchable **two-level sidebar** (each track's pages are grouped into
+- **`frontend/`** — the hub app (`app.html`): **300+ interactive visualizers** across
+  **15 tracks**, a searchable **two-level sidebar** (each track's pages are grouped into
   **collapsible sub-sections**, so you're never faced with hundreds of links at once),
   progress tracking, streaks, and a sign-in/register modal.
   The flow / lifecycle pages default to an **animated step-walk with a live inspector** of
   the real objects at each step (router events, RxJS stream values, `HttpRequest`/`HttpResponse`,
   and — across the **Identity & Auth** track — OAuth/OIDC redirects, JWT claims, SCIM payloads,
-  and Conditional-Access decisions). The 🍃 **Spring Boot** core and the entire 🅰️ **Angular** track
-  (all **70 pages**) now carry the full chip-walk + inspector treatment. Spring covers Architecture,
+  and Conditional-Access decisions). The 🍃 **Spring Boot** core, the entire 🅰️ **Angular** track
+  (all **70 pages**), and all new tracks carry the full chip-walk + inspector treatment. Spring covers Architecture,
   Batch, Microservices, Resilience4j, WebSocket, Flyway, Logging, Profiles, Data Specifications,
-  Events, and Pagination. Angular covers every major topic: fundamentals (Components, Binding,
+  Events, Pagination, and **Lombok & Code Generation**. Angular covers every major topic: fundamentals (Components, Binding,
   Directives, Pipes, Services, Lifecycle), reactivity (Signals, RxJS, NgRx, SignalStore), HTTP &
   Interceptors, Forms (Reactive, Template, FormArray, CVA, FormData), Routing, Auth & OIDC, Change
   Detection (Zone.js / OnPush / Zoneless), Defer, CDK & Material, Testing, Lazy Loading, Animations,
-  PWA, Workspace Libraries, v21 features, and three Debugging diagnosers. The **🧪 Playgrounds** track adds *live* sandboxes —
+  PWA, Workspace Libraries, v21 features, and three Debugging diagnosers. The **🔐 Identity & Auth** track
+  now includes an **Authorization Patterns** section with RBAC vs ABAC, JWT claim design, Spring @PreAuthorize SpEL,
+  and multi-tenant RBAC. Three new language tracks launched — **🐍 Python** (fundamentals, OOP, collections, type hints,
+  asyncio, FastAPI), **⚛️ React** (Fiber, hooks, state management, React Router v6, forms, performance),
+  and **🐿️ Go** (types, goroutines/channels, interfaces, error handling, HTTP server, generics) — each with 6
+  deep animated visualizers. The **🧪 Playgrounds** track adds *live* sandboxes —
   the **API Playground** is a real in-browser HTTP client (every Send is an actual `fetch()`), and the
   **JWT & Auth Playground** decodes any token, really signs/verifies it (Web Crypto), and tests `@PreAuthorize` live;
   the **Spring Boot Playground** simulates the security filter chain — fire a request and watch it land on 200/401/403/404

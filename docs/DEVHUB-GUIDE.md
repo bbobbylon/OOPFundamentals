@@ -5,7 +5,7 @@
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **283 browser visualizers** across **12 tracks**, plus a
+DevHub is a learning hub: **300+ browser visualizers** across **15 tracks**, plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
 copy-paste **command-line runbook** (build/run, the auth round-trip via curl, and
@@ -35,6 +35,9 @@ Or jump straight to any file linked below.
 | 🔐 **Identity & Auth** | OAuth2/OIDC, Entra ID, Ping, tokens & claims | open via the hub |
 | 🐛 **Debugging** | find bugs faster: CORS, 401-vs-403, JWTs (more stacks coming) | [CORS Failures](../frontend/debugging-cors-visualizer.html) |
 | 🧪 **Playgrounds** | live, hands-on sandboxes — fire real requests, read real responses | [API Playground](../frontend/api-playground-visualizer.html) |
+| 🐍 **Python** | fundamentals, OOP, collections, type hints, asyncio, FastAPI | [Python Fundamentals](../frontend/python-fundamentals-visualizer.html) |
+| ⚛️ **React** | JSX/Fiber, hooks, state management, Router v6, forms, performance | [React Fundamentals](../frontend/react-fundamentals-visualizer.html) |
+| 🐿️ **Go** | types, goroutines/channels, interfaces, errors, HTTP server, generics | [Go Fundamentals](../frontend/go-fundamentals-visualizer.html) |
 
 Pages are tagged **beginner → intermediate → advanced → expert**. The deepest
 ones are the **`*-deep`** / **`*-lab`** companion pages (34 of them) — each takes a
@@ -151,7 +154,7 @@ The track → body-class → accent map (defined once in `devhub.css`):
 |---|---|---|
 | ☕ Java — OOP & Language | `track-java` | coffee orange |
 | 🌲 Data Structures & Algorithms | `track-data` | amber |
-| 🍃 Spring Boot | `track-spring` | Spring green |
+| 🍃 Spring Boot | `track-springboot` | Spring green |
 | 🅰️ Angular | `track-angular` | Angular red |
 | 🔷 TypeScript | `track-ts` | TS blue |
 | ⚙️ App Configuration | `track-config` | indigo |
@@ -161,6 +164,9 @@ The track → body-class → accent map (defined once in `devhub.css`):
 | 🔐 Identity & Auth | `track-identity` | cyan |
 | &nbsp;&nbsp;↳ Ping pages (`ping-*`) | `track-ping` | Ping red |
 | 🐛 Debugging | `track-debug` | orange |
+| 🐍 Python | `track-python` | Python blue + yellow |
+| ⚛️ React | `track-react` | React cyan → sky |
+| 🐿️ Go | `track-go` | Go gopher blue |
 
 To add one: create `frontend/<name>-deep-visualizer.html`, link `devhub.css` and set
 the right `track-*` body class, then register it in the `TRACKS` array in
@@ -269,4 +275,35 @@ And a **complete Angular hero wave** — all **70 pages** of the 🅰️ Angular
 [Zoneless](../frontend/angular-zoneless-deep-visualizer.html) (signal.set() → scheduler → targeted CD vs Zone full tree walk).
 **Debugging:** [ExpressionChangedAfterItHasBeenChecked](../frontend/angular-debugging-change-detection-deep-visualizer.html),
 [Debugging RxJS](../frontend/angular-debugging-rxjs-deep-visualizer.html) (cold Observable / leak / swallowed error / tap tracing),
-[Browser &amp; Angular DevTools](../frontend/angular-debugging-devtools-deep-visualizer.html) (Network / Profiler / breakpoints / Component explorer).*
+[Browser &amp; Angular DevTools](../frontend/angular-debugging-devtools-deep-visualizer.html) (Network / Profiler / breakpoints / Component explorer).
+
+And the **🍃 Spring Boot** track gained two new deep pages:
+[Lombok &amp; Code Generation](../frontend/spring-boot-lombok-visualizer.html) (APT compile-time pipeline / @Data / @Builder / @Slf4j / @RequiredArgsConstructor / gotchas: @Data on JPA entities).
+The **🔐 Identity &amp; Auth** track gained an Authorization Patterns section:
+[RBAC &amp; Authorization Deep Dive](../frontend/rbac-deep-visualizer.html) (RBAC vs ABAC vs ReBAC / JWT claims design / Spring @PreAuthorize SpEL / hasPermission ABAC / multi-tenant RBAC with row-level data isolation).
+
+Three brand-new tracks launched — **300+ pages total**:
+
+**🐍 Python (6 pages):**
+[Fundamentals](../frontend/python-fundamentals-visualizer.html) (CPython pipeline / everything is an object / reference counting / LEGB scope),
+[OOP](../frontend/python-oop-visualizer.html) (type metaclass / instance creation / MRO C3 / dunder protocols / @property descriptor),
+[Collections &amp; Comprehensions](../frontend/python-collections-visualizer.html) (list/dict/set/generator comprehensions / iteration protocol / sort/defaultdict/Counter),
+[Type Hints &amp; Protocols](../frontend/python-type-hints-visualizer.html) (mypy / TypeVar / structural typing Protocol / Union narrowing),
+[Async / Await &amp; asyncio](../frontend/python-async-visualizer.html) (event loop / coroutines / gather() / task cancellation / blocking trap),
+[FastAPI Deep Dive](../frontend/python-fastapi-deep-visualizer.html) (Starlette ASGI / Pydantic validation / Depends() DI / OAuth2 Bearer / background tasks; Spring Boot comparison table).
+
+**⚛️ React (6 pages):**
+[Fundamentals](../frontend/react-fundamentals-visualizer.html) (JSX → createElement / Fiber architecture / initial mount / state update / list keys / unmount),
+[Hooks Deep Dive](../frontend/react-hooks-visualizer.html) (hooks linked list / useState / useEffect deps + cleanup / useRef / useMemo / useCallback),
+[State Management](../frontend/react-state-management-visualizer.html) (useReducer / Context API + re-render pitfalls / Zustand selectors / lifting state),
+[React Router v6](../frontend/react-router-visualizer.html) (navigation / data loaders / auth guard redirect / nested routes with Outlet),
+[Forms &amp; Validation](../frontend/react-forms-visualizer.html) (controlled vs uncontrolled / React Hook Form / Zod schema / form submit with server errors),
+[Performance &amp; Rendering](../frontend/react-performance-visualizer.html) (React.memo / code splitting + Suspense / useTransition / DevTools profiling).
+
+**🐿️ Go (6 pages):**
+[Fundamentals](../frontend/go-fundamentals-visualizer.html) (value vs reference types / slice three-word header / maps / pointers / zero values),
+[Goroutines &amp; Channels](../frontend/go-goroutines-channels-visualizer.html) (M:N scheduler / buffered channels / select / WaitGroup / errgroup),
+[Interfaces &amp; Embedding](../frontend/go-interfaces-visualizer.html) (implicit satisfaction / interface value two-word header / nil interface gotcha / embedding / io.Reader pattern),
+[Error Handling](../frontend/go-error-handling-visualizer.html) (error interface / fmt.Errorf %w wrapping / errors.Is / errors.As / custom error types / panic+recover),
+[HTTP Server &amp; Middleware](../frontend/go-http-server-visualizer.html) (ServeMux Go 1.22 / middleware chain / JWT Bearer auth / structured JSON API),
+[Generics (Go 1.18+)](../frontend/go-generics-visualizer.html) (type parameters / constraints as type sets / ~ tilde / generic types / slices/maps/cmp stdlib packages).*
