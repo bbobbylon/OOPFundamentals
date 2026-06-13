@@ -1,11 +1,11 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 283 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 341 pages.** Pick a *path* below and follow it.
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **300+ browser visualizers** across **15 tracks**, plus a
+DevHub is a learning hub: **341 browser visualizers** across **18 tracks**, plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
 copy-paste **command-line runbook** (build/run, the auth round-trip via curl, and
@@ -41,12 +41,15 @@ Or jump straight to any file linked below.
 | 🎯 **Interview Prep** | curated drills across the tracks | open via the hub |
 | 🛠️ **Dev Tools** | Git, Maven, Docker | open via the hub |
 | ☁️ **Cloud — AWS** | core AWS services for app developers | open via the hub |
-| 🔐 **Identity & Auth** | OAuth2/OIDC, Entra ID, Ping, tokens & claims | open via the hub |
+| 🔐 **Identity & Auth** | JWTs, **tokens/keys & signing**, OAuth2/OIDC, Entra ID, Ping, claims | [Tokens, Keys & Signing](../frontend/identity-keys-signing-deep-visualizer.html) |
 | 🐛 **Debugging** | find bugs faster: CORS, 401-vs-403, JWTs (more stacks coming) | [CORS Failures](../frontend/debugging-cors-visualizer.html) |
-| 🧪 **Playgrounds** | live, hands-on sandboxes — fire real requests, read real responses | [API Playground](../frontend/api-playground-visualizer.html) |
-| 🐍 **Python** | fundamentals, OOP, collections, type hints, asyncio, FastAPI | [Python Fundamentals](../frontend/python-fundamentals-visualizer.html) |
+| 🧪 **Playgrounds** | six *live* sandboxes — real `tsc`, real CPython, a Bash/PowerShell/CMD shell, HTTP, JWT, Spring | [TypeScript Playground](../frontend/typescript-playground-visualizer.html) |
+| 🐍 **Python** | fundamentals, functions/scope, **decorators, generators, exceptions**, OOP, type hints, asyncio, FastAPI | [Python Fundamentals](../frontend/python-fundamentals-visualizer.html) |
 | ⚛️ **React** | JSX/Fiber, hooks, state management, Router v6, forms, performance | [React Fundamentals](../frontend/react-fundamentals-visualizer.html) |
 | 🐿️ **Go** | types, goroutines/channels, interfaces, errors, HTTP server, generics | [Go Fundamentals](../frontend/go-fundamentals-visualizer.html) |
+| ⎈ **Kubernetes** | pods, deployments, services, config & secrets, Helm, Spring on K8s | [Kubernetes Fundamentals](../frontend/kubernetes-fundamentals-visualizer.html) |
+| 🗄️ **SQL & Databases** | SQL, indexes & query plans, transactions/ACID, CTEs, normalization, Postgres | [SQL Fundamentals](../frontend/sql-fundamentals-visualizer.html) |
+| ⌨️ **Shell & Scripting** | CLI basics, **Bash**, **PowerShell** objects, **CMD/Batch** — three shells side by side | [CLI Basics](../frontend/shell-cli-basics-visualizer.html) |
 
 Pages are tagged **beginner → intermediate → advanced → expert**. The deepest
 ones are the **`*-deep`** / **`*-lab`** companion pages (34 of them) — each takes a
@@ -176,6 +179,9 @@ The track → body-class → accent map (defined once in `devhub.css`):
 | 🐍 Python | `track-python` | Python blue + yellow |
 | ⚛️ React | `track-react` | React cyan → sky |
 | 🐿️ Go | `track-go` | Go gopher blue |
+| ⎈ Kubernetes | `track-kubernetes` | K8s blue |
+| 🗄️ SQL & Databases | `track-sql` | SQL amber |
+| ⌨️ Shell & Scripting | `track-shell` | terminal green → cyan |
 
 To add one: create `frontend/<name>-deep-visualizer.html`, link `devhub.css` and set
 the right `track-*` body class, then register it in the `TRACKS` array in
@@ -185,8 +191,23 @@ rather than a pile of pages.
 
 ---
 
-*This guide is updated as new tracks and deep-dives land. Last refreshed with a big
-**extreme-viz hero** wave — an animated step-walk with a gliding chip and a **live
+*This guide is updated as new tracks and deep-dives land. **Latest wave — live sandboxes &amp; two
+languages going deep:** the **🧪 Playgrounds** track grew to six and now includes genuinely-runnable
+environments — a **[TypeScript Playground](../frontend/typescript-playground-visualizer.html)** that loads the
+real `typescript` compiler (semantic type-checking with VS-Code-grade diagnostics, emitted JS, and live execution),
+a **[Python Playground](../frontend/python-playground-visualizer.html)** running **real CPython** via Pyodide (stdlib,
+real tracebacks), and a **[Shell Playground](../frontend/shell-playground-visualizer.html)** — a working mini-shell with
+an in-memory filesystem that switches between **Bash / PowerShell / CMD** so you can feel the differences. The **🐍 Python**
+track expanded past the basics with the hero treatment on **[Functions &amp; LEGB scope](../frontend/python-functions-visualizer.html)**,
+**[Decorators](../frontend/python-decorators-visualizer.html)**, **[Generators &amp; Iterators](../frontend/python-generators-visualizer.html)**,
+and **[Exceptions](../frontend/python-errors-visualizer.html)**. A brand-new **⌨️ Shell &amp; Scripting** track landed —
+**[CLI Basics](../frontend/shell-cli-basics-visualizer.html)**, **[Bash](../frontend/shell-bash-visualizer.html)**,
+**[PowerShell](../frontend/shell-powershell-visualizer.html)** (objects, not text), and **[CMD/Batch](../frontend/shell-cmd-visualizer.html)**.
+And **🔐 Identity &amp; Auth** gained **[Tokens, Keys &amp; Signing](../frontend/identity-keys-signing-deep-visualizer.html)** —
+symmetric vs asymmetric signing, JWKS &amp; `kid` rotation, the tamper→break demo, a layer-by-layer "where each key lives"
+map, and a glossary that finally untangles session keys vs secret keys vs signing keys vs client secrets. (Plus a fix to the Go track's
+sidebar icon.) Before that: a big*
+*<!-- prior --> **extreme-viz hero** wave — an animated step-walk with a gliding chip and a **live
 inspector of the real per-step objects** across happy-path / blocked / error / edge-case
 scenarios. The hero is now the lead element on the **Component Lifecycle** (SimpleChanges,
 @ViewChild timing, OnPush mutation), **Signals** (set→dirty→recompute→effect, equality

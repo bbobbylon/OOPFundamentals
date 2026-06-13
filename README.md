@@ -139,7 +139,10 @@ double-click**, no server needed.
 
 | Visualizer | What it shows |
 |---|---|
-| [`app.html`](frontend/app.html) | The full Dev Hub — searchable, progress, **300+ pages grouped into collapsible sub-sections** (serve it; `index.html` redirects here) |
+| [`app.html`](frontend/app.html) | The full Dev Hub — searchable, progress, **340+ pages grouped into collapsible sub-sections** (serve it; `index.html` redirects here) |
+| [`typescript-playground-visualizer.html`](frontend/typescript-playground-visualizer.html) | 🧪 **TypeScript Playground** — loads the **real** `typescript` compiler: type-checks your code (the same red errors as VS Code/`tsc`), shows the emitted JS, and runs it with live console capture; toggle `strict`/`target` and watch errors change |
+| [`python-playground-visualizer.html`](frontend/python-playground-visualizer.html) | 🧪 **Python Playground** — **real CPython** in the browser via Pyodide: `print()`, the stdlib (`json`, `dataclasses`, `itertools`…), real exceptions and full tracebacks — runnable, with presets |
+| [`shell-playground-visualizer.html`](frontend/shell-playground-visualizer.html) | 🧪 **Shell Playground** — a working mini-shell with an in-memory filesystem; flip between **Bash / PowerShell / CMD** modes and watch the prompt, command names, pipes, redirection, and variable syntax change with it |
 | [`api-playground-visualizer.html`](frontend/api-playground-visualizer.html) | 🧪 **API Playground** — a real in-browser HTTP client: build a request, **Send** fires a live `fetch()`, read the actual status/timing/headers/body; presets (jsonplaceholder, httpbin, GitHub, a CORS error, your local backend) + CORS/auth explainers |
 | [`jwt-playground-visualizer.html`](frontend/jwt-playground-visualizer.html) | 🧪 **JWT & Auth Playground** — paste/decode any JWT (claims explained, live expiry), really sign & verify it with Web Crypto, **tamper a claim and watch the signature break**, then map claims → Spring authorities and test `@PreAuthorize` |
 | [`spring-boot-playground-visualizer.html`](frontend/spring-boot-playground-visualizer.html) | 🧪 **Spring Boot Playground** — a configurable security simulator: fire a request through the filter chain → URL authz → DispatcherServlet → `@PreAuthorize` and watch **200/401/403/404** flip as you change the caller's authorities; plus a **Live** tab against the real `:8081` backend |
@@ -167,8 +170,8 @@ in the support packages.
 Beyond the static visualizers, this repo ships a full **Dev Learning Hub** web
 app with user accounts and cross-device progress sync:
 
-- **`frontend/`** — the hub app (`app.html`): **300+ interactive visualizers** across
-  **15 tracks**, a searchable **two-level sidebar** (each track's pages are grouped into
+- **`frontend/`** — the hub app (`app.html`): **340+ interactive visualizers** across
+  **18 tracks**, a searchable **two-level sidebar** (each track's pages are grouped into
   **collapsible sub-sections**, so you're never faced with hundreds of links at once),
   progress tracking, streaks, and a sign-in/register modal.
   The flow / lifecycle pages default to an **animated step-walk with a live inspector** of
@@ -183,21 +186,24 @@ app with user accounts and cross-device progress sync:
   Detection (Zone.js / OnPush / Zoneless), Defer, CDK & Material, Testing, Lazy Loading, Animations,
   PWA, Workspace Libraries, v21 features, and three Debugging diagnosers. The **🔐 Identity & Auth** track
   now includes an **Authorization Patterns** section with RBAC vs ABAC, JWT claim design, Spring @PreAuthorize SpEL,
-  and multi-tenant RBAC. Three new language tracks launched — **🐍 Python** (fundamentals, OOP, collections, type hints,
-  asyncio, FastAPI), **⚛️ React** (Fiber, hooks, state management, React Router v6, forms, performance),
-  and **🐿️ Go** (types, goroutines/channels, interfaces, error handling, HTTP server, generics) — each with 6
-  deep animated visualizers. The **🧪 Playgrounds** track adds *live* sandboxes —
-  the **API Playground** is a real in-browser HTTP client (every Send is an actual `fetch()`), and the
-  **JWT & Auth Playground** decodes any token, really signs/verifies it (Web Crypto), and tests `@PreAuthorize` live;
-  the **Spring Boot Playground** simulates the security filter chain — fire a request and watch it land on 200/401/403/404
-  as you change the caller's authorities (plus a Live tab against the real `:8081` backend).
+  and multi-tenant RBAC, plus a **Tokens, Keys & Signing** deep-dive (symmetric vs asymmetric, JWKS &amp; `kid` rotation,
+  and a plain-English glossary of every "key" — session keys, secret keys, signing keys, client secrets, the whole nine yards).
+  Language &amp; platform tracks: **🐍 Python** — now expanded well past the basics with **Functions & LEGB scope, Decorators,
+  Generators & Iterators, and Exceptions** alongside OOP, collections, type hints, asyncio, and FastAPI — plus **⚛️ React**,
+  **🐿️ Go**, **⎈ Kubernetes**, **🗄️ SQL & Databases**, and a brand-new **⌨️ Shell & Scripting** track
+  (CLI Basics, **Bash** scripting, **PowerShell**'s object pipeline, and **CMD/Batch**, shown side by side).
+  The **🧪 Playgrounds** track now hosts six *live* sandboxes — a **TypeScript Playground** (the real `tsc`: type-checks,
+  emits JS, runs it), a **Python Playground** (real CPython via Pyodide, with tracebacks), a **Shell Playground**
+  (a working Bash/PowerShell/CMD mini-shell), the **API Playground** (every Send is an actual `fetch()`), the
+  **JWT & Auth Playground** (decode/sign/verify with Web Crypto, test `@PreAuthorize`), and the
+  **Spring Boot Playground** (simulate the security filter chain → 200/401/403/404, plus a Live tab against `:8081`).
 - **`backend/`** — a Spring Boot 4 API (`devhub-backend`): registration, JWT
   login, and per-user topic progress, backed by H2 (local) or PostgreSQL (prod).
 
 > **📖 New to the hub? Start with the [DevHub Guided Tour](docs/DEVHUB-GUIDE.md).**
-> It maps the 12 tracks and hands you ready-made learning paths — including a featured
+> It maps the 18 tracks and hands you ready-made learning paths — including a featured
 > *"how a CIAM app works, end to end"* walkthrough (Angular OIDC login → tokens →
-> guards → Spring filter chain → method security) — so you're never staring at 283
+> guards → Spring filter chain → method security) — so you're never staring at 340+
 > files wondering where to begin.
 
 You can run it three ways. Pick the one you need:
