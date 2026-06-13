@@ -1,42 +1,64 @@
 # ============================================================================
-# DevHub backend — multi-stage Docker build
+# DevHub backend — multi-stage Docker build (production-hardened)
 # ----------------------------------------------------------------------------
-# Stage 1 builds the Spring Boot fat jar with Maven; stage 2 ships only the
-# JRE + jar so the final image stays small. Works on Render, Railway, Fly.io,
-# or any Docker host. Build context is this `backend/` directory.
+# Stage 1 builds the Spring Boot fat jar with Maven.
+# Stage 2 is a lean Alpine JRE runtime (~80 MB vs ~200 MB without Alpine).
+# Runs as a non-root user. Container-aware JVM flags applied automatically.
 #
+# Build (from the backend/ directory):
 #   docker build -t devhub-backend .
+#
+# Run standalone:
 #   docker run -p 8080:8080 \
 #     -e SPRING_PROFILES_ACTIVE=prod \
 #     -e DATABASE_URL=jdbc:postgresql://host:5432/devhub \
 #     -e DATABASE_USERNAME=devhub \
 #     -e DATABASE_PASSWORD=secret \
-#     -e JWT_SECRET=change-me-to-a-long-random-string \
-#     -e CORS_ALLOWED_ORIGINS=https://yourname.github.io \
+#     -e JWT_SECRET=change-me-32-chars-minimum-for-HS256 \
+#     -e CORS_ALLOWED_ORIGINS=https://yourapp.com \
 #     devhub-backend
+#
+# Or use docker-compose from the repo root:
+#   docker compose up --build
 # ============================================================================
 
-# ---- Stage 1: build ----
+# ---- Stage 1: Maven build ----
 FROM maven:3.9-eclipse-temurin-21 AS build
-WORKDIR /app
+WORKDIR /build
 
-# Cache dependencies first (only re-runs when pom.xml changes)
+# Cache Maven dependencies separately — only re-runs when pom.xml changes
 COPY pom.xml .
 RUN mvn -q -B dependency:go-offline
 
-# Build the application
+# Compile and package; skip tests (run them in CI before building the image)
 COPY src ./src
 RUN mvn -q -B clean package -DskipTests
 
-# ---- Stage 2: runtime ----
-FROM eclipse-temurin:21-jre
+# ---- Stage 2: Lean runtime (Alpine = ~80 MB) ----
+FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
 
-# Copy the repackaged Spring Boot jar (excludes *.jar.original)
-COPY --from=build /app/target/*.jar app.jar
+# Non-root user — security best practice; never run app as root in production
+RUN addgroup -S spring && adduser -S spring -G spring
 
-# Render/Railway/Fly inject the port via $PORT; application-prod.yml reads it.
-EXPOSE 8080
+# Copy the repackaged Spring Boot jar
+COPY --from=build /build/target/*.jar app.jar
+
+# Container-optimized JVM flags:
+#   UseContainerSupport  — respect cgroup CPU/memory limits (not host values)
+#   MaxRAMPercentage=75  — heap = 75% of container memory limit
+#   urandom              — faster startup; /dev/random can block in containers
+ENV JAVA_OPTS="-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -Djava.security.egd=file:/dev/./urandom"
 ENV SPRING_PROFILES_ACTIVE=prod
 
-ENTRYPOINT ["java", "-jar", "app.jar"]
+EXPOSE 8080
+
+# Docker will mark the container unhealthy if actuator/health stops responding.
+# Orchestrators (Kubernetes, ECS) use this to decide when to restart the pod.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
+  CMD wget -qO- http://localhost:8080/actuator/health || exit 1
+
+USER spring
+
+# sh -c expands $JAVA_OPTS at runtime so the env var is honoured
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar app.jar"]

@@ -11,6 +11,15 @@ the map. To *run* it (locally or deployed), see the main [README](../README.md);
 copy-paste **command-line runbook** (build/run, the auth round-trip via curl, and
 deployment troubleshooting), see [HELP.md](../HELP.md#command-line-runbook).
 
+**Quick-start options** (all from the project root):
+
+| Command | What you get |
+|---|---|
+| `./startapp.sh` | Spring Boot (`:8081`) + Python dev-server (`:5500`). Fastest for local dev — no Docker needed. |
+| `./startapp.sh --docker` | Full Docker stack: multi-stage image → nginx (`:8081`) proxies `/api/` to backend (`:8080`). Closest to the Render production layout. First build ~2 min. |
+| `./startapp.sh --frontend-only` | Just the Python dev-server — browse pages without touching the backend. |
+| `docker compose up --build` | Same as `--docker` without the browser-open; useful in CI or headless environments. |
+
 The fastest way in: open **`frontend/app.html`** — the hub — and use the sidebar. The
 sidebar is a **two-level accordion**: open a track to reveal its **sub-sections**, then open a
 sub-section to see its pages — so you browse a handful of named groups, never a wall of 280 links.

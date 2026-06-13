@@ -264,6 +264,31 @@ have one going), serve the frontend on `:5500`, and open
 script started. Useful flags: `--frontend-only` / `-FrontendOnly` (skip the backend —
 fast, just browse the pages) and `--no-browser` / `-NoBrowser`.
 
+### Docker mode (closest to production)
+
+Want to test with real containers — multi-stage Docker build, nginx, production
+JAVA_OPTS — without pushing to Render? One extra flag:
+
+```bash
+./startapp.sh --docker
+```
+
+What this does:
+1. Runs `mvn package -DskipTests` to produce the layered jar.
+2. Builds the backend image (`backend/Dockerfile` — Alpine JRE, non-root `spring`
+   user, `HEALTHCHECK`).
+3. Starts both services via `docker-compose.yml`:
+   - **backend** → <http://localhost:8080> (Spring Boot, H2 dev profile)
+   - **frontend nginx** → <http://localhost:8081> (nginx serves static files,
+     proxies `/api/` to the backend container)
+4. Opens <http://localhost:8081/app> in your default browser.
+
+First build takes ~2 min (Docker downloads the JDK build image + Alpine JRE base).
+Subsequent runs reuse the layer cache and are much faster.
+
+> **Requires** Docker Desktop (or Docker Engine + Compose plugin) installed and
+> running. Windows: Docker Desktop with WSL 2 backend recommended.
+
 Prefer to run the halves by hand? The manual steps follow.
 
 ### Manual — two terminals

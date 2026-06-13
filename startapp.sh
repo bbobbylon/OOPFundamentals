@@ -5,13 +5,20 @@
 # Start the Spring Boot backend (H2, :8081) and the static frontend (:5500)
 # together, then open the hub (app.html) in your browser. One command:
 #
-#     ./startapp.sh                  # backend + frontend, then open the hub
+#     ./startapp.sh                  # backend + frontend (Maven dev mode), then open the hub
+#     ./startapp.sh --docker         # build + launch the full stack via docker compose
 #     ./startapp.sh --frontend-only  # just the static pages (no Maven, no backend)
 #     ./startapp.sh --no-browser     # don't auto-open the browser
 #
 # Leave this terminal open; press Ctrl+C to stop what the script started.
 # If a backend is already running on :8081 it is detected and reused (so this
 # is safe to run when you already have `mvnw spring-boot:run` going).
+#
+# Docker mode notes:
+#   - Requires Docker Desktop (or Docker Engine + Compose plugin)
+#   - Backend on :8080, nginx frontend on :8081
+#   - First build takes ~2 min (Maven downloads inside the container)
+#   - Hub opens at http://localhost:8081/app
 #
 set -uo pipefail
 
@@ -20,13 +27,15 @@ FRONTEND_PORT="${FRONTEND_PORT:-5500}"
 BACKEND_PORT=8081
 FRONTEND_ONLY=0
 NO_BROWSER=0
+DOCKER_MODE=0
 
 for arg in "$@"; do
   case "$arg" in
     --frontend-only) FRONTEND_ONLY=1 ;;
     --no-browser)    NO_BROWSER=1 ;;
+    --docker)        DOCKER_MODE=1 ;;
     -h|--help)
-      echo "usage: ./startapp.sh [--frontend-only] [--no-browser]"
+      echo "usage: ./startapp.sh [--docker] [--frontend-only] [--no-browser]"
       exit 0 ;;
     *) echo "unknown option: $arg (try -h)" >&2; exit 2 ;;
   esac
@@ -84,6 +93,26 @@ open_url() {
   elif command -v xdg-open     >/dev/null 2>&1; then xdg-open "$url" || true
   else echo "  open this in your browser: $url"; fi
 }
+
+# ---- Docker compose mode (exec here — no PIDS/trap needed) ------------------
+if [ "$DOCKER_MODE" -eq 1 ]; then
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "ERROR: docker not found. Install Docker Desktop from https://www.docker.com/products/docker-desktop" >&2; exit 1
+  fi
+  [ -f "$ROOT/docker-compose.yml" ] || { echo "ERROR: docker-compose.yml not found at $ROOT" >&2; exit 1; }
+  echo
+  echo "  === DevHub Docker launcher ==="
+  echo "  root: $ROOT"
+  echo "  Running: docker compose up --build"
+  echo "  Backend : http://localhost:8080"
+  echo "  Frontend: http://localhost:8081/app"
+  echo "  Press Ctrl+C to stop."
+  echo
+  if [ "$NO_BROWSER" -eq 0 ]; then
+    ( sleep 15 && open_url "http://localhost:8081/app" ) &
+  fi
+  exec docker compose -f "$ROOT/docker-compose.yml" up --build
+fi
 
 PIDS=()
 cleanup() {
