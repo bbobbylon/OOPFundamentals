@@ -191,7 +191,17 @@ rather than a pile of pages.
 
 ---
 
-*This guide is updated as new tracks and deep-dives land. **Newest pass — the Head First book is complete &amp; Angular goes beginner→expert:**
+*This guide is updated as new tracks and deep-dives land. **Newest pass — a "Code Walkthrough" widget &amp; deeper page content:**
+a reusable **line-by-line code stepper** now lives in the design system (`devhub-codewalk.js` + `.cw-*` in `devhub.css`) — press ▶ and
+each line of a real snippet highlights while a panel on the right narrates it and shows live variable boxes, output, and gotchas.
+First exemplars (one per stack, ready to scale across the app): **Java** [Encapsulation](../frontend/encapsulation-visualizer.html)
+(a `BankAccount` rejecting an overdraft), **TypeScript** [Narrowing](../frontend/typescript-narrowing-visualizer.html)
+(watch the type of `id` shrink through a guard), **Spring** [REST Controllers](../frontend/spring-boot-rest-api-visualizer.html)
+(one request through a controller), and **Angular** [Signals](../frontend/angular-signals-visualizer.html) (the reactive graph staying in sync).
+More **beginner→expert** on-ramp/expert-corner cards landed too — Angular [Routing](../frontend/angular-routing-visualizer.html), Spring
+[Security](../frontend/spring-boot-security-visualizer.html), Java [Polymorphism](../frontend/polymorphism-visualizer.html), and
+TypeScript [Fundamentals](../frontend/typescript-fundamentals-visualizer.html) — on top of the earlier Angular five (Components, Data
+Binding, Services &amp; DI, Signals, RxJS). Before that: **the Head First book completed &amp; Angular went beginner→expert:**
 the ☕ Java **Head First Design Patterns** sub-track now covers the whole book — the final three chapters landed with the same
 voice + animated hero: **[Iterator &amp; Composite](../frontend/head-first-iterator-composite-visualizer.html)** (the Objectville menus),
 **[Proxy](../frontend/head-first-proxy-visualizer.html)** (remote / virtual / protection / caching), and
