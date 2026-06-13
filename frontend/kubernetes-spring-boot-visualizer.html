@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Spring Boot on Kubernetes — DevHub</title>
+<style>
+.who-JAR{background:rgba(109,179,63,.22);color:#a6e07f}
+.who-IMG{background:rgba(50,108,229,.22);color:#93bbff}
+.who-DEPLOY{background:rgba(84,195,241,.18);color:#7dd3fc}
+.who-PROBE{background:rgba(251,191,36,.18);color:#fcd34d}
+.who-POD{background:rgba(74,222,128,.18);color:#86efac}
+</style>
+<link rel="stylesheet" href="devhub.css"/>
+</head>
+<body class="track-kubernetes">
+<div class="page">
+<a class="back" href="javascript:history.back()">← Back</a>
+<h1>Spring Boot on Kubernetes</h1>
+<p class="subtitle">Container image, health probes, graceful shutdown, and resource limits — the K8s-native Spring Boot playbook.</p>
+
+<div class="rt-ctlbar">
+  <span class="lbl">scenario:</span>
+  <span class="userseg" id="kbScen">
+    <button data-s="deploy" class="on">deploy flow</button>
+    <button data-s="health">health probes</button>
+    <button data-s="graceful">graceful shutdown</button>
+    <button data-s="oom">OOMKilled</button>
+  </span>
+  <button class="rt-run" id="kbRun">▶ Play</button>
+  <span class="rt-pill" id="kbPill">JAR → Docker image → K8s Deployment → pods ready</span>
+</div>
+<div class="rt-stage">
+  <div class="rt-diagram" id="kbDiagram"></div>
+  <div class="rt-inspect">
+    <div class="rt-dir" id="kbDir">▶ READY</div>
+    <div class="rt-cap" id="kbCap">Choose a scenario and press ▶</div>
+    <pre class="rt-payload" id="kbPay"></pre>
+    <pre class="rt-headers" id="kbHdr"></pre>
+    <div class="rt-result" id="kbRes"></div>
+  </div>
+</div>
+<div class="rt-legend">
+  <span>JAR → Docker Image → Deployment → Health Probe → Pod Running</span>
+</div>
+
+<section>
+<h2>1 — Dockerfile for Spring Boot</h2>
+<div class="card">
+<pre><code><span class="cm"># Multi-stage: build with Maven, run with JRE only</span>
+FROM eclipse-temurin:21-jdk-alpine <span class="kw">AS</span> build
+WORKDIR /app
+COPY pom.xml .
+COPY src ./src
+RUN mvn package -DskipTests
+
+FROM eclipse-temurin:21-jre-alpine
+WORKDIR /app
+<span class="cm"># Extract layers (Spring Boot layertools) for better caching</span>
+COPY --from=build /app/target/app.jar app.jar
+RUN java -Djarmode=layertools -jar app.jar extract
+
+<span class="cm"># Run as non-root (security best practice)</span>
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+USER appuser
+
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "app.jar"]</code></pre>
+<p class="note">For faster K8s startup use <strong>Spring Boot Layer Jars</strong> or <strong>GraalVM native images</strong> (near-instant startup, 10× less memory). Layer jars improve Docker cache reuse — dependencies rarely change, so they cache well.</p>
+</div>
+</section>
+
+<section>
+<h2>2 — Health Probes via Spring Actuator</h2>
+<div class="card card-green">
+<pre><code><span class="cm"># application.yml</span>
+<span class="kw">management</span>:
+  <span class="kw">endpoint.health.probes.enabled</span>: true
+  <span class="kw">health.livenessstate.enabled</span>: true
+  <span class="kw">health.readinessstate.enabled</span>: true
+
+<span class="cm"># Kubernetes deployment spec</span>
+<span class="kw">livenessProbe</span>:
+  <span class="kw">httpGet</span>:
+    <span class="kw">path</span>: /actuator/health/liveness
+    <span class="kw">port</span>: 8080
+  <span class="kw">initialDelaySeconds</span>: 60   <span class="cm"># give Spring time to boot</span>
+  <span class="kw">periodSeconds</span>: 10
+  <span class="kw">failureThreshold</span>: 3       <span class="cm"># restart after 3 fails</span>
+<span class="kw">readinessProbe</span>:
+  <span class="kw">httpGet</span>:
+    <span class="kw">path</span>: /actuator/health/readiness
+    <span class="kw">port</span>: 8080
+  <span class="kw">initialDelaySeconds</span>: 30
+  <span class="kw">periodSeconds</span>: 5</code></pre>
+</div>
+</section>
+
+<section>
+<h2>3 — Graceful Shutdown</h2>
+<div class="card card-blue">
+<p>When K8s sends SIGTERM to terminate a pod it waits <code>terminationGracePeriodSeconds</code> (default 30s) before SIGKILL. Spring Boot 2.3+ supports graceful shutdown out of the box.</p>
+<pre><code><span class="cm"># application.yml</span>
+<span class="kw">server</span>:
+  <span class="kw">shutdown</span>: graceful    <span class="cm"># drain in-flight requests first</span>
+<span class="kw">spring.lifecycle</span>:
+  <span class="kw">timeout-per-shutdown-phase</span>: 25s  <span class="cm"># leave 5s buffer for SIGKILL</span>
+
+<span class="cm"># preStop hook ensures the pod is removed from Service endpoints
+# BEFORE SIGTERM arrives (avoids a 503 race condition)</span>
+<span class="kw">lifecycle</span>:
+  <span class="kw">preStop</span>:
+    <span class="kw">exec</span>:
+      <span class="kw">command</span>: [<span class="str">"/bin/sh"</span>, <span class="str">"-c"</span>, <span class="str">"sleep 5"</span>]</code></pre>
+</div>
+</section>
+
+<section>
+<h2>4 — Resource Requests &amp; Limits</h2>
+<div class="card card-purple">
+<table>
+<tr><th>Setting</th><th>Purpose</th><th>Consequence if missing</th></tr>
+<tr><td><code>requests.cpu</code></td><td>Scheduler uses this to find a fitting node</td><td>Pod may land on an overcommitted node</td></tr>
+<tr><td><code>requests.memory</code></td><td>Scheduler guarantee: node has this memory free</td><td>Pod scheduled onto nodes without enough memory</td></tr>
+<tr><td><code>limits.cpu</code></td><td>Throttled if exceeded (never killed)</td><td>Unbounded CPU usage — noisy neighbour problem</td></tr>
+<tr><td><code>limits.memory</code></td><td>OOMKilled if exceeded</td><td>Pod killed without limits — can take down the node</td></tr>
+</table>
+<pre style="margin-top:12px"><code><span class="kw">resources</span>:
+  <span class="kw">requests</span>:
+    <span class="kw">memory</span>: <span class="str">"256Mi"</span>    <span class="cm"># Spring Boot bare minimum</span>
+    <span class="kw">cpu</span>:    <span class="str">"250m"</span>     <span class="cm"># 0.25 core at startup</span>
+  <span class="kw">limits</span>:
+    <span class="kw">memory</span>: <span class="str">"512Mi"</span>    <span class="cm"># set limit = 2× request</span>
+    <span class="kw">cpu</span>:    <span class="str">"1000m"</span>    <span class="cm"># 1 core max (throttled if exceeded)</span></code></pre>
+</div>
+</section>
+</div>
+
+<script>
+(function(){
+const pfx='kb';
+const NODES=['JAR','IMG','DEPLOY','PROBE','POD'];
+function posOf(n){return 10+NODES.indexOf(n)*18;}
+const SCEN={
+  deploy:{
+    pill:'JAR → Docker image → K8s Deployment → pods ready',
+    steps:[
+      {node:'JAR',hdr:'mvn package creates the Spring Boot JAR',pay:{artifact:'target/app.jar',size:'48 MB',layers:{dependencies:'40 MB',snapshot:'2 MB',application:'6 MB'}},ins:'Spring Boot Maven plugin creates an executable "fat JAR" with all dependencies embedded',tone:null},
+      {node:'IMG',hdr:'Docker multi-stage build → push to registry',pay:{image:'myregistry/api-server:2.1',baseImage:'eclipse-temurin:21-jre-alpine',size:'180 MB',layers:4},ins:'Multi-stage build: build in JDK image, copy JAR to minimal JRE image — reduces image size by ~300MB',tone:null},
+      {node:'DEPLOY',hdr:'kubectl apply -f deployment.yaml',pay:{name:'api-server',replicas:3,image:'myregistry/api-server:2.1',strategy:'RollingUpdate'},ins:'Deployment controller creates a new ReplicaSet — pods start pulling the new image',tone:null},
+      {node:'PROBE',hdr:'Spring Boot starts — startupProbe keeps liveness alive',pay:{startupProbe:{path:'/actuator/health/liveness',failureThreshold:10,periodSeconds:10},status:'Pending for up to 100s'},ins:'startupProbe gives Spring Boot 10×10s = 100s to start before liveness kicks in — prevents premature restart',tone:null},
+      {node:'POD',hdr:'Readiness probe passes — pods added to endpoints',pay:{pods:3,readinessProbe:200,addedToService:true,startTime:'42s after pod creation'},ins:'Pod receives traffic only after readiness probe succeeds — prevents 503s during startup',tone:'ok'}
+    ],
+    result:'✓ 3/3 pods ready — api-server:2.1 serving traffic'
+  },
+  health:{
+    pill:'liveness probe fails → container restart (not full pod)',
+    steps:[
+      {node:'PROBE',hdr:'Liveness probe: GET /actuator/health/liveness',pay:{url:'http://pod-ip:8080/actuator/health/liveness',expectedStatus:200,check:'is the app alive (not deadlocked)?'},ins:'Spring Boot exposes LivenessState — you can mark the app as BROKEN programmatically to trigger a restart',tone:null},
+      {node:'POD',hdr:'App thread pool exhausted — liveness returns 503',pay:{status:503,body:{'status':'DOWN','components':{'livenessState':{'status':'DOWN'}}}},ins:'If liveness fails 3 consecutive times (failureThreshold:3) K8s restarts the container inside the pod',tone:'bad'},
+      {node:'PROBE',hdr:'Container restarted — Spring Boot reboots',pay:{restartCount:1,restartPolicy:'Always',reason:'Liveness probe failed'},ins:'Container restarts in the same pod (new containerId, same pod IP) — pod stays scheduled on same node',tone:null},
+      {node:'POD',hdr:'App comes back healthy — readiness clears after warmup',pay:{status:200,readinessProbe:'Pending → 200',addedBackToService:true,downtime:'~35s'},ins:'Pod is removed from Service endpoints during restart and re-added only after readiness passes',tone:'ok'}
+    ],
+    result:'✓ Container restarted; pod back in service after ~35s'
+  },
+  graceful:{
+    pill:'SIGTERM → drain in-flight → SIGKILL safety net',
+    steps:[
+      {node:'DEPLOY',hdr:'kubectl delete pod / rolling update triggers termination',pay:{signal:'SIGTERM',reason:'rolling update or manual delete',terminationGracePeriodSeconds:30},ins:'K8s sends SIGTERM and starts a 30s countdown; after 30s it force-kills with SIGKILL',tone:null},
+      {node:'PROBE',hdr:'preStop hook: sleep 5s',pay:{lifecycle:{preStop:{exec:{command:['sleep','5']}}},purpose:'wait for endpoints to propagate removal from Service'},ins:'5s sleep ensures kube-proxy has removed the pod from iptables rules BEFORE Spring sees SIGTERM — prevents 503',tone:null},
+      {node:'POD',hdr:'Spring Boot graceful shutdown: draining requests',pay:{shutdown:'graceful',timeoutPerPhase:'25s',inFlightRequests:3,action:'waiting for in-flight requests to complete'},ins:'Spring completes in-flight requests but rejects new ones — new connections get connection refused',tone:null},
+      {node:'JAR',hdr:'All requests drained — JVM exits 0',pay:{exitCode:0,drainTime:'3.2s',totalShutdownTime:'8.2s',nextStep:'new pod already Running'},ins:'Rolling update: new pod is Ready before this pod receives SIGTERM — zero downtime achieved',tone:'ok'}
+    ],
+    result:'✓ Graceful shutdown in 8.2s — zero dropped requests'
+  },
+  oom:{
+    pill:'heap grows beyond limit → OOMKilled → restart',
+    steps:[
+      {node:'POD',hdr:'Memory usage creeping up — memory leak in app',pay:{containerMemory:'480 MB',limit:'512 MB',heapUsed:'390 MB',heapMax:'440 MB',note:'getting close to limit'},ins:'The Linux OOM killer watches cgroup memory limits — the container is killed the moment it exceeds the limit',tone:null},
+      {node:'POD',hdr:'OOMKilled! Container killed by kernel',pay:{exitCode:137,reason:'OOMKilled',containerMemoryAtKill:'513 MB',limit:'512 MB'},ins:'Exit code 137 = SIGKILL. Unlike CPU throttling, exceeding memory limit is instant death.',tone:'bad'},
+      {node:'PROBE',hdr:'Liveness probe fails on dead container',pay:{restartCount:1,backoff:'0s (immediate for OOMKilled)'},ins:'K8s restarts immediately for OOMKilled (no backoff on first restart)',tone:null},
+      {node:'DEPLOY',hdr:'Fix: increase memory limit or find the leak',pay:{options:['Increase limits.memory to 768Mi','Use -XX:MaxRAMPercentage=75.0 JVM flag','Enable heap dump on OOM: -XX:+HeapDumpOnOutOfMemoryError','Profile with async-profiler or Java Flight Recorder']},ins:'Check kubectl top pod for trends. For JVM: set -XX:MaxRAMPercentage to cap heap at % of container limit.',tone:'bad'}
+    ],
+    result:'✗ OOMKilled — increase memory limit or fix memory leak'
+  }
+};
+let cur='deploy',T=[];
+const $=id=>document.getElementById(pfx+id);
+function renderNodes(){$('Diagram').innerHTML=NODES.map(n=>`<div class="rt-node who-${n}" id="${pfx}N${n}" style="left:${posOf(n)}%">${n}</div>`).join('');}
+function chip(){let c=document.getElementById(pfx+'chip');if(!c){c=document.createElement('div');c.id=pfx+'chip';c.className='rt-chip';$('Diagram').appendChild(c);}return c;}
+function clearT(){T.forEach(clearTimeout);T=[];}
+function reset(){clearT();renderNodes();chip().style.left=posOf(NODES[0])+'%';chip().className='rt-chip';$('Dir').textContent='▶ READY';$('Cap').textContent='Choose a scenario and press ▶';$('Pay').textContent='';$('Hdr').textContent='';$('Res').textContent='';$('Run').disabled=false;document.querySelectorAll('#'+pfx+'Diagram .rt-node').forEach(n=>n.className=n.className.replace(/ ?(vchk|vskip|curbad|rt-cur)/g,''));}
+function applyStep(s){document.querySelectorAll('#'+pfx+'Diagram .rt-node').forEach(n=>n.classList.remove('rt-cur','vchk','vskip','curbad'));const nd=document.getElementById(pfx+'N'+s.node);if(nd){nd.classList.add('rt-cur');if(s.tone==='ok')nd.classList.add('vchk');if(s.tone==='bad')nd.classList.add('vskip','curbad');chip().style.left=posOf(s.node)+'%';chip().className='rt-chip'+(s.tone==='ok'?' ok':s.tone==='bad'?' bad':'');}$('Dir').textContent=s.hdr;$('Cap').textContent=s.ins;$('Pay').textContent=JSON.stringify(s.pay,null,2);$('Hdr').textContent='';}
+function run(){const sc=SCEN[cur];reset();$('Run').disabled=true;$('Pill').textContent=sc.pill;document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.disabled=true);sc.steps.forEach((s,i)=>T.push(setTimeout(()=>{applyStep(s);if(i===sc.steps.length-1)T.push(setTimeout(()=>{$('Res').textContent=sc.result;$('Run').disabled=false;document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.disabled=false);},2000));},300+i*2000)));}
+document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.addEventListener('click',function(){document.querySelectorAll('#'+pfx+'Scen button').forEach(x=>x.classList.remove('on'));this.classList.add('on');cur=this.dataset.s;reset();$('Pill').textContent=SCEN[cur].pill;}));
+$('Run').addEventListener('click',run);renderNodes();chip();
+})();
+</script>
+</body>
+</html>

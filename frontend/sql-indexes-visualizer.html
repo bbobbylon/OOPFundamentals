@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>SQL Indexes &amp; Query Plans — DevHub</title>
+<style>
+.who-QUERY{background:rgba(204,102,0,.22);color:#fcd34d}
+.who-BTREE{background:rgba(84,195,241,.18);color:#7dd3fc}
+.who-PAGE{background:rgba(167,139,250,.18);color:#c4b5fd}
+.who-ROW{background:rgba(74,222,128,.18);color:#86efac}
+.who-RESULT{background:rgba(248,113,113,.18);color:#fca5a5}
+</style>
+<link rel="stylesheet" href="devhub.css"/>
+</head>
+<body class="track-sql">
+<div class="page">
+<a class="back" href="javascript:history.back()">← Back</a>
+<h1>Indexes &amp; Query Plans</h1>
+<p class="subtitle">B-tree indexes, composite indexes, covering indexes — and how EXPLAIN shows you what the planner chose.</p>
+
+<div class="rt-ctlbar">
+  <span class="lbl">scenario:</span>
+  <span class="userseg" id="siScen">
+    <button data-s="btree" class="on">B-tree lookup</button>
+    <button data-s="composite">composite</button>
+    <button data-s="covering">covering</button>
+    <button data-s="explain">EXPLAIN ANALYZE</button>
+  </span>
+  <button class="rt-run" id="siRun">▶ Play</button>
+  <span class="rt-pill" id="siPill">query → B-tree index traversal → heap fetch → row</span>
+</div>
+<div class="rt-stage">
+  <div class="rt-diagram" id="siDiagram"></div>
+  <div class="rt-inspect">
+    <div class="rt-dir" id="siDir">▶ READY</div>
+    <div class="rt-cap" id="siCap">Choose a scenario and press ▶</div>
+    <pre class="rt-payload" id="siPay"></pre>
+    <pre class="rt-headers" id="siHdr"></pre>
+    <div class="rt-result" id="siRes"></div>
+  </div>
+</div>
+<div class="rt-legend">
+  <span>Query → B-tree Root → Leaf Page → Heap Fetch → Row</span>
+</div>
+
+<section>
+<h2>1 — How B-tree Indexes Work</h2>
+<div class="card">
+<p>A B-tree index is a separate on-disk structure ordered by the indexed column(s). The tree is typically 3-4 levels deep for millions of rows — instead of scanning every page you traverse ~3 pages to find the target, then fetch the heap page.</p>
+<pre><code><span class="cm">-- Create an index</span>
+<span class="kw">CREATE INDEX</span> idx_users_email <span class="kw">ON</span> users (email);
+<span class="kw">CREATE UNIQUE INDEX</span> idx_users_email_uniq <span class="kw">ON</span> users (email);
+
+<span class="cm">-- Partial index: only index active users (smaller, faster)</span>
+<span class="kw">CREATE INDEX</span> idx_active_users <span class="kw">ON</span> users (created_at)
+  <span class="kw">WHERE</span> active = true;
+
+<span class="cm">-- Expression index: index on a computed value</span>
+<span class="kw">CREATE INDEX</span> idx_lower_email <span class="kw">ON</span> users (LOWER(email));
+<span class="cm">-- Now this uses the index:</span>
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> users <span class="kw">WHERE</span> LOWER(email) = <span class="str">'alice@ex.com'</span>;</code></pre>
+</div>
+</section>
+
+<section>
+<h2>2 — Composite Index Column Order</h2>
+<div class="card card-blue">
+<p>A composite index <code>(a, b)</code> is sorted by <code>a</code> first, then <code>b</code> within equal <code>a</code> values. The <strong>leading column rule</strong>: a query can only use the index if it filters on the leftmost column(s).</p>
+<pre><code><span class="kw">CREATE INDEX</span> idx_orders_user_status <span class="kw">ON</span> orders (user_id, status);
+
+<span class="cm">-- USES the index (leading column user_id matches)</span>
+<span class="kw">WHERE</span> user_id = 42
+<span class="kw">WHERE</span> user_id = 42 <span class="kw">AND</span> status = <span class="str">'pending'</span>
+
+<span class="cm">-- Does NOT use the index (skips leading column)</span>
+<span class="kw">WHERE</span> status = <span class="str">'pending'</span>   <span class="cm">-- index scan on status alone? No.</span>
+
+<span class="cm">-- Rule of thumb: put high-cardinality, equality columns first</span>
+<span class="cm">-- Then range columns. user_id (equality) before status (range).</span></code></pre>
+</div>
+</section>
+
+<section>
+<h2>3 — Covering Index (Index-Only Scan)</h2>
+<div class="card card-green">
+<p>If the index contains ALL columns the query needs (via <code>INCLUDE</code>), PostgreSQL does an index-only scan — no heap page fetch needed. This is dramatically faster for read-heavy workloads.</p>
+<pre><code><span class="cm">-- Without covering: index scan + heap fetch for email</span>
+<span class="kw">CREATE INDEX</span> idx_users_active <span class="kw">ON</span> users (active, created_at);
+
+<span class="cm">-- With covering: no heap fetch needed</span>
+<span class="kw">CREATE INDEX</span> idx_users_active_cov <span class="kw">ON</span> users (active, created_at)
+  <span class="kw">INCLUDE</span> (id, email);  <span class="cm">-- INCLUDE stores extra cols in leaf pages</span>
+
+<span class="cm">-- This query now does an index-only scan:</span>
+<span class="kw">SELECT</span> id, email <span class="kw">FROM</span> users
+<span class="kw">WHERE</span> active = true <span class="kw">AND</span> created_at &gt; <span class="str">'2024-01-01'</span>;</code></pre>
+</div>
+</section>
+
+<section>
+<h2>4 — Reading EXPLAIN ANALYZE</h2>
+<div class="card card-purple">
+<pre><code><span class="kw">EXPLAIN ANALYZE</span>
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> users <span class="kw">WHERE</span> email = <span class="str">'alice@ex.com'</span>;
+
+<span class="cm">-- With index:
+-- Index Scan using idx_users_email on users  (cost=0.42..8.44 rows=1)
+--   (actual time=0.032..0.034 rows=1 loops=1)
+--   Index Cond: (email = 'alice@ex.com')
+-- Planning Time: 0.1 ms
+-- Execution Time: 0.1 ms
+
+-- Without index:
+-- Seq Scan on users  (cost=0.00..1842.00 rows=1 width=52)
+--   (actual time=12.3..18.4 rows=1 loops=1)
+--   Filter: (email = 'alice@ex.com')
+--   Rows Removed by Filter: 99999
+-- Execution Time: 18.5 ms</span></code></pre>
+<p class="note"><strong>cost=startup..total</strong>: startup cost to return first row, total cost to return all. <strong>rows</strong>: planner estimate (actual in parentheses). Big gaps = stale statistics → run <code>ANALYZE users;</code></p>
+</div>
+</section>
+</div>
+
+<script>
+(function(){
+const pfx='si';
+const NODES=['QUERY','BTREE','PAGE','ROW','RESULT'];
+function posOf(n){return 10+NODES.indexOf(n)*18;}
+const SCEN={
+  btree:{
+    pill:'email lookup → B-tree traverse (3 levels) → 1 row',
+    steps:[
+      {node:'QUERY',hdr:'SELECT * FROM users WHERE email = alice@ex.com',pay:{predicate:{column:'email',op:'=',value:'alice@ex.com'},tableRows:100000,indexExists:'idx_users_email'},ins:'Equality predicate on an indexed column — planner will choose index scan over sequential scan',tone:null},
+      {node:'BTREE',hdr:'Planner picks Index Scan — traverse root → branch → leaf',pay:{indexName:'idx_users_email',levels:3,rootPage:1,branchPage:142,leafPage:8847},ins:'B-tree traversal: root page → binary search → branch page → binary search → leaf page. O(log n)',tone:null},
+      {node:'PAGE',hdr:'Leaf page found — contains ctid (heap location)',pay:{leafPage:8847,entry:{email:'alice@ex.com',ctid:'(312,4)'},ctid:'page 312, slot 4 of the heap'},ins:'ctid (tuple ID) is the physical address in the heap table — index leaf points to it',tone:null},
+      {node:'ROW',hdr:'Heap page 312 fetched — row at slot 4 read',pay:{heapPage:312,slot:4,row:{id:1042,email:'alice@ex.com',active:true,created_at:'2024-03-15'},heapFetch:1},ins:'Heap fetch: read one 8KB page from disk (or buffer cache) — get the full row',tone:null},
+      {node:'RESULT',hdr:'1 row returned — total 3 page reads',pay:{rows:1,pagesRead:3,indexPages:2,heapPages:1,executionTime:'0.1ms'},ins:'Index scan: 3 pages vs 12,500 pages (seq scan on 100K row table). The index is 99.97% smaller.',tone:'ok'}
+    ],
+    result:'✓ 1 row in 0.1ms via B-tree index (3 page reads vs 12,500 seq scan)'
+  },
+  composite:{
+    pill:'(user_id, status) composite → leading column used',
+    steps:[
+      {node:'QUERY',hdr:'SELECT * FROM orders WHERE user_id=42 AND status=pending',pay:{predicates:{user_id:42,status:'pending'},compositeIndex:'idx_orders_user_status (user_id, status)'},ins:'Query hits both columns of the composite index in order — optimal case',tone:null},
+      {node:'BTREE',hdr:'Traverse index on (user_id=42, status=pending)',pay:{rootPage:1,leafRange:{from:{user_id:42,status:'pending'},to:{user_id:42,status:'pending'}}},ins:'B-tree is sorted by user_id first — jumps directly to user_id=42 section, then filters status',tone:null},
+      {node:'PAGE',hdr:'3 leaf entries match (user_id=42, status=pending)',pay:{matches:[{user_id:42,status:'pending',ctid:'(51,3)'},{user_id:42,status:'pending',ctid:'(67,1)'},{user_id:42,status:'pending',ctid:'(89,7)'}]},ins:'Only 3 orders of user 42 are pending — perfect selectivity from composite index',tone:null},
+      {node:'ROW',hdr:'3 heap fetches → 3 rows',pay:{rowsFetched:3,heapPages:3,note:'Without status in index: would scan ALL 47 orders for user_id=42'},ins:'The composite index eliminated the need to scan all 47 orders for this user — status filtering in the index',tone:'ok'}
+    ],
+    result:'✓ 3 rows via composite index — leading column + trailing column both matched'
+  },
+  covering:{
+    pill:'INCLUDE columns → Index-Only Scan — zero heap fetches',
+    steps:[
+      {node:'QUERY',hdr:'SELECT id, email FROM users WHERE active=true ORDER BY created_at DESC LIMIT 20',pay:{columns:['id','email'],filter:'active=true',sort:'created_at DESC',limit:20},ins:'Query needs only id and email columns — can we satisfy this from the index alone?',tone:null},
+      {node:'BTREE',hdr:'Covering index: (active, created_at) INCLUDE (id, email)',pay:{indexName:'idx_users_active_cov',keyColumns:['active','created_at'],includedColumns:['id','email']},ins:'INCLUDE columns are stored in leaf pages but not in branch/root — they are not sortable, but available for free',tone:null},
+      {node:'PAGE',hdr:'Index-Only Scan: all needed data in leaf pages',pay:{leafEntries:[{active:true,created_at:'2024-12-01',id:1001,email:'alice@ex.com'},{active:true,created_at:'2024-11-30',id:1002,email:'bob@ex.com'}],heapFetch:0},ins:'PostgreSQL checks the visibility map — if the heap page is all-visible, no heap fetch needed',tone:null},
+      {node:'RESULT',hdr:'20 rows from index pages only',pay:{rows:20,indexPagesRead:3,heapPagesRead:0,speedup:'4x faster than index scan + heap fetch'},ins:'Index-only scan is the fastest possible plan — consider covering indexes for your most critical read queries',tone:'ok'}
+    ],
+    result:'✓ Index-Only Scan — 0 heap fetches, 20 rows in 0.05ms'
+  },
+  explain:{
+    pill:'EXPLAIN ANALYZE reveals actual vs estimated row counts',
+    steps:[
+      {node:'QUERY',hdr:'EXPLAIN ANALYZE SELECT * FROM orders WHERE user_id=42',pay:{sql:'EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM orders WHERE user_id = 42'},ins:'BUFFERS shows cache hit/miss; ANALYZE actually runs the query — use on dev/staging, not prod (runs the query!)',tone:null},
+      {node:'BTREE',hdr:'Planner estimates: Index Scan, 47 rows',pay:{plan:'Index Scan using idx_orders_user_id on orders',cost:'cost=0.43..8.81 rows=47 width=64',estimateSource:'pg_statistic histogram'},ins:'Row estimate comes from column statistics — if wildly off, run ANALYZE to refresh them',tone:null},
+      {node:'PAGE',hdr:'Execution: actual 47 rows, 3 heap pages',pay:{actual:'rows=47 loops=1',buffers:{shared_hit:5,shared_read:3},totalPages:8},ins:'shared_hit = from buffer cache (fast); shared_read = from disk. High read count = cold cache or large scan',tone:null},
+      {node:'RESULT',hdr:'Planning 0.1ms, Execution 0.2ms',pay:{planningTime:'0.134 ms',executionTime:'0.215 ms',rowsEstimated:47,rowsActual:47,verdict:'estimate matches actual — statistics are fresh'},ins:'If estimated rows >> actual rows: planner may pick a bad plan (e.g. seq scan). Fix: ANALYZE the table.',tone:'ok'}
+    ],
+    result:'✓ Good plan — index scan, estimate matches actual, < 0.4ms total'
+  }
+};
+let cur='btree',T=[];
+const $=id=>document.getElementById(pfx+id);
+function renderNodes(){$('Diagram').innerHTML=NODES.map(n=>`<div class="rt-node who-${n}" id="${pfx}N${n}" style="left:${posOf(n)}%">${n}</div>`).join('');}
+function chip(){let c=document.getElementById(pfx+'chip');if(!c){c=document.createElement('div');c.id=pfx+'chip';c.className='rt-chip';$('Diagram').appendChild(c);}return c;}
+function clearT(){T.forEach(clearTimeout);T=[];}
+function reset(){clearT();renderNodes();chip().style.left=posOf(NODES[0])+'%';chip().className='rt-chip';$('Dir').textContent='▶ READY';$('Cap').textContent='Choose a scenario and press ▶';$('Pay').textContent='';$('Hdr').textContent='';$('Res').textContent='';$('Run').disabled=false;document.querySelectorAll('#'+pfx+'Diagram .rt-node').forEach(n=>n.className=n.className.replace(/ ?(vchk|vskip|curbad|rt-cur)/g,''));}
+function applyStep(s){document.querySelectorAll('#'+pfx+'Diagram .rt-node').forEach(n=>n.classList.remove('rt-cur','vchk','vskip','curbad'));const nd=document.getElementById(pfx+'N'+s.node);if(nd){nd.classList.add('rt-cur');if(s.tone==='ok')nd.classList.add('vchk');if(s.tone==='bad')nd.classList.add('vskip','curbad');chip().style.left=posOf(s.node)+'%';chip().className='rt-chip'+(s.tone==='ok'?' ok':s.tone==='bad'?' bad':'');}$('Dir').textContent=s.hdr;$('Cap').textContent=s.ins;$('Pay').textContent=JSON.stringify(s.pay,null,2);$('Hdr').textContent='';}
+function run(){const sc=SCEN[cur];reset();$('Run').disabled=true;$('Pill').textContent=sc.pill;document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.disabled=true);sc.steps.forEach((s,i)=>T.push(setTimeout(()=>{applyStep(s);if(i===sc.steps.length-1)T.push(setTimeout(()=>{$('Res').textContent=sc.result;$('Run').disabled=false;document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.disabled=false);},2000));},300+i*2000)));}
+document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.addEventListener('click',function(){document.querySelectorAll('#'+pfx+'Scen button').forEach(x=>x.classList.remove('on'));this.classList.add('on');cur=this.dataset.s;reset();$('Pill').textContent=SCEN[cur].pill;}));
+$('Run').addEventListener('click',run);renderNodes();chip();
+})();
+</script>
+</body>
+</html>

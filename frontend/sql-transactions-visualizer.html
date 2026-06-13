@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>SQL Transactions &amp; ACID — DevHub</title>
+<style>
+.who-TXN{background:rgba(204,102,0,.22);color:#fcd34d}
+.who-LOCK{background:rgba(248,113,113,.18);color:#fca5a5}
+.who-LOG{background:rgba(84,195,241,.18);color:#7dd3fc}
+.who-COMMIT{background:rgba(74,222,128,.18);color:#86efac}
+.who-DB{background:rgba(167,139,250,.18);color:#c4b5fd}
+</style>
+<link rel="stylesheet" href="devhub.css"/>
+</head>
+<body class="track-sql">
+<div class="page">
+<a class="back" href="javascript:history.back()">← Back</a>
+<h1>Transactions &amp; ACID</h1>
+<p class="subtitle">Atomicity, Consistency, Isolation, Durability — and how PostgreSQL MVCC gives you isolation without blocking readers.</p>
+
+<div class="rt-ctlbar">
+  <span class="lbl">scenario:</span>
+  <span class="userseg" id="stScen">
+    <button data-s="atomic" class="on">atomicity</button>
+    <button data-s="isolation">isolation levels</button>
+    <button data-s="deadlock">deadlock</button>
+    <button data-s="mvcc">MVCC</button>
+  </span>
+  <button class="rt-run" id="stRun">▶ Play</button>
+  <span class="rt-pill" id="stPill">BEGIN → operations → COMMIT / ROLLBACK</span>
+</div>
+<div class="rt-stage">
+  <div class="rt-diagram" id="stDiagram"></div>
+  <div class="rt-inspect">
+    <div class="rt-dir" id="stDir">▶ READY</div>
+    <div class="rt-cap" id="stCap">Choose a scenario and press ▶</div>
+    <pre class="rt-payload" id="stPay"></pre>
+    <pre class="rt-headers" id="stHdr"></pre>
+    <div class="rt-result" id="stRes"></div>
+  </div>
+</div>
+<div class="rt-legend">
+  <span>Transaction → Row Lock → WAL (Write-Ahead Log) → Commit → Durable DB state</span>
+  <span><span style="color:#fca5a5">red = deadlock / rollback</span> · <span style="color:#86efac">green = committed</span></span>
+</div>
+
+<section>
+<h2>1 — ACID Properties</h2>
+<div class="card">
+<table>
+<tr><th>Property</th><th>Meaning</th><th>How PostgreSQL provides it</th></tr>
+<tr><td><strong>A</strong>tomicity</td><td>All operations succeed or none do</td><td>WAL rollback; BEGIN/COMMIT/ROLLBACK</td></tr>
+<tr><td><strong>C</strong>onsistency</td><td>Constraints are never violated</td><td>FK, UNIQUE, CHECK, NOT NULL enforced at commit</td></tr>
+<tr><td><strong>I</strong>solation</td><td>Concurrent txns don't see each other's partial work</td><td>MVCC (snapshot isolation) + row-level locks</td></tr>
+<tr><td><strong>D</strong>urability</td><td>Committed data survives crashes</td><td>WAL fsynced to disk before COMMIT returns</td></tr>
+</table>
+</div>
+</section>
+
+<section>
+<h2>2 — Isolation Levels</h2>
+<div class="card card-blue">
+<table>
+<tr><th>Level</th><th>Dirty Read</th><th>Non-repeatable Read</th><th>Phantom Read</th></tr>
+<tr><td>READ UNCOMMITTED</td><td>Possible</td><td>Possible</td><td>Possible</td></tr>
+<tr><td>READ COMMITTED (PG default)</td><td>No</td><td>Possible</td><td>Possible</td></tr>
+<tr><td>REPEATABLE READ</td><td>No</td><td>No</td><td>No (PG uses snapshot)</td></tr>
+<tr><td>SERIALIZABLE</td><td>No</td><td>No</td><td>No</td></tr>
+</table>
+<pre style="margin-top:12px"><code><span class="cm">-- Set isolation level</span>
+<span class="kw">BEGIN TRANSACTION ISOLATION LEVEL</span> REPEATABLE READ;
+
+<span class="cm">-- In Spring Boot:</span>
+<span class="dec">@Transactional</span>(isolation = Isolation.REPEATABLE_READ)</code></pre>
+</div>
+</section>
+
+<section>
+<h2>3 — Deadlock Prevention</h2>
+<div class="card card-red">
+<p>A deadlock occurs when TXN A waits for TXN B's lock, and TXN B waits for TXN A's lock — a cycle that can never resolve. PostgreSQL detects it in ~1 second and kills one transaction.</p>
+<pre><code><span class="cm">-- Prevention: always acquire locks in the same ORDER</span>
+
+<span class="cm">-- BAD (can deadlock):</span>
+<span class="cm">-- TXN A: UPDATE accounts WHERE id=1 THEN WHERE id=2</span>
+<span class="cm">-- TXN B: UPDATE accounts WHERE id=2 THEN WHERE id=1</span>
+
+<span class="cm">-- GOOD: always lock lower id first</span>
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> accounts
+  <span class="kw">WHERE</span> id <span class="kw">IN</span> (1, 2)
+  <span class="kw">ORDER BY</span> id  <span class="cm">-- lock in consistent order!</span>
+  <span class="kw">FOR UPDATE</span>;
+
+<span class="cm">-- Or use SELECT ... FOR UPDATE SKIP LOCKED (queue pattern)</span></code></pre>
+</div>
+</section>
+
+<section>
+<h2>4 — MVCC in Spring Boot Context</h2>
+<div class="card card-green">
+<p>PostgreSQL MVCC means <strong>readers never block writers, writers never block readers</strong>. Each transaction sees a consistent snapshot. Old row versions are kept until VACUUM removes them.</p>
+<pre><code><span class="cm">// Spring: @Transactional creates a transaction boundary</span>
+<span class="dec">@Transactional</span>(readOnly = true)  <span class="cm">// uses snapshot, no locks</span>
+<span class="kw">public</span> List&lt;User&gt; getUsers() {
+  <span class="kw">return</span> userRepo.findAll();  <span class="cm">// consistent snapshot at txn start</span>
+}
+
+<span class="cm">// Optimistic locking: detect conflicts without row-level locks</span>
+<span class="dec">@Entity</span>
+<span class="kw">public class</span> Order {
+  <span class="dec">@Version</span>  <span class="cm">// Hibernate checks this on UPDATE</span>
+  <span class="kw">private int</span> version;  <span class="cm">// incremented each update</span>
+  <span class="cm">// UPDATE orders SET ... WHERE id=? AND version=?</span>
+  <span class="cm">// If 0 rows updated → OptimisticLockException → retry</span>
+}</code></pre>
+</div>
+</section>
+</div>
+
+<script>
+(function(){
+const pfx='st';
+const NODES=['TXN','LOCK','LOG','COMMIT','DB'];
+function posOf(n){return 10+NODES.indexOf(n)*18;}
+const SCEN={
+  atomic:{
+    pill:'BEGIN → transfer $100 → error → ROLLBACK → no change',
+    steps:[
+      {node:'TXN',hdr:'BEGIN — transfer $100 from Alice to Bob',pay:{txnId:'txn_4892',operations:['UPDATE accounts SET balance=balance-100 WHERE id=1','UPDATE accounts SET balance=balance+100 WHERE id=2'],isolation:'READ COMMITTED'},ins:'BEGIN starts a transaction — all operations form one atomic unit',tone:null},
+      {node:'LOCK',hdr:'Row lock acquired on accounts id=1',pay:{lockedRow:{id:1,name:'Alice',balance:500},lockType:'FOR UPDATE (exclusive row lock)',txnId:'txn_4892'},ins:'UPDATE acquires an exclusive row lock — other transactions block on the same row until commit/rollback',tone:null},
+      {node:'LOG',hdr:'First UPDATE written to WAL buffer',pay:{wal:{lsn:'0/1A2B3C4D',type:'UPDATE',relation:'accounts',key:{id:1},old:{balance:500},new:{balance:400}}},ins:'WAL (Write-Ahead Log) records the change before the heap page — enables crash recovery',tone:null},
+      {node:'COMMIT',hdr:'Second UPDATE fails: CHECK constraint violated',pay:{error:'new row violates check constraint accounts_balance_check',constraint:'balance >= 0',attempted:{id:2,balance:-50}},ins:'PostgreSQL raises an error — the transaction is now in ERROR state; you MUST ROLLBACK before doing anything else',tone:'bad'},
+      {node:'DB',hdr:'ROLLBACK — WAL records reversed, locks released',pay:{rolledBack:true,aliceBalance:500,bobBalance:null,note:'As if the transaction never happened'},ins:'Atomicity: since the second UPDATE failed, the first UPDATE is also undone — no partial transfer',tone:'ok'}
+    ],
+    result:'✓ ROLLBACK — Alice still has $500, no money lost'
+  },
+  isolation:{
+    pill:'READ COMMITTED: two reads of same row see different values',
+    steps:[
+      {node:'TXN',hdr:'TXN A starts — reads orders count at 10:00',pay:{txnId:'txn_A',isolation:'READ COMMITTED (default)',time:'10:00:00',query:'SELECT COUNT(*) FROM orders WHERE status=pending'},ins:'READ COMMITTED: each statement sees its own snapshot — takes a fresh snapshot per statement',tone:null},
+      {node:'DB',hdr:'TXN B inserts a new pending order and commits',pay:{txnId:'txn_B',action:'INSERT INTO orders (status) VALUES (pending)',committed:'10:00:01'},ins:'TXN B commits between TXN A first and second reads — this is allowed under READ COMMITTED',tone:null},
+      {node:'TXN',hdr:'TXN A reads orders count again at 10:00:02',pay:{txnId:'txn_A',query:'SELECT COUNT(*) FROM orders WHERE status=pending',firstRead:47,secondRead:48,difference:'non-repeatable read!'},ins:'Non-repeatable read: same query returns different results within the same transaction — normal for READ COMMITTED',tone:'bad'},
+      {node:'LOG',hdr:'REPEATABLE READ would have prevented this',pay:{fix:'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ',behaviour:'TXN A sees the same snapshot for all reads — committed data after BEGIN is invisible to TXN A',tradeoff:'Serialization failure errors possible (retry needed)'},ins:'REPEATABLE READ takes a snapshot at first data access — all reads see the same state',tone:null},
+      {node:'COMMIT',hdr:'TXN A commits — isolation level decision made',pay:{recommendation:'Use READ COMMITTED for most OLTP. Use REPEATABLE READ for reports. Use SERIALIZABLE for financial/audit critical paths.'},ins:'Spring: @Transactional(isolation=Isolation.REPEATABLE_READ) on report methods',tone:'ok'}
+    ],
+    result:'✓ Non-repeatable read demonstrated — use REPEATABLE READ for consistent reports'
+  },
+  deadlock:{
+    pill:'TXN A + TXN B lock in reverse order → cycle → deadlock',
+    steps:[
+      {node:'LOCK',hdr:'TXN A locks account id=1 (FOR UPDATE)',pay:{txnA:{lockedRows:[1],waitingFor:null},txnB:{lockedRows:[],waitingFor:null}},ins:'TXN A acquires an exclusive lock on row id=1 — OK so far',tone:null},
+      {node:'LOCK',hdr:'TXN B locks account id=2 (FOR UPDATE)',pay:{txnA:{lockedRows:[1],waitingFor:null},txnB:{lockedRows:[2],waitingFor:null}},ins:'TXN B acquires an exclusive lock on row id=2 — also OK',tone:null},
+      {node:'LOCK',hdr:'TXN A tries to lock id=2 — blocked by TXN B',pay:{txnA:{lockedRows:[1],waitingFor:2,status:'WAITING'},txnB:{lockedRows:[2],waitingFor:null}},ins:'TXN A blocks — it needs row 2 which TXN B has locked',tone:null},
+      {node:'LOCK',hdr:'TXN B tries to lock id=1 — blocked by TXN A — DEADLOCK',pay:{txnA:{waitingFor:2},txnB:{waitingFor:1},cycle:true,detectedBy:'PostgreSQL lock detector (~1s)'},ins:'PostgreSQL detects the cycle and picks one transaction to kill (the one that has done less work)',tone:'bad'},
+      {node:'DB',hdr:'TXN B killed with ERROR 40P01 — TXN A proceeds',pay:{killed:'txn_B',error:'ERROR 40P01: deadlock detected',txnACompletes:true,fix:'Always acquire locks in the same order (ORDER BY id FOR UPDATE)'},ins:'Handle 40P01 in application code — catch and retry. Spring @Retryable or explicit retry loop.',tone:'ok'}
+    ],
+    result:'✗ Deadlock! TXN B rolled back — fix by locking in consistent ORDER BY id'
+  },
+  mvcc:{
+    pill:'MVCC: reader sees old row version while writer updates',
+    steps:[
+      {node:'DB',hdr:'Row: id=42, balance=500, xmin=100, xmax=null',pay:{row:{id:42,balance:500,xmin:100,xmax:null},xmin:'transaction that created this version',xmax:'transaction that deleted/updated (null = still current)'},ins:'Every row has xmin (created by) and xmax (deleted/updated by) system columns — the basis of MVCC',tone:null},
+      {node:'TXN',hdr:'TXN A (id=200) reads row — sees balance=500',pay:{txnA:{id:200,snapshot:'sees committed rows with xmin < 200'},rowVisible:{id:42,balance:500,reason:'xmin=100 < 200, xmax=null (not deleted)'}},ins:'TXN A sees the committed version — xmin 100 < snapshot 200 and row is not deleted',tone:null},
+      {node:'LOCK',hdr:'TXN B (id=201) updates row — writes NEW version',pay:{old:{id:42,balance:500,xmin:100,xmax:201},new:{id:42,balance:450,xmin:201,xmax:null},note:'TXN A still sees the old version with xmax=201 (201 > 200 = invisible to TXN A)'},ins:'UPDATE creates a new row version; marks old version xmax=201. Both versions exist on the heap.',tone:null},
+      {node:'COMMIT',hdr:'TXN B commits — TXN A still sees old version',pay:{txnBCommitted:true,txnAStillReads:{balance:500},newReadersWouldSee:{balance:450},mvccBenefit:'zero blocking between reader and writer'},ins:'TXN A keeps its snapshot — will see 450 only in its NEXT transaction. No locking needed.',tone:null},
+      {node:'DB',hdr:'VACUUM eventually removes old versions (dead tuples)',pay:{deadTuples:1,vacuumAction:'remove row version with xmax=201 (no active txn can see it)',tableBloat:'eliminated — pages reclaimed'},ins:'AUTOVACUUM runs in the background — critical for tables with high UPDATE/DELETE rates',tone:'ok'}
+    ],
+    result:'✓ MVCC: reader sees consistent snapshot, writer proceeds — no blocking'
+  }
+};
+let cur='atomic',T=[];
+const $=id=>document.getElementById(pfx+id);
+function renderNodes(){$('Diagram').innerHTML=NODES.map(n=>`<div class="rt-node who-${n}" id="${pfx}N${n}" style="left:${posOf(n)}%">${n}</div>`).join('');}
+function chip(){let c=document.getElementById(pfx+'chip');if(!c){c=document.createElement('div');c.id=pfx+'chip';c.className='rt-chip';$('Diagram').appendChild(c);}return c;}
+function clearT(){T.forEach(clearTimeout);T=[];}
+function reset(){clearT();renderNodes();chip().style.left=posOf(NODES[0])+'%';chip().className='rt-chip';$('Dir').textContent='▶ READY';$('Cap').textContent='Choose a scenario and press ▶';$('Pay').textContent='';$('Hdr').textContent='';$('Res').textContent='';$('Run').disabled=false;document.querySelectorAll('#'+pfx+'Diagram .rt-node').forEach(n=>n.className=n.className.replace(/ ?(vchk|vskip|curbad|rt-cur)/g,''));}
+function applyStep(s){document.querySelectorAll('#'+pfx+'Diagram .rt-node').forEach(n=>n.classList.remove('rt-cur','vchk','vskip','curbad'));const nd=document.getElementById(pfx+'N'+s.node);if(nd){nd.classList.add('rt-cur');if(s.tone==='ok')nd.classList.add('vchk');if(s.tone==='bad')nd.classList.add('vskip','curbad');chip().style.left=posOf(s.node)+'%';chip().className='rt-chip'+(s.tone==='ok'?' ok':s.tone==='bad'?' bad':'');}$('Dir').textContent=s.hdr;$('Cap').textContent=s.ins;$('Pay').textContent=JSON.stringify(s.pay,null,2);$('Hdr').textContent='';}
+function run(){const sc=SCEN[cur];reset();$('Run').disabled=true;$('Pill').textContent=sc.pill;document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.disabled=true);sc.steps.forEach((s,i)=>T.push(setTimeout(()=>{applyStep(s);if(i===sc.steps.length-1)T.push(setTimeout(()=>{$('Res').textContent=sc.result;$('Run').disabled=false;document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.disabled=false);},2000));},300+i*2000)));}
+document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.addEventListener('click',function(){document.querySelectorAll('#'+pfx+'Scen button').forEach(x=>x.classList.remove('on'));this.classList.add('on');cur=this.dataset.s;reset();$('Pill').textContent=SCEN[cur].pill;}));
+$('Run').addEventListener('click',run);renderNodes();chip();
+})();
+</script>
+</body>
+</html>

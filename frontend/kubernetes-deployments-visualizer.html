@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Kubernetes Deployments &amp; Scaling — DevHub</title>
+<style>
+.who-DEPLOY{background:rgba(50,108,229,.22);color:#93bbff}
+.who-RS{background:rgba(84,195,241,.18);color:#7dd3fc}
+.who-POD{background:rgba(74,222,128,.18);color:#86efac}
+.who-PROBE{background:rgba(251,191,36,.18);color:#fcd34d}
+.who-HPA{background:rgba(167,139,250,.18);color:#c4b5fd}
+</style>
+<link rel="stylesheet" href="devhub.css"/>
+</head>
+<body class="track-kubernetes">
+<div class="page">
+<a class="back" href="javascript:history.back()">← Back</a>
+<h1>Deployments &amp; Scaling</h1>
+<p class="subtitle">Deployments manage ReplicaSets so your pods survive crashes, updates, and traffic spikes.</p>
+
+<div class="rt-ctlbar">
+  <span class="lbl">scenario:</span>
+  <span class="userseg" id="kdScen">
+    <button data-s="create" class="on">create</button>
+    <button data-s="rollout">rolling update</button>
+    <button data-s="rollback">rollback</button>
+    <button data-s="hpa">autoscale</button>
+  </span>
+  <button class="rt-run" id="kdRun">▶ Play</button>
+  <span class="rt-pill" id="kdPill">Deployment → ReplicaSet → 3 Pods Ready</span>
+</div>
+<div class="rt-stage">
+  <div class="rt-diagram" id="kdDiagram"></div>
+  <div class="rt-inspect">
+    <div class="rt-dir" id="kdDir">▶ READY</div>
+    <div class="rt-cap" id="kdCap">Choose a scenario and press ▶</div>
+    <pre class="rt-payload" id="kdPay"></pre>
+    <pre class="rt-headers" id="kdHdr"></pre>
+    <div class="rt-result" id="kdRes"></div>
+  </div>
+</div>
+<div class="rt-legend">
+  <span>Deployment → ReplicaSet → Pod → Health Probe → HPA</span>
+  <span><span style="color:#86efac">green = ready</span> · <span style="color:#fca5a5">red = failed probe / bad version</span></span>
+</div>
+
+<section>
+<h2>1 — Deployment Manifest</h2>
+<div class="card">
+<p>A <strong>Deployment</strong> declares desired replicas and a pod template. It owns a <strong>ReplicaSet</strong> which ensures the right number of pods are always running.</p>
+<pre><code><span class="kw">apiVersion</span>: apps/v1
+<span class="kw">kind</span>: Deployment
+<span class="kw">metadata</span>:
+  <span class="kw">name</span>: api-server
+<span class="kw">spec</span>:
+  <span class="kw">replicas</span>: 3
+  <span class="kw">selector</span>:
+    <span class="kw">matchLabels</span>: { <span class="kw">app</span>: api-server }
+  <span class="kw">strategy</span>:
+    <span class="kw">type</span>: RollingUpdate
+    <span class="kw">rollingUpdate</span>:
+      <span class="kw">maxSurge</span>: 1        <span class="cm"># extra pods during update</span>
+      <span class="kw">maxUnavailable</span>: 0   <span class="cm"># never go below replicas</span>
+  <span class="kw">template</span>:
+    <span class="kw">metadata</span>:
+      <span class="kw">labels</span>: { <span class="kw">app</span>: api-server }
+    <span class="kw">spec</span>:
+      <span class="kw">containers</span>:
+      - <span class="kw">name</span>: app
+        <span class="kw">image</span>: <span class="str">myregistry/api-server:1.0</span>
+        <span class="kw">livenessProbe</span>:
+          <span class="kw">httpGet</span>: { <span class="kw">path</span>: /actuator/health/liveness, <span class="kw">port</span>: 8080 }
+          <span class="kw">initialDelaySeconds</span>: 30
+        <span class="kw">readinessProbe</span>:
+          <span class="kw">httpGet</span>: { <span class="kw">path</span>: /actuator/health/readiness, <span class="kw">port</span>: 8080 }</code></pre>
+</div>
+</section>
+
+<section>
+<h2>2 — Rolling Update Strategy</h2>
+<div class="card card-blue">
+<p>A rolling update creates a new ReplicaSet and gradually shifts replicas from old to new. With <code>maxSurge:1, maxUnavailable:0</code> and <code>replicas:3</code>, you always have 3 healthy pods and at most 4 total during the update.</p>
+<pre><code><span class="cm"># trigger a rollout</span>
+kubectl set image deployment/api-server app=myregistry/api-server:2.0
+
+<span class="cm"># watch progress</span>
+kubectl rollout status deployment/api-server
+
+<span class="cm"># history</span>
+kubectl rollout history deployment/api-server
+<span class="cm"># REVISION  CHANGE-CAUSE
+# 1         initial deploy
+# 2         image update to 2.0</span></code></pre>
+</div>
+</section>
+
+<section>
+<h2>3 — Probes: Liveness vs Readiness</h2>
+<div class="card card-green">
+<table>
+<tr><th>Probe</th><th>Failure action</th><th>Use for</th></tr>
+<tr><td><code>livenessProbe</code></td><td>Restart container</td><td>Detect deadlock / hung process</td></tr>
+<tr><td><code>readinessProbe</code></td><td>Remove from Service endpoints</td><td>Warm-up, temporary unavailability</td></tr>
+<tr><td><code>startupProbe</code></td><td>Restart if not ready within failureThreshold</td><td>Slow-starting apps (protects liveness during startup)</td></tr>
+</table>
+<p style="margin-top:10px">For Spring Boot: expose <code>/actuator/health/liveness</code> and <code>/actuator/health/readiness</code> by adding the Kubernetes actuator group in <code>application.yml</code>.</p>
+</div>
+</section>
+
+<section>
+<h2>4 — Horizontal Pod Autoscaler (HPA)</h2>
+<div class="card card-purple">
+<pre><code><span class="kw">apiVersion</span>: autoscaling/v2
+<span class="kw">kind</span>: HorizontalPodAutoscaler
+<span class="kw">metadata</span>:
+  <span class="kw">name</span>: api-server-hpa
+<span class="kw">spec</span>:
+  <span class="kw">scaleTargetRef</span>:
+    <span class="kw">apiVersion</span>: apps/v1
+    <span class="kw">kind</span>: Deployment
+    <span class="kw">name</span>: api-server
+  <span class="kw">minReplicas</span>: 2
+  <span class="kw">maxReplicas</span>: 10
+  <span class="kw">metrics</span>:
+  - <span class="kw">type</span>: Resource
+    <span class="kw">resource</span>:
+      <span class="kw">name</span>: cpu
+      <span class="kw">target</span>:
+        <span class="kw">type</span>: Utilization
+        <span class="kw">averageUtilization</span>: 70  <span class="cm"># scale up if avg CPU > 70%</span></code></pre>
+<p class="note">HPA requires <code>metrics-server</code> in the cluster. For KEDA (event-driven autoscaling on queue depth, Redis key count, etc.) replace HPA with a <code>ScaledObject</code>.</p>
+</div>
+</section>
+</div>
+
+<script>
+(function(){
+const pfx='kd';
+const NODES=['DEPLOY','RS','POD','PROBE','HPA'];
+function posOf(n){return 10+NODES.indexOf(n)*18;}
+const SCEN={
+  create:{
+    pill:'Deployment → ReplicaSet → 3 Pods Ready',
+    steps:[
+      {node:'DEPLOY',hdr:'kubectl apply → Deployment created',pay:{name:'api-server',replicas:3,image:'myregistry/api-server:1.0',strategy:'RollingUpdate'},ins:'Deployment controller creates a ReplicaSet from the pod template with a revision label',tone:null},
+      {node:'RS',hdr:'ReplicaSet rs-a1b2c ensures 3 replicas',pay:{name:'api-server-a1b2c',replicas:{desired:3,current:0,ready:0}},ins:'ReplicaSet watches pods with matching labels — creates pods until desired == actual',tone:null},
+      {node:'POD',hdr:'3 pods created and scheduled',pay:{pods:['api-server-a1b2c-x','api-server-a1b2c-y','api-server-a1b2c-z'],phase:'Pending',node:['worker-1','worker-2','worker-2']},ins:'Pods are in Pending phase until the scheduler assigns them to nodes and images pull',tone:null},
+      {node:'PROBE',hdr:'Readiness probe passes on all 3 pods',pay:{path:'/actuator/health/readiness',status:200,pods:{ready:3,total:3}},ins:'Once readiness probes succeed pods are added to the Service endpoints and traffic flows',tone:'ok'},
+      {node:'RS',hdr:'ReplicaSet reports 3/3 ready',pay:{name:'api-server-a1b2c',replicas:{desired:3,current:3,ready:3}},ins:'Deployment is fully available — all 3 pods healthy and receiving traffic',tone:'ok'}
+    ],
+    result:'✓ Deployment api-server: 3/3 pods ready'
+  },
+  rollout:{
+    pill:'image:1.0 → image:2.0 zero-downtime rolling update',
+    steps:[
+      {node:'DEPLOY',hdr:'kubectl set image → new revision created',pay:{prevImage:'api-server:1.0',newImage:'api-server:2.0',revision:2,strategy:{maxSurge:1,maxUnavailable:0}},ins:'Deployment controller creates a NEW ReplicaSet (rs-d3e4f) for the new image',tone:null},
+      {node:'RS',hdr:'New RS scales up, old RS scales down',pay:{newRS:{name:'api-server-d3e4f',replicas:1},oldRS:{name:'api-server-a1b2c',replicas:3}},ins:'maxSurge:1 allows a 4th pod to exist temporarily; maxUnavailable:0 keeps all 3 slots filled',tone:null},
+      {node:'PROBE',hdr:'Readiness probe on new pod passes',pay:{pod:'api-server-d3e4f-p',image:'api-server:2.0',readinessProbe:200,addedToEndpoints:true},ins:'Only after the new pod is Ready does the old RS lose one replica — prevents traffic loss',tone:'ok'},
+      {node:'POD',hdr:'Rollout completes: 3 new pods, 0 old',pay:{newRS:{replicas:3,ready:3},oldRS:{replicas:0},downtime:'0s'},ins:'Old RS stays at 0 replicas (not deleted) so rollback is instant — just scale it back up',tone:'ok'}
+    ],
+    result:'✓ Rollout complete — api-server:2.0 running on 3 pods, zero downtime'
+  },
+  rollback:{
+    pill:'v2 bad → rollback to v1 in seconds',
+    steps:[
+      {node:'PROBE',hdr:'Readiness probe failing on v2 pods',pay:{pod:'api-server-d3e4f-p',image:'api-server:2.0',readinessProbe:500,addedToEndpoints:false},ins:'New pods fail readiness — K8s pauses the rollout (never removes old pods when maxUnavailable:0)',tone:'bad'},
+      {node:'DEPLOY',hdr:'kubectl rollout undo deployment/api-server',pay:{undoTo:'revision 1',oldRS:'api-server-a1b2c',action:'scale up old RS'},ins:'kubectl rollout undo scales the old ReplicaSet back to 3 and the new one to 0',tone:null},
+      {node:'RS',hdr:'Old RS (v1) scaled back to 3',pay:{oldRS:{name:'api-server-a1b2c',replicas:3,image:'api-server:1.0'},newRS:{name:'api-server-d3e4f',replicas:0}},ins:'Because old RS was kept at 0 (not deleted), rollback is immediate — no image pull needed',tone:null},
+      {node:'POD',hdr:'v1 pods back in service',pay:{image:'api-server:1.0',ready:3,rollbackTime:'< 10s'},ins:'Rollback is complete — v2 pods removed, v1 pods serving traffic again',tone:'ok'}
+    ],
+    result:'✓ Rolled back to revision 1 — api-server:1.0 serving'
+  },
+  hpa:{
+    pill:'CPU spike → HPA scales replicas up → idle → scale down',
+    steps:[
+      {node:'HPA',hdr:'HPA watches average CPU utilization',pay:{target:'api-server',currentReplicas:2,currentCPU:'30%',targetCPU:'70%'},ins:'HPA polls metrics-server every 15s; 30% CPU is well under the 70% target — no action',tone:null},
+      {node:'HPA',hdr:'CPU spikes to 85% — scale up triggered',pay:{currentCPU:'85%',desiredReplicas:3,calculation:'85/70 * 2 = 2.43 → ceil → 3'},ins:'HPA calculates: ceil(currentMetric/target * currentReplicas) = 3 desired',tone:null},
+      {node:'DEPLOY',hdr:'Deployment scaled to 3 replicas',pay:{prevReplicas:2,newReplicas:3,message:'Scaled up replica set api-server-a1b2c to 3'},ins:'HPA patches the Deployment spec.replicas — Deployment controller creates the new pod',tone:null},
+      {node:'POD',hdr:'New pod ready; CPU drops to 55%',pay:{replicas:3,cpu:'55%',scaleDownCooldown:'5min'},ins:'Load is now spread across 3 pods; HPA has a scale-down cooldown (default 5min) to prevent flapping',tone:'ok'}
+    ],
+    result:'✓ Autoscaled 2 → 3 replicas; CPU 85% → 55%'
+  }
+};
+let cur='create',T=[];
+const $=id=>document.getElementById(pfx+id);
+function renderNodes(){
+  $('Diagram').innerHTML=NODES.map(n=>`<div class="rt-node who-${n}" id="${pfx}N${n}" style="left:${posOf(n)}%">${n}</div>`).join('');
+}
+function chip(){let c=document.getElementById(pfx+'chip');if(!c){c=document.createElement('div');c.id=pfx+'chip';c.className='rt-chip';$('Diagram').appendChild(c);}return c;}
+function clearT(){T.forEach(clearTimeout);T=[];}
+function reset(){
+  clearT();renderNodes();chip().style.left=posOf(NODES[0])+'%';chip().className='rt-chip';
+  $('Dir').textContent='▶ READY';$('Cap').textContent='Choose a scenario and press ▶';
+  $('Pay').textContent='';$('Hdr').textContent='';$('Res').textContent='';
+  $('Run').disabled=false;
+  document.querySelectorAll('#'+pfx+'Diagram .rt-node').forEach(n=>n.className=n.className.replace(/ ?(vchk|vskip|curbad|rt-cur)/g,''));
+}
+function applyStep(s){
+  document.querySelectorAll('#'+pfx+'Diagram .rt-node').forEach(n=>n.classList.remove('rt-cur','vchk','vskip','curbad'));
+  const nd=document.getElementById(pfx+'N'+s.node);
+  if(nd){nd.classList.add('rt-cur');if(s.tone==='ok')nd.classList.add('vchk');if(s.tone==='bad')nd.classList.add('vskip','curbad');chip().style.left=posOf(s.node)+'%';chip().className='rt-chip'+(s.tone==='ok'?' ok':s.tone==='bad'?' bad':'');}
+  $('Dir').textContent=s.hdr;$('Cap').textContent=s.ins;$('Pay').textContent=JSON.stringify(s.pay,null,2);$('Hdr').textContent='';
+}
+function run(){
+  const sc=SCEN[cur];reset();$('Run').disabled=true;$('Pill').textContent=sc.pill;
+  document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.disabled=true);
+  sc.steps.forEach((s,i)=>T.push(setTimeout(()=>{applyStep(s);if(i===sc.steps.length-1)T.push(setTimeout(()=>{$('Res').textContent=sc.result;$('Run').disabled=false;document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.disabled=false);},2000));},300+i*2000)));
+}
+document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.addEventListener('click',function(){
+  document.querySelectorAll('#'+pfx+'Scen button').forEach(x=>x.classList.remove('on'));
+  this.classList.add('on');cur=this.dataset.s;reset();$('Pill').textContent=SCEN[cur].pill;
+}));
+$('Run').addEventListener('click',run);
+renderNodes();chip();
+})();
+</script>
+</body>
+</html>

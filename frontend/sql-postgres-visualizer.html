@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>PostgreSQL Deep Dive — DevHub</title>
+<style>
+.who-QUERY{background:rgba(204,102,0,.22);color:#fcd34d}
+.who-PLNR{background:rgba(84,195,241,.18);color:#7dd3fc}
+.who-EXEC{background:rgba(167,139,250,.18);color:#c4b5fd}
+.who-VACM{background:rgba(74,222,128,.18);color:#86efac}
+.who-CONN{background:rgba(248,113,113,.18);color:#fca5a5}
+</style>
+<link rel="stylesheet" href="devhub.css"/>
+</head>
+<body class="track-sql">
+<div class="page">
+<a class="back" href="javascript:history.back()">← Back</a>
+<h1>PostgreSQL Deep Dive</h1>
+<p class="subtitle">JSONB, full-text search, VACUUM, connection pooling — PostgreSQL-specific power features for production apps.</p>
+
+<div class="rt-ctlbar">
+  <span class="lbl">scenario:</span>
+  <span class="userseg" id="spScen">
+    <button data-s="jsonb" class="on">JSONB</button>
+    <button data-s="fts">full-text search</button>
+    <button data-s="vacuum">VACUUM</button>
+    <button data-s="pool">connection pool</button>
+  </span>
+  <button class="rt-run" id="spRun">▶ Play</button>
+  <span class="rt-pill" id="spPill">JSONB @> containment + GIN index</span>
+</div>
+<div class="rt-stage">
+  <div class="rt-diagram" id="spDiagram"></div>
+  <div class="rt-inspect">
+    <div class="rt-dir" id="spDir">▶ READY</div>
+    <div class="rt-cap" id="spCap">Choose a scenario and press ▶</div>
+    <pre class="rt-payload" id="spPay"></pre>
+    <pre class="rt-headers" id="spHdr"></pre>
+    <div class="rt-result" id="spRes"></div>
+  </div>
+</div>
+<div class="rt-legend">
+  <span>Query → Planner → Executor → VACUUM → Connection Pool</span>
+</div>
+
+<section>
+<h2>1 — JSONB</h2>
+<div class="card">
+<pre><code><span class="cm">-- Store flexible metadata without separate tables</span>
+<span class="kw">ALTER TABLE</span> users <span class="kw">ADD COLUMN</span> metadata <span class="kw">JSONB</span>;
+
+<span class="cm">-- Insert</span>
+<span class="kw">UPDATE</span> users <span class="kw">SET</span> metadata = <span class="str">'{"plan":"pro","features":["sso","audit"],"score":95}'</span>
+<span class="kw">WHERE</span> id = 1;
+
+<span class="cm">-- Query operators</span>
+metadata -&gt; <span class="str">'plan'</span>           <span class="cm">-- JSON value (returns JSON)</span>
+metadata -&gt;&gt; <span class="str">'plan'</span>          <span class="cm">-- text value (returns text)</span>
+metadata @&gt; <span class="str">'{"plan":"pro"}'</span>  <span class="cm">-- containment (GIN-indexable!)</span>
+metadata ? <span class="str">'features'</span>        <span class="cm">-- key exists</span>
+metadata #&gt;&gt; <span class="str">'{features,0}'</span>   <span class="cm">-- first element of features array</span>
+
+<span class="cm">-- GIN index for fast containment queries</span>
+<span class="kw">CREATE INDEX</span> idx_users_metadata <span class="kw">ON</span> users <span class="kw">USING</span> gin(metadata);
+
+<span class="cm">-- Now this is fast (index scan, not seq scan)</span>
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> users <span class="kw">WHERE</span> metadata @&gt; <span class="str">'{"plan":"pro"}'</span>;</code></pre>
+</div>
+</section>
+
+<section>
+<h2>2 — Full-Text Search</h2>
+<div class="card card-blue">
+<pre><code><span class="cm">-- tsvector: pre-parsed document representation</span>
+<span class="kw">ALTER TABLE</span> articles <span class="kw">ADD COLUMN</span> search_vec tsvector
+  <span class="kw">GENERATED ALWAYS AS</span> (
+    to_tsvector(<span class="str">'english'</span>, coalesce(title, <span class="str">''</span>) || <span class="str">' '</span> || coalesce(body, <span class="str">''</span>))
+  ) <span class="kw">STORED</span>;
+
+<span class="kw">CREATE INDEX</span> idx_articles_fts <span class="kw">ON</span> articles <span class="kw">USING</span> gin(search_vec);
+
+<span class="cm">-- tsquery: search expression</span>
+<span class="kw">SELECT</span> title, ts_rank(search_vec, query) <span class="kw">AS</span> rank
+<span class="kw">FROM</span> articles, to_tsquery(<span class="str">'english'</span>, <span class="str">'spring & boot & security'</span>) <span class="kw">AS</span> query
+<span class="kw">WHERE</span> search_vec @@ query
+<span class="kw">ORDER BY</span> rank <span class="kw">DESC</span>
+<span class="kw">LIMIT</span> 10;</code></pre>
+</div>
+</section>
+
+<section>
+<h2>3 — Connection Pooling with PgBouncer</h2>
+<div class="card card-purple">
+<p>PostgreSQL creates a heavyweight process per connection (~5MB). At 1000 concurrent users, that's 5GB just for connection processes. <strong>PgBouncer</strong> multiplexes many app connections onto few database connections.</p>
+<pre><code><span class="cm"># pgbouncer.ini</span>
+[databases]
+mydb = host=localhost port=5432 dbname=mydb
+
+[pgbouncer]
+listen_port = 6432
+pool_mode = transaction   <span class="cm"># best for Spring Boot</span>
+max_client_conn = 1000    <span class="cm"># app connections to PgBouncer</span>
+default_pool_size = 20    <span class="cm"># actual connections to PostgreSQL</span></code></pre>
+<p class="note">In Spring Boot: connect to PgBouncer on port 6432 instead of PostgreSQL on 5432. Set <code>spring.datasource.hikari.maximum-pool-size</code> to match <code>default_pool_size</code>.</p>
+</div>
+</section>
+
+<section>
+<h2>4 — VACUUM &amp; Table Bloat</h2>
+<div class="card card-green">
+<pre><code><span class="cm">-- Check table bloat</span>
+<span class="kw">SELECT</span> relname, n_dead_tup, n_live_tup,
+       ROUND(n_dead_tup::numeric / NULLIF(n_live_tup,0) * 100, 2) <span class="kw">AS</span> dead_pct,
+       last_autovacuum
+<span class="kw">FROM</span> pg_stat_user_tables
+<span class="kw">WHERE</span> relname = <span class="str">'orders'</span>;
+
+<span class="cm">-- Manual VACUUM options</span>
+<span class="kw">VACUUM</span> orders;            <span class="cm">-- reclaim dead tuples (non-locking)</span>
+<span class="kw">VACUUM FULL</span> orders;       <span class="cm">-- rewrite table (exclusive lock!)</span>
+<span class="kw">VACUUM ANALYZE</span> orders;   <span class="cm">-- vacuum + refresh statistics</span>
+
+<span class="cm">-- autovacuum tuning for high-update tables</span>
+<span class="kw">ALTER TABLE</span> orders <span class="kw">SET</span> (
+  autovacuum_vacuum_scale_factor = 0.01,   <span class="cm">-- 1% (default 20%)</span>
+  autovacuum_analyze_scale_factor = 0.005
+);</code></pre>
+</div>
+</section>
+</div>
+<script>
+(function(){
+const pfx='sp';
+const NODES=['QUERY','PLNR','EXEC','VACM','CONN'];
+function posOf(n){return 10+NODES.indexOf(n)*18;}
+const SCEN={
+  jsonb:{
+    pill:'JSONB @> containment → GIN index scan → rows',
+    steps:[
+      {node:'QUERY',hdr:'SELECT * FROM users WHERE metadata @> {"plan":"pro"}',pay:{operator:'@> (containment)',meaning:'metadata column contains this JSON object as a subset',indexable:'GIN index on metadata column'},ins:'@> checks if left JSONB contains the right JSONB — all key-value pairs in right must exist in left',tone:null},
+      {node:'PLNR',hdr:'Planner uses Bitmap Index Scan on idx_users_metadata',pay:{plan:'Bitmap Index Scan using idx_users_metadata',condition:"metadata @> '{\"plan\":\"pro\"}'",estimatedRows:234},ins:'GIN index stores each JSON key and value separately — very efficient for containment and key-exists queries',tone:null},
+      {node:'EXEC',hdr:'GIN bitmap built from index, heap pages fetched',pay:{bitmapPages:3,heapPagesRead:12,rowsReturned:234,jsonbOps:['@> containment','? key exists','->> text extract','#>> nested path']},ins:'GIN index returns a bitmap of pages; executor fetches those heap pages and re-checks the condition',tone:null},
+      {node:'CONN',hdr:'234 users with pro plan returned',pay:{rows:234,time:'1.2ms vs seqscan 45ms',tip:'Use jsonb_set() to update nested keys without replacing the whole document'},ins:'JSONB is schemaless — great for optional metadata. Use typed columns for queried/indexed fields.',tone:'ok'}
+    ],
+    result:'✓ 234 pro-plan users via GIN index — 1.2ms'
+  },
+  fts:{
+    pill:'to_tsquery → GIN index on tsvector → ranked results',
+    steps:[
+      {node:'QUERY',hdr:"SELECT title FROM articles WHERE search_vec @@ to_tsquery('spring & boot')",pay:{tsquery:"to_tsquery('english', 'spring & boot')",lexemes:['spring','boot'],dictionary:'english (snowball stemming)'},ins:'to_tsquery parses the search expression; stems words (running→run); supports & | ! and <-> phrase operators',tone:null},
+      {node:'PLNR',hdr:'GIN index scan on search_vec',pay:{plan:'Bitmap Index Scan on idx_articles_fts',indexedColumn:'search_vec (tsvector)',estimatedRows:89},ins:'tsvector stores stemmed lexemes with positions — GIN indexes each lexeme for fast lookup',tone:null},
+      {node:'EXEC',hdr:'ts_rank scores results by term frequency',pay:{scoring:'ts_rank(search_vec, query)',factors:['term frequency','proximity','document length normalization'],topResult:{title:'Spring Boot Security Guide',rank:0.89}},ins:'ts_rank_cd uses cover density (term proximity) for better ranking on longer documents',tone:null},
+      {node:'CONN',hdr:'10 ranked articles returned',pay:{rows:[{title:'Spring Boot Security Guide',rank:0.89},{title:'Spring Boot Microservices',rank:0.74}],totalMatches:89,time:'3.2ms'},ins:'Use ts_headline() to highlight matched terms in the result for a search-engine-like UX',tone:'ok'}
+    ],
+    result:'✓ Full-text search: 89 articles ranked by relevance in 3.2ms'
+  },
+  vacuum:{
+    pill:'dead tuples accumulate → AUTOVACUUM reclaims pages',
+    steps:[
+      {node:'EXEC',hdr:'Heavy UPDATE workload creates dead tuples',pay:{table:'orders',liveRows:50000,deadRows:8200,deadPct:'16.4%',lastAutoVacuum:'2 hours ago'},ins:'Every UPDATE creates a new row version (MVCC) and marks the old one dead. Dead rows waste space and slow scans.',tone:'bad'},
+      {node:'VACM',hdr:'AUTOVACUUM wakes up: dead_pct > 20% threshold',pay:{trigger:'autovacuum_vacuum_scale_factor=0.2 (20%)',action:'VACUUM orders',mode:'non-blocking (shares with readers)'},ins:'AUTOVACUUM runs as a background daemon — it VACUUM and ANALYZEs tables automatically based on activity',tone:null},
+      {node:'EXEC',hdr:'VACUUM marks dead rows as free space',pay:{deadTuplesRemoved:8200,pagesFree:52,tableSize:{before:'12 MB',after:'12 MB (free space in same pages)'},note:'VACUUM never shrinks the file — it marks pages as reusable'},ins:'VACUUM reclaims space WITHIN the existing pages. Only VACUUM FULL rewrites the table and shrinks the file (needs exclusive lock).',tone:null},
+      {node:'VACM',hdr:'ANALYZE refreshes query planner statistics',pay:{tableStats:{distinctValues:{user_id:842,status:5},correlations:{created_at:0.98}},plannerWillNow:'choose better plans for queries on orders'},ins:'Stale statistics → bad estimates → wrong plans. VACUUM ANALYZE together keeps the planner accurate.',tone:'ok'}
+    ],
+    result:'✓ AUTOVACUUM reclaimed 8,200 dead tuples — statistics refreshed'
+  },
+  pool:{
+    pill:'1000 app connections → PgBouncer → 20 Postgres connections',
+    steps:[
+      {node:'CONN',hdr:'Without pooling: 200 HikariCP connections × 5MB = 1 GB',pay:{appInstances:10,hikariPoolSize:20,totalConnections:200,postgresMemory:'200 × 5MB = 1 GB just for connection processes',maxPostgresConns:100},ins:'PostgreSQL default max_connections is 100. At 10 Spring Boot instances × 20 HikariCP connections = 200 — already over limit',tone:'bad'},
+      {node:'CONN',hdr:'PgBouncer sits between app and PostgreSQL',pay:{pgbouncerPort:6432,maxClientConn:1000,defaultPoolSize:20,mode:'transaction (connection returned after each transaction)'},ins:'Transaction pooling: PgBouncer assigns a real PG connection only for the duration of a transaction — perfect for Spring @Transactional',tone:null},
+      {node:'PLNR',hdr:'Spring Boot connects to PgBouncer, not PostgreSQL directly',pay:{springDatasource:{url:'jdbc:postgresql://pgbouncer-host:6432/mydb'},hikariMaxPoolSize:20,note:'Each app instance has 20 HikariCP connections to PgBouncer — 200 total client connections'},ins:'Caveat: prepared statement caching must be disabled in transaction mode (add ?prepareThreshold=0 to JDBC URL)',tone:null},
+      {node:'CONN',hdr:'Efficient: 200 app connections → 20 actual PG connections',pay:{before:{postgresConns:200,memory:'1 GB'},after:{postgresConns:20,memory:'100 MB'},savings:'900 MB + 10× more headroom for real workload'},ins:'PgBouncer multiplexes: while 200 connections are "open", only 20 are active at once (matching your typical concurrency)',tone:'ok'}
+    ],
+    result:'✓ PgBouncer: 200 client connections multiplexed to 20 PostgreSQL connections'
+  }
+};
+let cur='jsonb',T=[];
+const $=id=>document.getElementById(pfx+id);
+function renderNodes(){$('Diagram').innerHTML=NODES.map(n=>`<div class="rt-node who-${n}" id="${pfx}N${n}" style="left:${posOf(n)}%">${n}</div>`).join('');}
+function chip(){let c=document.getElementById(pfx+'chip');if(!c){c=document.createElement('div');c.id=pfx+'chip';c.className='rt-chip';$('Diagram').appendChild(c);}return c;}
+function clearT(){T.forEach(clearTimeout);T=[];}
+function reset(){clearT();renderNodes();chip().style.left=posOf(NODES[0])+'%';chip().className='rt-chip';$('Dir').textContent='▶ READY';$('Cap').textContent='Choose a scenario and press ▶';$('Pay').textContent='';$('Hdr').textContent='';$('Res').textContent='';$('Run').disabled=false;document.querySelectorAll('#'+pfx+'Diagram .rt-node').forEach(n=>n.className=n.className.replace(/ ?(vchk|vskip|curbad|rt-cur)/g,''));}
+function applyStep(s){document.querySelectorAll('#'+pfx+'Diagram .rt-node').forEach(n=>n.classList.remove('rt-cur','vchk','vskip','curbad'));const nd=document.getElementById(pfx+'N'+s.node);if(nd){nd.classList.add('rt-cur');if(s.tone==='ok')nd.classList.add('vchk');if(s.tone==='bad')nd.classList.add('vskip','curbad');chip().style.left=posOf(s.node)+'%';chip().className='rt-chip'+(s.tone==='ok'?' ok':s.tone==='bad'?' bad':'');}$('Dir').textContent=s.hdr;$('Cap').textContent=s.ins;$('Pay').textContent=JSON.stringify(s.pay,null,2);$('Hdr').textContent='';}
+function run(){const sc=SCEN[cur];reset();$('Run').disabled=true;$('Pill').textContent=sc.pill;document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.disabled=true);sc.steps.forEach((s,i)=>T.push(setTimeout(()=>{applyStep(s);if(i===sc.steps.length-1)T.push(setTimeout(()=>{$('Res').textContent=sc.result;$('Run').disabled=false;document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.disabled=false);},2000));},300+i*2000)));}
+document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.addEventListener('click',function(){document.querySelectorAll('#'+pfx+'Scen button').forEach(x=>x.classList.remove('on'));this.classList.add('on');cur=this.dataset.s;reset();$('Pill').textContent=SCEN[cur].pill;}));
+$('Run').addEventListener('click',run);renderNodes();chip();
+})();
+</script>
+</body>
+</html>
