@@ -1,11 +1,11 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 341 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 344 pages.** Pick a *path* below and follow it.
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **341 browser visualizers** across **18 tracks**, plus a
+DevHub is a learning hub: **344 browser visualizers** across **18 tracks**, plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
 copy-paste **command-line runbook** (build/run, the auth round-trip via curl, and
@@ -191,7 +191,14 @@ rather than a pile of pages.
 
 ---
 
-*This guide is updated as new tracks and deep-dives land. **Latest wave — live sandboxes &amp; two
+*This guide is updated as new tracks and deep-dives land. **Newest pass — the Head First book is complete &amp; Angular goes beginner→expert:**
+the ☕ Java **Head First Design Patterns** sub-track now covers the whole book — the final three chapters landed with the same
+voice + animated hero: **[Iterator &amp; Composite](../frontend/head-first-iterator-composite-visualizer.html)** (the Objectville menus),
+**[Proxy](../frontend/head-first-proxy-visualizer.html)** (remote / virtual / protection / caching), and
+**[Compound Patterns &amp; MVC](../frontend/head-first-compound-mvc-visualizer.html)** (Observer + Strategy + Composite teaming up) —
+that's 12 chapters in all. And the core 🅰️ **Angular** pages gained a two-tier depth treatment — a plain-English **"brand-new to this?"**
+on-ramp plus an **"expert corner"** (internals, gotchas, CIAM tie-ins) appended to **Components, Data Binding, Services &amp; DI, Signals,
+and RxJS**, so the same page serves a first-timer and a senior. Before that: **live sandboxes &amp; two
 languages going deep:** the **🧪 Playgrounds** track grew to six and now includes genuinely-runnable
 environments — a **[TypeScript Playground](../frontend/typescript-playground-visualizer.html)** that loads the
 real `typescript` compiler (semantic type-checking with VS-Code-grade diagnostics, emitted JS, and live execution),
