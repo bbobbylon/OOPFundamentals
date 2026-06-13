@@ -64,6 +64,7 @@
     .note{font-size:11px;color:var(--muted);margin-top:6px}
     ul.tight{margin:6px 0 0 18px;font-size:12.5px}ul.tight li{margin:5px 0}
     .pill{font-family:ui-monospace,monospace;font-size:11px;background:#0a0f1e;border:1px solid var(--border);border-radius:6px;padding:2px 7px;color:var(--purple)}
+    .who-TMPL{background:#0ea5e9;color:#fff;} .who-CD{background:#a855f7;color:#fff;} .who-DIFF{background:#22c55e;color:#fff;} .who-DOM{background:#f59e0b;color:#000;} .who-ZONE{background:#f97316;color:#fff;} .who-BAD{background:#ef4444;color:#fff;}
   </style>
   <link rel="stylesheet" href="devhub.css" />
 </head>
@@ -72,6 +73,40 @@
 
   <h1>@for, <code>track</code> &amp; Control-Flow Internals</h1>
   <p class="subtitle">The new built-in control flow isn't just nicer syntax — <code>@for</code> makes <code>track</code> <strong>mandatory</strong> because that key drives DOM reconciliation. Pick a wrong key and Angular destroys and rebuilds nodes you meant to keep. Watch it happen, node by node.</p>
+
+  <!-- ── EXTREME-VIZ HERO: Control Flow Internals ── -->
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">Scenario</span>
+      <div class="userseg" id="cfSeg">
+        <button class="on" data-s="if">@if change</button>
+        <button data-s="for">@for + track</button>
+        <button data-s="badtrack">@for bad track</button>
+        <button data-s="defer">@defer trigger</button>
+      </div>
+      <button class="rt-run" id="cfRun">▶ Run</button>
+      <span class="rt-pill" id="cfPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="cfDiag">
+        <div class="rt-rail"></div>
+        <div class="rt-chip" id="cfChip">→</div>
+        <div class="rt-node" data-n="TMPL"><span class="ic">📝</span><div><div class="nl">Template AST</div><div class="ns">@if / @for / @defer</div></div><span class="who who-TMPL">TMPL</span></div>
+        <div class="rt-node" data-n="CD"><span class="ic">♻️</span><div><div class="nl">Change Detector</div><div class="ns">markDirty / detectChanges</div></div><span class="who who-CD">CD</span></div>
+        <div class="rt-node" data-n="DIFF"><span class="ic">🔍</span><div><div class="nl">Differ</div><div class="ns">IterableDiffer / KeyValueDiffer</div></div><span class="who who-DIFF">DIFF</span></div>
+        <div class="rt-node" data-n="DOM"><span class="ic">🖼️</span><div><div class="nl">Real DOM</div><div class="ns">add / move / remove nodes</div></div><span class="who who-DOM">DOM</span></div>
+        <div class="rt-node" data-n="ZONE"><span class="ic">⚡</span><div><div class="nl">Zone.js</div><div class="ns">async notification</div></div><span class="who who-ZONE">ZONE</span></div>
+      </div>
+      <div class="rt-inspect" id="cfInspect">
+        <div class="rt-dir" id="cfDir">STEP 0 / 5</div>
+        <div class="rt-cap" id="cfCap">Pick a scenario and press ▶ Run</div>
+        <div class="rt-payload" id="cfPayload"></div>
+        <div class="rt-headers" id="cfHeaders"><span class="ht">INSPECTOR</span>(waiting)</div>
+      </div>
+    </div>
+    <div class="rt-result" id="cfResult"></div>
+    <div class="rt-legend"><span>🟢 minimal DOM ops</span><span>🔴 full reconcile (expensive)</span><span>⬜ pending</span></div>
+  </div>
 
   <!-- 1 ─────────────────────────────── -->
   <section>
@@ -332,6 +367,144 @@ function renderNote(c, reused){
 document.querySelectorAll('#seg-track button').forEach(b=>b.onclick=()=>{ track=b.dataset.v; render(); });
 document.querySelectorAll('#seg-op button').forEach(b=>b.onclick=()=>{ op=b.dataset.v; render(); });
 render();
+</script>
+
+<script>
+(function(){
+  const SCEN={
+    if:{
+      steps:[
+        {n:'ZONE',dir:'ASYNC',cap:'setTimeout() completes — Zone.js intercepts and schedules change detection',
+         pay:'setTimeout callback → Zone.js notifies Angular',
+         hdr:'// Zone.js patches async APIs:\nsetTimeout(() => {\n  this.showPanel = true; // signal or property change\n}, 2000);\n\n// Zone.js intercepts the callback\n// → calls ApplicationRef.tick()\n// → triggers change detection across the app\n// Without Zone.js: must call markForCheck() manually'},
+        {n:'CD',dir:'TICK',cap:'Change Detector walks the component tree — finds this component has changed inputs',
+         pay:'ApplicationRef.tick() → root → children → leaf',
+         hdr:'// Change detection walk:\nAppComponent (checked)\n├── NavbarComponent (checked, no change)\n├── SidebarComponent (checked, no change)\n└── DashboardComponent ← has change!\n    └── PanelComponent ← @if target\n\n// Marked dirty: DashboardComponent'},
+        {n:'DIFF',dir:'EVAL',cap:'@if evaluates the condition — showPanel changed: false → true',
+         pay:'@if(showPanel) → prev: false · curr: true → CHANGED',
+         hdr:'// Angular\'s @if block:\n@if (showPanel) {\n  <app-panel />\n}\n\n// Differ evaluates:\nprev: showPanel = false → no embedded view\ncurr: showPanel = true  → needs to create view\n\n// Result: CREATE the embedded view for <app-panel>'},
+        {n:'DOM',dir:'CREATE',cap:'Angular creates the EmbeddedView — creates DOM nodes for <app-panel>',
+         pay:'DOM: INSERT <app-panel> element + children',
+         hdr:'// DOM operations:\ndocument.createElement("app-panel") // new element\ndocument.createElement("div")       // children\n...\nparentNode.appendChild(panelElement)\n\n// Panel component is instantiated:\n// → constructor called\n// → ngOnInit called\n// → initial HTTP calls fire'},
+        {n:'TMPL',dir:'RENDER',tone:'ok',cap:'Panel visible in DOM — change detection completes, Zone.js is stable',
+         pay:'<app-panel> is visible · ngOnInit ran · data loading',
+         hdr:'// End state:\nshowPanel: true\npanelElement in DOM: yes\nPanelComponent.ngOnInit: called\nPanelComponent.isLoading: true (HTTP in flight)\n\n// Next Zone.js tick: HTTP response arrives\n// → change detection runs again\n// → panel renders with data'},
+      ],
+      result:{ok:true,msg:'@if: Zone.js tick → CD walks tree → differ evaluates condition → DOM add/remove. Surgical.'}
+    },
+    for:{
+      steps:[
+        {n:'ZONE',dir:'SIGNAL',cap:'A signal holding the items array is updated — Angular schedules targeted re-render',
+         pay:'items.set([...newItems])',
+         hdr:'// Signals bypass Zone.js:\nconst items = signal<Item[]>([...]);\nitems.set([...newItems]);\n\n// Angular marks ONLY components reading\n// items() as dirty — not the whole tree\n// This is the zone-less advantage'},
+        {n:'CD',dir:'MARK',cap:'Only the component reading items() is marked dirty — targeted change detection',
+         pay:'ItemListComponent marked dirty (reads items signal)',
+         hdr:'// Signal-based change detection:\n// Only ItemListComponent reads items()\n// Only it is scheduled for re-render\n\n// Zone.js mode: ALL components checked\n// Signal mode: ONLY dependents checked\n\n// With 100 components:\n// Zone: 100 checks\n// Signals: 1-5 checks'},
+        {n:'DIFF',dir:'DIFFER',cap:'IterableDiffer compares prev items[] to curr items[] using the track expression',
+         pay:'track item.id → identity preserved for unchanged items',
+         hdr:'// @for with track:\n@for (item of items(); track item.id) {\n  <app-item [item]="item" />\n}\n\n// IterableDiffer operations:\nprev: [A, B, C]  →  ids: [1, 2, 3]\ncurr: [A, D, C]  →  ids: [1, 4, 3]\n\nOperations: REMOVE id=2 (B), INSERT id=4 (D)'},
+        {n:'DOM',dir:'PATCH',cap:'Only 2 DOM operations: remove item B, insert item D — items A and C reuse existing views',
+         pay:'DOM ops: remove(B), insert(D) — A and C untouched',
+         hdr:'// DOM patch operations:\n1. REMOVE: <app-item [item]="B"> (id=2)\n2. INSERT: <app-item [item]="D"> (id=4)\n\n// Items A (id=1) and C (id=3) keep their\n// existing DOM nodes and component instances\n// → no destroy/recreate → preserves state\n// → no animation interruption\n// → no input focus lost'},
+        {n:'TMPL',dir:'DONE',tone:'ok',cap:'UI updated with 2 DOM ops — list reorders/replaces correctly, animations intact',
+         pay:'2 DOM operations for 1 change · O(n) differ',
+         hdr:'// Performance comparison:\nWith track item.id:\n  DOM ops: 2 (remove + insert)\n  Components destroyed: 1\n  Components created: 1\n\nWithout track (using index):\n  DOM ops: 5 (A,B,C,D,... all re-render)\n  Components destroyed: 3\n  Components created: 3\n\ntrack: always required for keyed lists.'},
+      ],
+      result:{ok:true,msg:'@for + track: signal marks 1 component dirty → differ finds 2 changes → 2 DOM ops. Efficient.'}
+    },
+    badtrack:{
+      steps:[
+        {n:'ZONE',dir:'SIGNAL',cap:'Items array updated — same data, just re-fetched from the API',
+         pay:'items.set(freshFromApi) — same IDs, same data',
+         hdr:'// Scenario:\n// User pulls-to-refresh\n// API returns same 10 items\n// items signal is updated with new array reference\n\n// Even though data is identical:\n// items() returns a new array object\n// Angular must diff the contents'},
+        {n:'CD',dir:'MARK',cap:'ItemListComponent marked dirty — new array reference triggers re-evaluation',
+         pay:'new array reference → component marked for re-check',
+         hdr:'// Signal reactivity:\n// Even if items are the same, the signal\n// now holds a new array reference\n// Angular cannot know the contents are equal\n// without running the differ\n\n// Component is scheduled for update.'},
+        {n:'DIFF',dir:'BADTRACK',tone:'bad',cap:'track i (index) means item identity = position — all items appear "new" even if unchanged',
+         pay:'@for track i → ALL 10 items: MOVED (position changed)',
+         hdr:'// BAD track:\n@for (item of items(); track $index) {\n  <app-item [item]="item" />\n}\n\n// Differ result:\n// prev: A at 0, B at 1, C at 2...\n// curr: A at 0, B at 1, C at 2...\n// Tracking by index: all match → NO ops!\n// BUT: each component gets new item object\n// → all inputs changed → all re-render fully'},
+        {n:'DOM',dir:'RERENDER',tone:'bad',cap:'All 10 item components re-render — even unchanged ones — because input object reference changed',
+         pay:'10 component re-renders · expanded forms reset · animations restart',
+         hdr:'// Result of bad track:\n// 10 components all get new @Input() values\n// (new object reference even if data same)\n// Angular marks all 10 for OnPush check\n\n// Side effects:\n// - Expanded accordion items collapse\n// - Focused inputs lose focus\n// - Animations restart from beginning\n// - 10x wasted CPU vs track item.id'},
+        {n:'TMPL',dir:'FIX',tone:'ok',cap:'Fix: use track item.id — differ identifies unchanged items, skips re-renders',
+         pay:'track item.id → 0 DOM ops, 0 re-renders for unchanged data',
+         hdr:'// GOOD track:\n@for (item of items(); track item.id) {\n  <app-item [item]="item" />\n}\n\n// Differ result with same data:\n// prev id=1 → curr id=1 → SAME (skip)\n// prev id=2 → curr id=2 → SAME (skip)\n// ... all 10 items: NO DOM ops needed\n\n// Result: 0 re-renders, 0 DOM ops.\n// track item.id is almost always correct.'},
+      ],
+      result:{ok:false,msg:'Bad track (index): all components re-render on refresh. Fix: track item.id → 0 ops for unchanged data.'}
+    },
+    defer:{
+      steps:[
+        {n:'ZONE',dir:'IDLE',cap:'App bootstraps — @defer block for HeavyChartComponent is NOT yet loaded',
+         pay:'@defer { <app-heavy-chart> } @placeholder { <div>Loading…</div> }',
+         hdr:'// @defer block:\n@defer (on viewport) {\n  <app-heavy-chart [data]="chartData()" />\n} @placeholder {\n  <div class="chart-skeleton">Loading chart…</div>\n} @loading (minimum 200ms) {\n  <app-spinner />\n}\n\n// Chart JS bundle: NOT fetched yet'},
+        {n:'CD',dir:'WATCH',cap:'IntersectionObserver watches the @placeholder boundary — waiting for scroll',
+         pay:'IntersectionObserver: threshold 0, root: null',
+         hdr:'// Angular\'s @defer (on viewport) uses:\nIntersectionObserver.observe(placeholderBoundary)\n\n// No chart bundle is downloaded yet.\n// Placeholder is visible.\n// CPU: near zero (no chart computed).\n\n// User scrolls down...'},
+        {n:'DIFF',dir:'TRIGGER',cap:'Placeholder enters viewport — IntersectionObserver fires, @defer triggers',
+         pay:'intersecting: true → @defer: TRIGGERED',
+         hdr:'// IntersectionObserver callback:\nentries[0].isIntersecting → true\n\n// Angular fires the defer trigger:\n// 1. Show @loading block (spinner)\n// 2. Fire dynamic import for the chunk\n\nimport(() => import("./heavy-chart/heavy-chart.component")\n  .then(m => m.HeavyChartComponent))'},
+        {n:'DOM',dir:'LOAD',cap:'heavy-chart.chunk.js downloads — includes Chart.js and all its dependencies',
+         pay:'heavy-chart.abc123.js: 78 KB fetched',
+         hdr:'// Network fetch:\nGET /heavy-chart.abc123.js → 200 · 78 KB\n\n// What\'s in the chunk:\n- HeavyChartComponent\n- Chart.js library\n- chart-utils.ts\n\n// Not in initial bundle!\n// Initial load was faster by 78 KB.'},
+        {n:'TMPL',dir:'MOUNT',tone:'ok',cap:'@loading replaced by HeavyChartComponent — component initializes, chart renders',
+         pay:'HeavyChartComponent.ngOnInit() → chart renders',
+         hdr:'// @defer resolves:\n1. @loading block removed from DOM\n2. HeavyChartComponent class registered\n3. Component instance created\n4. ngOnInit() called → chart.js initializes\n5. chartData() signal read → chart renders\n\n// User experience:\n// Placeholder → Spinner → Full chart\n// All while keeping initial bundle small'},
+      ],
+      result:{ok:true,msg:'@defer (on viewport): placeholder shown → scroll → chunk downloads → component mounts. Initial bundle stays small.'}
+    }
+  };
+
+  const pfx='cf';
+  const g=id=>document.getElementById(pfx+id);
+  let cS='if',running=false,T=[];
+  function clr(){T.forEach(clearTimeout);T=[];}
+  function t(fn,ms){T.push(setTimeout(fn,ms));}
+  function disBtn(v){g('Run').disabled=v;g('Pill').textContent=v?'⏳ running…':'ready';}
+  function ns(){return[...document.getElementById(pfx+'Diag').querySelectorAll('.rt-node')];}
+  function posOf(el){const d=document.getElementById(pfx+'Diag');return(el.getBoundingClientRect().top-d.getBoundingClientRect().top)+el.offsetHeight/2;}
+  function reset(){
+    clr();running=false;
+    ns().forEach(n=>n.className='rt-node');
+    const ch=document.getElementById(pfx+'Chip');ch.style.top='0';ch.style.opacity='0';
+    g('Dir').textContent='STEP 0 / 5';g('Cap').textContent='Pick a scenario and press ▶ Run';
+    g('Payload').textContent='';g('Headers').innerHTML='<span class="ht">INSPECTOR</span>(waiting)';
+    g('Result').className='rt-result';g('Result').textContent='';disBtn(false);
+  }
+  function applyStep(nl,i,step){
+    const el=nl.find(n=>n.dataset.n===step.n);if(!el)return;
+    nl.forEach(n=>{n.classList.remove('cur','curbad','rtpulse');});
+    if(step.tone==='ok')el.classList.add('vchk','rtpulse');
+    else if(step.tone==='bad')el.classList.add('vskip','curbad','rtpulse');
+    else el.classList.add('cur','rtpulse');
+    const ch=document.getElementById(pfx+'Chip');
+    ch.style.opacity='1';ch.style.top=posOf(el)+'px';
+    ch.textContent=step.dir;
+    ch.className='rt-chip'+(step.tone==='ok'?' ok':step.tone==='bad'?' bad':'');
+    g('Dir').textContent='STEP '+(i+1)+' / '+SCEN[cS].steps.length;
+    g('Cap').textContent=step.cap;g('Payload').textContent=step.pay||'';
+    g('Headers').innerHTML='<span class="ht">INSPECTOR</span>'+step.hdr;
+  }
+  function run(){
+    if(running)return;running=true;clr();disBtn(true);
+    const sc=SCEN[cS];const nl=ns();
+    nl.forEach(n=>n.className='rt-node');
+    document.getElementById(pfx+'Chip').style.opacity='0';
+    g('Result').className='rt-result';
+    sc.steps.forEach((step,i)=>t(()=>applyStep(nl,i,step),300+i*2000));
+    t(()=>{
+      const r=sc.result||{ok:true,msg:'Done'};
+      const el=g('Result');el.className='rt-result show '+(r.ok?'ok':'warn');el.textContent=r.msg;
+      running=false;disBtn(false);
+    },300+sc.steps.length*2000+800);
+  }
+  document.querySelectorAll('#cfSeg button').forEach(b=>b.onclick=()=>{
+    if(running)return;cS=b.dataset.s;
+    document.querySelectorAll('#cfSeg button').forEach(x=>x.classList.toggle('on',x===b));
+    reset();
+  });
+  g('Run').onclick=run;
+  reset();
+})();
 </script>
 </body>
 </html>

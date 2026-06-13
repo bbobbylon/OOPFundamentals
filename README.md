@@ -174,11 +174,14 @@ app with user accounts and cross-device progress sync:
   The flow / lifecycle pages default to an **animated step-walk with a live inspector** of
   the real objects at each step (router events, RxJS stream values, `HttpRequest`/`HttpResponse`,
   and — across the **Identity & Auth** track — OAuth/OIDC redirects, JWT claims, SCIM payloads,
-  and Conditional-Access decisions). The 🍃 Spring Boot core and 🅰️ Angular core now have the full
-  chip-walk + inspector treatment: Spring covers Architecture, Batch, Microservices, Resilience4j,
-  WebSocket, Flyway, Logging, Profiles, Data Specifications, Events, and Pagination; Angular covers
-  Change Detection, Component Communication, Control Flow, ViewChild/ContentChild, Functional Guards,
-  Testing, Lazy Loading, and Animations. The **🧪 Playgrounds** track adds *live* sandboxes —
+  and Conditional-Access decisions). The 🍃 **Spring Boot** core and the entire 🅰️ **Angular** track
+  (all **70 pages**) now carry the full chip-walk + inspector treatment. Spring covers Architecture,
+  Batch, Microservices, Resilience4j, WebSocket, Flyway, Logging, Profiles, Data Specifications,
+  Events, and Pagination. Angular covers every major topic: fundamentals (Components, Binding,
+  Directives, Pipes, Services, Lifecycle), reactivity (Signals, RxJS, NgRx, SignalStore), HTTP &
+  Interceptors, Forms (Reactive, Template, FormArray, CVA, FormData), Routing, Auth & OIDC, Change
+  Detection (Zone.js / OnPush / Zoneless), Defer, CDK & Material, Testing, Lazy Loading, Animations,
+  PWA, Workspace Libraries, v21 features, and three Debugging diagnosers. The **🧪 Playgrounds** track adds *live* sandboxes —
   the **API Playground** is a real in-browser HTTP client (every Send is an actual `fetch()`), and the
   **JWT & Auth Playground** decodes any token, really signs/verifies it (Web Crypto), and tests `@PreAuthorize` live;
   the **Spring Boot Playground** simulates the security filter chain — fire a request and watch it land on 200/401/403/404

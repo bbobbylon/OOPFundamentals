@@ -62,12 +62,54 @@
     .uxact b{color:var(--text)}
   </style>
   <link rel="stylesheet" href="devhub.css" />
+<style>
+.who-ERR{background:#ef4444;color:#fff;}
+.who-HTTP{background:#0ea5e9;color:#fff;}
+.who-INT{background:#a855f7;color:#fff;}
+.who-HNDL{background:#22c55e;color:#fff;}
+.who-UX{background:#f59e0b;color:#000;}
+.who-BAD{background:#6b7280;color:#fff;}
+</style>
 </head>
 <body class="track-angular">
 <div class="page">
 
   <h1>API Error Handling — End to End</h1>
   <p class="subtitle">A failing API call is a journey: Spring throws, an <code>@RestControllerAdvice</code> turns it into a <strong>ProblemDetail</strong>, it crosses the wire as a status code + JSON, Angular wraps it in an <code>HttpErrorResponse</code>, your <code>catchError</code> inspects it, and <em>something</em> shows up for the user. Handle each hop deliberately and errors become a feature, not a surprise.</p>
+
+  <!-- ── EXTREME-VIZ HERO: Error Handling Flow ── -->
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">Scenario</span>
+      <div class="userseg" id="ehSeg">
+        <button class="on" data-s="network">Network Timeout</button>
+        <button data-s="validation">400 Validation</button>
+        <button data-s="interceptor">401 → Refresh</button>
+        <button data-s="global">Global Handler</button>
+      </div>
+      <button class="rt-run" id="ehRun">▶ Run</button>
+      <span class="rt-pill" id="ehPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="ehDiag">
+        <div class="rt-rail"></div>
+        <div class="rt-chip" id="ehChip">→</div>
+        <div class="rt-node" data-n="ERR"><span class="ic">💥</span><div><div class="nl">Error Origin</div><div class="ns">throw / HTTP status</div></div><span class="who who-ERR">ERR</span></div>
+        <div class="rt-node" data-n="HTTP"><span class="ic">📦</span><div><div class="nl">HttpErrorResponse</div><div class="ns">Angular wrapper</div></div><span class="who who-HTTP">HTTP</span></div>
+        <div class="rt-node" data-n="INT"><span class="ic">🔄</span><div><div class="nl">Interceptor</div><div class="ns">retry / token refresh</div></div><span class="who who-INT">INT</span></div>
+        <div class="rt-node" data-n="HNDL"><span class="ic">🪤</span><div><div class="nl">catchError</div><div class="ns">RxJS operator</div></div><span class="who who-HNDL">HNDL</span></div>
+        <div class="rt-node" data-n="UX"><span class="ic">🔔</span><div><div class="nl">User Experience</div><div class="ns">toast / form / page</div></div><span class="who who-UX">UX</span></div>
+      </div>
+      <div class="rt-inspect" id="ehInspect">
+        <div class="rt-dir" id="ehDir">STEP 0 / 5</div>
+        <div class="rt-cap" id="ehCap">Pick a scenario and press ▶ Run</div>
+        <div class="rt-payload" id="ehPayload"></div>
+        <div class="rt-headers" id="ehHeaders"><span class="ht">INSPECTOR</span>(waiting)</div>
+      </div>
+    </div>
+    <div class="rt-result" id="ehResult"></div>
+    <div class="rt-legend"><span>🟢 handled cleanly</span><span>🔴 propagated to next layer</span><span>⬜ pending</span></div>
+  </div>
 
   <!-- 1 -->
   <section>
@@ -337,6 +379,144 @@ function showUx(e){
 }
 document.getElementById('run').onclick=trace;
 renderErrs(); renderSteps();
+</script>
+
+<script>
+(function(){
+  const SCEN={
+    network:{
+      steps:[
+        {n:'ERR',dir:'TIMEOUT',cap:'Network timeout — request never left or server unreachable; status 0',
+         pay:'HTTP status: 0 · statusText: "Unknown Error"',
+         hdr:'error.status = 0\nerror.message = "Http failure response for /api/data: 0 Unknown Error"\nerror.url = "/api/data"\n\nstatus === 0 means NO response received — network-layer failure.\nNot a server error, not a 5xx.'},
+        {n:'HTTP',dir:'WRAP',cap:'Angular wraps in HttpErrorResponse — error.status===0 signals offline/no-conn',
+         pay:'instanceof HttpErrorResponse → true',
+         hdr:'{\n  status: 0,\n  statusText: "Unknown Error",\n  error: ProgressEvent { type: "error" },\n  url: "/api/data"\n}\n\nstatus === 0 → network failure, not server error.\nCannot retry without back-off.'},
+        {n:'INT',dir:'RETRY',cap:'RetryInterceptor: status 0 → retry up to 3× with exponential back-off',
+         pay:'attempt 1→1s, 2→2s, 3→4s, still failing…',
+         hdr:'retryWhen(errors => errors.pipe(\n  scan((acc) => acc + 1, 0),\n  takeWhile(acc => acc < 3),\n  delayWhen(acc => timer(1000 * 2 ** acc))\n))\n\nAttempt 3 still fails → propagate error downstream.'},
+        {n:'HNDL',dir:'CATCH',cap:'catchError in service: returns fallback empty array, logs to Sentry',
+         pay:'return of([] as T[])',
+         hdr:'catchError((err: HttpErrorResponse) => {\n  if (err.status === 0)\n    return of(fallback); // graceful degradation\n  return throwError(() => err);\n})\n\nObservable completes with fallback — no crash.'},
+        {n:'UX',dir:'RENDER',tone:'ok',cap:'Component receives [] — shows "unavailable" message, not a blank white crash',
+         pay:'items$ → [] → template renders "Data unavailable"',
+         hdr:'@if(items.length === 0) {\n  <div class="empty-state">\n    Data unavailable — try again later\n  </div>\n}\n\nGraceful degradation. User got feedback, not a blank page.'},
+      ],
+      result:{ok:true,msg:'Network timeout → retry → catchError fallback → user sees graceful empty state.'}
+    },
+    validation:{
+      steps:[
+        {n:'ERR',dir:'400',cap:'Spring @Valid fails — @RestControllerAdvice returns ProblemDetail JSON',
+         pay:'HTTP 400 · Content-Type: application/problem+json',
+         hdr:'{\n  "type": "about:blank",\n  "title": "Bad Request",\n  "status": 400,\n  "detail": "Validation failed for object=userDto",\n  "errors": {\n    "email": "must be a valid email address",\n    "name": "must not be blank"\n  }\n}'},
+        {n:'HTTP',dir:'WRAP',cap:'Angular: error.status=400, error.error = the full ProblemDetail object',
+         pay:'error.error.errors → { email: "...", name: "..." }',
+         hdr:'status: 400\nstatusText: "Bad Request"\nerror: {\n  title: "Bad Request",\n  errors: {\n    email: "must be a valid email address",\n    name: "must not be blank"\n  }\n}\n\nThe full ProblemDetail body is in error.error.'},
+        {n:'INT',dir:'PASS',cap:'No retry for 4xx — interceptor passes through to the service\'s catchError',
+         pay:'4xx → no retry applied',
+         hdr:'// RetryInterceptor rule:\nif (err.status >= 400 && err.status < 500) {\n  return throwError(() => err); // pass through\n}\n\nRetrying a validation error is pointless — the body is wrong.'},
+        {n:'HNDL',dir:'EXTRACT',cap:'catchError extracts ProblemDetail errors → re-throws as a field-errors map',
+         pay:'errors: { email: "valid email", name: "not blank" }',
+         hdr:'catchError((err: HttpErrorResponse) => {\n  if (err.status === 400 && err.error?.errors) {\n    return throwError(() => err.error.errors);\n  }\n  return throwError(() => err);\n})'},
+        {n:'UX',dir:'SHOW',tone:'ok',cap:'Component sets per-field errors on FormControls — inline messages under each input',
+         pay:'form.get("email").setErrors({ server: "must be valid email" })',
+         hdr:'Object.entries(errs).forEach(([field, msg]) =>\n  this.form.get(field)?.setErrors({ server: msg })\n);\n\nEach field shows its own error message. No generic toast — maximum UX clarity.'},
+      ],
+      result:{ok:true,msg:'400 ProblemDetail → catchError → setErrors() → per-field inline messages. Clean.'}
+    },
+    interceptor:{
+      steps:[
+        {n:'ERR',dir:'401',cap:'Backend rejects: access token expired, returns 401 Unauthorized',
+         pay:'HTTP 401 · WWW-Authenticate: Bearer error="invalid_token"',
+         hdr:'HTTP/1.1 401 Unauthorized\nWWW-Authenticate: Bearer\n  error="invalid_token",\n  error_description="The access token expired"\n\nToken window passed. Interceptor must refresh before retrying.'},
+        {n:'HTTP',dir:'WRAP',cap:'Angular wraps as HttpErrorResponse(status:401) — interceptor fires BEFORE catchError',
+         pay:'error.status === 401',
+         hdr:'status: 401\nurl: "/api/data"\nheaders: { ... }\n\nInterceptor intercepts this before it reaches the service\'s pipe.\nThis is the key advantage of an HttpInterceptor.'},
+        {n:'INT',dir:'REFRESH',cap:'AuthInterceptor: POST /auth/refresh → new token → clone request with new header',
+         pay:'POST /auth/refresh → { token: "eyJ…[new]" }',
+         hdr:'if (err.status === 401 && !req.headers.get("X-Retried")) {\n  return this.auth.refresh().pipe(\n    switchMap(token => {\n      const retried = req.clone({\n        setHeaders: { Authorization: "Bearer "+token },\n        headers: req.headers.set("X-Retried","1")\n      });\n      return next(retried);\n    })\n  );\n}'},
+        {n:'HNDL',dir:'RETRY',cap:'Cloned request with new Bearer token → backend returns 200',
+         pay:'GET /api/data + new token → 200 OK',
+         hdr:'// Cloned request:\nAuthorization: Bearer eyJ…[new token]\nX-Retried: 1\n\nResponse: 200 OK\n{ items: [...] }\n\nOriginal request succeeds transparently.'},
+        {n:'UX',dir:'OK',tone:'ok',cap:'Component receives data normally — zero user-visible disruption on token expiry',
+         pay:'data$ → { items: [...] } — no error shown',
+         hdr:'// Component code:\nthis.items$ = this.api.getItems(); // no catchError needed\n\nThe interceptor handled the full refresh + retry cycle invisibly.\nUser never saw a 401. No login prompt needed.'},
+      ],
+      result:{ok:true,msg:'Token expired → interceptor refreshes + retries → component sees 200. Transparent.'}
+    },
+    global:{
+      steps:[
+        {n:'ERR',dir:'THROW',cap:'Uncaught JS error in component — thrown outside any try/catch or catchError',
+         pay:'Error: Cannot read properties of undefined (reading "id")',
+         hdr:'Error: Cannot read properties of undefined (reading "id")\n  at OrderComponent.ngOnInit (order.component.ts:24)\n  at callHook (core.js:2671)\n  at ...\n\nNo catchError here. Angular runtime catches it next.'},
+        {n:'HTTP',dir:'HANDLE',cap:'Angular calls your ErrorHandler.handleError() — overrides the default console.error',
+         pay:'implements ErrorHandler { handleError(err: any) }',
+         hdr:'@Injectable()\nexport class GlobalErrorHandler implements ErrorHandler {\n  constructor(\n    private router: Router,\n    private snack: MatSnackBar\n  ) {}\n  handleError(error: any) { /* your code */ }\n}\n// registered via:\n{ provide: ErrorHandler, useClass: GlobalErrorHandler }'},
+        {n:'INT',dir:'REPORT',cap:'Handler sends to Sentry with user + route + build SHA for full context',
+         pay:'Sentry.captureException(error)',
+         hdr:'Sentry.captureException(error, {\n  extra: {\n    route: this.router.url,\n    user: this.auth.userId,\n    build: environment.buildSha,\n    timestamp: new Date().toISOString()\n  }\n});\n\nError is captured — engineering team gets alerted automatically.'},
+        {n:'HNDL',dir:'RECOVER',cap:'Handler classifies error: fatal → redirect to /error; non-fatal → snackbar + continue',
+         pay:'isFatal(error) → this.router.navigate(["/error"])',
+         hdr:'if (isFatal(error)) {\n  this.router.navigate([\'/error\']);\n} else {\n  this.snack.open(\n    "Something went wrong",\n    "Dismiss",\n    { duration: 5000 }\n  );\n}\n\nControlled fallback instead of blank white screen.'},
+        {n:'UX',dir:'PAGE',tone:'ok',cap:'User lands on /error — friendly message + "go home" button, error is reported',
+         pay:'/error route → "Something went wrong" + retry CTA',
+         hdr:'// ErrorPageComponent template:\n<h1>Something went wrong</h1>\n<p>Our team has been notified automatically.</p>\n<button (click)="goHome()">Back to home</button>\n\nGraceful end-state: error is handled, logged, and user has a path forward.'},
+      ],
+      result:{ok:true,msg:'Unhandled error → GlobalErrorHandler → Sentry report + controlled recovery. No blank screen.'}
+    }
+  };
+
+  const pfx='eh';
+  const g=id=>document.getElementById(pfx+id);
+  let cS='network',running=false,T=[];
+  function clr(){T.forEach(clearTimeout);T=[];}
+  function t(fn,ms){T.push(setTimeout(fn,ms));}
+  function disBtn(v){g('Run').disabled=v;g('Pill').textContent=v?'⏳ running…':'ready';}
+  function ns(){return[...document.getElementById(pfx+'Diag').querySelectorAll('.rt-node')];}
+  function posOf(el){const d=document.getElementById(pfx+'Diag');return(el.getBoundingClientRect().top-d.getBoundingClientRect().top)+el.offsetHeight/2;}
+  function reset(){
+    clr();running=false;
+    ns().forEach(n=>n.className='rt-node');
+    const ch=document.getElementById(pfx+'Chip');ch.style.top='0';ch.style.opacity='0';
+    g('Dir').textContent='STEP 0 / 5';g('Cap').textContent='Pick a scenario and press ▶ Run';
+    g('Payload').textContent='';g('Headers').innerHTML='<span class="ht">INSPECTOR</span>(waiting)';
+    g('Result').className='rt-result';g('Result').textContent='';disBtn(false);
+  }
+  function applyStep(nl,i,step){
+    const el=nl.find(n=>n.dataset.n===step.n);if(!el)return;
+    nl.forEach(n=>{n.classList.remove('cur','curbad','rtpulse');});
+    if(step.tone==='ok')el.classList.add('vchk','rtpulse');
+    else if(step.tone==='bad')el.classList.add('vskip','curbad','rtpulse');
+    else el.classList.add('cur','rtpulse');
+    const ch=document.getElementById(pfx+'Chip');
+    ch.style.opacity='1';ch.style.top=posOf(el)+'px';
+    ch.textContent=step.dir;
+    ch.className='rt-chip'+(step.tone==='ok'?' ok':step.tone==='bad'?' bad':'');
+    g('Dir').textContent='STEP '+(i+1)+' / '+SCEN[cS].steps.length;
+    g('Cap').textContent=step.cap;g('Payload').textContent=step.pay||'';
+    g('Headers').innerHTML='<span class="ht">INSPECTOR</span>'+step.hdr;
+  }
+  function run(){
+    if(running)return;running=true;clr();disBtn(true);
+    const sc=SCEN[cS];const nl=ns();
+    nl.forEach(n=>n.className='rt-node');
+    document.getElementById(pfx+'Chip').style.opacity='0';
+    g('Result').className='rt-result';
+    sc.steps.forEach((step,i)=>t(()=>applyStep(nl,i,step),300+i*2000));
+    t(()=>{
+      const r=sc.result||{ok:true,msg:'Done'};
+      const el=g('Result');el.className='rt-result show '+(r.ok?'ok':'warn');el.textContent=r.msg;
+      running=false;disBtn(false);
+    },300+sc.steps.length*2000+800);
+  }
+  document.querySelectorAll('#ehSeg button').forEach(b=>b.onclick=()=>{
+    if(running)return;cS=b.dataset.s;
+    document.querySelectorAll('#ehSeg button').forEach(x=>x.classList.toggle('on',x===b));
+    reset();
+  });
+  g('Run').onclick=run;
+  reset();
+})();
 </script>
 </body>
 </html>

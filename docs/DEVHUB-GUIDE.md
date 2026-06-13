@@ -238,12 +238,35 @@ Most recently: a **full Spring Boot hero wave** — 11 pages of the 🍃 Spring 
 [Data Specifications](../frontend/spring-boot-data-specs-visualizer.html) (Specification → dynamic WHERE / .and() compose / null-safe / projection),
 [Events](../frontend/spring-boot-events-visualizer.html) (sync / @Async pool / @TransactionalEventListener AFTER_COMMIT / SpEL conditional),
 [Pagination](../frontend/spring-boot-pagination-visualizer.html) (basic page / sort / empty / Slice&lt;T&gt; no-COUNT).
-And an **Angular hero wave** — 8 pages of the 🅰️ Angular core now carry the same deep visualization:
-[Change Detection](../frontend/angular-change-detection-visualizer.html) (Zone.js tick / OnPush + async pipe / signal reactive graph / zoneless),
-[Component Communication](../frontend/angular-communication-visualizer.html) (@Input down / @Output up / [(two-way)] / shared signal service),
-[Control Flow](../frontend/angular-control-flow-visualizer.html) (@if/@else / @for + track / @defer on viewport / @switch),
-[ViewChild &amp; ContentChild](../frontend/angular-viewchild-visualizer.html) (lifecycle timing / static:true / signal viewChild() / ContentChild),
-[Functional Guards](../frontend/angular-functional-guards-visualizer.html) (canActivate allow / UrlTree redirect / canDeactivate dirty form / canMatch chunk-skip),
-[Testing](../frontend/angular-testing-visualizer.html) (pure unit / TestBed + ComponentFixture / jasmine spy / fakeAsync + tick),
-[Lazy Loading](../frontend/angular-lazy-loading-visualizer.html) (first nav chunk fetch / PreloadAllModules / @defer viewport / JS module cache),
-[Animations](../frontend/angular-animations-visualizer.html) (fade void/visible / state machine slide / :enter/:leave / keyframes bounce).*
+And a **complete Angular hero wave** — all **70 pages** of the 🅰️ Angular track now carry the animated chip-walk + live inspector. Every major topic is covered:
+**Fundamentals:** [Change Detection](../frontend/angular-change-detection-visualizer.html) (Zone.js / OnPush / signal graph / zoneless),
+[Component Communication](../frontend/angular-communication-visualizer.html) (@Input / @Output / two-way / shared service),
+[Control Flow](../frontend/angular-control-flow-visualizer.html) (@if / @for+track / @defer / @switch),
+[ViewChild &amp; ContentChild](../frontend/angular-viewchild-visualizer.html) (lifecycle timing / static:true / signal viewChild()),
+[Functional Guards](../frontend/angular-functional-guards-visualizer.html) (canActivate / UrlTree / canDeactivate / canMatch),
+[Testing](../frontend/angular-testing-visualizer.html) (pure unit / TestBed / jasmine spy / fakeAsync+tick),
+[Lazy Loading](../frontend/angular-lazy-loading-visualizer.html) (chunk fetch / PreloadAll / @defer viewport / module cache),
+[Animations](../frontend/angular-animations-visualizer.html) (fade / state machine / :enter:leave / keyframes).
+**Reactivity & State:** [Signals](../frontend/angular-signals-visualizer.html), [RxJS family](../frontend/angular-rxjs-visualizer.html) (lifecycle, operators, multicasting, custom operators, flattening),
+[NgRx](../frontend/angular-ngrx-visualizer.html) (dispatch→reducer→selector+effect), [SignalStore](../frontend/angular-ngrx-signal-store-visualizer.html) (patchState / rxMethod),
+[State Patterns](../frontend/angular-state-patterns-visualizer.html) (same update through BehaviorSubject / Signal / NgRx / SignalStore side-by-side).
+**HTTP & Auth:** [HTTP Client](../frontend/angular-http-visualizer.html) (interceptor round-trip, chip turns around on response),
+[Interceptors Advanced](../frontend/angular-interceptors-advanced-visualizer.html), [OIDC Login](../frontend/angular-oidc-login-deep-visualizer.html) (PKCE / Entra / Ping / silent refresh),
+[Token Lifecycle](../frontend/angular-token-lifecycle-deep-visualizer.html) (JWT issuance / storage / silent-refresh interceptor / revoke).
+**Forms:** [Reactive Forms](../frontend/angular-forms-visualizer.html), [Template Forms](../frontend/angular-template-forms-visualizer.html),
+[FormArray](../frontend/angular-form-array-visualizer.html) (push/insertAt/removeAt timeline),
+[Custom Form Controls (CVA)](../frontend/angular-custom-form-controls-visualizer.html) (writeValue↓ / onChange↑ / setDisabledState / async validation),
+[Forms &amp; Data](../frontend/angular-forms-data-deep-visualizer.html) (reactive / multipart / patchValue / nested DTO).
+**Advanced:** [Defer](../frontend/angular-defer-deep-visualizer.html) (on viewport / interaction / idle / prefetch),
+[DI Hierarchy](../frontend/angular-di-hierarchy-deep-visualizer.html) (root singleton / lazy scope / @SkipSelf / @Optional),
+[Components deep](../frontend/angular-components-visualizer.html) (lifecycle / @Input SimpleChange / @Output EventEmitter / viewChild safety),
+[CDK &amp; Material](../frontend/angular-material-cdk-visualizer.html) (custom palette / CDK Overlay / FocusTrap / MatFormField),
+[PWA](../frontend/angular-pwa-visualizer.html) (SW install / cache-first / offline / Web Push),
+[Signal Store Patterns](../frontend/angular-signal-store-patterns-deep-visualizer.html) (withState / withComputed / rxMethod / withCalls),
+[OpenAPI Client](../frontend/angular-openapi-client-deep-visualizer.html) (ng-openapi-gen / schema drift / auth interceptor / MSW mock),
+[Workspace Libraries](../frontend/angular-workspace-libraries-visualizer.html) (ng generate library / path alias / ng-packagr / peerDependencies),
+[v21 Features](../frontend/angular-v21-visualizer.html) (HMR template patch / resource() / incremental hydration / linkedSignal()),
+[Zoneless](../frontend/angular-zoneless-deep-visualizer.html) (signal.set() → scheduler → targeted CD vs Zone full tree walk).
+**Debugging:** [ExpressionChangedAfterItHasBeenChecked](../frontend/angular-debugging-change-detection-deep-visualizer.html),
+[Debugging RxJS](../frontend/angular-debugging-rxjs-deep-visualizer.html) (cold Observable / leak / swallowed error / tap tracing),
+[Browser &amp; Angular DevTools](../frontend/angular-debugging-devtools-deep-visualizer.html) (Network / Profiler / breakpoints / Component explorer).*
