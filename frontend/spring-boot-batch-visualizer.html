@@ -88,12 +88,51 @@
     .s-abandoned{background:#1a0a1a;color:var(--info);border:1px solid var(--info);}
   </style>
   <link rel="stylesheet" href="devhub.css" />
+  <style>
+    .who-JOB{background:rgba(148,163,184,.18);color:#cbd5e1}
+    .who-STEP{background:rgba(109,179,63,.22);color:#a6e07f}
+    .who-READ{background:rgba(34,211,238,.14);color:#7dd3fc}
+    .who-PROC{background:rgba(245,158,11,.16);color:#fcd34d}
+    .who-WRIT{background:rgba(167,139,250,.16);color:#c4b5fd}
+    .who-BAD{background:rgba(248,113,113,.16);color:#fca5a5}
+  </style>
 </head>
 <body class="track-spring">
 <div class="container">
   <a class="back" href="spring-boot-index.html">← Spring Boot Index</a>
   <h1>Spring Batch — Jobs, Steps &amp; Chunk Processing</h1>
   <p class="sub">Process millions of records reliably. Spring Batch handles retry, skip, partitioning, restartability and job history automatically.</p>
+
+  <!-- ── HERO: animated Spring Batch job execution · live per-step inspector ── -->
+  <div class="panel" style="border:1px solid var(--accent)">
+    <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch a Batch job run — read chunk → process → write → commit</h2>
+    <p style="font-size:13px;color:var(--muted);margin:6px 0 12px">Spring Batch processes data in chunks: the ItemReader reads N items, the ItemProcessor transforms each, and the ItemWriter commits the whole chunk atomically. Pick a scenario to see how skip, retry, and failures play out.</p>
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="scenseg">
+        <button data-s="happy" class="on">chunk commit</button>
+        <button data-s="skip">skip on error</button>
+        <button data-s="retry">retry on write fail</button>
+        <button data-s="fail">job fails</button>
+      </span>
+      <button class="rt-run" id="run">▶ Play</button>
+      <span class="rt-pill" id="reqPill">Job → Step → chunk · COMPLETED</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="rtDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="rtDir">▶ READY</span>
+        <div class="rt-cap" id="rtCap">Press ▶ to run the job…</div>
+        <div class="rt-payload" id="rtPayload"></div>
+        <div class="rt-headers" id="rtHeaders"></div>
+        <div class="rt-result" id="rtResult"></div>
+      </div>
+    </div>
+    <div class="rt-legend">
+      <span>📋 Job · 🪜 Step · 📖 ItemReader · ⚙️ ItemProcessor · 💾 ItemWriter</span>
+      <span><span style="color:#86efac">green = chunk committed</span> · <span style="color:#fca5a5">red = skip / fail</span></span>
+    </div>
+  </div>
 
   <!-- SECTION 1 — Why batch -->
   <h2>1. Why Batch Processing?</h2>
@@ -581,6 +620,42 @@ async function runChunkDemo(){
     `✓ Step COMPLETED — ${readCount} read, ${writeCount} written, ${skipCount} skipped`;
   chunkRunning = false;
 }
+</script>
+<script>
+(function(){
+const HDR={
+  h0:{dir:'1 → JobLauncher',cap:'JobLauncher.run(importJob, params) — Job starts, Step begins',payload:'JobParameters:\n  run.id=1\n  file=/data/orders-2026-06-12.csv\n\nJobExecution:\n  jobId: 42\n  status: STARTED\n  Step: importOrdersStep → STARTED',headers:'@EnableBatchProcessing\nJobRepository stores all Job/Step state in DB',result:''},
+  h1:{dir:'2 → ItemReader reads',cap:'FlatFileItemReader reads next N items (chunk-size=10)',payload:'Reading items...\n  item[0]: {orderId:1001, amount:49.99}\n  item[1]: {orderId:1002, amount:129.00}\n  ...\n  item[9]: {orderId:1010, amount:22.50}\n  item[10]: null → chunk boundary',headers:'FlatFileItemReader<OrderCsv>\nchunk-size: 10\nReader returns null to signal end of chunk',result:''},
+  h2:{dir:'3 → ItemProcessor transforms',cap:'Each item passed through ItemProcessor — CSV converted to Order entity',payload:'Processor.process(OrderCsv{orderId:1001})\n  → Order{id:1001, amount:49.99, status:PENDING}\n\nAll 10 items transformed successfully\nno items returned null (no implicit skips)',headers:'ItemProcessor<OrderCsv, Order>\nReturn null = skip item without counting\nagainst skip limit',result:''},
+  h3:{dir:'4 → ItemWriter commits',cap:'All 10 processed items written as a single atomic transaction',payload:'JpaItemWriter.write([10 items])\n  INSERT INTO orders VALUES\n    (1001,49.99,PENDING),(1002,129.00,PENDING),\n    ... [10 rows]\n  COMMIT;',headers:'Chunk = one transaction\nIf writer throws → entire chunk rolled back\nStep resumes from last checkpoint',result:''},
+  h4:{dir:'5 ✓ Chunk committed',cap:'Chunk committed — Step loops back to read next chunk until reader returns null',payload:'StepExecution:\n  readCount: 10\n  writeCount: 10\n  commitCount: 1\n  skipCount: 0\n\nReading next chunk...',headers:'All chunks done → Step COMPLETED\nJobExecution: COMPLETED\nExit code: COMPLETED',result:'✓ Chunk committed — Job COMPLETED'},
+  s0:{dir:'1 → item[5] bad data',cap:'ItemReader reads 10 items — item[5] has malformed amount field',payload:'item[0..4]: ok\nitem[5]: {orderId:1006, amount:"N/A"} ← bad\nitem[6..9]: ok\n\nSkipPolicy: LimitCheckingItemSkipPolicy\nSkip limit: 3',headers:'chunkSize=10',result:''},
+  s1:{dir:'2 → ParseException thrown',cap:'ItemProcessor throws ParseException when parsing "N/A" as BigDecimal',payload:'Processor: OrderCsv{amount:"N/A"}\n  → NumberFormatException: "N/A"\n  → ParseException\n\nSkipPolicy.shouldSkip(ParseException,1):\n  skipCount=1 < limit=3 → SKIP',headers:'Item logged to skip table\nprocessing continues with item[6]',result:''},
+  s2:{dir:'3 ✓ 9 items written',cap:'9 valid items committed — item[5] permanently skipped',payload:'JpaItemWriter.write([9 items])\n  INSERT ... [9 rows]\n  COMMIT;\n\nStepExecution:\n  readCount:10, writeCount:9\n  skipCount:1',headers:'Skip is permanent for this execution\nRestart: skipped items not re-read',result:'✓ 9 written, skip_count=1'},
+  r0:{dir:'1 → Write fails (attempt 1)',cap:'ItemWriter.write() throws TransientDataAccessException — DB pool exhausted',payload:'JpaItemWriter.write([10 items])\n  → TransientDataAccessException:\n    Could not acquire JDBC connection\n    (HikariPool exhausted)\n\nRetryTemplate: attempt 1/3 FAILED',headers:'RetryPolicy: SimpleRetryPolicy\nmaxAttempts: 3\nretryable: TransientDataAccessException',result:''},
+  r1:{dir:'2 → Backoff, retry attempt 2',cap:'FixedBackOffPolicy waits 1s then retries the write',payload:'Waiting 1000ms (FixedBackOffPolicy)...\n\nJpaItemWriter.write([10 items]) attempt 2\n  → TransientDataAccessException again\n  attempt 2/3 FAILED',headers:'Items buffered in memory between retries\nReader NOT re-called during retry\n(chunk already assembled)',result:''},
+  r2:{dir:'3 ✓ Attempt 3 succeeds',cap:'DB pool recovered — third write attempt succeeds',payload:'JpaItemWriter.write([10 items]) attempt 3\n  INSERT ... [10 rows]\n  COMMIT; ✓\n\nretry_count: 3\nChunk committed',headers:'If attempt 3 also fails:\n  → RetryExhaustedException\n  → Step FAILED',result:'✓ Committed after 3 retries'},
+  f0:{dir:'1 → Non-retryable failure',cap:'ItemWriter throws DataIntegrityViolationException — not retryable, Step fails immediately',payload:'JpaItemWriter.write([10 items])\n  → DataIntegrityViolationException:\n    Duplicate entry "1001" for key PRIMARY\n\nRetryPolicy: DataIntegrityViolationException\n  is NOT retryable → immediately FAILED',headers:'Non-transient = data problem, not infra\nRetrying would produce same error',result:''},
+  f1:{dir:'✗ Job FAILED',cap:'Step exits FAILED — Job marked FAILED, restartable from last checkpoint',payload:'StepExecution status: FAILED\nexitStatus: FAILED\nfailureExceptions:\n  DataIntegrityViolationException:\n    Duplicate entry "1001"\n\nJobExecution: FAILED\nRestart: fix data, re-run with same JobParameters',headers:'Job is RESTARTABLE by default\nRestart resumes from last commit point\n(re-reads items after last checkpoint)',result:'✗ Job FAILED — fix data + restart from checkpoint'}
+};
+const SCEN={
+  happy:{pill:'Job → Step → chunk · COMPLETED',nodes:[{id:'JOB',label:'JobLauncher',cls:'who-JOB'},{id:'STEP',label:'Step',cls:'who-STEP'},{id:'READ',label:'ItemReader',cls:'who-READ'},{id:'PROC',label:'ItemProcessor',cls:'who-PROC'},{id:'WRIT',label:'ItemWriter',cls:'who-WRIT'}],steps:[{from:'',to:'JOB',hdr:'h0'},{from:'JOB',to:'READ',hdr:'h1'},{from:'READ',to:'PROC',hdr:'h2'},{from:'PROC',to:'WRIT',hdr:'h3'},{from:'WRIT',to:'STEP',hdr:'h4',tone:'ok'}],result:'✓ Chunk committed — Job COMPLETED'},
+  skip:{pill:'item[5] ParseException → skipped → 9 written',nodes:[{id:'JOB',label:'Job',cls:'who-JOB'},{id:'STEP',label:'Step',cls:'who-STEP'},{id:'READ',label:'ItemReader',cls:'who-READ'},{id:'PROC',label:'ItemProcessor',cls:'who-PROC'},{id:'WRIT',label:'ItemWriter',cls:'who-WRIT'}],steps:[{from:'',to:'READ',hdr:'s0'},{from:'READ',to:'PROC',hdr:'s1'},{from:'PROC',to:'WRIT',hdr:'s2',tone:'ok'}],result:'✓ 9 items written, skip_count=1'},
+  retry:{pill:'write fail → retry × 3 → committed',nodes:[{id:'JOB',label:'Job',cls:'who-JOB'},{id:'STEP',label:'Step',cls:'who-STEP'},{id:'READ',label:'ItemReader',cls:'who-READ'},{id:'PROC',label:'ItemProcessor',cls:'who-PROC'},{id:'WRIT',label:'ItemWriter',cls:'who-WRIT'}],steps:[{from:'',to:'WRIT',hdr:'r0'},{from:'WRIT',to:'WRIT',hdr:'r1'},{from:'WRIT',to:'STEP',hdr:'r2',tone:'ok'}],result:'✓ Committed after 3 retry attempts'},
+  fail:{pill:'DataIntegrityViolation → Job FAILED',nodes:[{id:'JOB',label:'Job',cls:'who-JOB'},{id:'STEP',label:'Step',cls:'who-STEP'},{id:'READ',label:'ItemReader',cls:'who-READ'},{id:'PROC',label:'ItemProcessor',cls:'who-PROC'},{id:'BAD',label:'FAILED',cls:'who-BAD'}],steps:[{from:'',to:'WRIT',hdr:'f0'},{from:'WRIT',to:'BAD',hdr:'f1',tone:'bad'}],result:'✗ Job FAILED — fix data + restart from checkpoint'}
+};
+let cur='happy',T=[];
+function $i(id){return document.getElementById(id);}
+function renderNodes(s){const st=SCEN[s];$i('rtDiagram').innerHTML=st.nodes.map(n=>`<div class="rt-node ${n.cls}" id="n_${n.id}">${n.label}</div>`).join('');$i('reqPill').textContent=st.pill;}
+function resetStage(){$i('rtDir').textContent='▶ READY';$i('rtCap').textContent='Press ▶ to run the job…';$i('rtPayload').textContent='';$i('rtHeaders').textContent='';$i('rtResult').textContent='';document.querySelectorAll('.rt-node').forEach(n=>{n.classList.remove('vchk','vskip','curbad','rt-cur');});clearT();}
+function applyStep(steps,i){const step=steps[i];if(!step)return;const h=HDR[step.hdr]||{};$i('rtDir').textContent=(step.tone==='bad'?'✗ ':step.tone==='ok'?'✓ ':'')+(h.dir||'');$i('rtCap').textContent=h.cap||'';$i('rtPayload').textContent=h.payload||'';$i('rtHeaders').textContent=h.headers||'';$i('rtResult').textContent=h.result||'';document.querySelectorAll('.rt-node').forEach(n=>n.classList.remove('rt-cur','vchk','vskip','curbad'));const toNode=document.getElementById('n_'+step.to);if(toNode){toNode.classList.add('rt-cur');if(step.tone==='ok')toNode.classList.add('vchk');if(step.tone==='bad'){toNode.classList.add('vskip','curbad');}}}
+function clearT(){T.forEach(clearTimeout);T=[];}
+function setDisabled(on){document.querySelectorAll('#scenseg button').forEach(b=>b.disabled=on);$i('run').disabled=on;}
+function run(){const steps=SCEN[cur].steps;clearT();resetStage();setDisabled(true);steps.forEach((s,i)=>T.push(setTimeout(()=>{applyStep(steps,i);if(i===steps.length-1){T.push(setTimeout(()=>{$i('rtResult').textContent=SCEN[cur].result;setDisabled(false);},2000));}},300+i*2000)));}
+document.querySelectorAll('#scenseg button').forEach(b=>b.addEventListener('click',function(){document.querySelectorAll('#scenseg button').forEach(x=>x.classList.remove('on'));this.classList.add('on');cur=this.dataset.s;clearT();resetStage();renderNodes(cur);}));
+$i('run').addEventListener('click',run);
+renderNodes(cur);
+})();
 </script>
 </body>
 </html>

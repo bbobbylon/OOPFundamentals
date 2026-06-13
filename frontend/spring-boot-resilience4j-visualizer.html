@@ -134,12 +134,50 @@
     @media(max-width:680px){.mod-grid,.two-col,.three-col{grid-template-columns:1fr;}.state-machine{flex-direction:column;gap:8px;}.state-arrow{flex-direction:row;}.cascade-diagram{flex-direction:column;}.svc-arrow{transform:rotate(90deg);}}
   </style>
   <link rel="stylesheet" href="devhub.css" />
+  <style>
+    .who-CALL{background:rgba(148,163,184,.18);color:#cbd5e1}
+    .who-CB{background:rgba(109,179,63,.22);color:#a6e07f}
+    .who-RETRY{background:rgba(34,211,238,.14);color:#7dd3fc}
+    .who-FALL{background:rgba(245,158,11,.16);color:#fcd34d}
+    .who-BAD{background:rgba(248,113,113,.16);color:#fca5a5}
+  </style>
 </head>
 <body class="track-spring">
 <div class="container">
   <a class="back" href="spring-boot-index.html">← Spring Boot</a>
   <h1>Resilience4j — Circuit Breaker, Retry &amp; Rate Limiter</h1>
   <p class="sub">When a remote service fails, your entire application should not. Resilience4j gives you battle-tested fault-tolerance patterns as simple annotations.</p>
+
+  <!-- ── HERO: animated circuit breaker state machine · live per-step inspector ── -->
+  <div class="panel" style="border:1px solid var(--accent)">
+    <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch the circuit breaker trip — CLOSED → OPEN → HALF_OPEN → CLOSED</h2>
+    <p style="font-size:13px;color:var(--muted);margin:6px 0 12px">Resilience4j's CircuitBreaker is a state machine. When failures exceed the threshold it opens — calls fail fast without hitting the broken downstream. After a wait it probes with a half-open test call. The inspector shows the real state, failure rate, and what fires when.</p>
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="scenseg">
+        <button data-s="closed" class="on">CLOSED (normal)</button>
+        <button data-s="open">threshold → OPEN</button>
+        <button data-s="halfopen">HALF_OPEN probe</button>
+        <button data-s="ratelimit">RateLimiter</button>
+      </span>
+      <button class="rt-run" id="run">▶ Play</button>
+      <span class="rt-pill" id="reqPill">CircuitBreaker CLOSED · calls pass</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="rtDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="rtDir">▶ READY</span>
+        <div class="rt-cap" id="rtCap">Press ▶ to start calling…</div>
+        <div class="rt-payload" id="rtPayload"></div>
+        <div class="rt-headers" id="rtHeaders"></div>
+        <div class="rt-result" id="rtResult"></div>
+      </div>
+    </div>
+    <div class="rt-legend">
+      <span>📞 caller · 🔌 CircuitBreaker · 🔄 Retry · 🛟 fallback · 🚦 RateLimiter</span>
+      <span><span style="color:#86efac">green = call passes</span> · <span style="color:#fca5a5">red = fail fast / rejected</span></span>
+    </div>
+  </div>
 
   <!-- ═══════════════════════════════════════════════════════ -->
   <!-- SECTION 1: The cascading failure problem                -->
@@ -1210,6 +1248,42 @@ rlRenderTokens();
     t.textContent = i < 8 ? '●' : '·';
     pool.appendChild(t);
   }
+})();
+</script>
+<script>
+(function(){
+const HDR={
+  cl0:{dir:'1 → Call enters CB proxy',cap:'@CircuitBreaker AOP proxy intercepts the method call — CB state: CLOSED',payload:'Caller → @CircuitBreaker(name="paymentCB")\n\nCircuitBreakerRegistry.circuitBreaker("paymentCB")\n  State: CLOSED\n  FailureRate: 0.0% (0/10 recent calls)\n  Threshold: 50%',headers:'State CLOSED means: calls pass through normally\nCB tracks results in a sliding window (count=10)',result:''},
+  cl1:{dir:'2 → Call passes to remote',cap:'CircuitBreaker in CLOSED state — call forwarded to PaymentService',payload:'Calling PaymentService:\n  POST http://payment-service/api/charge\n  {"orderId":42,"amount":199.99}\n\nPaymentService responded: 200 OK\n  {"transactionId":"txn_abc123","status":"CAPTURED"}',headers:'CB records result: SUCCESS\nSliding window: 1 success / 1 total\nFailure rate: 0.0% — stays CLOSED',result:''},
+  cl2:{dir:'3 ✓ CB records success',cap:'Call succeeded — CircuitBreaker records SUCCESS in sliding window',payload:'CircuitBreaker "paymentCB" after call:\n  State: CLOSED\n  SuccessCount: 1\n  FailureCount: 0\n  FailureRate: 0.0%\n  SlowCallRate: 0.0%',headers:'CB stays CLOSED until:\n  failureRate >= threshold (50%)\n  OR slowCallRate >= slowCallRateThreshold',result:'✓ CLOSED: call passed, success recorded'},
+  op0:{dir:'1 → Failures accumulate',cap:'5 consecutive calls to PaymentService fail with 500 — failure rate hits threshold',payload:'Call 1: POST /api/charge → 500 Internal Server Error\nCall 2: POST /api/charge → 500\nCall 3: POST /api/charge → 500\nCall 4: POST /api/charge → 500\nCall 5: POST /api/charge → 500\n\nFailureRate: 50% (5/10) ≥ threshold(50%)',headers:'slidingWindowSize: 10\nfailureRateThreshold: 50\n→ 5 failures out of 10 trips the breaker',result:''},
+  op1:{dir:'2 → CB transitions to OPEN',cap:'Failure rate threshold exceeded — CircuitBreaker transitions CLOSED → OPEN',payload:'CircuitBreaker "paymentCB" state change:\n  CLOSED → OPEN\n\nReason: failureRate=50.0% >= threshold=50%\n\nwaitDurationInOpenState: 30s\nTimer started: will transition to HALF_OPEN at T+30s',headers:'OPEN state: all calls rejected immediately\nNo calls forwarded to PaymentService\nFallback method invoked instead',result:''},
+  op2:{dir:'3 → Fail fast (no downstream call)',cap:'Next call arrives — CB is OPEN, rejected immediately without calling PaymentService',payload:'Caller → @CircuitBreaker → CB is OPEN\n\nCallNotPermittedException thrown immediately\n  (PaymentService NOT called)\n\n→ @CircuitBreaker fallback method invoked:\n  return PaymentResult.pending("circuit-open")',headers:'Fail fast protects downstream:\n  PaymentService gets zero load while in OPEN\nFallback must be same return type as method',result:''},
+  op3:{dir:'4 ✗ Fallback returned',cap:'Fallback returns queued-for-later response — user informed gracefully',payload:'Fallback response:\n{\n  "transactionId": null,\n  "status": "QUEUED",\n  "message": "Payment queued — service temporarily unavailable"\n}\n\nHTTP 202 Accepted returned to client',headers:'Circuit OPEN for: 30s\nAfter 30s: automatically transitions to HALF_OPEN\nClient can retry or poll for status',result:'✗ OPEN: fail fast → fallback fired, downstream protected'},
+  ho0:{dir:'1 → HALF_OPEN probe starts',cap:'waitDurationInOpenState elapsed — CB transitions OPEN → HALF_OPEN to probe',payload:'CircuitBreaker "paymentCB" state change:\n  OPEN → HALF_OPEN\n\n30 seconds elapsed since OPEN.\n\npermittedNumberOfCallsInHalfOpenState: 3\nAllow up to 3 calls through as probe calls',headers:'HALF_OPEN = trial period\nAllows limited calls to test if service recovered\nStill uses fallback if probe fails',result:''},
+  ho1:{dir:'2 → Probe call forwarded',cap:'One of the 3 permitted probe calls forwarded to PaymentService',payload:'Probe call (1/3):\n  POST http://payment-service/api/charge\n  {"orderId":44,"amount":49.99}\n\nPaymentService: 200 OK\n  {"transactionId":"txn_xyz","status":"CAPTURED"}\n\nResult: SUCCESS',headers:'All 3 probe calls must succeed to close:\nIf any probe fails → back to OPEN state',result:''},
+  ho2:{dir:'3 ✓ Probes pass → CLOSED',cap:'All 3 probe calls succeeded — CircuitBreaker transitions HALF_OPEN → CLOSED',payload:'Probe results (3/3):\n  Call 1: SUCCESS\n  Call 2: SUCCESS\n  Call 3: SUCCESS\n\nAll probes passed → CB transitions:\n  HALF_OPEN → CLOSED\n\nFailure rate reset to 0%',headers:'Normal operation resumes.\nCB will re-open if failure rate climbs again.',result:'✓ HALF_OPEN → CLOSED: service recovered, normal calls resume'},
+  rl0:{dir:'1 → RateLimiter check',cap:'@RateLimiter intercepts call — checks if token available in current period',payload:'@RateLimiter(name="paymentRL")\npublic PaymentResult charge(...)\n\nRateLimiterConfig:\n  limitForPeriod: 10\n  limitRefreshPeriod: 1s\n  timeoutDuration: 0\n\nCurrent period: 10/10 tokens used',headers:'RateLimiter controls CALLS PER SECOND\n(vs CircuitBreaker which reacts to FAILURES)',result:''},
+  rl1:{dir:'2 ✗ Token unavailable → rejected',cap:'Rate limit exceeded — RequestNotPermitted thrown immediately',payload:'RateLimiter "paymentRL":\n  Available permissions: 0\n  timeoutDuration: 0s (no waiting)\n\n→ RequestNotPermittedException thrown\n→ @RateLimiter fallback invoked:\n  return PaymentResult.rateLimited()',headers:'timeoutDuration=0: fail immediately if no token\ntimeoutDuration=500ms: wait up to 500ms for token\nFallback: same signature as annotated method',result:''},
+  rl2:{dir:'3 ✓ Next period — token refilled',cap:'1s refresh period elapses — 10 new tokens available, next call succeeds',payload:'Period refreshed at T+1.0s\nRateLimiter "paymentRL":\n  Available permissions: 10 (refilled)\n\nNext call:\n  POST /api/charge → token acquired\n  PaymentService: 200 OK\n  Token remaining: 9',headers:'RateLimiter protects downstream from:\n  traffic spikes, DDoS, noisy neighbours\nCombine with CB for full resilience stack',result:'✓ RateLimiter: 10 req/s enforced — token refilled at T+1s'}
+};
+const SCEN={
+  closed:{pill:'CircuitBreaker CLOSED · calls pass through',nodes:[{id:'CALL',label:'Caller',cls:'who-CALL'},{id:'CB',label:'CircuitBreaker',cls:'who-CB'},{id:'RETRY',label:'Retry',cls:'who-RETRY'},{id:'FALL',label:'Fallback',cls:'who-FALL'},{id:'BAD',label:'Remote Svc',cls:'who-BAD'}],steps:[{from:'',to:'CALL',hdr:'cl0'},{from:'CALL',to:'CB',hdr:'cl1'},{from:'CB',to:'BAD',hdr:'cl2',tone:'ok'}],result:'✓ CLOSED: call passed through, success recorded'},
+  open:{pill:'50% failure rate → OPEN → fail fast',nodes:[{id:'CALL',label:'Caller',cls:'who-CALL'},{id:'CB',label:'CircuitBreaker',cls:'who-CB'},{id:'RETRY',label:'Retry',cls:'who-RETRY'},{id:'FALL',label:'Fallback',cls:'who-FALL'},{id:'BAD',label:'Remote Svc',cls:'who-BAD'}],steps:[{from:'',to:'BAD',hdr:'op0'},{from:'BAD',to:'CB',hdr:'op1'},{from:'CB',to:'CALL',hdr:'op2'},{from:'CALL',to:'FALL',hdr:'op3',tone:'bad'}],result:'✗ OPEN: fail fast fired, fallback returned gracefully'},
+  halfopen:{pill:'OPEN → HALF_OPEN probe → CLOSED',nodes:[{id:'CALL',label:'Caller',cls:'who-CALL'},{id:'CB',label:'CircuitBreaker',cls:'who-CB'},{id:'RETRY',label:'Probe×3',cls:'who-RETRY'},{id:'FALL',label:'Fallback',cls:'who-FALL'},{id:'BAD',label:'Remote Svc',cls:'who-BAD'}],steps:[{from:'',to:'CB',hdr:'ho0'},{from:'CB',to:'RETRY',hdr:'ho1'},{from:'RETRY',to:'CB',hdr:'ho2',tone:'ok'}],result:'✓ HALF_OPEN → CLOSED: service recovered'},
+  ratelimit:{pill:'Rate limit exceeded → RequestNotPermitted',nodes:[{id:'CALL',label:'Caller',cls:'who-CALL'},{id:'CB',label:'RateLimiter',cls:'who-CB'},{id:'RETRY',label:'Token bucket',cls:'who-RETRY'},{id:'FALL',label:'Fallback',cls:'who-FALL'},{id:'BAD',label:'Remote Svc',cls:'who-BAD'}],steps:[{from:'',to:'RETRY',hdr:'rl0'},{from:'RETRY',to:'FALL',hdr:'rl1',tone:'bad'},{from:'FALL',to:'CB',hdr:'rl2',tone:'ok'}],result:'✓ RateLimiter: 10 req/s enforced — token refills each second'}
+};
+let cur='closed',T=[];
+function $i(id){return document.getElementById(id);}
+function renderNodes(s){const st=SCEN[s];$i('rtDiagram').innerHTML=st.nodes.map(n=>`<div class="rt-node ${n.cls}" id="n_${n.id}">${n.label}</div>`).join('');$i('reqPill').textContent=st.pill;}
+function resetStage(){$i('rtDir').textContent='▶ READY';$i('rtCap').textContent='Press ▶ to start calling…';$i('rtPayload').textContent='';$i('rtHeaders').textContent='';$i('rtResult').textContent='';document.querySelectorAll('.rt-node').forEach(n=>{n.classList.remove('vchk','vskip','curbad','rt-cur');});clearT();}
+function applyStep(steps,i){const step=steps[i];if(!step)return;const h=HDR[step.hdr]||{};$i('rtDir').textContent=(step.tone==='bad'?'✗ ':step.tone==='ok'?'✓ ':'')+( h.dir||'');$i('rtCap').textContent=h.cap||'';$i('rtPayload').textContent=h.payload||'';$i('rtHeaders').textContent=h.headers||'';$i('rtResult').textContent=h.result||'';document.querySelectorAll('.rt-node').forEach(n=>n.classList.remove('rt-cur','vchk','vskip','curbad'));const toNode=document.getElementById('n_'+step.to);if(toNode){toNode.classList.add('rt-cur');if(step.tone==='ok')toNode.classList.add('vchk');if(step.tone==='bad'){toNode.classList.add('vskip','curbad');}}}
+function clearT(){T.forEach(clearTimeout);T=[];}
+function setDisabled(on){document.querySelectorAll('#scenseg button').forEach(b=>b.disabled=on);$i('run').disabled=on;}
+function run(){const steps=SCEN[cur].steps;clearT();resetStage();setDisabled(true);steps.forEach((s,i)=>T.push(setTimeout(()=>{applyStep(steps,i);if(i===steps.length-1){T.push(setTimeout(()=>{$i('rtResult').textContent=SCEN[cur].result;setDisabled(false);},2000));}},300+i*2000)));}
+document.querySelectorAll('#scenseg button').forEach(b=>b.addEventListener('click',function(){document.querySelectorAll('#scenseg button').forEach(x=>x.classList.remove('on'));this.classList.add('on');cur=this.dataset.s;clearT();resetStage();renderNodes(cur);}));
+$i('run').addEventListener('click',run);
+renderNodes(cur);
 })();
 </script>
 </body>

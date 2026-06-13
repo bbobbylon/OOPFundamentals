@@ -89,12 +89,50 @@
     .saga-content .saga-comp{font-size:11px;color:var(--bad);margin-top:2px;font-style:italic;}
   </style>
   <link rel="stylesheet" href="devhub.css" />
+  <style>
+    .who-SVC{background:rgba(148,163,184,.18);color:#cbd5e1}
+    .who-GW{background:rgba(109,179,63,.22);color:#a6e07f}
+    .who-BRKO{background:rgba(34,211,238,.14);color:#7dd3fc}
+    .who-REG{background:rgba(245,158,11,.16);color:#fcd34d}
+    .who-BAD{background:rgba(248,113,113,.16);color:#fca5a5}
+  </style>
 </head>
 <body class="track-spring">
 <div class="container">
   <a class="back" href="spring-boot-index.html">← Spring Boot Index</a>
   <h1>Microservices Architecture Patterns with Spring Boot</h1>
   <p class="sub">Design distributed systems that scale independently, deploy separately, and fail gracefully. Understand the patterns before reaching for the tools.</p>
+
+  <!-- ── HERO: animated microservice communication · live per-step inspector ── -->
+  <div class="panel" style="border:1px solid var(--accent)">
+    <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch services talk — sync REST, async events, discovery, gateway</h2>
+    <p style="font-size:13px;color:var(--muted);margin:6px 0 12px">Microservices communicate in four main ways. Pick a pattern to see the request flow, the real payloads, and why each pattern exists — including what happens when a downstream service is down.</p>
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="scenseg">
+        <button data-s="sync" class="on">sync REST</button>
+        <button data-s="async">async events</button>
+        <button data-s="discovery">service discovery</button>
+        <button data-s="gateway">API gateway</button>
+      </span>
+      <button class="rt-run" id="run">▶ Play</button>
+      <span class="rt-pill" id="reqPill">ServiceA → ServiceB · 200</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="rtDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="rtDir">▶ READY</span>
+        <div class="rt-cap" id="rtCap">Press ▶ to connect services…</div>
+        <div class="rt-payload" id="rtPayload"></div>
+        <div class="rt-headers" id="rtHeaders"></div>
+        <div class="rt-result" id="rtResult"></div>
+      </div>
+    </div>
+    <div class="rt-legend">
+      <span>🧩 service · 🚪 API gateway · 📨 message broker · 📋 service registry</span>
+      <span><span style="color:#86efac">green = delivered</span> · <span style="color:#fca5a5">red = downstream down</span></span>
+    </div>
+  </div>
 
   <!-- SECTION 1 — Monolith vs Microservices -->
   <h2>1. Monolith vs Microservices — When to Split</h2>
@@ -676,6 +714,45 @@ async function runOrderFlow(fail){
   }
   topoRunning = false;
 }
+</script>
+<script>
+(function(){
+const HDR={
+  sy0:{dir:'1 → API Gateway',cap:'Client request enters API Gateway — routes to Order Service',payload:'GET /api/orders/42\nHost: api.example.com\nAuthorization: Bearer eyJhbGci...',headers:'Gateway: Spring Cloud Gateway\nRoute: /api/orders/** → order-service\nLoad balancer: round-robin',result:''},
+  sy1:{dir:'2 → Order → User (sync)',cap:'OrderService makes synchronous RestClient call to UserService',payload:'OrderService → RestClient:\n  GET http://user-service/api/users/7\n  Authorization: Bearer eyJhbGci...\n\n// BLOCKING: current thread waits',headers:'RestClient (Spring 6.1+)\nService-to-service via internal DNS\nTimeout: connectTimeout=2s, readTimeout=5s',result:''},
+  sy2:{dir:'3 ← UserService responds',cap:'UserService returns 200 — OrderService merges user data',payload:'HTTP/1.1 200 OK\nContent-Type: application/json\n\n{\n  "id": 7,\n  "name": "Alice Chen",\n  "email": "alice@example.com",\n  "tier": "PREMIUM"\n}',headers:'Latency: ~12ms (internal)\nSerialized by Jackson on UserService',result:''},
+  sy3:{dir:'4 ✓ Enriched order returned',cap:'OrderService merges user data into response — Gateway returns to client',payload:'HTTP/1.1 200 OK\n\n{\n  "orderId": 42,\n  "amount": 199.99,\n  "status": "PENDING",\n  "customer": {\n    "id": 7,\n    "name": "Alice Chen",\n    "tier": "PREMIUM"\n  }\n}',headers:'Total latency: ~25ms\nHops: client→GW→OrderSvc→UserSvc→back',result:'✓ Sync REST: enriched order in ~25ms'},
+  as0:{dir:'1 → Order placed',cap:'OrderService saves order and publishes OrderPlacedEvent to Kafka',payload:'OrderService.placeOrder(dto):\n  1. DB: INSERT order (id=43, status=PENDING)\n  2. kafkaTemplate.send("order.placed",\n       OrderPlacedEvent{orderId:43, userId:7,\n         amount:199.99, ts:"2026-06-12T10:00Z"})',headers:'Kafka topic: order.placed\nPartition key: userId\nSerializer: JsonSerializer',result:''},
+  as1:{dir:'2 → Event stored on broker',cap:'Kafka stores event — OrderService HTTP thread returns 202 immediately',payload:'Kafka topic: order.placed\nPartition: 2 | Offset: 18742\n\nEvent:\n{\n  "orderId": 43, "userId": 7,\n  "amount": 199.99\n}\n\nHTTP 202 Accepted already sent to client',headers:'Non-blocking: OrderService does not\nwait for Email Service to process\nEvents queue if consumer is down',result:''},
+  as2:{dir:'3 → EmailService consumes',cap:'EmailService @KafkaListener picks up event — sends confirmation asynchronously',payload:'@KafkaListener(topics="order.placed")\nvoid onOrderPlaced(OrderPlacedEvent e) {\n  User u = userClient.get(e.userId());\n  emailSvc.send(u.email(),\n    "Order #" + e.orderId() + " confirmed");\n}\nEmail sent to: alice@example.com',headers:'Consumer group: email-service\nAck mode: BATCH\nOffset committed after email sent',result:''},
+  as3:{dir:'4 ✓ Decoupled delivery',cap:'Email sent — services share zero direct dependency',payload:'Timeline:\n  T=0ms:   OrderService returns 202\n  T=120ms: EmailService consumed event\n  T=450ms: Email sent to alice@example.com\n\nIf EmailService is DOWN:\n  Events queue in Kafka\n  Drain automatically when it recovers',headers:'Temporal decoupling:\n  producer and consumer lifecycles independent',result:'✓ Async: 202 returned at T=0, email at T=450ms'},
+  di0:{dir:'1 → Service registers',cap:'UserService registers itself with Eureka on startup',payload:'eureka.client.serviceUrl.defaultZone=\n  http://eureka:8761/eureka\n\nRegistering:\n  appName: USER-SERVICE\n  instanceId: user-svc:192.168.1.10:8082\n  port: 8082\n  status: UP',headers:'Heartbeat: every 30s\nLease duration: 90s\n3 instances registered: .10, .11, .12',result:''},
+  di1:{dir:'2 → OrderService looks up',cap:'OrderService queries Eureka for USER-SERVICE instances',payload:'EurekaClient.getInstances("USER-SERVICE")\n→ [\n    {host:192.168.1.10,port:8082,UP},\n    {host:192.168.1.11,port:8082,UP},\n    {host:192.168.1.12,port:8082,UP}\n  ]',headers:'LoadBalancer: Spring Cloud LoadBalancer\nStrategy: round-robin\nLocal cache TTL: 30s',result:''},
+  di2:{dir:'3 → Load-balanced call',cap:'Spring Cloud LoadBalancer selects one instance — request routed there',payload:'Selected: 192.168.1.11:8082\n\nGET http://USER-SERVICE/api/users/7\n  resolved → http://192.168.1.11:8082/api/users/7\n\nResponse: 200 {id:7, name:"Alice"}',headers:'No hardcoded URLs in OrderService:\n  restClient.get().uri("http://USER-SERVICE/...")\nEureka resolves at runtime',result:''},
+  di3:{dir:'4 ✓ Discovery complete',cap:'Call succeeded via service registry — zero hardcoded IPs',payload:'Fulfilled by: 192.168.1.11:8082\nInstances registered: 3\n\nIf .11 goes DOWN:\n  Eureka removes after 90s\n  Next call routes to .10 or .12\n  Zero config changes needed',headers:'Discovery benefits:\n  horizontal scaling + zero-downtime deploys\n  without DNS propagation delays',result:'✓ Discovery: 3 instances, 0 hardcoded IPs'},
+  gw0:{dir:'1 → Client hits gateway',cap:'Single entry point — all external traffic through Spring Cloud Gateway',payload:'GET https://api.example.com/orders/42\nHost: api.example.com\n\nGateway receives request.\nRoutes defined in application.yml.',headers:'Spring Cloud Gateway runs on Netty\nRoute predicates: Path, Method, Header\nFilters: AddRequestHeader, CircuitBreaker',result:''},
+  gw1:{dir:'2 → Route matched',cap:'Path predicate /orders/** matched — route to order-service via Eureka',payload:'Route: order-route\n  predicate: Path=/orders/**\n  uri: lb://order-service\n  filters:\n    - AddRequestHeader=X-Gateway-Source, api-gw\n    - CircuitBreaker=name=orderCB\n\nStripping /orders → /api/orders/42',headers:'lb:// prefix = load-balanced via Eureka\nFilters apply pre- and post-request',result:''},
+  gw2:{dir:'3 → Forwarded to service',cap:'Gateway forwards request with added gateway headers to Order Service',payload:'Forwarded:\n  GET http://order-service/api/orders/42\n  X-Gateway-Source: api-gw\n  X-Forwarded-For: 203.0.113.42\n  Authorization: Bearer eyJhbGci... (pass-through)',headers:'JWT NOT broken by gateway —\nforwarded to downstream for validation',result:''},
+  gw3:{dir:'4 ✓ Response returned',cap:'Order Service responds — gateway adds X-Response-Time, returns to client',payload:'HTTP/1.1 200 OK\nX-Response-Time: 23ms\n\n{"orderId":42,"amount":199.99}',headers:'Gateway adds: X-Response-Time\nStrips: X-Forwarded-For\nRate limiting + auth filters live here',result:'✓ Gateway: routing + auth forwarding + filtering at edge'}
+};
+const SCEN={
+  sync:{pill:'Client → GW → OrderSvc → UserSvc · 200 OK',nodes:[{id:'GW',label:'API Gateway',cls:'who-GW'},{id:'SVC',label:'Order Service',cls:'who-SVC'},{id:'BRKO',label:'User Service',cls:'who-BRKO'},{id:'REG',label:'Registry',cls:'who-REG'},{id:'BAD',label:'Timeout',cls:'who-BAD'}],steps:[{from:'',to:'GW',hdr:'sy0'},{from:'GW',to:'SVC',hdr:'sy1'},{from:'SVC',to:'BRKO',hdr:'sy2'},{from:'BRKO',to:'GW',hdr:'sy3',tone:'ok'}],result:'✓ Sync REST: enriched order ~25ms'},
+  async:{pill:'OrderSvc publishes → Kafka → EmailSvc · 202',nodes:[{id:'SVC',label:'Order Service',cls:'who-SVC'},{id:'BRKO',label:'Kafka Broker',cls:'who-BRKO'},{id:'GW',label:'Email Service',cls:'who-GW'},{id:'REG',label:'User Service',cls:'who-REG'},{id:'BAD',label:'Consumer down',cls:'who-BAD'}],steps:[{from:'',to:'SVC',hdr:'as0'},{from:'SVC',to:'BRKO',hdr:'as1'},{from:'BRKO',to:'GW',hdr:'as2'},{from:'GW',to:'SVC',hdr:'as3',tone:'ok'}],result:'✓ Async event: 202 at T=0, email at T=450ms'},
+  discovery:{pill:'USER-SERVICE × 3 · round-robin LB',nodes:[{id:'REG',label:'Eureka',cls:'who-REG'},{id:'BRKO',label:'UserSvc × 3',cls:'who-BRKO'},{id:'SVC',label:'Order Service',cls:'who-SVC'},{id:'GW',label:'Load Balancer',cls:'who-GW'},{id:'BAD',label:'Instance down',cls:'who-BAD'}],steps:[{from:'',to:'BRKO',hdr:'di0'},{from:'BRKO',to:'REG',hdr:'di1'},{from:'REG',to:'GW',hdr:'di2'},{from:'GW',to:'SVC',hdr:'di3',tone:'ok'}],result:'✓ Service discovery: 3 instances, 0 hardcoded URLs'},
+  gateway:{pill:'api.example.com → GW routes → order-service',nodes:[{id:'GW',label:'API Gateway',cls:'who-GW'},{id:'SVC',label:'Order Service',cls:'who-SVC'},{id:'BRKO',label:'Kafka',cls:'who-BRKO'},{id:'REG',label:'Eureka',cls:'who-REG'},{id:'BAD',label:'CB open',cls:'who-BAD'}],steps:[{from:'',to:'GW',hdr:'gw0'},{from:'GW',to:'REG',hdr:'gw1'},{from:'REG',to:'SVC',hdr:'gw2'},{from:'SVC',to:'GW',hdr:'gw3',tone:'ok'}],result:'✓ Gateway: routing + JWT forwarding + filtering'}
+};
+let cur='sync',T=[];
+function $i(id){return document.getElementById(id);}
+function renderNodes(s){const st=SCEN[s];$i('rtDiagram').innerHTML=st.nodes.map(n=>`<div class="rt-node ${n.cls}" id="n_${n.id}">${n.label}</div>`).join('');$i('reqPill').textContent=st.pill;}
+function resetStage(){$i('rtDir').textContent='▶ READY';$i('rtCap').textContent='Press ▶ to connect services…';$i('rtPayload').textContent='';$i('rtHeaders').textContent='';$i('rtResult').textContent='';document.querySelectorAll('.rt-node').forEach(n=>{n.classList.remove('vchk','vskip','curbad','rt-cur');});clearT();}
+function applyStep(steps,i){const step=steps[i];if(!step)return;const h=HDR[step.hdr]||{};$i('rtDir').textContent=(step.tone==='bad'?'✗ ':step.tone==='ok'?'✓ ':'')+(h.dir||'');$i('rtCap').textContent=h.cap||'';$i('rtPayload').textContent=h.payload||'';$i('rtHeaders').textContent=h.headers||'';$i('rtResult').textContent=h.result||'';document.querySelectorAll('.rt-node').forEach(n=>n.classList.remove('rt-cur','vchk','vskip','curbad'));const toNode=document.getElementById('n_'+step.to);if(toNode){toNode.classList.add('rt-cur');if(step.tone==='ok')toNode.classList.add('vchk');if(step.tone==='bad'){toNode.classList.add('vskip','curbad');}}}
+function clearT(){T.forEach(clearTimeout);T=[];}
+function setDisabled(on){document.querySelectorAll('#scenseg button').forEach(b=>b.disabled=on);$i('run').disabled=on;}
+function run(){const steps=SCEN[cur].steps;clearT();resetStage();setDisabled(true);steps.forEach((s,i)=>T.push(setTimeout(()=>{applyStep(steps,i);if(i===steps.length-1){T.push(setTimeout(()=>{$i('rtResult').textContent=SCEN[cur].result;setDisabled(false);},2000));}},300+i*2000)));}
+document.querySelectorAll('#scenseg button').forEach(b=>b.addEventListener('click',function(){document.querySelectorAll('#scenseg button').forEach(x=>x.classList.remove('on'));this.classList.add('on');cur=this.dataset.s;clearT();resetStage();renderNodes(cur);}));
+$i('run').addEventListener('click',run);
+renderNodes(cur);
+})();
 </script>
 </body>
 </html>

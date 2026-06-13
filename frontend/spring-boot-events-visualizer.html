@@ -95,12 +95,50 @@
     .lifecycle-when{color:var(--muted);line-height:1.6;}
   </style>
   <link rel="stylesheet" href="devhub.css" />
+  <style>
+    .who-PUB{background:rgba(148,163,184,.18);color:#cbd5e1}
+    .who-BUS{background:rgba(109,179,63,.22);color:#a6e07f}
+    .who-LIST{background:rgba(34,211,238,.14);color:#7dd3fc}
+    .who-ASYNC{background:rgba(245,158,11,.16);color:#fcd34d}
+    .who-TXN{background:rgba(167,139,250,.16);color:#c4b5fd}
+  </style>
 </head>
 <body class="track-spring">
 <div class="container">
   <a class="back" href="spring-boot-index.html">← Spring Boot Index</a>
   <h1>Spring Boot Application Events</h1>
   <p class="sub">Decouple your components with the publish-subscribe pattern. Events let one part of your app notify others without direct dependencies.</p>
+
+  <!-- ── HERO: animated Spring event flow · live per-step inspector ── -->
+  <div class="panel" style="border:1px solid var(--accent)">
+    <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch an event travel — publish → bus → listener → action</h2>
+    <p style="font-size:13px;color:var(--muted);margin:6px 0 12px">ApplicationEventPublisher broadcasts events to all @EventListener methods. Sync listeners run on the publisher thread; @Async ones run on a pool thread; @TransactionalEventListener waits for the DB transaction to commit first. The inspector shows the real event object and execution context per step.</p>
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="scenseg">
+        <button data-s="sync" class="on">sync listener</button>
+        <button data-s="async">@Async listener</button>
+        <button data-s="transactional">@TransactionalEventListener</button>
+        <button data-s="conditional">conditional listener</button>
+      </span>
+      <button class="rt-run" id="run">▶ Play</button>
+      <span class="rt-pill" id="reqPill">UserCreatedEvent · sync listener fires</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="rtDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="rtDir">▶ READY</span>
+        <div class="rt-cap" id="rtCap">Press ▶ to publish…</div>
+        <div class="rt-payload" id="rtPayload"></div>
+        <div class="rt-headers" id="rtHeaders"></div>
+        <div class="rt-result" id="rtResult"></div>
+      </div>
+    </div>
+    <div class="rt-legend">
+      <span>📢 publisher · 🚌 event bus · 👂 @EventListener · ⚡ @Async · 🔒 @Transactional</span>
+      <span><span style="color:#86efac">green = listener fires</span> · <span style="color:#fca5a5">red = condition not met</span></span>
+    </div>
+  </div>
 
   <!-- ═══════════════════════════════════════════════════════════
        SECTION 1 — What are events?
@@ -635,6 +673,41 @@ async function runEventDemo(){
   }
   demoRunning = false;
 }
+</script>
+<script>
+(function(){
+const HDR={
+  sy0:{dir:'1 → publishEvent()',cap:'UserService saves user and publishes UserCreatedEvent on the same thread',payload:'@Service\npublic class UserService {\n  @Transactional\n  public User createUser(UserDto dto) {\n    User user = userRepo.save(new User(dto));\n    publisher.publishEvent(\n      new UserCreatedEvent(user.getId(), user.getEmail()));\n    return user; // response returned AFTER listener fires\n  }\n}',headers:'ApplicationEventPublisher injected via @Autowired\nEvent = any POJO (or extend ApplicationEvent)\nSync: publishEvent() blocks until all listeners done',result:''},
+  sy1:{dir:'2 → Event routed to listener',cap:'ApplicationEventMulticaster delivers event to all @EventListener methods with matching type',payload:'ApplicationEventMulticaster:\n  Scanning: @EventListener methods for UserCreatedEvent\n  Found: WelcomeEmailListener.onUserCreated()\n  Found: AuditLogger.onUserCreated()\n\nDelivering to both on current thread...',headers:'Sync multicaster: SimpleApplicationEventMulticaster\nDefault: all listeners on same thread as publisher\nAll listeners finish before publishEvent() returns',result:''},
+  sy2:{dir:'3 ✓ Listener fires synchronously',cap:'WelcomeEmailListener.onUserCreated() executes — email sent before HTTP response',payload:'@EventListener\npublic void onUserCreated(UserCreatedEvent e) {\n  String email = e.getEmail();\n  emailService.sendWelcome(email);\n  // "Welcome to the platform!"\n}\n\nEmail sent to: alice@example.com\nListener completed. publishEvent() returns.',headers:'Sync listener shares the caller\'s transaction\n(if called within @Transactional method)\nException in listener = rolls back caller\'s tx',result:'✓ Sync: listener fired on same thread, email sent'},
+  as0:{dir:'1 → publishEvent() on HTTP thread',cap:'UserService publishes event — @Async listener will run on a pool thread',payload:'UserService.createUser():\n  1. userRepo.save(user) — DB insert\n  2. publisher.publishEvent(\n       new UserCreatedEvent(userId, email))\n  // publishEvent() returns IMMEDIATELY\n  // (Async listener queued on pool)\n  3. return user  // ← happens right away',headers:'@Async requires @EnableAsync on config class\nAnd @Async on the listener method\n(or on the class)',result:''},
+  as1:{dir:'2 → @Async hands off to pool',cap:'TaskExecutor receives the listener task — HTTP thread continues without waiting',payload:'SimpleApplicationEventMulticaster:\n  @Async listener detected:\n    EmailService.sendWelcomeAsync()\n\nSubmitting to TaskExecutor (thread pool)\n  Submitted. Thread released.\n\nHTTP thread continues → UserService returns user\nHTTP response sent: 201 Created',headers:'Thread pool: ThreadPoolTaskExecutor\ncorePoolSize: 10\nmaxPoolSize: 20\nHTTP response NOT delayed by email sending',result:''},
+  as2:{dir:'3 ✓ Pool thread executes listener',cap:'Pool thread picks up the task and executes the listener independently',payload:'Thread: task-pool-1 (separate from HTTP thread)\n  EmailService.sendWelcome(alice@example.com)\n  → SMTP: 250 OK\n  Email delivered at T+320ms\n\nHTTP response was already sent at T+5ms',headers:'If listener throws:\n  Exception logged but NOT propagated to caller\n  HTTP response already gone\n  Use Dead Letter Queue for reliability',result:'✓ @Async: 201 at T=5ms, email sent at T=320ms'},
+  tr0:{dir:'1 → Event published inside @Transactional',cap:'OrderService publishes event inside a @Transactional method — tx still open',payload:'@Transactional\npublic Order placeOrder(OrderDto dto) {\n  Order order = orderRepo.save(new Order(dto));\n  // Transaction NOT committed yet!\n  publisher.publishEvent(\n    new OrderPlacedEvent(order.getId()));\n  return order;\n  // transaction commits HERE (after method returns)\n}',headers:'@TransactionalEventListener:\n  TransactionPhase.AFTER_COMMIT (default)\n  waits for the committing transaction\n  to complete before firing',result:''},
+  tr1:{dir:'2 → Transaction commits',cap:'@Transactional method returns — Spring commits the transaction to DB',payload:'Spring Transaction Manager:\n  OrderService.placeOrder() returned\n  Committing transaction...\n  COMMIT; ← order 42 is now in DB\n\nOrderPlacedEvent is held by\n  TransactionSynchronization registry\n  until AFTER_COMMIT',headers:'AFTER_COMMIT means:\n  the DB row EXISTS before the listener fires\n  listener can safely read the new data',result:''},
+  tr2:{dir:'3 ✓ Listener fires AFTER commit',cap:'AFTER_COMMIT hook fires — listener sees committed order in DB',payload:'@TransactionalEventListener\n@Async  // often combined\npublic void onOrderPlaced(OrderPlacedEvent e) {\n  // DB row exists — safe to read\n  Order order = orderRepo.findById(e.getOrderId());\n  analyticsService.track(order);\n  inventoryService.reserve(order);\n}\n\nFired AFTER DB commit ✓',headers:'Without @TransactionalEventListener:\n  listener might fire while tx still open\n  → reads rolled-back data if tx fails',result:'✓ AFTER_COMMIT: listener sees committed DB data'},
+  cd0:{dir:'1 → Event published',cap:'Publisher fires UserCreatedEvent — conditional @EventListener evaluates condition SpEL',payload:'publisher.publishEvent(\n  new UserCreatedEvent(userId=7,\n    email="alice@example.com",\n    tier="PREMIUM"));\n\n@EventListener(condition = "#event.tier == \'PREMIUM\'")\npublic void onPremiumUser(UserCreatedEvent e) {...}',headers:'condition SpEL expression evaluated before\ncalling the listener method\n#event = the event object\n#root.event, #root.args also available',result:''},
+  cd1:{dir:'2 → Condition: PREMIUM → fires',cap:'tier=PREMIUM → condition true → PremiumOnboardingListener fires',payload:'condition: "#event.tier == \'PREMIUM\'"\n  #event.tier = "PREMIUM"\n  "PREMIUM" == "PREMIUM" → TRUE\n\nPremiumOnboardingListener.onPremiumUser():\n  scheduledemoCall(e.email())\n  grantPremiumFeatures(e.userId())\n\n  Demo call scheduled for: alice@example.com',headers:'Condition SpEL supports:\n  #event.fieldName, arithmetic, comparisons\n  method calls on #event\n  #root.args[0] for method args',result:''},
+  cd2:{dir:'3 ✗ condition: FREE → filtered',cap:'tier=FREE → condition false → listener not invoked (zero cost)',payload:'// Different event:\npublisher.publishEvent(\n  new UserCreatedEvent(userId=8,\n    email="bob@example.com",\n    tier="FREE"));\n\ncondition: "\'PREMIUM\' == \'FREE\'" → FALSE\nListener NOT called.\nNo demo scheduled for bob.',headers:'Conditional listener:\n  filtered BEFORE method is called\n  no overhead for non-matching events\n  keeps premium-only logic isolated',result:'✗ FREE tier → condition false → listener skipped'}
+};
+const SCEN={
+  sync:{pill:'UserCreatedEvent · sync listener · same thread',nodes:[{id:'PUB',label:'UserService',cls:'who-PUB'},{id:'BUS',label:'EventMulticaster',cls:'who-BUS'},{id:'LIST',label:'EmailListener',cls:'who-LIST'},{id:'ASYNC',label:'Async pool',cls:'who-ASYNC'},{id:'TXN',label:'Transaction',cls:'who-TXN'}],steps:[{from:'',to:'PUB',hdr:'sy0'},{from:'PUB',to:'BUS',hdr:'sy1'},{from:'BUS',to:'LIST',hdr:'sy2',tone:'ok'}],result:'✓ Sync: listener fired on publisher thread'},
+  async:{pill:'@Async listener · pool thread · 201 not delayed',nodes:[{id:'PUB',label:'UserService',cls:'who-PUB'},{id:'BUS',label:'EventMulticaster',cls:'who-BUS'},{id:'LIST',label:'HTTP thread',cls:'who-LIST'},{id:'ASYNC',label:'Task pool',cls:'who-ASYNC'},{id:'TXN',label:'Transaction',cls:'who-TXN'}],steps:[{from:'',to:'PUB',hdr:'as0'},{from:'PUB',to:'BUS',hdr:'as1'},{from:'BUS',to:'ASYNC',hdr:'as2',tone:'ok'}],result:'✓ @Async: 201 at T=5ms, email sent at T=320ms'},
+  transactional:{pill:'@TransactionalEventListener · AFTER_COMMIT',nodes:[{id:'PUB',label:'OrderService',cls:'who-PUB'},{id:'BUS',label:'EventMulticaster',cls:'who-BUS'},{id:'LIST',label:'Listener',cls:'who-LIST'},{id:'ASYNC',label:'Async pool',cls:'who-ASYNC'},{id:'TXN',label:'Transaction',cls:'who-TXN'}],steps:[{from:'',to:'PUB',hdr:'tr0'},{from:'PUB',to:'TXN',hdr:'tr1'},{from:'TXN',to:'LIST',hdr:'tr2',tone:'ok'}],result:'✓ AFTER_COMMIT: listener fires after DB commit'},
+  conditional:{pill:'condition SpEL · PREMIUM fires · FREE skipped',nodes:[{id:'PUB',label:'UserService',cls:'who-PUB'},{id:'BUS',label:'EventMulticaster',cls:'who-BUS'},{id:'LIST',label:'PremiumListener',cls:'who-LIST'},{id:'ASYNC',label:'Async pool',cls:'who-ASYNC'},{id:'TXN',label:'Condition',cls:'who-TXN'}],steps:[{from:'',to:'PUB',hdr:'cd0'},{from:'PUB',to:'LIST',hdr:'cd1'},{from:'LIST',to:'TXN',hdr:'cd2',tone:'bad'}],result:'PREMIUM: listener fires / FREE: condition filtered'}
+};
+let cur='sync',T=[];
+function $i(id){return document.getElementById(id);}
+function renderNodes(s){const st=SCEN[s];$i('rtDiagram').innerHTML=st.nodes.map(n=>`<div class="rt-node ${n.cls}" id="n_${n.id}">${n.label}</div>`).join('');$i('reqPill').textContent=st.pill;}
+function resetStage(){$i('rtDir').textContent='▶ READY';$i('rtCap').textContent='Press ▶ to publish…';$i('rtPayload').textContent='';$i('rtHeaders').textContent='';$i('rtResult').textContent='';document.querySelectorAll('.rt-node').forEach(n=>{n.classList.remove('vchk','vskip','curbad','rt-cur');});clearT();}
+function applyStep(steps,i){const step=steps[i];if(!step)return;const h=HDR[step.hdr]||{};$i('rtDir').textContent=(step.tone==='bad'?'✗ ':step.tone==='ok'?'✓ ':'')+(h.dir||'');$i('rtCap').textContent=h.cap||'';$i('rtPayload').textContent=h.payload||'';$i('rtHeaders').textContent=h.headers||'';$i('rtResult').textContent=h.result||'';document.querySelectorAll('.rt-node').forEach(n=>n.classList.remove('rt-cur','vchk','vskip','curbad'));const toNode=document.getElementById('n_'+step.to);if(toNode){toNode.classList.add('rt-cur');if(step.tone==='ok')toNode.classList.add('vchk');if(step.tone==='bad'){toNode.classList.add('vskip','curbad');}}}
+function clearT(){T.forEach(clearTimeout);T=[];}
+function setDisabled(on){document.querySelectorAll('#scenseg button').forEach(b=>b.disabled=on);$i('run').disabled=on;}
+function run(){const steps=SCEN[cur].steps;clearT();resetStage();setDisabled(true);steps.forEach((s,i)=>T.push(setTimeout(()=>{applyStep(steps,i);if(i===steps.length-1){T.push(setTimeout(()=>{$i('rtResult').textContent=SCEN[cur].result;setDisabled(false);},2000));}},300+i*2000)));}
+document.querySelectorAll('#scenseg button').forEach(b=>b.addEventListener('click',function(){document.querySelectorAll('#scenseg button').forEach(x=>x.classList.remove('on'));this.classList.add('on');cur=this.dataset.s;clearT();resetStage();renderNodes(cur);}));
+$i('run').addEventListener('click',run);
+renderNodes(cur);
+})();
 </script>
 </body>
 </html>
