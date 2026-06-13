@@ -209,20 +209,41 @@ Built on the **shared `devhub.css` design system** — the `rt-*` **extreme-viz 
 every page links one stylesheet and declares its track accent via a `<body class="track-*">` (see the map above).
 Also: the **🐛 Debugging track**, the completed **CIAM round-trip**, the Spring **Security & Identity**
 section, and a fixed **GitHub Pages deploy** workflow (`enablement: true` + Node-24 action versions; see the
-[README deploy steps](../README.md#part-3--deploy-the-frontend-github-pages)). Most recently the **🔐 Identity & Auth**
+[README deploy steps](../README.md#part-3--deploy-the-frontend-github-pages)). The **🔐 Identity & Auth**
 track got the hero treatment end-to-end: the **Entra** and **Ping/IDM** overviews (a user sign-in,
 app-only/**Managed-Identity**, **hybrid AD sync**, and a **risky adaptive sign-in**; and the **Joiner-Mover-Leaver**
 lifecycle walked through the Ping product chain), **[PingFederate Admin](../frontend/ping-admin-visualizer.html)**
 (the admin config running at request time — adapters, token policy, key rotation, the Admin API), and the
 **[Ping](../frontend/ping-integration-visualizer.html)** + **[Entra](../frontend/entra-spring-angular-visualizer.html)**
 full-stack integrations (the happy round-trip plus the classic **401-issuer / CORS / 403-claim-mapping** failures,
-**MSAL silent refresh**, app-role assignment, and **On-Behalf-Of** to Microsoft Graph). And the **sidebar was
+**MSAL silent refresh**, app-role assignment, and **On-Behalf-Of** to Microsoft Graph). The **sidebar was
 reorganized into a two-level accordion** so each track's pages sit inside collapsible sub-sections — pages no
-longer land as one scary list. And a new **🧪 Playgrounds** track debuts with the
+longer land as one scary list. A new **🧪 Playgrounds** track debuted with the
 **[API Playground](../frontend/api-playground-visualizer.html)** — a real in-browser HTTP client (every Send is a live
 `fetch()`, with status/timing/headers/body + CORS &amp; auth explainers) and the
 **[JWT &amp; Auth Playground](../frontend/jwt-playground-visualizer.html)** (decode any token, really sign/verify it with
 Web Crypto, tamper a claim and watch the signature break, then map claims → Spring authorities and test `@PreAuthorize`) and the
 **[Spring Boot Playground](../frontend/spring-boot-playground-visualizer.html)** (a configurable security simulator — fire a
 request through the filter chain → URL authz → DispatcherServlet → `@PreAuthorize` and watch 200/401/403/404 flip as you change
-the caller's authorities, plus a Live tab against the real `:8081` backend).*
+the caller's authorities, plus a Live tab against the real `:8081` backend).
+Most recently: a **full Spring Boot hero wave** — 11 pages of the 🍃 Spring core now carry the animated chip-walk + live inspector:
+[Architecture](../frontend/spring-boot-architecture-visualizer.html) (SpringApplication.run → auto-config → BeanDefinition cycle),
+[Batch](../frontend/spring-boot-batch-visualizer.html) (chunk commit / skip / retry / fail),
+[Microservices](../frontend/spring-boot-microservices-visualizer.html) (sync REST / async Kafka / Eureka discovery / Gateway routing),
+[Resilience4j](../frontend/spring-boot-resilience4j-visualizer.html) (CLOSED → OPEN → HALF_OPEN + RateLimiter),
+[WebSocket](../frontend/spring-boot-websocket-visualizer.html) (HTTP upgrade → STOMP → broadcast → disconnect),
+[Flyway](../frontend/spring-boot-flyway-visualizer.html) (migrate / up-to-date / checksum mismatch / repair),
+[Logging](../frontend/spring-boot-logging-visualizer.html) (log.info → SLF4J → Logback → appender / MDC / filtered / JSON),
+[Profiles](../frontend/spring-boot-profiles-visualizer.html) (dev H2 / prod Postgres / @Profile bean / env-var override),
+[Data Specifications](../frontend/spring-boot-data-specs-visualizer.html) (Specification → dynamic WHERE / .and() compose / null-safe / projection),
+[Events](../frontend/spring-boot-events-visualizer.html) (sync / @Async pool / @TransactionalEventListener AFTER_COMMIT / SpEL conditional),
+[Pagination](../frontend/spring-boot-pagination-visualizer.html) (basic page / sort / empty / Slice&lt;T&gt; no-COUNT).
+And an **Angular hero wave** — 8 pages of the 🅰️ Angular core now carry the same deep visualization:
+[Change Detection](../frontend/angular-change-detection-visualizer.html) (Zone.js tick / OnPush + async pipe / signal reactive graph / zoneless),
+[Component Communication](../frontend/angular-communication-visualizer.html) (@Input down / @Output up / [(two-way)] / shared signal service),
+[Control Flow](../frontend/angular-control-flow-visualizer.html) (@if/@else / @for + track / @defer on viewport / @switch),
+[ViewChild &amp; ContentChild](../frontend/angular-viewchild-visualizer.html) (lifecycle timing / static:true / signal viewChild() / ContentChild),
+[Functional Guards](../frontend/angular-functional-guards-visualizer.html) (canActivate allow / UrlTree redirect / canDeactivate dirty form / canMatch chunk-skip),
+[Testing](../frontend/angular-testing-visualizer.html) (pure unit / TestBed + ComponentFixture / jasmine spy / fakeAsync + tick),
+[Lazy Loading](../frontend/angular-lazy-loading-visualizer.html) (first nav chunk fetch / PreloadAllModules / @defer viewport / JS module cache),
+[Animations](../frontend/angular-animations-visualizer.html) (fade void/visible / state machine slide / :enter/:leave / keyframes bounce).*
