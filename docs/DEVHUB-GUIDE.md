@@ -191,7 +191,23 @@ rather than a pile of pages.
 
 ---
 
-*This guide is updated as new tracks and deep-dives land. **Newest pass — a "Code Walkthrough" widget &amp; deeper page content:**
+*This guide is updated as new tracks and deep-dives land. **Newest pass — Head First deepening · TypeScript why hero · Angular content revamps (2026-06-13):**
+Five ☕ **Head First Design Patterns** pages were deepened from "OK" to "RICH" — animation timing tightened to 950ms and two new sections added per page:
+[Singleton](../frontend/head-first-singleton-visualizer.html) ("Singleton in the wild" — Spring `@Component` / Angular `@Injectable` — and the static-singleton testing trap with `@Mock` fix);
+[Command](../frontend/head-first-command-visualizer.html) (NoCommand null-object pattern for empty slots; Command in the stack — `ExecutorService.submit`, `publisher.publishEvent`, NgRx Actions, CQRS);
+[Adapter &amp; Facade](../frontend/head-first-adapter-facade-visualizer.html) (Adapter in the wild — `Arrays.asList`, `InputStreamReader`, Angular `@Pipe`; `@Service` as Facade over 4 subsystems);
+[Template Method](../frontend/head-first-template-method-visualizer.html) (`Arrays.sort()` / `HttpServlet` / `JdbcTemplate` / Angular `ngOnInit` as everyday Template Methods; Template Method vs Strategy — inheritance vs composition comparison);
+[State](../frontend/head-first-state-visualizer.html) (state-transition table mapping states × actions → next state; State in the stack — `OrderStatus` enum, XState `createMachine()`, TCP / auth flows).
+The 🔷 **TypeScript Why** page gained its animated hero ([compiler trace](../frontend/typescript-why-visualizer.html)) — the chip is a piece of code moving through `tsc` across 4 scenarios: **null crash** (TS2531 vs JS runtime TypeError), **wrong type passed** (TS2345 at call site), **rename property** (TS2339 × 10 — exact task list), and **strict mode** (`noImplicitAny + strictNullChecks` enabled together).
+Six 🅰️ **Angular** core pages received full content depth revamps (new sections, not just touch-ups):
+[Data Binding](../frontend/angular-binding-visualizer.html) — added: signal inputs `input()`/`output()`/`model()` (Angular 17+), the `async` pipe + `as` alias pattern, host bindings via `@HostBinding` and `host: {}` metadata;
+[Routing](../frontend/angular-routing-visualizer.html) — added: functional guards with `inject()` + `UrlTree` redirect, `canActivate` vs `canMatch` table, `withComponentInputBinding()` (route params as `input()` signals), CIAM OIDC redirect guard pattern (`angular-auth-oidc-client` + `returnUrl` flow);
+[Directives](../frontend/angular-directives-visualizer.html) — added: `hostDirectives` for mix-in composition (Angular 15+), custom structural directive walkthrough (`*appUnless` with `TemplateRef + ViewContainerRef` — how `*` desugars);
+[Control Flow](../frontend/angular-control-flow-visualizer.html) — added: `@for @empty` fallback block, all 7 `@defer` trigger types reference table (`on idle / viewport / interaction / hover / timer / immediate / when`) with combined trigger + `prefetch` examples;
+[Pipes](../frontend/angular-pipes-visualizer.html) — added: `keyvalue` pipe deep-dive (object + Map iteration, custom sort comparator, CIAM attributes use case), custom pipe with `inject()` standalone pattern + null-safe transform guard;
+[Signals](../frontend/angular-signals-visualizer.html) — added: `untracked()` escape hatch (read without registering dependency), `effect()` cleanup function pattern (WebSocket open/close, auto-reconnect on userId change).
+
+**Previous pass — a "Code Walkthrough" widget &amp; deeper page content:**
 a reusable **line-by-line code stepper** now lives in the design system (`devhub-codewalk.js` + `.cw-*` in `devhub.css`) — press ▶ and
 each line of a real snippet highlights while a panel on the right narrates it and shows live variable boxes, output, and gotchas.
 First exemplars (one per stack, ready to scale across the app): **Java** [Encapsulation](../frontend/encapsulation-visualizer.html)
