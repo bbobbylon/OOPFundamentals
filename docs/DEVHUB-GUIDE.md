@@ -216,7 +216,7 @@ shared-execution counter, custom-operator internals), **Pagination** (the full H
 Spring `Pageable` → `Page<T>` round-trip), and state management (**NgRx** action→reducer→
 selector, **SignalStore** `patchState`, and a **State-Patterns** hero that runs the *same*
 update through all four architectures) — on top of the earlier Routing / RxJS Lab / HTTP
-set. Also new: a **Head First Design Patterns** sub-track in ☕ Java — **9 chapters** retold with
+set. Also new: a **Head First Design Patterns** sub-track in ☕ Java — **12 chapters** retold with
 the book's voice (Brain Power, "no Dumb Questions", design-principle boxes) and the same
 animated hero: [Strategy / SimUDuck](../frontend/head-first-strategy-visualizer.html),
 [Observer / Weather Station](../frontend/head-first-observer-visualizer.html),
@@ -225,8 +225,14 @@ animated hero: [Strategy / SimUDuck](../frontend/head-first-strategy-visualizer.
 [Singleton / Chocolate Boiler](../frontend/head-first-singleton-visualizer.html),
 [Command / Remote Control](../frontend/head-first-command-visualizer.html),
 [Adapter &amp; Facade](../frontend/head-first-adapter-facade-visualizer.html),
-[Template Method / Coffee &amp; Tea](../frontend/head-first-template-method-visualizer.html), and
-[State / Gumball Machine](../frontend/head-first-state-visualizer.html) — plus an inline SVG **favicon** for the hub.
+[Template Method / Coffee &amp; Tea](../frontend/head-first-template-method-visualizer.html),
+[State / Gumball Machine](../frontend/head-first-state-visualizer.html),
+[Iterator + Composite / Diner &amp; Pancake House 🍽️](../frontend/head-first-iterator-composite-visualizer.html)
+(tight-coupling → Iterator interface → Composite menu tree → uniform `print()`),
+[Proxy 🪞](../frontend/head-first-proxy-visualizer.html)
+(remote / virtual / protection / caching proxy — four scenarios, all behind one `Subject` interface), and
+[Compound Patterns &amp; MVC 🎛️](../frontend/head-first-compound-mvc-visualizer.html)
+(the finale — Observer + Strategy + Composite cooperating; the full MVC request cycle traced live) — **12 chapters** total, plus an inline SVG **favicon** for the hub.
 The **🔷 TypeScript** core now carries the hero too — the per-step inspector shows the *type itself*
 transforming: [Narrowing/CFA](../frontend/typescript-narrowing-visualizer.html) (a union shrinking through
 guards), [Generics](../frontend/typescript-generics-visualizer.html), [Conditional Types](../frontend/typescript-conditional-types-visualizer.html)
