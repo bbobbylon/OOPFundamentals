@@ -72,12 +72,51 @@
     @media(max-width:680px){.sched-grid,.two-col{grid-template-columns:1fr;}}
   </style>
   <link rel="stylesheet" href="devhub.css" />
+  <style>
+    .who-HTTP{background:rgba(148,163,184,.18);color:#cbd5e1}
+    .who-PRXY{background:rgba(109,179,63,.22);color:#a6e07f}
+    .who-POOL{background:rgba(34,211,238,.14);color:#7dd3fc}
+    .who-TASK{background:rgba(245,158,11,.16);color:#fcd34d}
+    .who-SCHED{background:rgba(167,139,250,.16);color:#c4b5fd}
+    .who-BAD{background:rgba(248,113,113,.16);color:#fca5a5}
+  </style>
 </head>
 <body class="track-spring">
 <div class="container">
   <a class="back" href="spring-boot-index.html">← Spring Boot</a>
   <h1>Async &amp; Scheduling</h1>
   <p class="sub">Run work off the calling thread with <code style="color:var(--accent)">@Async</code>, and execute recurring tasks automatically with <code style="color:var(--accent)">@Scheduled</code> — two essential patterns in every enterprise Spring Boot app.</p>
+
+  <!-- ── HERO: animated @Async dispatch · live per-step inspector ── -->
+  <div class="panel" style="border:1px solid var(--accent)">
+    <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch @Async free the HTTP thread — proxy → pool → task → done</h2>
+    <p style="font-size:13px;color:var(--muted);margin:6px 0 12px">Spring wraps your @Async method in an AOP proxy that submits the work to a thread pool and returns immediately. The HTTP thread is freed in milliseconds while the task runs in the background. See what happens under the hood — and what happens when the pool is full.</p>
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="scenseg">
+        <button data-s="asyncvoid" class="on">@Async void</button>
+        <button data-s="asyncfuture">@Async Future</button>
+        <button data-s="scheduled">@Scheduled</button>
+        <button data-s="rejection">pool full → reject</button>
+      </span>
+      <button class="rt-run" id="run">▶ Play</button>
+      <span class="rt-pill" id="reqPill">POST /register · @Async sendWelcome()</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="rtDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="rtDir">▶ READY</span>
+        <div class="rt-cap" id="rtCap">Press ▶ to dispatch…</div>
+        <div class="rt-payload" id="rtPayload"></div>
+        <div class="rt-headers" id="rtHeaders"></div>
+        <div class="rt-result" id="rtResult"></div>
+      </div>
+    </div>
+    <div class="rt-legend">
+      <span>🌐 HTTP thread · 🔀 AOP proxy · 🏊 thread pool · ⚙️ async task · ⏰ scheduler</span>
+      <span><span style="color:#86efac">green = dispatched / executed</span> · <span style="color:#fca5a5">red = rejected</span></span>
+    </div>
+  </div>
 
   <!-- SECTION 1: @Async basics -->
   <h2>1 — <code style="font-size:18px">@Async</code> — Running Work in a Background Thread</h2>
@@ -354,6 +393,223 @@ function updateCron(){
   document.getElementById('cron-code').innerHTML=`<span class="ann">@Scheduled</span>(cron = <span class="str">"${expr}"</span>)\n<span class="kw">public void</span> scheduledTask() { <span class="cm">// runs: ${parts.join(', ')}</span> }`;
 }
 renderPool(); updateCron();
+</script>
+
+<!-- ── animated @Async dispatch · live per-step inspector (isolated IIFE) ── -->
+<script>
+(function(){
+  const HDR={
+    av0:{t:'POST /register — HTTP thread handles request',b:`@PostMapping("/register")
+public ResponseEntity<?> register(@RequestBody UserDto dto) {
+    userService.createUser(dto);
+    emailService.sendWelcome(dto.email()); // ← @Async
+    return ResponseEntity.accepted().build();
+}
+// HTTP thread: tomcat-1 (or netty-1)`},
+    av1:{t:'@Async proxy submits to thread pool',b:`// Spring AOP intercepts sendWelcome() call
+// AsyncExecutionInterceptor.invoke():
+//   1. wraps method in Callable
+//   2. submits to ThreadPoolTaskExecutor
+//   3. RETURNS IMMEDIATELY (void method)
+// HTTP thread is now FREE`},
+    av2:{t:'HTTP thread returns 202 Accepted',b:`// While the email sends in the background:
+HTTP/1.1 202 Accepted
+Content-Type: application/json
+{"message":"registered"}
+// Client receives the response in <10ms
+// Email still sending on a pool thread`},
+    av3:{t:'pool thread executes sendWelcome()',b:`// Thread: async-pool-1
+@Async
+public void sendWelcome(String email) {
+    smtpClient.send(email, "Welcome!");  // takes 2s
+    log.info("Welcome email sent to {}", email);
+}
+// Runs independently — HTTP thread long gone`},
+    af0:{t:'@Async with CompletableFuture return type',b:`@Async
+public CompletableFuture<Report> generateReport(Long userId) {
+    // runs on thread pool
+    Report r = reportBuilder.build(userId);  // 5s
+    return CompletableFuture.completedFuture(r);
+}
+// Caller can .get() or .thenApply() on the future`},
+    af1:{t:'proxy submits task → returns Future immediately',b:`// Caller thread calls generateReport(userId)
+// AOP proxy wraps the method in an AsyncResult
+// CompletableFuture<Report> future = new CompletableFuture<>()
+// → task submitted to pool
+// → future returned to caller immediately (unfulfilled)`},
+    af2:{t:'caller continues while pool thread works',b:`// Caller can do other work while pool thread runs:
+CompletableFuture<Report> future = svc.generateReport(1L);
+future.thenApply(report -> emailService.send(report));
+// OR:
+Report result = future.get(10, SECONDS); // block with timeout
+// Caller thread not blocked — pool thread is running`},
+    af3:{t:'pool thread completes the future',b:`// async-pool-1 finishes report generation (~5s)
+future.complete(report);
+// → thenApply callback fires on completion
+// → caller gets the Report
+// Total wall time: 5s  (vs caller blocking for 5s)`},
+    sc0:{t:'@Scheduled(fixedRate=5000) registered',b:`@Scheduled(fixedRate = 5000)  // every 5 seconds
+public void cleanExpiredSessions() {
+    sessionRepo.deleteExpiredBefore(Instant.now());
+}
+// Requires @EnableScheduling on @SpringBootApplication
+// Spring registers a ScheduledFuture at startup`},
+    sc1:{t:'TaskScheduler fires the task at t=0',b:`// Spring uses ThreadPoolTaskScheduler (default 1 thread)
+// ScheduledExecutorService.scheduleAtFixedRate(…)
+// First fire: immediately at startup (or after initialDelay)
+// thread: scheduling-1`},
+    sc2:{t:'cleanExpiredSessions() executes',b:`// scheduling-1 executes the method body:
+DELETE FROM session WHERE expires_at < NOW()
+// Deleted: 37 expired sessions
+// Duration: ~120ms
+// HTTP threads not involved — dedicated scheduler thread`},
+    sc3:{t:'waits 5s → fires again',b:`// After completion, TaskScheduler waits fixedRate=5000ms
+// Then fires cleanExpiredSessions() again
+// fixedRate: next fire at START_TIME + 5000 (overlaps if slow)
+// fixedDelay: next fire 5000ms AFTER COMPLETION (safer)`},
+    rj0:{t:'thread pool fully saturated',b:`// ThreadPoolTaskExecutor config:
+// corePoolSize=2, maxPoolSize=2, queueCapacity=0
+// All 2 threads busy with long-running @Async tasks
+// No queue space — next task cannot wait`},
+    rj1:{t:'new @Async call arrives — executor checks',b:`// Another request triggers an @Async sendWelcome()
+// AsyncExecutionInterceptor tries to submit:
+//   poolSize=2 (at max), queue=0 (at capacity)
+// → TaskExecutor.execute() → AbortPolicy fires`},
+    rj2:{t:'RejectedExecutionException thrown to caller',b:`// The CALLER thread gets the exception
+// (NOT the pool thread — the pool is busy)
+java.util.concurrent.RejectedExecutionException:
+  Task was rejected — executor not accepting tasks
+// Spring wraps this for @Async methods
+// The caller HTTP request FAILS`},
+    rj3:{t:'fix: increase pool size or add queue capacity',b:`@Bean
+TaskExecutor asyncExecutor() {
+    var exec = new ThreadPoolTaskExecutor();
+    exec.setCorePoolSize(4);
+    exec.setMaxPoolSize(10);
+    exec.setQueueCapacity(100); // buffer for bursts
+    exec.setRejectedExecutionHandler(
+        new CallerRunsPolicy()); // fallback: run on caller
+    exec.initialize();
+    return exec;
+}`},
+  };
+  const SCEN={
+    asyncvoid:{req:'POST /register · @Async sendWelcome() · 202',
+      intro:'POST /register triggers user creation and a welcome email. The welcome email is @Async — Spring hands it to a thread pool and returns to the HTTP thread immediately. The client gets 202 in <10ms while the email sends in the background.',
+      result:{cls:'ok',text:'✅ @Async void is the fire-and-forget pattern. The HTTP thread returns the response immediately and the expensive operation runs in the background. Add @EnableAsync to your @SpringBootApplication and configure a ThreadPoolTaskExecutor @Bean (never use the default SimpleAsyncTaskExecutor in production — it creates a new thread per call).'},
+      nodes:[
+        {id:'http',icon:'🌐',label:'HTTP thread (tomcat-1)',sub:'POST /register',who:'HTTP'},
+        {id:'prxy',icon:'🔀',label:'@Async AOP proxy',sub:'intercepts sendWelcome()',who:'PRXY'},
+        {id:'pool',icon:'🏊',label:'ThreadPoolTaskExecutor',sub:'submits task',who:'POOL'},
+        {id:'free',icon:'✅',label:'HTTP thread returns 202',sub:'< 10ms',who:'HTTP'},
+        {id:'task',icon:'⚙️',label:'pool thread: sendWelcome()',sub:'email sends async',who:'TASK'},
+      ],
+      steps:[
+        {node:'http',chip:'POST',dir:'🌐 HTTP',sn:'POST /register arrives',pay:'HTTP thread (tomcat-1) handles the request — creates the user, then calls emailService.sendWelcome().',view:'av0'},
+        {node:'prxy',chip:'intercept',tone:'ok',dir:'🔀 AOP',sn:'@Async proxy intercepts',pay:'Spring AOP intercepts the @Async method. AsyncExecutionInterceptor wraps it in a Callable.',view:'av1'},
+        {node:'pool',chip:'submit',tone:'ok',dir:'🏊 pool',sn:'task submitted to thread pool',pay:'The Callable is submitted to ThreadPoolTaskExecutor. The proxy returns IMMEDIATELY.',view:'av1'},
+        {node:'free',chip:'202 ✓',tone:'ok',dir:'✅ free',sn:'HTTP thread returns 202',pay:'The HTTP thread is freed. ResponseEntity.accepted() returns in <10ms. Client gets their response.',view:'av2'},
+        {node:'task',chip:'email',tone:'ok',dir:'⚙️ async',sn:'pool thread sends the email',pay:'async-pool-1 executes sendWelcome() independently. Takes ~2s — HTTP thread long gone.',view:'av3'},
+      ]},
+    asyncfuture:{req:'GET /report · @Async CompletableFuture',
+      intro:'generateReport() is @Async and returns CompletableFuture<Report>. The HTTP thread gets an unfulfilled future immediately, does other work, and either .get() with a timeout or chains .thenApply() for the result.',
+      result:{cls:'ok',text:'✅ @Async CompletableFuture lets you compose async results. Chain .thenApply() for non-blocking continuation, or .get(timeout) for bounded blocking. Use this when you need the result eventually but want the HTTP thread free to do other work in parallel. Combine with Mono.fromFuture() in WebFlux contexts.'},
+      nodes:[
+        {id:'http',icon:'🌐',label:'HTTP thread',sub:'calls generateReport(userId)',who:'HTTP'},
+        {id:'prxy',icon:'🔀',label:'@Async proxy',sub:'submits → returns Future',who:'PRXY'},
+        {id:'pool',icon:'🏊',label:'pool thread works',sub:'5s report generation',who:'POOL'},
+        {id:'task',icon:'⚙️',label:'future.complete(report)',sub:'result available',who:'TASK'},
+      ],
+      steps:[
+        {node:'http',chip:'call',dir:'🌐 invoke',sn:'HTTP thread calls generateReport()',pay:'@Async CompletableFuture<Report> — the proxy intercepts before the method body runs.',view:'af0'},
+        {node:'prxy',chip:'future',tone:'ok',dir:'🔀 proxy',sn:'proxy submits + returns Future',pay:'Task submitted to pool. An empty CompletableFuture is returned to the caller immediately.',view:'af1'},
+        {node:'pool',chip:'running',tone:'ok',dir:'🏊 pool',sn:'pool thread runs in background',pay:'HTTP thread holds the future and can do other work while async-pool-1 builds the report.',view:'af2'},
+        {node:'task',chip:'done ✓',tone:'ok',dir:'⚙️ complete',sn:'future.complete(report)',pay:'After ~5s, async-pool-1 calls future.complete(report). thenApply() callbacks fire.',view:'af3'},
+      ]},
+    scheduled:{req:'@Scheduled(fixedRate=5000) · every 5s',
+      intro:'@Scheduled runs cleanExpiredSessions() every 5 seconds on a dedicated scheduler thread. No HTTP request involved — Spring registers the schedule at startup and fires it on the TaskScheduler.',
+      result:{cls:'ok',text:'✅ @Scheduled(fixedRate) and @Scheduled(cron) are the two main modes. fixedRate fires every N ms from the START of the previous execution — can overlap if the task is slow. fixedDelay fires N ms after COMPLETION — safer for tasks that must not overlap. Use cron for time-of-day schedules. Add @EnableScheduling and configure a ThreadPoolTaskScheduler for concurrent scheduled tasks.'},
+      nodes:[
+        {id:'sched',icon:'⏰',label:'@Scheduled fires (t=0)',sub:'fixedRate=5000',who:'SCHED'},
+        {id:'pool',icon:'🏊',label:'scheduling-1 thread',sub:'dedicated scheduler thread',who:'POOL'},
+        {id:'task',icon:'⚙️',label:'cleanExpiredSessions()',sub:'DELETE expired rows',who:'TASK'},
+        {id:'wait',icon:'⏳',label:'wait 5s → repeat',sub:'next fire at t=5000ms',who:'SCHED'},
+      ],
+      steps:[
+        {node:'sched',chip:'fire',dir:'⏰ timer',sn:'@Scheduled fires at t=0',pay:'Spring ScheduledExecutorService fires the first execution at startup (or after initialDelay).',view:'sc0'},
+        {node:'pool',chip:'thread',tone:'ok',dir:'🏊 scheduler',sn:'scheduling-1 picks up task',pay:'The dedicated scheduler thread (scheduling-1) begins executing the method body.',view:'sc1'},
+        {node:'task',chip:'DELETE',tone:'ok',dir:'⚙️ execute',sn:'cleanExpiredSessions() runs',pay:'DELETE FROM session WHERE expires_at < NOW() — deletes 37 expired sessions in ~120ms.',view:'sc2'},
+        {node:'wait',chip:'wait 5s',tone:'ok',dir:'⏳ interval',sn:'waits fixedRate=5000ms',pay:'After completion, TaskScheduler waits 5000ms then fires again. fixedRate counts from start time.',view:'sc3'},
+      ]},
+    rejection:{req:'@Async · pool full → RejectedExecutionException',
+      intro:'The thread pool has corePoolSize=2, maxPoolSize=2, and queueCapacity=0. All threads are busy. A new @Async call arrives and the executor rejects it — RejectedExecutionException thrown to the CALLER thread.',
+      result:{cls:'warn',text:'⚠️ RejectedExecutionException from a saturated thread pool is a production outage. Fix it by increasing maxPoolSize, adding queueCapacity as a buffer, or switching to CallerRunsPolicy (caller thread runs the task as a fallback). Monitor the pool with Actuator metrics (executor.active, executor.queue.remaining). Use @Async with care in high-throughput paths.'},
+      nodes:[
+        {id:'http',icon:'🌐',label:'HTTP thread',sub:'another @Async call',who:'HTTP'},
+        {id:'pool',icon:'💥',label:'ThreadPoolTaskExecutor',sub:'core=2 max=2 queue=0 — FULL',who:'BAD'},
+        {id:'exc',icon:'⛔',label:'RejectedExecutionException',sub:'thrown to caller thread',who:'BAD'},
+      ],
+      steps:[
+        {node:'http',chip:'call',dir:'🌐 invoke',sn:'@Async sendWelcome() called',pay:'An HTTP thread triggers another @Async call. The proxy tries to submit to the pool.',view:'rj0'},
+        {node:'pool',chip:'FULL',tone:'bad',dir:'💥 rejected',sn:'pool at capacity — no queue',pay:'corePoolSize=2, maxPoolSize=2, queueCapacity=0. Both threads busy, no buffer. AbortPolicy fires.',view:'rj1'},
+        {node:'exc',chip:'throw',tone:'bad',dir:'⛔ exception',sn:'RejectedExecutionException to caller',pay:'The CALLER thread (HTTP thread) gets the exception. The HTTP request fails with 500. Fix: add queue capacity.',view:'rj3'},
+      ]},
+  };
+  let scen='asyncvoid',running=false,timers=[];
+  function clearT(){timers.forEach(clearTimeout);timers=[];}
+  function nodeEl(id){return document.querySelector('.rt-node[data-node="'+id+'"]');}
+  function nodeCenter(id){const n=nodeEl(id);return n.offsetTop+n.offsetHeight/2;}
+  function setDisabled(on){document.querySelectorAll('#scenseg button').forEach(b=>b.disabled=on);document.getElementById('run').disabled=on;}
+  function renderNodes(scenKey){
+    const nodes=SCEN[scenKey].nodes;
+    let html='<div class="rt-rail"></div><div class="rt-chip" id="rtChip">task</div>';
+    nodes.forEach(function(n){html+='<div class="rt-node" data-node="'+n.id+'"><span class="ic">'+n.icon+'</span><div style="flex:1;min-width:0"><div class="nl">'+n.label+'</div><div class="ns">'+n.sub+'</div></div><span class="who who-'+n.who+'">'+n.who+'</span></div>';});
+    document.getElementById('rtDiagram').innerHTML=html;
+  }
+  function resetStage(){
+    renderNodes(scen);const s=SCEN[scen];
+    const chip=document.getElementById('rtChip');
+    chip.style.transition='none';chip.style.top=nodeCenter(s.steps[0].node)+'px';chip.style.opacity='0';
+    chip.classList.remove('ok','bad');void chip.offsetWidth;chip.style.transition='';
+    document.getElementById('rtResult').className='rt-result';
+    const dir=document.getElementById('rtDir');dir.textContent='▶ READY';dir.className='rt-dir';
+    document.getElementById('rtCap').textContent='Press ▶ to dispatch…';
+    document.getElementById('rtPayload').textContent=s.intro;
+    document.getElementById('rtHeaders').innerHTML='<span class="ht">live async state</span>— thread names, pool state, Future lifecycle, and rejection cause appear here per step —';
+    document.getElementById('reqPill').textContent=s.req;
+  }
+  function applyStep(steps,i){
+    const st=steps[i];
+    document.querySelectorAll('.rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
+    const n=nodeEl(st.node);
+    n.classList.remove('vchk','vskip');n.classList.add(st.tone==='bad'?'vskip':'vchk');
+    n.classList.add('cur');if(st.tone==='bad')n.classList.add('curbad');
+    void n.offsetWidth;n.classList.add('rtpulse');
+    const chip=document.getElementById('rtChip');
+    chip.textContent=st.chip;chip.classList.remove('ok','bad');if(st.tone)chip.classList.add(st.tone);
+    chip.style.opacity='1';chip.style.top=nodeCenter(st.node)+'px';
+    const dir=document.getElementById('rtDir');dir.textContent=st.dir;dir.className='rt-dir'+(st.tone==='bad'?' bad':'');
+    document.getElementById('rtCap').textContent=st.sn;
+    document.getElementById('rtPayload').textContent=st.pay;
+    const h=HDR[st.view];document.getElementById('rtHeaders').innerHTML='<span class="ht">'+h.t+'</span>'+h.b;
+  }
+  function run(){
+    if(running)return;running=true;clearT();resetStage();setDisabled(true);
+    const s=SCEN[scen];let i=0;
+    function tick(){
+      if(i>=s.steps.length){const r=document.getElementById('rtResult');r.className='rt-result show '+s.result.cls;r.textContent=s.result.text;running=false;setDisabled(false);return;}
+      applyStep(s.steps,i);i++;timers.push(setTimeout(tick,2000));
+    }
+    timers.push(setTimeout(tick,300));
+  }
+  document.querySelectorAll('#scenseg button').forEach(b=>b.onclick=()=>{
+    if(running)return;scen=b.dataset.s;
+    document.querySelectorAll('#scenseg button').forEach(x=>x.classList.toggle('on',x===b));
+    resetStage();
+  });
+  document.getElementById('run').onclick=run;
+  resetStage();
+})();
 </script>
 </body>
 </html>

@@ -62,12 +62,51 @@
     @media(max-width:680px){.opts,.two-col{grid-template-columns:1fr;}}
   </style>
   <link rel="stylesheet" href="devhub.css" />
+  <style>
+    .who-SVC{background:rgba(148,163,184,.18);color:#cbd5e1}
+    .who-BLDRC{background:rgba(109,179,63,.22);color:#a6e07f}
+    .who-REQ{background:rgba(34,211,238,.14);color:#7dd3fc}
+    .who-NET{background:rgba(245,158,11,.16);color:#fcd34d}
+    .who-RESP{background:rgba(167,139,250,.16);color:#c4b5fd}
+    .who-BAD{background:rgba(248,113,113,.16);color:#fca5a5}
+  </style>
 </head>
 <body class="track-spring">
 <div class="container">
   <a class="back" href="spring-boot-index.html">← Spring Boot</a>
   <h1>REST Client</h1>
   <p class="sub">Your Spring Boot service often needs to call other services or external APIs. Spring provides three clients — choose <code style="color:var(--accent)">RestClient</code> (Spring 6.1+) for synchronous calls and <code style="color:var(--accent)">WebClient</code> for reactive/non-blocking workloads.</p>
+
+  <!-- ── HERO: animated RestClient call flight · live per-step inspector ── -->
+  <div class="panel" style="border:1px solid var(--accent)">
+    <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch a RestClient call fly — build → send → response → deserialize</h2>
+    <p style="font-size:13px;color:var(--muted);margin:6px 0 12px">Your service builds a fluent request, the factory dispatches it over the network, and RestClient deserializes the response body into your type. Pick a scenario to see how errors and retries play out — the inspector shows the real HTTP artifacts at each stage.</p>
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="scenseg">
+        <button data-s="happy" class="on">200 OK</button>
+        <button data-s="notfound">404 → throw</button>
+        <button data-s="retry">500 → retry</button>
+        <button data-s="bearer">Bearer token</button>
+      </span>
+      <button class="rt-run" id="run">▶ Play</button>
+      <span class="rt-pill" id="reqPill">GET /api/products/42 · 200</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="rtDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="rtDir">▶ READY</span>
+        <div class="rt-cap" id="rtCap">Press ▶ to send a request…</div>
+        <div class="rt-payload" id="rtPayload"></div>
+        <div class="rt-headers" id="rtHeaders"></div>
+        <div class="rt-result" id="rtResult"></div>
+      </div>
+    </div>
+    <div class="rt-legend">
+      <span>🧩 your service · 🔧 RestClient builder · 📤 request in flight · 🌐 network · 📥 response · 📦 deserialized</span>
+      <span><span style="color:#86efac">green = success path</span> · <span style="color:#fca5a5">red = error thrown</span></span>
+    </div>
+  </div>
 
   <!-- SECTION 1: Options overview -->
   <h2>1 — Choosing a Client</h2>
@@ -456,6 +495,217 @@ function buildRequest(){
 }
 
 initStatuses(); buildRequest();
+</script>
+
+<!-- ── animated RestClient call flight · live per-step artifact inspector (isolated IIFE) ── -->
+<script>
+(function(){
+  const HDR={
+    h0:{t:'RestClient configured with baseUrl + headers',b:`RestClient client = RestClient.builder()
+    .baseUrl("https://api.example.com")
+    .defaultHeader("Accept", "application/json")
+    .requestInterceptor(loggingInterceptor)
+    .build();
+// inject as a @Bean — reuse across the service`},
+    h1:{t:'fluent request assembled',b:`client
+    .get()
+    .uri("/products/{id}", 42L)
+    // GET https://api.example.com/products/42
+    // + Accept: application/json (from defaultHeader)`},
+    h2:{t:'HTTP GET dispatched',b:`GET /products/42 HTTP/1.1
+Host: api.example.com
+Accept: application/json
+// ClientHttpRequestFactory wraps JDK / Reactor HttpClient`},
+    h3:{t:'network round-trip',b:`TCP connect → TLS handshake → request bytes sent
+→ external service processes the request
+→ response bytes arrive back`},
+    h4:{t:'200 OK arrives',b:`HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"id":42,"name":"Laptop Pro","price":999.00,"inStock":true}`},
+    h5:{t:'Jackson deserializes body → Product',b:`objectMapper.readValue(responseBody, Product.class)
+→ Product(id=42, name="Laptop Pro", price=999.00)
+returned to your service method.`},
+    n0:{t:'request targets a missing product',b:`GET /products/99 HTTP/1.1
+Host: api.example.com
+// product 99 does not exist in the external service`},
+    n1:{t:'404 Not Found from the server',b:`HTTP/1.1 404 Not Found
+Content-Type: application/problem+json
+
+{"type":"…/not-found","title":"Not Found",
+ "detail":"Product 99 not found","status":404}`},
+    n2:{t:'.onStatus(is4xxClientError) handler fires',b:`restClient.get().uri("/products/{id}", 99)
+  .retrieve()
+  .onStatus(HttpStatusCode::is4xxClientError, (req, res) -> {
+    if (res.getStatusCode() == NOT_FOUND)
+      throw new ResourceNotFoundException("Product 99");
+  })
+  .body(Product.class);`},
+    n3:{t:'ResourceNotFoundException propagates',b:`RestClient does NOT swallow the exception.
+@ExceptionHandler in @ControllerAdvice maps it:
+  ResourceNotFoundException → 404 ProblemDetail
+No body deserialization — the exception is thrown.`},
+    r0:{t:'attempt #1 — downstream unavailable',b:`GET /api/orders HTTP/1.1
+Host: orders.internal
+→ HTTP 500 Internal Server Error
+   (orders service crashed during deploy)`},
+    r1:{t:'@Retryable intercepts HttpServerErrorException',b:`@Retryable(retryFor = HttpServerErrorException.class,
+           maxAttempts = 3,
+           backoff = @Backoff(delay = 500, multiplier = 2))
+waiting 500ms → firing attempt #2…`},
+    r2:{t:'retry #2 → 200 OK',b:`GET /api/orders HTTP/1.1
+→ HTTP 200 OK  (service recovered)
+{"orders":[{"id":1,"status":"PENDING"},…]}
+succeeded on attempt 2 of 3`},
+    r3:{t:'caller receives result as if nothing happened',b:`List<Order> orders = fetchOrders();  // ← normal return
+@Recover method is only called after maxAttempts exhausted.
+From the controller: just a regular service call.`},
+    b0:{t:'request needs a downstream Bearer token',b:`restClient.get()
+  .uri("/api/orders")
+  .header("Authorization", "Bearer eyJhbGciOiJSUzI1NiJ9…")
+  .retrieve()
+// OR use a defaultHeaders() interceptor to attach the
+// token automatically on every call`},
+    b1:{t:'request flies with the Bearer header',b:`GET /api/orders HTTP/1.1
+Host: api.example.com
+Accept: application/json
+Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzZXJ2aWNlLWEifQ…`},
+    b2:{t:'downstream resource server validates the token',b:`BearerTokenAuthenticationFilter extracts it
+JwtDecoder: sig ✓  iss ✓  aud ✓  exp ✓
+authenticated as "service-a", scope "orders:read"
+→ request passes SecurityFilterChain`},
+    b3:{t:'200 OK — orders returned and deserialized',b:`HTTP/1.1 200 OK
+[{"id":1,"status":"PENDING"},{"id":2,"status":"SHIPPED"}]
+List<Order> result = objectMapper.readValue(body, typeRef)
+Tip: use defaultHeaders() to attach Bearer on every call.`},
+  };
+  const SCEN={
+    happy:{req:'GET /api/products/42 · 200',
+      intro:'The happy path: your service calls RestClient, the builder assembles the request, it flies to the external API, and the JSON body is deserialized into a Product. The inspector shows the real HTTP request and response at each stage.',
+      result:{cls:'ok',text:'✅ RestClient assembled the GET request with the configured base URL and default headers, dispatched it through the HttpClientRequestFactory, received a 200 OK, and Jackson deserialized the JSON body into Product.class — all in one fluent chain. No boilerplate, no try/catch for status codes (unless you want them).'},
+      nodes:[
+        {id:'svc',icon:'🧩',label:'your service',sub:'restClient.get().uri(…)',who:'SVC'},
+        {id:'build',icon:'🔧',label:'RestClient builder',sub:'baseUrl + defaultHeaders',who:'BLDRC'},
+        {id:'req',icon:'📤',label:'HTTP GET in flight',sub:'GET /products/42',who:'REQ'},
+        {id:'net',icon:'🌐',label:'network round-trip',sub:'TCP · TLS · server',who:'NET'},
+        {id:'resp',icon:'📥',label:'200 OK arrives',sub:'JSON body',who:'RESP'},
+        {id:'deser',icon:'📦',label:'Jackson deserializes',sub:'→ Product.class',who:'SVC'},
+      ],
+      steps:[
+        {node:'svc',chip:'call',dir:'your service',sn:'service calls RestClient',pay:'Your Spring service invokes the fluent RestClient API to fetch a product by ID.',view:'h0'},
+        {node:'build',chip:'build',tone:'ok',dir:'🔧 configure',sn:'builder assembles request',pay:'RestClient merges the base URL, default headers, and the .uri() call into a single HTTP request.',view:'h1'},
+        {node:'req',chip:'GET',tone:'ok',dir:'📤 sending',sn:'HTTP GET dispatched',pay:'The request is dispatched through the ClientHttpRequestFactory (JDK or Reactor HttpClient).',view:'h2'},
+        {node:'net',chip:'↔',tone:'ok',dir:'🌐 network',sn:'network round-trip',pay:'TCP connect, TLS handshake, request travels to the external service and waits for the response.',view:'h3'},
+        {node:'resp',chip:'200',tone:'ok',dir:'📥 response',sn:'200 OK arrives',pay:'The external service responds with 200 OK and a JSON body.',view:'h4'},
+        {node:'deser',chip:'Product',tone:'ok',dir:'📦 deserialize',sn:'Jackson maps JSON → Product',pay:'RestClient calls Jackson to deserialize the body into Product.class and returns the object.',view:'h5'},
+      ]},
+    notfound:{req:'GET /api/products/99 · ResourceNotFoundException',
+      intro:'Product 99 does not exist. The server returns 404. Your .onStatus(is4xxClientError) handler inspects the status code and throws a domain exception — no ProblemDetail body is deserialized.',
+      result:{cls:'warn',text:'⚠️ RestClient does not throw automatically on 4xx/5xx — you explicitly handle them with .onStatus(). The .onStatus(is4xxClientError) lambda checks the status and throws ResourceNotFoundException, which your @ControllerAdvice maps back to a 404 ProblemDetail for the original caller. The key insight: map HTTP errors to domain exceptions early, not at the call site.'},
+      nodes:[
+        {id:'svc',icon:'🧩',label:'your service',sub:'restClient.get().uri("/products/99")',who:'SVC'},
+        {id:'req',icon:'📤',label:'HTTP GET in flight',sub:'GET /products/99',who:'REQ'},
+        {id:'net',icon:'🌐',label:'404 Not Found',sub:'external service: no such product',who:'BAD'},
+        {id:'handler',icon:'⚡',label:'.onStatus handler',sub:'is4xxClientError → inspect',who:'BLDRC'},
+        {id:'exc',icon:'💥',label:'ResourceNotFoundException',sub:'propagates to @ControllerAdvice',who:'BAD'},
+      ],
+      steps:[
+        {node:'svc',chip:'call',dir:'your service',sn:'service calls RestClient',pay:'restClient.get().uri("/products/{id}", 99).retrieve().onStatus(…).body(Product.class)',view:'n0'},
+        {node:'req',chip:'GET',tone:'ok',dir:'📤 sending',sn:'GET /products/99 dispatched',pay:'The request flies to the external service asking for product 99.',view:'n0'},
+        {node:'net',chip:'404',tone:'bad',dir:'🌐 404',sn:'404 Not Found returned',pay:'The external service has no product 99 — returns 404 with a ProblemDetail body.',view:'n1'},
+        {node:'handler',chip:'catch',tone:'ok',dir:'⚡ handler',sn:'.onStatus handler fires',pay:'The .onStatus(is4xxClientError) handler inspects the status code and throws a domain exception.',view:'n2'},
+        {node:'exc',chip:'throw',tone:'bad',dir:'💥 exception',sn:'ResourceNotFoundException thrown',pay:'The exception propagates to @ControllerAdvice which maps it to a 404 ProblemDetail response.',view:'n3'},
+      ]},
+    retry:{req:'GET /api/orders · @Retryable → 200 on attempt 2',
+      intro:'The downstream orders service is temporarily down. @Retryable intercepts the HttpServerErrorException, waits 500ms, and retries. The second attempt succeeds — the caller never sees the failure.',
+      result:{cls:'ok',text:'✅ @Retryable + RestClient is a powerful combination for transient failures. Spring Retry wraps the method call in AOP, catches the configured exception class, backs off exponentially, and retries up to maxAttempts. The @Recover method acts as the final fallback if all retries are exhausted. The caller sees a normal return value — or the recover result — never the 500.'},
+      nodes:[
+        {id:'svc',icon:'🧩',label:'@Retryable method',sub:'fetchOrders()',who:'SVC'},
+        {id:'req1',icon:'📤',label:'attempt #1',sub:'GET /api/orders',who:'REQ'},
+        {id:'fail',icon:'⛔',label:'500 Server Error',sub:'downstream crashed',who:'BAD'},
+        {id:'retry',icon:'🔄',label:'@Retryable backs off',sub:'wait 500ms → retry',who:'BLDRC'},
+        {id:'ok',icon:'✅',label:'attempt #2 → 200',sub:'deserialized to List<Order>',who:'RESP'},
+      ],
+      steps:[
+        {node:'svc',chip:'call',dir:'@Retryable',sn:'@Retryable method invoked',pay:'Spring AOP intercepts the @Retryable method. Attempt #1 begins.',view:'r0'},
+        {node:'req1',chip:'GET',tone:'ok',dir:'📤 attempt 1',sn:'attempt #1 dispatched',pay:'GET /api/orders flies to the downstream orders service.',view:'r0'},
+        {node:'fail',chip:'500',tone:'bad',dir:'⛔ error',sn:'500 Server Error',pay:'The orders service is down — Spring throws HttpServerErrorException.InternalServerError.',view:'r1'},
+        {node:'retry',chip:'wait…',tone:'ok',dir:'🔄 backoff',sn:'Spring Retry backs off 500ms',pay:'@Retryable catches HttpServerErrorException, waits 500ms, and fires attempt #2.',view:'r1'},
+        {node:'ok',chip:'200 ✓',tone:'ok',dir:'✅ success',sn:'attempt #2 succeeds',pay:'The second attempt returns 200. @Recover is skipped. The caller receives List<Order>.',view:'r3'},
+      ]},
+    bearer:{req:'GET /api/orders · Bearer → 200',
+      intro:'Your service needs to call a downstream API that requires a Bearer token. RestClient adds the Authorization header — or use a defaultHeaders() interceptor to do it automatically on every call.',
+      result:{cls:'ok',text:'✅ Service-to-service calls with Bearer tokens are the standard pattern in Spring microservices. For OAuth2 client_credentials flows, use Spring Security\'s OAuth2 client support to manage token lifecycle automatically — Spring fetches, caches, and refreshes the token transparently. The downstream resource server validates the JWT locally without calling the auth server per request.'},
+      nodes:[
+        {id:'svc',icon:'🧩',label:'your service',sub:'needs downstream API',who:'SVC'},
+        {id:'build',icon:'🔧',label:'attach Bearer header',sub:'Authorization: Bearer …',who:'BLDRC'},
+        {id:'req',icon:'📤',label:'request + token in flight',sub:'GET + JWT',who:'REQ'},
+        {id:'net',icon:'🌐',label:'downstream validates token',sub:'sig·iss·aud·exp all pass',who:'NET'},
+        {id:'resp',icon:'📥',label:'200 OK · orders returned',sub:'deserialized',who:'RESP'},
+      ],
+      steps:[
+        {node:'svc',chip:'call',dir:'your service',sn:'service calls downstream API',pay:'Your service needs orders from a downstream API that requires a Bearer token for auth.',view:'b0'},
+        {node:'build',chip:'Bearer',tone:'ok',dir:'🔧 header',sn:'Bearer header attached',pay:'.header("Authorization","Bearer …") adds the token. Use defaultHeaders() to do this on every call.',view:'b1'},
+        {node:'req',chip:'GET+JWT',tone:'ok',dir:'📤 sending',sn:'request + token dispatched',pay:'The HTTP request flies with the Authorization header carrying the JWT.',view:'b1'},
+        {node:'net',chip:'authn ✓',tone:'ok',dir:'🌐 verified',sn:'downstream validates JWT',pay:'The downstream resource server\'s BearerTokenAuthenticationFilter verifies sig, iss, aud, and exp.',view:'b2'},
+        {node:'resp',chip:'200 ✓',tone:'ok',dir:'📥 response',sn:'200 OK — orders returned',pay:'The downstream API returns the orders. RestClient deserializes to List<Order>.',view:'b3'},
+      ]},
+  };
+  let scen='happy',running=false,timers=[];
+  function clearT(){timers.forEach(clearTimeout);timers=[];}
+  function nodeEl(id){return document.querySelector('.rt-node[data-node="'+id+'"]');}
+  function nodeCenter(id){const n=nodeEl(id);return n.offsetTop+n.offsetHeight/2;}
+  function setDisabled(on){document.querySelectorAll('#scenseg button').forEach(b=>b.disabled=on);document.getElementById('run').disabled=on;}
+  function renderNodes(scenKey){
+    const nodes=SCEN[scenKey].nodes;
+    let html='<div class="rt-rail"></div><div class="rt-chip" id="rtChip">req</div>';
+    nodes.forEach(function(n){html+='<div class="rt-node" data-node="'+n.id+'"><span class="ic">'+n.icon+'</span><div style="flex:1;min-width:0"><div class="nl">'+n.label+'</div><div class="ns">'+n.sub+'</div></div><span class="who who-'+n.who+'">'+n.who+'</span></div>';});
+    document.getElementById('rtDiagram').innerHTML=html;
+  }
+  function resetStage(){
+    renderNodes(scen);const s=SCEN[scen];
+    const chip=document.getElementById('rtChip');
+    chip.style.transition='none';chip.style.top=nodeCenter(s.steps[0].node)+'px';chip.style.opacity='0';
+    chip.classList.remove('ok','bad');void chip.offsetWidth;chip.style.transition='';
+    document.getElementById('rtResult').className='rt-result';
+    const dir=document.getElementById('rtDir');dir.textContent='▶ READY';dir.className='rt-dir';
+    document.getElementById('rtCap').textContent='Press ▶ to send a request…';
+    document.getElementById('rtPayload').textContent=s.intro;
+    document.getElementById('rtHeaders').innerHTML='<span class="ht">live request artifacts</span>— the client config, HTTP headers, response status, and error handling appear here per step —';
+    document.getElementById('reqPill').textContent=s.req;
+  }
+  function applyStep(steps,i){
+    const st=steps[i];
+    document.querySelectorAll('.rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
+    const n=nodeEl(st.node);
+    n.classList.remove('vchk','vskip');n.classList.add(st.tone==='bad'?'vskip':'vchk');
+    n.classList.add('cur');if(st.tone==='bad')n.classList.add('curbad');
+    void n.offsetWidth;n.classList.add('rtpulse');
+    const chip=document.getElementById('rtChip');
+    chip.textContent=st.chip;chip.classList.remove('ok','bad');if(st.tone)chip.classList.add(st.tone);
+    chip.style.opacity='1';chip.style.top=nodeCenter(st.node)+'px';
+    const dir=document.getElementById('rtDir');dir.textContent=st.dir;dir.className='rt-dir'+(st.tone==='bad'?' bad':'');
+    document.getElementById('rtCap').textContent=st.sn;
+    document.getElementById('rtPayload').textContent=st.pay;
+    const h=HDR[st.view];document.getElementById('rtHeaders').innerHTML='<span class="ht">'+h.t+'</span>'+h.b;
+  }
+  function run(){
+    if(running)return;running=true;clearT();resetStage();setDisabled(true);
+    const s=SCEN[scen];let i=0;
+    function tick(){
+      if(i>=s.steps.length){const r=document.getElementById('rtResult');r.className='rt-result show '+s.result.cls;r.textContent=s.result.text;running=false;setDisabled(false);return;}
+      applyStep(s.steps,i);i++;timers.push(setTimeout(tick,2000));
+    }
+    timers.push(setTimeout(tick,300));
+  }
+  document.querySelectorAll('#scenseg button').forEach(b=>b.onclick=()=>{
+    if(running)return;scen=b.dataset.s;
+    document.querySelectorAll('#scenseg button').forEach(x=>x.classList.toggle('on',x===b));
+    resetStage();
+  });
+  document.getElementById('run').onclick=run;
+  resetStage();
+})();
 </script>
 </body>
 </html>
