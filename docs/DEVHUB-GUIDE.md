@@ -191,7 +191,16 @@ rather than a pile of pages.
 
 ---
 
-*This guide is updated as new tracks and deep-dives land. **Newest pass — Head First deepening · TypeScript why hero · Angular content revamps (2026-06-13):**
+*This guide is updated as new tracks and deep-dives land. **Newest pass — TS animated heroes (4 pages) · Angular HTTP + async depth (2026-06-13 cont.):**
+Four 🔷 **TypeScript** pages gained full animated heroes (4 scenarios each, 950ms chip, live inspector):
+[Type Guards](../frontend/typescript-type-guards-visualizer.html) — typeof narrowing, instanceof, custom `x is T` predicate (with CIAM `/token` response guard example), assertion functions `asserts x is T` + `assertNever` for exhaustive union checks;
+[Variance &amp; Assignability](../frontend/typescript-variance-visualizer.html) — covariant return types (`() => Dog → () => Animal`), contravariant parameter types (wider param = valid subtype), bivariant method-shorthand footgun, invariant mutable generics (`Array<Dog>` ≠ `Array<Animal>`) + `ReadonlyArray` fix;
+[Classes](../frontend/typescript-classes-visualizer.html) — abstract class blueprint (cannot instantiate, must implement abstract methods), `implements` vs `extends` (shape-only vs code+shape), TypeScript `private` erasure vs `#` hard-private (truly runtime-enforced), dual nature of a class (`Point` vs `typeof Point` vs `InstanceType<typeof Point>`);
+[Type-Level Patterns](../frontend/typescript-type-patterns-visualizer.html) — branded/nominal types (`UserId ≠ PostId ≠ string`, CIAM AccessToken/RefreshToken/ClientId brands), phantom types for state machines (Form&lt;Draft&gt; → Form&lt;Validated&gt; transitions, PKCE flow example), Result&lt;T,E&gt; typed error channels (no hidden throws, caller forced to handle both branches), exhaustive `assertNever` switches (add new union variant → every unhandled switch flagged).
+Three 🅰️ **Angular HTTP** depth sections added to [HTTP &amp; HttpClient](../frontend/angular-http-visualizer.html): retry with exponential backoff (`retry({ count, delay: (err, n) => timer(2^n * 1000) })`), global `errorInterceptor` for 0/401/403/503 with toast + redirect, full CIAM bearer interceptor (`SKIP_AUTH` context token, `isTokenExpired()` + `refreshTokens().pipe(switchMap)`, `addBearer()` helper), and the Angular 19 `httpResource()` primitive (`users.isLoading()`, `users.value()`, `users.error()`, reactive URL signal).
+One 🔷 **TypeScript async-patterns** depth section added to [Async Patterns](../frontend/typescript-async-patterns-visualizer.html): `Awaited<T>` utility type, `Awaited<ReturnType<typeof asyncFn>>`, `catch (e: unknown)` → typed error guards, `class ApiError extends Error`, `Promise.any()` / `AggregateError`, and async generic pipelines.
+
+**Previous pass — Head First deepening · TypeScript why hero · Angular content revamps (2026-06-13):**
 Five ☕ **Head First Design Patterns** pages were deepened from "OK" to "RICH" — animation timing tightened to 950ms and two new sections added per page:
 [Singleton](../frontend/head-first-singleton-visualizer.html) ("Singleton in the wild" — Spring `@Component` / Angular `@Injectable` — and the static-singleton testing trap with `@Mock` fix);
 [Command](../frontend/head-first-command-visualizer.html) (NoCommand null-object pattern for empty slots; Command in the stack — `ExecutorService.submit`, `publisher.publishEvent`, NgRx Actions, CQRS);

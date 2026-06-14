@@ -540,6 +540,157 @@ users = <span class="fn">toSignal</span>(<span class="kw">this</span>.userServic
     <div class="callout">
       <b>The mental model:</b> <code>HttpClient</code> is just an Observable factory. Interceptors are a pipeline of <code>(req, next) =&gt; Observable&lt;event&gt;</code> functions wrapped around it. Auth, logging, cache, retry, error mapping — all live in interceptors so your services stay clean.
     </div>
+
+    <!-- ============================================================ -->
+    <h2 id="error-handling">8. Error handling — retry, global interceptor, typed errors</h2>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+      <div>
+        <h3 style="color:#4ade80;font-size:14px;margin:0 0 6px">Retry with exponential backoff</h3>
+        <pre><span class="kw">import</span> { retry, timer } <span class="kw">from</span> <span class="st">'rxjs'</span>;
+
+<span class="cm">// Retry up to 3 times, delay 1s/2s/4s</span>
+<span class="kw">this</span>.http.<span class="fn">get</span>&lt;User[]&gt;(<span class="st">'/api/users'</span>).<span class="fn">pipe</span>(
+  <span class="fn">retry</span>({
+    count: <span class="num">3</span>,
+    delay: (err, attempt) =&gt;
+      <span class="fn">timer</span>(Math.<span class="fn">pow</span>(<span class="num">2</span>, attempt) * <span class="num">1000</span>)
+  })
+).<span class="fn">subscribe</span>(...);
+
+<span class="cm">// In an interceptor: retry transient errors only</span>
+<span class="kw">return</span> <span class="fn">next</span>(req).<span class="fn">pipe</span>(
+  <span class="fn">retry</span>({
+    count: <span class="num">2</span>,
+    delay: (err) =&gt; {
+      <span class="kw">if</span> (err <span class="kw">instanceof</span> HttpErrorResponse
+          &amp;&amp; err.status &gt;= <span class="num">500</span>) {
+        <span class="kw">return</span> <span class="fn">timer</span>(<span class="num">1000</span>); <span class="cm">// retry server errors</span>
+      }
+      <span class="kw">throw</span> err; <span class="cm">// don't retry 4xx</span>
+    }
+  })
+);</pre>
+      </div>
+      <div>
+        <h3 style="color:#f472b6;font-size:14px;margin:0 0 6px">Global error interceptor — toasts + 401 redirect</h3>
+        <pre><span class="kw">export const</span> errorInterceptor: HttpInterceptorFn =
+  (req, next) =&gt;
+    <span class="fn">next</span>(req).<span class="fn">pipe</span>(
+      <span class="fn">catchError</span>((err: HttpErrorResponse) =&gt; {
+        <span class="kw">const</span> toast = <span class="fn">inject</span>(ToastService);
+        <span class="kw">const</span> router = <span class="fn">inject</span>(Router);
+
+        <span class="kw">switch</span> (err.status) {
+          <span class="kw">case</span> <span class="num">0</span>:
+            toast.<span class="fn">error</span>(<span class="st">'Network error'</span>); <span class="kw">break</span>;
+          <span class="kw">case</span> <span class="num">401</span>:
+            <span class="cm">// token expired — silent refresh handles it</span>
+            <span class="cm">// or redirect if refresh also fails</span>
+            router.<span class="fn">navigate</span>([<span class="st">'/login'</span>]); <span class="kw">break</span>;
+          <span class="kw">case</span> <span class="num">403</span>:
+            toast.<span class="fn">error</span>(<span class="st">'Permission denied'</span>); <span class="kw">break</span>;
+          <span class="kw">case</span> <span class="num">503</span>:
+            toast.<span class="fn">error</span>(<span class="st">'Service unavailable'</span>); <span class="kw">break</span>;
+          <span class="kw">default</span>:
+            toast.<span class="fn">error</span>(err.message);
+        }
+        <span class="kw">return</span> <span class="fn">throwError</span>(() =&gt; err);
+      })
+    );</pre>
+      </div>
+    </div>
+    <div style="background:#0b1426;border-left:3px solid #facc15;border-radius:6px;padding:10px 14px;font-size:13px;color:#cbd5e1;line-height:1.7">
+      <b style="color:#facc15">Rule:</b> Handle <i>component-specific</i> recovery (show an empty state, hide a spinner) at the call site with <code>catchError</code>. Handle <i>cross-cutting</i> responses (toast, redirect, logging) in the error interceptor. Don't duplicate both.
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 id="ciam-interceptor">9. CIAM bearer token interceptor — full implementation</h2>
+    <p style="color:var(--muted);font-size:13.5px;line-height:1.7;margin:0 0 12px">In a CIAM app (Ping / Entra) the <i>one job</i> of an HTTP interceptor is to attach the access token as a Bearer header to every protected API call, skip it for public routes, and kick off silent refresh when the token is expired. The functional interceptor pattern makes this clean:</p>
+    <pre><span class="cm">// auth.interceptor.ts</span>
+<span class="kw">export const</span> authInterceptor: HttpInterceptorFn = (req, next) =&gt; {
+  <span class="kw">const</span> auth   = <span class="fn">inject</span>(AuthService);
+  <span class="kw">const</span> skipAuth = req.context.<span class="fn">get</span>(SKIP_AUTH); <span class="cm">// public endpoints opt out</span>
+
+  <span class="kw">if</span> (skipAuth || !req.url.<span class="fn">startsWith</span>(<span class="st">'/api'</span>)) {
+    <span class="kw">return</span> <span class="fn">next</span>(req);         <span class="cm">// public route — no token</span>
+  }
+
+  <span class="kw">const</span> token = auth.<span class="fn">getAccessToken</span>(); <span class="cm">// reads from memory/cookie</span>
+
+  <span class="kw">if</span> (auth.<span class="fn">isTokenExpired</span>(token)) {
+    <span class="cm">// token expired — refresh first, then retry with new token</span>
+    <span class="kw">return</span> auth.<span class="fn">refreshTokens</span>().<span class="fn">pipe</span>(
+      <span class="fn">switchMap</span>(newToken =&gt; <span class="fn">next</span>(<span class="fn">addBearer</span>(req, newToken))),
+      <span class="fn">catchError</span>(() =&gt; {
+        auth.<span class="fn">logout</span>();                  <span class="cm">// refresh failed → force login</span>
+        <span class="kw">return</span> <span class="fn">throwError</span>(() =&gt; <span class="kw">new</span> Error(<span class="st">'Session expired'</span>));
+      })
+    );
+  }
+
+  <span class="kw">return</span> <span class="fn">next</span>(<span class="fn">addBearer</span>(req, token));
+};
+
+<span class="cm">// helper — clone request with Authorization header (requests are immutable)</span>
+<span class="kw">function</span> <span class="fn">addBearer</span>(req: HttpRequest&lt;<span class="kw">unknown</span>&gt;, token: <span class="kw">string</span>) {
+  <span class="kw">return</span> req.<span class="fn">clone</span>({
+    setHeaders: { Authorization: <span class="st">`Bearer ${token}`</span> }
+  });
+}
+
+<span class="cm">// register it (app.config.ts)</span>
+provideHttpClient(withInterceptors([authInterceptor, errorInterceptor]))</pre>
+    <div style="background:#0b1426;border-left:3px solid #dd0031;border-radius:6px;padding:10px 14px;font-size:13px;color:#cbd5e1;line-height:1.7;margin-top:12px">
+      <b style="color:#ff5b7f">Security note:</b> The interceptor attaches the token to <code>/api/*</code> calls. <b>Verify the path prefix matches your API base URL</b> — never send the Bearer header to third-party URLs or CDN calls (the token would leak). Use <code>HttpContextToken</code> for precise opt-in/opt-out on individual requests.
+    </div>
+
+    <!-- ============================================================ -->
+    <h2 id="http-resource">10. <code>httpResource()</code> — Angular 19 signal-based HTTP</h2>
+    <p style="color:var(--muted);font-size:13.5px;line-height:1.7;margin:0 0 12px"><code>httpResource()</code> is Angular 19's signal-native HTTP primitive. It wraps an HTTP GET into a <code>Resource</code> — a signal that carries <code>value()</code>, <code>isLoading()</code>, <code>error()</code>, and <code>status()</code> — no <code>subscribe()</code>, no <code>async</code> pipe needed.</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+      <div>
+        <h3 style="color:#22d3ee;font-size:14px;margin:0 0 6px">Basic usage</h3>
+        <pre><span class="kw">import</span> { httpResource } <span class="kw">from</span> <span class="st">'@angular/core'</span>;
+
+<span class="kw">export class</span> UserListComponent {
+  <span class="cm">// GET /api/users — auto-fetches on init</span>
+  users = <span class="fn">httpResource</span>&lt;User[]&gt;(
+    <span class="st">'/api/users'</span>
+  );
+}
+
+<span class="cm">&lt;!-- template --&gt;</span>
+@<span class="fn">if</span> (users.<span class="fn">isLoading</span>()) { &lt;<span class="nm">app-spinner</span>/&gt; }
+@<span class="fn">if</span> (users.<span class="fn">error</span>()) { &lt;<span class="nm">p</span>&gt;Error loading&lt;/<span class="nm">p</span>&gt; }
+@<span class="fn">for</span> (u <span class="kw">of</span> users.<span class="fn">value</span>() ?? []; track u.id) {
+  &lt;<span class="nm">li</span>&gt;{{ u.name }}&lt;/<span class="nm">li</span>&gt;
+}</pre>
+      </div>
+      <div>
+        <h3 style="color:#a78bfa;font-size:14px;margin:0 0 6px">Reactive URL — refetches when signal changes</h3>
+        <pre><span class="kw">export class</span> UserDetailComponent {
+  <span class="cm">// route param as signal (withComponentInputBinding)</span>
+  id = <span class="fn">input</span>.<span class="fn">required</span>&lt;<span class="kw">string</span>&gt;();
+
+  <span class="cm">// re-fetches whenever id() changes</span>
+  user = <span class="fn">httpResource</span>&lt;User&gt;(() =&gt;
+    <span class="st">`/api/users/${this.<span class="fn">id</span>()}`</span>
+  );
+
+  <span class="cm">// derived signal from the resource</span>
+  displayName = <span class="fn">computed</span>(() =&gt;
+    <span class="kw">this</span>.user.<span class="fn">value</span>()?.<span class="nm">name</span> ?? <span class="st">'Loading…'</span>
+  );
+}
+
+<span class="cm">// Status values: 'idle'|'loading'|
+//               'refreshing'|'resolved'|'error'</span>
+<span class="kw">if</span> (user.<span class="fn">status</span>() === <span class="st">'resolved'</span>) { ... }</pre>
+      </div>
+    </div>
+    <div style="background:#0b1426;border-left:3px solid #22d3ee;border-radius:6px;padding:10px 14px;font-size:13px;color:#cbd5e1;line-height:1.7;margin-top:12px">
+      <b style="color:#7dd3fc">When to use httpResource() vs HttpClient directly:</b> Use <code>httpResource()</code> for "load data, display it, re-load when params change" — the 80% case. Use <code>HttpClient</code> directly when you need POST/PUT/DELETE, cancellation with <code>switchMap</code>, retry logic, or file upload progress.
+    </div>
   </div>
 
   <script>
