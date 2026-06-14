@@ -191,7 +191,14 @@ rather than a pile of pages.
 
 ---
 
-*This guide is updated as new tracks and deep-dives land. **Newest pass — TS animated heroes (4 pages) · Angular HTTP + async depth (2026-06-13 cont.):**
+*This guide is updated as new tracks and deep-dives land. **Newest pass — TypeScript Modules animated hero (2026-06-13):**
+[TypeScript Modules](../frontend/typescript-modules-visualizer.html) received a full animated hero (mo-* prefix, 4 scenarios, 950ms chip, live inspector):
+**import type erasure** — `import type { User }` is erased completely at emit (zero JS runtime cost), vs `import { getUser }` (value) which is kept; valid only in type-position annotations, not `new User()`;
+**verbatimModuleSyntax** — the tsconfig flag that makes every import explicit (`import type` vs value import required); prevents bundler-invisible dead imports; `import { type X, getUser }` inline syntax for mixed modules; essential in Angular 17+ projects;
+**module resolution** — `"bundler"` mode (Angular default: no `.js` extension needed, esbuild handles it) vs `"node16"` mode (ESM spec: `.js` required even for `.ts` files); how `node_modules` `package.json "exports"` resolution works; `resolveJsonModule` for typed JSON imports;
+**path aliases** — `@/components/Button` via tsconfig `"baseUrl" + "paths"`; TS resolves for type-checking but does NOT rewrite imports in emitted JS (bundler must also be configured); Angular 17+ esbuild reads tsconfig paths automatically; barrel file cost (full barrel loaded even for one import — prefer direct imports for tree-shaking).
+
+**Previous pass — TS animated heroes (4 pages) · Angular HTTP + async depth (2026-06-13 cont.):**
 Four 🔷 **TypeScript** pages gained full animated heroes (4 scenarios each, 950ms chip, live inspector):
 [Type Guards](../frontend/typescript-type-guards-visualizer.html) — typeof narrowing, instanceof, custom `x is T` predicate (with CIAM `/token` response guard example), assertion functions `asserts x is T` + `assertNever` for exhaustive union checks;
 [Variance &amp; Assignability](../frontend/typescript-variance-visualizer.html) — covariant return types (`() => Dog → () => Animal`), contravariant parameter types (wider param = valid subtype), bivariant method-shorthand footgun, invariant mutable generics (`Array<Dog>` ≠ `Array<Animal>`) + `ReadonlyArray` fix;
