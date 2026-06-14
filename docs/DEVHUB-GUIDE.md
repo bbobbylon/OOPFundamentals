@@ -200,6 +200,13 @@ Four 🔷 **TypeScript** pages gained full animated heroes (4 scenarios each, 95
 Three 🅰️ **Angular HTTP** depth sections added to [HTTP &amp; HttpClient](../frontend/angular-http-visualizer.html): retry with exponential backoff (`retry({ count, delay: (err, n) => timer(2^n * 1000) })`), global `errorInterceptor` for 0/401/403/503 with toast + redirect, full CIAM bearer interceptor (`SKIP_AUTH` context token, `isTokenExpired()` + `refreshTokens().pipe(switchMap)`, `addBearer()` helper), and the Angular 19 `httpResource()` primitive (`users.isLoading()`, `users.value()`, `users.error()`, reactive URL signal).
 One 🔷 **TypeScript async-patterns** depth section added to [Async Patterns](../frontend/typescript-async-patterns-visualizer.html): `Awaited<T>` utility type, `Awaited<ReturnType<typeof asyncFn>>`, `catch (e: unknown)` → typed error guards, `class ApiError extends Error`, `Promise.any()` / `AggregateError`, and async generic pipelines.
 
+**Newest pass cont. — TS decorators animated hero (2026-06-13):**
+[TypeScript Decorators](../frontend/typescript-decorators-visualizer.html) received a full animated hero (dc-* prefix, 4 scenarios, 950ms chip):
+execution order (evaluation top→down, application bottom→up — `@A @B class` → B applied first, A wraps around; Angular `@Component` fires last after all `@Input`/`@ViewChild` are done);
+method decorator (@Log) — wraps via PropertyDescriptor, saves original, wraps with function(){original.apply(this,args)}, returns modified descriptor, `@HostListener` uses same API;
+decorator factory (@Retry(3) vs @Log) — outer function captures options in closure, returns decorator; CIAM example: `@Retry(3)` wrapping OIDC `exchangeCode()`;
+TC39 Stage 3 vs legacy — different signatures (fn+context vs target+key+desc), `addInitializer` per-instance (no legacy equivalent); which to use (Angular/NestJS→legacy; new code→TC39; never mix).
+
 **Previous pass cont. — 2 more TS animated heroes + Angular directives depth (2026-06-13):**
 Two more 🔷 **TypeScript** animated heroes:
 [Functions in Depth](../frontend/typescript-functions-visualizer.html) — function overloads (two public sigs, one hidden impl; TS picks the right one; Angular HttpClient uses this exact pattern), `void` vs `undefined` vs `never` (void = "callers ignore return", undefined = "explicit", never = "does not return"), contextual typing (why `arr.map(n => n*2)` doesn't need a type annotation on `n`), call signatures (callable objects with properties — Angular DI tokens);
