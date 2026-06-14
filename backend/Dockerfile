@@ -38,7 +38,17 @@ RUN mvn -q -B clean package -DskipTests
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
 
-# Non-root user — security best practice; never run app as root in production
+# Optional language runtimes for the server-side code playground (app.exec.*).
+# docker-compose builds with these ON so Python/TypeScript/Shell run in-container.
+# A lean prod image (Render) can build with --build-arg INCLUDE_RUNTIMES=false —
+# code execution is disabled in the prod profile anyway.
+ARG INCLUDE_RUNTIMES=true
+RUN if [ "$INCLUDE_RUNTIMES" = "true" ]; then \
+      apk add --no-cache python3 nodejs npm bash; \
+    fi
+
+# Non-root user — security best practice; never run app as root in production.
+# Child processes spawned by the runner therefore also run unprivileged.
 RUN addgroup -S spring && adduser -S spring -G spring
 
 # Copy the repackaged Spring Boot jar
