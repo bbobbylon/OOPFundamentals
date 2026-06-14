@@ -231,7 +231,65 @@ You can run it three ways. Pick the one you need:
 ```
 
 The **one wire** connecting frontend to backend is `frontend/config.js` →
-`window.DEVHUB_API_BASE`. Set it to your backend's URL and everything connects.
+`window.DEVHUB_API_BASE`. It is now **host-aware**: on `*.github.io` it points at your
+Render backend (edit that one line), and locally/Docker it falls back to
+`http://localhost:8081` (the backend in dev, the nginx origin in Docker).
+
+---
+
+## What the API does — auth, identity & the code runner
+
+The backend is a real, security-hardened API. Two seeded dev accounts let you try
+everything immediately (dev profile only; H2 is in-memory so they reset on restart):
+
+| Account | Password | Roles |
+|---|---|---|
+| `demo`  | `demo12345`  | `ROLE_USER` |
+| `admin` | `admin12345` | `ROLE_USER`, `ROLE_ADMIN` |
+
+**Auth & roles (first-party HS256).** Login/register mint a JWT whose `roles` claim
+*is* the authorization — the filter reads authorities straight from the token.
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `POST /api/auth/register` · `POST /api/auth/login` | public | get a JWT (now includes `roles`) |
+| `GET /api/auth/me` | Bearer | current user + roles |
+| `GET /api/progress/**` | Bearer | progress sync |
+| `GET /api/admin/users` · `/api/admin/stats` | `ROLE_ADMIN` | **real 403** for a USER token, 200 for admin |
+
+**OIDC / resource-server (self-hosted RS256).** The backend also acts as a tiny
+authorization server + resource server, teaching the exact Entra/Ping pattern with
+zero external setup:
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `GET /oauth2/jwks` | public | the public JWK set (public key only) |
+| `POST /oauth2/token` | public | mint an **RS256** token shaped like `spring` / `entra` / `ping` / `keycloak` |
+| `GET /api/oidc/userinfo` | RS256 Bearer | validated claims + the authorities they map to |
+| `GET /api/oidc/admin` | RS256 + `ROLE_ADMIN` | scope/role-gated → real 403 |
+
+Each IdM's claim shape (`roles`, `scp`, `realm_access.roles`, `group`, `scope`) is mapped
+to authorities by `IdmAuthoritiesConverter` — the live version of what the JWT playground
+used to only simulate.
+
+**Server-side code runner.** `POST /api/run/{python|typescript|shell}` runs a snippet in a
+child process and returns real `stdout`/`stderr`/exit code; `GET /api/run/languages`
+advertises which runtimes are available (the UI uses it to enable/disable "Run on server").
+
+- **Safety rails:** wall-clock timeout that force-kills the process tree, output-size cap,
+  a **sanitized environment** (only `PATH` — the backend's `JWT_SECRET`/DB creds are *not*
+  visible to user code), a per-run temp dir, a concurrency cap, and non-root execution.
+- **Auth-gated:** the POST requires a Bearer token (an open runner is RCE). The playgrounds
+  auto-sign-in as `demo`.
+- **Local prereqs (process mode):** Python is used as-is; TypeScript needs **Node ≥ 22.18**
+  (`node --experimental-transform-types`); shell needs a POSIX shell, so it's **Docker-only**
+  on Windows (the simulator stays as the local fallback).
+- **Disabled in prod by default** (`EXEC_ENABLED=false`) — see Part 2.
+
+**Live playground pages** that exercise all of the above against the real backend:
+`Auth & Identity (Live)`, the `JWT & Auth Playground` ("fetch a real token"), the
+`Spring Boot Playground` (Live tab), and the Python/TypeScript/Shell playgrounds'
+"Run on server" toggle.
 
 ---
 
@@ -243,6 +301,8 @@ The **one wire** connecting frontend to backend is `frontend/config.js` →
 | **Git + GitHub account** | host the frontend on Pages | `git --version` |
 | **A backend host** | run the API in the cloud | [Render](https://render.com) free tier (used below); Railway or Fly.io also work |
 | **A static file server** | serve the frontend locally | VS Code "Live Server", or Python 3, or `npx serve` |
+| **Python 3 / Node ≥ 22.18** *(optional)* | the playgrounds' "Run on server" mode (process-mode); not needed for auth | `python --version` · `node --version` |
+| **Docker** *(optional)* | run the full stack in containers + server-side **shell** execution | `docker --version` |
 
 Maven is **not** required — the repo ships the Maven wrapper (`mvnw` / `mvnw.cmd`).
 
@@ -376,6 +436,17 @@ register a local account and everything syncs to the local H2 database.
    | `DATABASE_PASSWORD` | *(your db password)* | |
    | `JWT_SECRET` | *(random 32+ char string)* | signs login tokens — keep it secret |
    | `CORS_ALLOWED_ORIGINS` | `https://YOURNAME.github.io` | your Pages origin (Part 3); no trailing slash |
+
+   Optional:
+
+   | Key | Value | Notes |
+   |---|---|---|
+   | `EXEC_ENABLED` | `false` *(default in prod)* | ⚠ leave **off** on a public host — an open code runner is remote code execution. Only enable on a throwaway, isolated instance you fully control. |
+   | `APP_DEMO_ENABLED` + `APP_DEMO_USERNAME` + `APP_DEMO_PASSWORD` | e.g. `true` / `demo` / *(a password)* | seed a single read-only `ROLE_USER` demo account so the auth playgrounds work on the public site. No default credentials are ever shipped to prod. |
+   | `OIDC_ISSUER` / `OIDC_AUDIENCE` | *(strings)* | identify the self-hosted OIDC tokens; defaults are fine. The RSA signing key is generated at startup (a single Render instance is fine). |
+
+   > **Note:** the prod image can be built lean with `--build-arg INCLUDE_RUNTIMES=false`
+   > (skips Python/Node/bash) since code execution is off in prod anyway.
 
    > **The `DATABASE_URL` gotcha:** Render shows a URL like
    > `postgres://user:pass@host:5432/db`. Java/JDBC needs a different shape — build

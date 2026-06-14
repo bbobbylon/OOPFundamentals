@@ -6,8 +6,10 @@ import com.bob.devhub.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
-import org.springframework.context.annotation.Profile;
+import org.springframework.core.env.Environment;
+import org.springframework.core.env.Profiles;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
 
@@ -15,18 +17,19 @@ import java.util.EnumSet;
 import java.util.Set;
 
 /**
- * Seeds two demo accounts on startup so the auth playgrounds work the moment the
- * backend boots — no manual registration needed:
+ * Seeds accounts so the auth playgrounds work out of the box.
  *
- *   demo  / demo12345   → ROLE_USER          (hits a 403 on admin endpoints)
- *   admin / admin12345  → ROLE_USER, ROLE_ADMIN (gets 200 everywhere)
+ *  • Dev profile → always seeds:
+ *        demo  / demo12345   (ROLE_USER)            — hits 403 on admin endpoints
+ *        admin / admin12345  (ROLE_USER, ROLE_ADMIN)
+ *    (H2 is create-drop, so these are recreated each restart.)
  *
- * Dev profile only. The H2 schema is {@code create-drop}, so these are recreated
- * on every restart. Production seeding (Render) is handled separately and gated
- * behind explicit env vars — we never ship default credentials to a public host.
+ *  • Prod profile → seeds NOTHING by default — we never ship default credentials
+ *    to a public host. To enable a public demo login on Render, set
+ *        APP_DEMO_ENABLED=true  APP_DEMO_USERNAME=…  APP_DEMO_PASSWORD=…
+ *    and only that single ROLE_USER account is created.
  */
 @Component
-@Profile("dev")
 @RequiredArgsConstructor
 public class DataInitializer implements CommandLineRunner {
 
@@ -34,12 +37,22 @@ public class DataInitializer implements CommandLineRunner {
 
     private final UserRepository userRepo;
     private final PasswordEncoder passwordEncoder;
+    private final Environment env;
+
+    @Value("${app.demo.enabled:false}")  private boolean demoEnabled;
+    @Value("${app.demo.username:demo}")  private String demoUsername;
+    @Value("${app.demo.password:}")      private String demoPassword;
 
     @Override
     public void run(String... args) {
-        seed("demo", "demo@devhub.local", "demo12345", EnumSet.of(Role.ROLE_USER));
-        seed("admin", "admin@devhub.local", "admin12345", EnumSet.of(Role.ROLE_USER, Role.ROLE_ADMIN));
-        log.info("Seeded demo accounts -> demo/demo12345 (USER), admin/admin12345 (USER,ADMIN)");
+        if (env.acceptsProfiles(Profiles.of("dev"))) {
+            seed("demo", "demo@devhub.local", "demo12345", EnumSet.of(Role.ROLE_USER));
+            seed("admin", "admin@devhub.local", "admin12345", EnumSet.of(Role.ROLE_USER, Role.ROLE_ADMIN));
+            log.info("Seeded dev accounts -> demo/demo12345 (USER), admin/admin12345 (USER,ADMIN)");
+        } else if (demoEnabled && demoPassword != null && !demoPassword.isBlank()) {
+            seed(demoUsername, demoUsername + "@devhub.local", demoPassword, EnumSet.of(Role.ROLE_USER));
+            log.info("Seeded public demo account '{}' (ROLE_USER) from app.demo.* config", demoUsername);
+        }
     }
 
     private void seed(String username, String email, String rawPassword, Set<Role> roles) {

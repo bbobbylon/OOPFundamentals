@@ -189,9 +189,15 @@ public class ExecutionService {
 
     private boolean runtimeAvailable(Language lang) {
         return availabilityCache.computeIfAbsent(lang.id, k -> {
-            String exe = switch (lang) { case PYTHON -> python(); case TYPESCRIPT -> node(); case SHELL -> shell(); };
+            // busybox `sh --version` isn't supported, so probe the shell with `-c exit 0`
+            // instead; python/node both answer `--version`.
+            ProcessBuilder pb = switch (lang) {
+                case PYTHON -> new ProcessBuilder(python(), "--version");
+                case TYPESCRIPT -> new ProcessBuilder(node(), "--version");
+                case SHELL -> new ProcessBuilder(shell(), "-c", "exit 0");
+            };
             try {
-                Process probe = new ProcessBuilder(exe, "--version").redirectErrorStream(true).start();
+                Process probe = pb.redirectErrorStream(true).start();
                 boolean done = probe.waitFor(3, TimeUnit.SECONDS);
                 if (!done) { probe.destroyForcibly(); return false; }
                 return probe.exitValue() == 0;

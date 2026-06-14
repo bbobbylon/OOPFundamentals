@@ -96,6 +96,16 @@ needs to call *another* service, it relays the right token. Client guards are th
 polite "you can't see this"; the server is the lock. The **Round-Trip** page is the
 single view where you watch all of it happen at once.
 
+**▶ Now run it for real (live backend).** The pages above *animate* the model; these hit
+the **actual** Spring API (start it with `./startapp.sh` or `docker compose up`). Two
+accounts are seeded in dev: **`demo` / `demo12345`** (USER) and **`admin` / `admin12345`**
+(ADMIN).
+
+- [Auth & Identity (Live)](../frontend/auth-identity-live-visualizer.html) — pick *who* logs in, *how* (first-party **HS256** vs **OIDC/RS256**), and *what* they open; watch a real request walk login → token → filter chain → `@PreAuthorize` → a real **200 / 401 / 403**, with the genuine objects shown at each step.
+- [JWT & Auth Playground](../frontend/jwt-playground-visualizer.html) → **"Fetch a real token"** pulls a genuine signed token (HS256 or OIDC) from the backend and decodes it.
+- [Spring Boot Playground](../frontend/spring-boot-playground-visualizer.html) → **Live tab** fires real calls, incl. `demo` → `/api/admin/users` (real **403**) vs `admin` (real **200**), plus the OIDC `/oauth2/jwks` + resource-server endpoints.
+- **Run code on the server:** the [Python](../frontend/python-playground-visualizer.html), [TypeScript](../frontend/typescript-playground-visualizer.html), and [Shell](../frontend/shell-playground-visualizer.html) playgrounds each have a **"Run on server (real)"** toggle that POSTs your code to `/api/run/*` as an authenticated API call and streams back real process output.
+
 ---
 
 ## Other quick paths

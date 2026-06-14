@@ -23,4 +23,14 @@
  *    frontend automatically.
  * ========================================================================== */
 
-window.DEVHUB_API_BASE = null;
+window.DEVHUB_API_BASE = (function () {
+  // Deployed on GitHub Pages (HTTPS) → talk to your public backend.
+  // ⬇️ EDIT THIS ONE LINE to your deployed Render URL (HTTPS, no trailing slash).
+  if (location.hostname.endsWith('github.io')) {
+    return 'https://devhub-backend.onrender.com';
+  }
+  // Local dev (devserver :5500) and Docker (nginx :8081): null → the app falls
+  // back to http://localhost:8081, which is the backend in dev and the nginx
+  // origin in Docker (it proxies /api, /oauth2, /actuator to the backend).
+  return null;
+})();
