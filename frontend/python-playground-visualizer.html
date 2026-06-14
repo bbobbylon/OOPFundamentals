@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Python Playground — DevHub</title>
   <link rel="stylesheet" href="devhub.css"/>
+  <script src="config.js"></script>
+  <script src="devhub-run.js"></script>
   <style>
     .pp-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 10px}
     .pp-run{padding:9px 22px;border-radius:9px;border:1px solid var(--accent);background:var(--accent);color:#fff;font-size:13.5px;font-weight:800;cursor:pointer;white-space:nowrap;transition:filter .15s}
@@ -69,10 +71,18 @@
   <div class="pp-boot" id="boot"></div>
 
   <div class="pp-bar">
+    <span class="seg" id="engine" title="Where the code runs">
+      <button data-e="browser" class="on">⚙ In browser</button>
+      <button data-e="server">☁ On server (real API)</button>
+    </span>
     <button class="pp-run" id="run">▶ Run</button>
     <button class="pp-clear" id="clear">Clear output</button>
     <span class="pp-status"><span class="pp-dot" id="dot"></span><span id="statusTxt">interpreter not loaded yet</span></span>
   </div>
+  <p class="note" style="margin:-4px 0 12px"><b>Two real engines:</b> <b>In browser</b> runs CPython compiled to WebAssembly (Pyodide).
+  <b>On server</b> sends your code to the Spring backend as a genuine authenticated API call
+  (<code>POST /api/run/python</code> with a <code>Bearer</code> JWT) and streams back the real process output — the same loop a
+  hosted runner uses. (Server mode needs the backend running; it auto-signs-in as <code>demo</code>.)</p>
 
   <div class="pp-presets" id="presets"><span class="lbl">Examples:</span></div>
 
@@ -142,7 +152,7 @@ document.addEventListener('click', function (e) {
   const PY_VER = '0.26.4';
   const PY_BASE = 'https://cdn.jsdelivr.net/pyodide/v' + PY_VER + '/full/';
 
-  let pyodide = null, booting = false, lines = [];
+  let pyodide = null, booting = false, lines = [], engine = 'browser';
 
   const EXAMPLES = {
     'Hello & f-strings': `name = "Ada"
@@ -284,6 +294,7 @@ print("this never runs")`,
   }
 
   async function run(){
+    if(engine==='server') return runServer();
     $('run').disabled=true;
     const py = await boot();
     if(!py){ $('run').disabled=false; return; }
@@ -309,6 +320,47 @@ print("this never runs")`,
     $('run').disabled=false;
   }
   $('run').onclick = run;
+
+  // ── server engine: real authenticated API call to POST /api/run/python ──
+  async function runServer(){
+    $('run').disabled=true; lines=[]; render(); setStatus('calling server…','load');
+    const t0=performance.now();
+    const r = await DevHubRun.exec('python', ta.value, '');
+    const ms = Math.round(performance.now()-t0);
+    if(r.error){
+      push('err', r.error==='network'
+        ? 'Could not reach the backend — start it with dev.ps1 / docker compose. ('+(r.message||'')+')'
+        : ('Server error: '+(r.message||r.error)));
+      setStatus('server unreachable','bad');
+    } else if(!r.ok){
+      push('err','HTTP '+r.status+' — '+(r.message||r.error)
+        +(r.error==='execution_disabled'?' (code execution is off in this environment)':''));
+      setStatus('server declined','bad');
+    } else {
+      const res=r.result;
+      push('sys','→ POST /api/run/python · Authorization: Bearer <demo JWT> · HTTP '+r.status+' · server '+res.durationMs+' ms');
+      if(res.stdout) push('out', res.stdout.replace(/\n$/,''));
+      if(res.stderr) push('err', res.stderr.replace(/\n$/,''));
+      if(res.timedOut) push('err','⏱ killed: exceeded the server time limit');
+      if(res.truncated) push('sys','(output truncated at the server cap)');
+      if(!res.stdout && !res.stderr && !res.timedOut) push('sys','(ran on server — no output; exit code '+res.exitCode+')');
+      setStatus('ran on server (CPython) '+(res.exitCode===0?'✓':'· exit '+res.exitCode), res.exitCode===0?'ok':'bad');
+    }
+    $('runtime').textContent = ms+' ms round-trip';
+    $('run').disabled=false;
+  }
+  document.querySelectorAll('#engine button').forEach(b=>b.onclick=()=>{
+    if(b.disabled) return;
+    engine=b.dataset.e;
+    document.querySelectorAll('#engine button').forEach(x=>x.classList.toggle('on',x===b));
+    setStatus(engine==='server'?'server mode — press Run':'in-browser mode — press Run');
+  });
+  // gate the server toggle on real availability
+  DevHubRun.capabilities().then(c=>{
+    const ok = c && c.enabled && (c.languages||[]).some(l=>l.id==='python' && l.available);
+    if(!ok){ const b=document.querySelector('#engine button[data-e="server"]');
+      b.disabled=true; b.title='Start the backend (dev.ps1 / docker compose) to enable server execution'; }
+  });
 
   ta.value = EXAMPLES['Hello & f-strings'];
   refreshGutter();
