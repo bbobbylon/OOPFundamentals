@@ -142,6 +142,81 @@
     <div class="key-insight"><strong>Fewer heap allocations = shorter GC pauses.</strong> The biggest wins: reuse buffers (<code>sync.Pool</code>, or pass a <code>[]byte</code> in rather than returning a fresh one), avoid returning pointers to short-lived values, and pre-size slices/maps. Profile allocations with <code>go test -benchmem</code> and <code>pprof</code> (<code>-memprofile</code>) before optimizing — measure, don't guess.</div>
   </section>
 </div>
+
+<!-- ── Code Walkthrough: Go Runtime ── -->
+<div id="cw-gort"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-gort',{
+  id:'cw-gort',
+  title:'Go runtime — GC, goroutine scheduler, pprof, and allocation reduction',
+  subtitle:'The Go runtime handles garbage collection (tricolor concurrent mark-and-sweep), goroutine scheduling (work-stealing M:N model), and memory allocation (stack and heap). Understanding when allocations escape to the heap, how the GC triggers, and how to use pprof to profile production code prevents "why is my Go service slow?" situations.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6],
+      note:'Garbage collector: Go uses a concurrent tricolor mark-and-sweep GC. Marking happens concurrently with application goroutines (STW pauses are only ~100-500 microseconds per GC cycle). GC triggers when heap reaches 2× the live heap size (target controlled by GOGC env var, default 100 = 100% growth). Reduce GC pressure by: allocating less, reusing buffers, and pre-sizing slices/maps.',
+      vars:{'GOGC=100 (default)':'trigger GC when heap doubles; increase to defer GC (more memory, fewer cycles); GOGC=off to disable','runtime.GC()':'force a GC cycle; use in tests to measure memory; never in production hot paths','GOMEMLIMIT':'Go 1.19+: hard memory limit; GC runs more aggressively to stay under the limit; prevents OOM kills in containers'},
+      tone:'start'
+    },
+    {
+      lines:[8,9,10,11,12,13],
+      note:'Goroutine scheduler: M:N model — M goroutines mapped to N OS threads (M ≥ N). GOMAXPROCS OS threads can execute Go code simultaneously (default = CPU cores). Goroutines are scheduled cooperatively: they yield at function calls, system calls, and channel operations. Work-stealing: idle OS threads steal goroutines from busy threads\' queues. Goroutine context-switch is ~100ns vs OS thread ~1µs.',
+      vars:{'GOMAXPROCS':'number of OS threads that run Go code in parallel; runtime.GOMAXPROCS(n) to change at runtime; match to CPU quota in containers','work stealing':'idle P (processor) steals half the goroutines from a busy P\'s run queue; keeps all CPUs busy','runtime.Gosched()':'yield the current goroutine; allow other goroutines to run; useful in CPU-bound loops to prevent starvation'},
+      tone:'ok'
+    },
+    {
+      lines:[15,16,17,18,19,20],
+      note:'Stack vs heap: local variables that do not escape to a longer-lived scope are allocated on the goroutine\'s stack (fast, no GC). Variables that escape (returned pointer, captured in a goroutine, stored in a global) are allocated on the heap (GC managed, slower). The compiler performs escape analysis. go build -gcflags=-m shows escape decisions. The single biggest optimization: avoid unnecessary pointer returns for short-lived values.',
+      vars:{'escape analysis':'compiler determines if a variable\'s address outlives the function; if yes, it goes to the heap','go build -gcflags=-m':'prints escape analysis decisions; "moved to heap: x" = heap allocation; "does not escape" = stack','&v returned from function':'v escapes to heap if returned via pointer; returning the value directly (not a pointer) keeps it on the stack'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'pprof profiling: net/http/pprof registers profiling endpoints at /debug/pprof/. go tool pprof http://localhost:8080/debug/pprof/heap samples the heap. go tool pprof /debug/pprof/profile?seconds=30 samples CPU for 30 seconds. pprof top shows top allocators/CPU consumers. pprof web opens an SVG flamegraph. For production: use /debug/pprof/ behind auth — never expose it publicly.',
+      vars:{'import _ "net/http/pprof"':'registers pprof handlers on http.DefaultServeMux; add to your main.go','go tool pprof -alloc_objects profile.pb.gz':'shows allocation counts (not size) — useful for reducing GC frequency','pprof web command':'opens a Graphviz SVG flamegraph in the browser; shows call hierarchy for CPU or memory'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'sync.Pool: pool of reusable objects — avoids repeated allocation+GC. New creates a new object when the pool is empty. Get retrieves one; Put returns it. Objects in the pool may be collected by GC between GC cycles — pool is NOT a cache. Classic use: byte buffers for JSON encoding, HTTP request/response bodies. sync.Pool is safe for concurrent use.',
+      vars:{'pool.Get().(*bytes.Buffer)':'type assertion required; Pool stores interface{}; use the concrete type after assertion','pool.Put(buf)':'return the object to the pool; reset it first (buf.Reset()) to avoid stale data','GC may clear pool':'Pool contents are not guaranteed to survive a GC cycle; Pool is for amortizing allocation cost, not for long-term caching'},
+      tone:'ok',
+      callout:'CIAM: a high-throughput JWT validation endpoint in Go allocates a []byte buffer for every token parsing call. Use sync.Pool for the base64 decoding buffer. Profile with pprof after load testing: go tool pprof to find the top allocating function. Set GOMAXPROCS to match the container\'s CPU quota (not the host CPUs): a 0.5 CPU Fargate task should have GOMAXPROCS=1 — without this, the Go scheduler creates 4+ threads that compete for one CPU slot, causing context-switch overhead.'
+    }
+  ],
+  code:[
+    '// GC configuration',
+    '// GOGC=100 (default): GC when heap doubles; GOMEMLIMIT=512MiB (Go 1.19+)',
+    'debug.SetGCPercent(100)  // same as GOGC=100; 100% growth trigger',
+    'debug.SetMemoryLimit(512 << 20)  // 512 MB hard limit (prevents OOM)',
+    '',
+    '// Goroutine scheduler',
+    'runtime.GOMAXPROCS(runtime.NumCPU())  // match CPU quota',
+    '// In containers: GOMAXPROCS should match container CPU limit, not host',
+    '// Use "automaxprocs" package: go.uber.org/automaxprocs (reads cgroup CPU quota)',
+    '',
+    '// Escape analysis',
+    '// go build -gcflags=-m 2>&1 | grep "moved to heap"',
+    '// Avoid: return &localVar{}  (escapes to heap)',
+    '// Prefer: return localVar{}  (stays on stack if caller makes a copy)',
+    '',
+    '// pprof — register endpoints',
+    'import _ "net/http/pprof"  // registers /debug/pprof/ on DefaultServeMux',
+    '// go tool pprof http://localhost:6060/debug/pprof/heap',
+    '// go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30',
+    '',
+    '// sync.Pool — reuse buffers',
+    'var bufPool = sync.Pool{',
+    '  New: func() interface{} { return new(bytes.Buffer) },',
+    '}',
+    'buf := bufPool.Get().(*bytes.Buffer)',
+    'buf.Reset()',
+    '// ... use buf ...',
+    'bufPool.Put(buf)'
+  ]
+});
+</script>
+
 <script>
 (function(){
   const pfx='grt';

@@ -144,6 +144,87 @@
     <div class="key-insight"><strong>The race detector finds <em>real</em> races, not all races.</strong> It only reports a race it actually observes at runtime, so run it against tests that exercise real concurrency (<code>-race</code> in CI is standard). A clean <code>-race</code> run is strong evidence, not a proof of absence.</div>
   </section>
 </div>
+
+<!-- ── Code Walkthrough: Go Testing ── -->
+<div id="cw-gotest"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-gotest',{
+  id:'cw-gotest',
+  title:'Go testing — table-driven tests, subtests, mocks, benchmarks, fuzz, and -race',
+  subtitle:'Go\'s testing package is part of the standard library — no external test framework needed for most use cases. Table-driven tests with t.Run() subtests are the idiomatic pattern. Interface-based mocking avoids heavy mock libraries. Benchmarks (BenchmarkX) measure performance. Fuzzing (FuzzX) finds edge-case panics. -race detects concurrent memory access bugs.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'Table-driven test: define a slice of test cases (name, input, expected, wantErr) then loop. t.Run(tc.name, func(t *testing.T)) creates a subtest for each case — subtests run in isolation, can be targeted individually with go test -run TestX/case_name, and report failures with the case name. t.Parallel() inside a subtest runs it concurrently with other parallel subtests.',
+      vars:{'t.Errorf("got %v, want %v", got, want)':'marks test failed but continues; t.Fatalf stops immediately','tc := tc':'loop variable capture (pre-Go1.22); without this, all subtests capture the last tc value','t.Parallel()':'run this subtest concurrently with other t.Parallel() subtests; speeds up slow I/O-bound tests'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'Interface mocking: instead of a mock library, define an interface for the dependency and provide a test implementation. type UserStore interface { FindByID(id int64) (*User, error) }. The test uses a mockUserStore that implements the interface with hard-coded returns. This is idiomatic Go: interfaces are implicitly implemented, so your production type and test type both satisfy the same interface.',
+      vars:{'interface in production code':'define the interface in the package that USES it, not the package that implements it (consumer-defined interfaces)','mockUserStore struct':'implements the interface; holds canned return values; no heavy reflection or code generation needed','testify/mock or gomock':'use if the number of mocks is large and tracking call expectations is important; adds test clarity for complex interactions'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'httptest.NewRecorder: test HTTP handlers without starting a real server. httptest.NewRecorder() captures the response (StatusCode, Header, Body). httptest.NewRequest(method, url, body) creates an *http.Request. Call handler.ServeHTTP(w, r) directly. Check w.Code and w.Body.String(). For integration tests, httptest.NewServer starts a real local server.',
+      vars:{'httptest.NewRecorder()':'implements http.ResponseWriter; captures status, headers, and body','httptest.NewRequest("GET", "/path", nil)':'builds an *http.Request without network; set r.Header for auth tokens','w.Code, w.Body.String()':'check status code and body; JSON response: json.Unmarshal(w.Body.Bytes(), &result)'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25],
+      note:'Benchmarks: func BenchmarkX(b *testing.B). The runtime calls the benchmark b.N times (calibrating N to get a stable measurement). Place the code under test inside the for i := 0; i < b.N; i++ loop. b.ResetTimer() after setup to exclude initialization from measurement. Run with go test -bench=. -benchmem. -benchmem shows allocations per operation — the key metric for optimization.',
+      vars:{'b.N':'calibrated by the runtime; start small, increase until timing is stable; do not hardcode','b.ResetTimer()':'exclude test setup from benchmark time; call after creating fixtures/test data','go test -bench=. -benchmem':'run all benchmarks + show ns/op, B/op, allocs/op; compare before and after optimization'},
+      tone:'ok'
+    },
+    {
+      lines:[27,28,29,30],
+      note:'Fuzzing and the race detector: FuzzX functions take *testing.F. f.Add(seed) adds a corpus seed. go test -fuzz=FuzzX mutates inputs and calls the fuzz function looking for panics. Crash inputs are saved to testdata/fuzz/ and become permanent regression tests. go test -race enables the race detector (ThreadSanitizer) — it instruments memory accesses and reports unsynchronized concurrent reads/writes at runtime.',
+      vars:{'f.Add("a.b.c")':'corpus seed; the fuzzer mutates this to find edge cases; add representative production inputs','go test -fuzz=FuzzParseJWT':'run fuzzer; press Ctrl+C to stop; saved crashers become permanent corpus','go test -race ./...':'ALWAYS run with -race in CI; 10-20% slower but catches real race conditions that cause production bugs'},
+      tone:'ok',
+      callout:'CIAM: test JWT parsing with table-driven tests: valid token, expired token, wrong audience, wrong issuer, tampered signature, malformed base64. Use httptest for the /authenticate endpoint. Fuzz test ParseJWT(raw string) — the fuzzer will find edge cases in base64 decoding and JSON unmarshalling. Always run go test -race ./... in CI; a JWT validation handler touching a shared key cache without a mutex will be flagged immediately.'
+    }
+  ],
+  code:[
+    '// Table-driven test with subtests',
+    'func TestValidateToken(t *testing.T) {',
+    '  tests := []struct{ name, token string; wantErr bool }{',
+    '    {"valid", makeToken(time.Now().Add(time.Hour)), false},',
+    '    {"expired", makeToken(time.Now().Add(-time.Hour)), true},',
+    '  }',
+    '  for _, tc := range tests {',
+    '    t.Run(tc.name, func(t *testing.T) {',
+    '      _, err := validateToken(tc.token)',
+    '      if (err != nil) != tc.wantErr { t.Errorf("got err=%v", err) }',
+    '    })',
+    '  }',
+    '}',
+    '',
+    '// Interface mock — no library needed',
+    'type UserStore interface { FindByID(int64) (*User, error) }',
+    'type mockStore struct{ user *User; err error }',
+    'func (m *mockStore) FindByID(id int64) (*User, error) { return m.user, m.err }',
+    '',
+    '// HTTP handler test',
+    'w := httptest.NewRecorder()',
+    'r := httptest.NewRequest("GET", "/me", nil)',
+    'r.Header.Set("Authorization", "Bearer "+token)',
+    'handler.ServeHTTP(w, r)',
+    '',
+    '// Benchmark',
+    'func BenchmarkValidateToken(b *testing.B) {',
+    '  for i := 0; i < b.N; i++ { validateToken(tok) }',
+    '}',
+    '// go test -bench=. -benchmem  →  ns/op  B/op  allocs/op',
+    '',
+    '// Fuzz + race',
+    '// func FuzzParseJWT(f *testing.F) { f.Add("a.b.c"); f.Fuzz(func(t *testing.T, s string) { ParseJWT(s) }) }',
+    '// go test -race ./...'
+  ]
+});
+</script>
+
 <script>
 (function(){
   const pfx='gt';

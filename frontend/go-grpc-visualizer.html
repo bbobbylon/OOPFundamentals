@@ -130,6 +130,82 @@
     <div class="key-insight"><strong>Metadata is gRPC's header map; status codes are its errors.</strong> Carry the bearer token / trace ID in metadata, validate it once in an interceptor (chained like middleware), and return typed <code>status.Error(codes.X, msg)</code> — never a bare <code>errors.New</code>, or the client loses the code. <code>codes.Unauthenticated</code> → 401 and <code>codes.PermissionDenied</code> → 403 at your REST gateway.</div>
   </section>
 </div>
+
+<!-- ── Code Walkthrough: Go gRPC ── -->
+<div id="cw-gogrpc"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-gogrpc',{
+  id:'cw-gogrpc',
+  title:'Go gRPC — protobuf, service implementation, interceptors, and status codes',
+  subtitle:'gRPC uses Protocol Buffers (protobuf) to define services and messages. You write a .proto file, run protoc to generate Go code, implement the service interface, and call grpc.NewServer(). Interceptors are gRPC\'s middleware. Status codes replace HTTP status — use status.Error() for every error return to preserve the code on the client side.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7,8],
+      note:'Proto file defines the contract: service name, RPC methods, request/response messages. protoc-gen-go generates Go structs. protoc-gen-go-grpc generates the service interface (UserServiceServer) and client stub (UserServiceClient). You implement the server interface. The generated client stub handles serialization, HTTP/2 framing, and retries. Proto types: string, int32, int64, bool, bytes, repeated (slice), map, google.protobuf.Timestamp.',
+      vars:{'protoc --go_out --go-grpc_out':'generates *.pb.go (message structs) and *_grpc.pb.go (server interface + client stub)','UserServiceServer interface':'generated interface you must implement; compile-time error if any method is missing; UnimplementedUserServiceServer for forward compatibility','google.protobuf.Timestamp':'proto type for timestamps; maps to timestamppb.Timestamp in Go; use .AsTime() to convert to time.Time'},
+      tone:'start'
+    },
+    {
+      lines:[10,11,12,13,14],
+      note:'Implementing the gRPC server: embed the generated Unimplemented server, implement each method. Return (proto message, error). Errors MUST be status.Error(code, message) — a bare Go error loses the gRPC code on the client. The context carries deadlines and cancellation from the caller. Check ctx.Err() for long-running operations.',
+      vars:{'status.Error(codes.NotFound, "user not found")':'typed error; client sees codes.NotFound; grpc-gateway maps to HTTP 404','codes.Unauthenticated':'no valid token; maps to HTTP 401 in grpc-gateway; use for missing/invalid Bearer token','codes.PermissionDenied':'valid token but wrong scope/role; maps to HTTP 403; use for authorization failures'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20,21],
+      note:'Interceptors: gRPC\'s middleware. Unary interceptors wrap unary RPC calls (request → response). Streaming interceptors wrap streaming calls. Chain multiple interceptors with grpc.ChainUnaryInterceptor(). Common interceptors: authentication (validate Bearer token, add user to context), logging (request/response + duration), recovery (catch panics, return codes.Internal). Interceptors run in the order they are added.',
+      vars:{'grpc.UnaryInterceptor(authInterceptor)':'single interceptor; use grpc.ChainUnaryInterceptor for multiple','grpc.UnaryServerInterceptor type':'func(ctx, req, info, handler) (interface{}, error); call handler(ctx, req) to proceed to the actual method','metadata.FromIncomingContext(ctx)':'extract gRPC metadata (headers) from the context; read the Authorization header here'},
+      tone:'ok'
+    },
+    {
+      lines:[23,24,25,26,27],
+      note:'Metadata: gRPC\'s equivalent of HTTP headers. Sent with each call as key-value pairs. On the server: metadata.FromIncomingContext(ctx) extracts the metadata. Auth interceptor reads: md.Get("authorization")[0]. On the client: metadata.NewOutgoingContext(ctx, md) attaches metadata to the call. gRPC metadata keys are case-insensitive; binary values use the "-bin" suffix.',
+      vars:{'metadata.MD':'type alias for map[string][]string; keys are lowercase strings','md.Get("authorization")':'returns []string; first value is the Bearer token string','metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer " + token)':'attach token to outgoing client call'},
+      tone:'ok'
+    },
+    {
+      lines:[29,30,31,32,33],
+      note:'gRPC-Gateway: a protoc plugin that generates a reverse proxy translating REST/JSON requests to gRPC. Add option (google.api.http) annotations to your .proto methods. The generated gateway handles JSON serialization, URL routing, and HTTP-to-gRPC translation. This lets you expose a single gRPC service as both gRPC (for internal microservices) and REST (for external clients like Angular).',
+      vars:{'grpc-gateway':'open-source project from grpc-ecosystem; generates HTTP reverse proxy from proto annotations','HTTP to gRPC translation':'POST /v1/users → gRPC CreateUser; GET /v1/users/{id} → gRPC GetUser; status code mapping included','buf.build':'modern alternative to calling protoc directly; buf.yaml + buf.gen.yaml; faster + better dependency management'},
+      tone:'ok',
+      callout:'CIAM: a Go gRPC auth interceptor: extract the Bearer token from metadata, call your JWT validation function (validate iss/aud/exp), extract the user subject, and add it to the context via context.WithValue. Every downstream RPC method reads the authenticated user from the context — no token validation in business logic. Use codes.Unauthenticated for invalid tokens and codes.PermissionDenied for valid tokens with insufficient scope.'
+    }
+  ],
+  code:[
+    '// users.proto — service definition',
+    'service UserService {',
+    '  rpc GetUser(GetUserRequest) returns (User);',
+    '  rpc CreateUser(CreateUserRequest) returns (User);',
+    '}',
+    'message GetUserRequest { string id = 1; }',
+    'message User { string id = 1; string email = 2; }',
+    '',
+    '// Generated: UserServiceServer interface; you implement it',
+    'type userServer struct {',
+    '  pb.UnimplementedUserServiceServer  // forward compat',
+    '  repo UserRepository',
+    '}',
+    'func (s *userServer) GetUser(ctx context.Context, req *pb.GetUserRequest) (*pb.User, error) {',
+    '  u, err := s.repo.GetByID(ctx, req.Id)',
+    '  if errors.Is(err, sql.ErrNoRows) {',
+    '    return nil, status.Error(codes.NotFound, "user not found")',
+    '  }',
+    '  return &pb.User{Id: u.ID, Email: u.Email}, nil',
+    '}',
+    '',
+    '// Interceptor (middleware)',
+    'func authInterceptor(ctx context.Context, req interface{}, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {',
+    '  md, _ := metadata.FromIncomingContext(ctx)',
+    '  tokens := md.Get("authorization")',
+    '  if len(tokens) == 0 { return nil, status.Error(codes.Unauthenticated, "missing token") }',
+    '  ctx = context.WithValue(ctx, userKey, validateToken(tokens[0]))',
+    '  return handler(ctx, req)',
+    '}'
+  ]
+});
+</script>
+
 <script>
 (function(){
   const pfx='ggrpc';

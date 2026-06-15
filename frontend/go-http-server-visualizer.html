@@ -114,6 +114,88 @@
     <div class="code-block"><span style="color:#a78bfa">// Store values in request context (middleware → handler)</span><br>type contextKey string<br>const userKey contextKey = <span style="color:#c3e88d">"user"</span><br><br>func <span style="color:#82aaff">WithAuth</span>(next http.Handler) http.Handler {<br>&nbsp;&nbsp;<span style="color:#c792ea">return</span> http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {<br>&nbsp;&nbsp;&nbsp;&nbsp;user, err := validateJWT(r.Header.Get(<span style="color:#c3e88d">"Authorization"</span>))<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#c792ea">if</span> err != <span style="color:#61dafb">nil</span> { http.Error(w, <span style="color:#c3e88d">"Unauthorized"</span>, 401); <span style="color:#c792ea">return</span> }<br>&nbsp;&nbsp;&nbsp;&nbsp;ctx := context.WithValue(r.Context(), userKey, user)<br>&nbsp;&nbsp;&nbsp;&nbsp;next.ServeHTTP(w, r.WithContext(ctx))<br>&nbsp;&nbsp;})<br>}<br><br>func <span style="color:#82aaff">getUser</span>(w http.ResponseWriter, r *http.Request) {<br>&nbsp;&nbsp;user := r.Context().Value(userKey).(*User)  <span style="color:#a78bfa">// extract from context</span><br>}</div>
   </section>
 </div>
+
+<!-- ── Code Walkthrough: Go HTTP Server ── -->
+<div id="cw-gohttp"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-gohttp',{
+  id:'cw-gohttp',
+  title:'Go HTTP server — ServeMux, middleware, JSON encoding, and request context',
+  subtitle:'net/http is Go\'s built-in HTTP package. http.ServeMux routes requests. Middleware is a chain of http.Handler functions. json.NewEncoder/Decoder handle JSON I/O. Understanding the pattern of passing the request context through every handler call and how to build a middleware chain explains how real Go web services (using chi, gorilla/mux, or bare net/http) are structured.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'http.ServeMux: the built-in URL router. mux.HandleFunc("/users/{id}", handler) registers a handler for a path pattern. Go 1.22+ ServeMux supports named path variables ({id}) and method routing (GET /users/{id}). For older versions or more complex routing, chi or gorilla/mux are popular. http.ListenAndServe(addr, mux) starts the server; it blocks until the server stops.',
+      vars:{'http.HandleFunc vs mux.HandleFunc':'http.HandleFunc registers on the default mux (http.DefaultServeMux); create your own mux for tests','GET /users/{id}':'Go 1.22+ method + path pattern; {id} is a path variable extracted with r.PathValue("id")','http.ListenAndServe(":8080", mux)':'blocks; starts the HTTP server; nil mux uses http.DefaultServeMux'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14,15],
+      note:'Middleware: a function that takes an http.Handler and returns an http.Handler. It wraps the handler to add behavior before and/or after. Chain middleware by wrapping: loggingMiddleware(authMiddleware(handler)). The innermost function is the actual handler; the outermost runs first. Common middleware: logging, authentication (parse JWT → add user to context), recovery (catch panics → return 500), CORS headers.',
+      vars:{'http.Handler interface':'type Handler interface { ServeHTTP(ResponseWriter, *Request) }; any type with ServeHTTP satisfies it','http.HandlerFunc type':'func(ResponseWriter, *Request); it has a ServeHTTP method making it an http.Handler; use for inline handlers','chain: a(b(c(h)))':'a runs first, calls b, which calls c, which calls h; middleware wraps in reverse order of execution'},
+      tone:'ok'
+    },
+    {
+      lines:[17,18,19,20,21],
+      note:'JSON encoding/decoding: json.NewDecoder(r.Body).Decode(&v) decodes the request body into a struct. json.NewEncoder(w).Encode(v) encodes a struct and writes to the response. Set Content-Type: application/json in the response header before writing the body. Use struct tags json:"field_name" to control JSON field names. The json.Decoder is efficient — it reads from the io.Reader without loading the whole body into memory.',
+      vars:{'json.NewDecoder(r.Body).Decode(&req)':'streaming decode; efficient for large request bodies; &req must be a pointer','w.Header().Set("Content-Type", "application/json")':'set before writing the body; once w.Write() is called, headers are locked','json.Decoder.DisallowUnknownFields()':'call before Decode; returns error on extra fields; useful for strict API validation'},
+      tone:'ok'
+    },
+    {
+      lines:[23,24,25,26,27],
+      note:'Request context: r.Context() returns the request\'s context — it is cancelled when the client disconnects. Pass r.Context() to every downstream call. Add request-scoped values (authenticated user, request ID) with context.WithValue() and create a new request with r.WithContext(ctx). The handler must call next.ServeHTTP(w, r.WithContext(ctx)) to pass the enriched context downstream.',
+      vars:{'r.Context()':'the request context; automatically cancelled when the TCP connection closes or the server shuts down','r.WithContext(ctx)':'creates a shallow copy of the request with the new context; the original request is unaffected','r.Context() cancelled':'all db.QueryContext(r.Context(), ...) calls automatically abort when client disconnects — saves DB resources'},
+      tone:'ok'
+    },
+    {
+      lines:[29,30,31,32,33],
+      note:'Graceful shutdown: http.Server.Shutdown(ctx) stops accepting new connections, waits for active handlers to finish (up to the context deadline), then returns. Use signal.NotifyContext to catch SIGTERM/SIGINT. This is essential for Kubernetes and ECS rolling deployments: the orchestrator sends SIGTERM, Go catches it, Shutdown waits for in-flight requests to finish (up to 30s), then exits cleanly.',
+      vars:{'http.Server.Shutdown(ctx)':'graceful: waits for active handlers; ctx deadline = max wait time; then closes all connections','signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)':'returns a context that is cancelled when the signal is received; trigger Shutdown inside this handler','ListenAndServe returns ErrServerClosed':'after Shutdown() completes; check with errors.Is(err, http.ErrServerClosed)'},
+      tone:'ok',
+      callout:'CIAM: the auth middleware pattern in Go HTTP: extract the Bearer token from r.Header.Get("Authorization"), validate it (check signature/iss/aud/exp), extract the subject claim, and store it in the request context with context.WithValue. Every handler downstream reads the user from the context. This single middleware protects all routes without repeating JWT validation in every handler. Wrap only the routes that require authentication.'
+    }
+  ],
+  code:[
+    '// Go 1.22+ ServeMux with method + path patterns',
+    'mux := http.NewServeMux()',
+    'mux.HandleFunc("GET /users/{id}", getUserHandler)',
+    'mux.HandleFunc("POST /users", createUserHandler)',
+    '',
+    '// Middleware pattern',
+    'func authMiddleware(next http.Handler) http.Handler {',
+    '  return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {',
+    '    user, err := validateJWT(r.Header.Get("Authorization"))',
+    '    if err != nil { http.Error(w, "Unauthorized", 401); return }',
+    '    ctx := context.WithValue(r.Context(), userKey, user)',
+    '    next.ServeHTTP(w, r.WithContext(ctx))  // pass enriched context',
+    '  })',
+    '}',
+    'protectedMux := authMiddleware(mux)',
+    '',
+    '// JSON request/response',
+    'func createUserHandler(w http.ResponseWriter, r *http.Request) {',
+    '  var req CreateUserRequest',
+    '  if err := json.NewDecoder(r.Body).Decode(&req); err != nil {',
+    '    http.Error(w, "invalid JSON", 400); return',
+    '  }',
+    '  user := createUser(r.Context(), req)',
+    '  w.Header().Set("Content-Type", "application/json")',
+    '  w.WriteHeader(http.StatusCreated)',
+    '  json.NewEncoder(w).Encode(user)',
+    '}',
+    '',
+    '// Graceful shutdown',
+    'srv := &http.Server{Addr: ":8080", Handler: protectedMux}',
+    'ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)',
+    'defer stop()',
+    'go srv.ListenAndServe()',
+    '<-ctx.Done()',
+    'srv.Shutdown(context.Background())'
+  ]
+});
+</script>
+
 <script>
 (function(){
   const pfx='gh';

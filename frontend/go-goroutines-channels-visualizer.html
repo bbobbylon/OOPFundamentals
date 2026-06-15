@@ -126,6 +126,82 @@
     <div class="key-insight"><strong>Always defer cancel().</strong> Not calling cancel() leaks the context goroutine and timer. Context is the standard Go mechanism for deadline propagation — pass ctx as the first argument to any function that does I/O, and check ctx.Err() or ctx.Done() in long loops.</div>
   </section>
 </div>
+
+<!-- ── Code Walkthrough: Goroutines and Channels ── -->
+<div id="cw-goch"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-goch',{
+  id:'cw-goch',
+  title:'Go goroutines and channels — WaitGroup, select, and goroutine leak prevention',
+  subtitle:'Goroutines are the unit of concurrency in Go — cheap green threads scheduled by the Go runtime. Channels are the typed conduits for communicating between goroutines. sync.WaitGroup coordinates when a group of goroutines finishes. select handles multiple channel operations simultaneously. The hardest part: preventing goroutine leaks.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'go f(): starts f as a new goroutine — returns immediately. The goroutine runs concurrently. Initial stack is ~2KB (grows dynamically up to 1GB). The runtime multiplexes goroutines onto OS threads (GOMAXPROCS OS threads by default = number of CPU cores). Key: goroutines are so cheap you can start one per HTTP request or per item in a batch.',
+      vars:{'go func(){}()':'immediately-invoked goroutine (IIFE pattern); each closure captures its own copy of loop vars','GOMAXPROCS':'number of OS threads that can execute Go code simultaneously; default = runtime.NumCPU()','goroutine vs OS thread':'goroutine: ~2KB initial stack, user-space scheduling; OS thread: ~1MB stack, kernel scheduling; goroutines are ~500× cheaper'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'sync.WaitGroup: coordinate when a group of goroutines finishes. wg.Add(n) before starting goroutines. defer wg.Done() inside each goroutine. wg.Wait() blocks until Done() has been called n times. Pass WaitGroup as a pointer (or close over it) — never copy a WaitGroup after first use. WaitGroup is the right tool when all goroutines do independent work with no return values.',
+      vars:{'wg.Add(1) before go':'call Add BEFORE launching the goroutine; a race condition exists if Add is called inside the goroutine','defer wg.Done()':'defer ensures Done is called even if the goroutine panics; use defer, never call Done manually','wg.Wait()':'blocks the calling goroutine until all Done() calls have been received'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20,21],
+      note:'Channels: make(chan T) creates an unbuffered channel. Send (ch <- v) blocks until a receiver reads. Receive (v := <-ch) blocks until a sender sends. make(chan T, n) creates a buffered channel: sends don\'t block until the buffer is full. Close(ch) signals that no more values will be sent; receivers drain the buffer then get the zero value. Range over a channel reads until close.',
+      vars:{'unbuffered channel':'synchronous: sender and receiver must both be ready at the same moment; like a handshake','buffered channel make(chan T, N)':'sender blocks only when buffer is full; receiver blocks only when buffer is empty; decouples timing','range over channel':'for v := range ch {} reads until ch is closed; a never-closed channel causes the goroutine to block forever (leak)'},
+      tone:'ok'
+    },
+    {
+      lines:[23,24,25,26,27],
+      note:'select: waits for multiple channel operations simultaneously — whichever is ready first executes. Like a switch for channel operations. With a default: case, it becomes non-blocking (execute default if no channel is ready). select with ctx.Done() is the standard pattern for cancellable goroutines: wait for work OR cancellation, whichever comes first.',
+      vars:{'select with ctx.Done()':'goroutine exits when context is cancelled; prevents goroutine leaks when the caller times out','default case':'makes select non-blocking; execute default if no channel is ready; use for try-send/try-receive','random selection':'if multiple cases are ready simultaneously, Go chooses one uniformly at random; prevents starvation'},
+      tone:'ok'
+    },
+    {
+      lines:[29,30,31,32,33],
+      note:'Goroutine leaks: a goroutine that never terminates. Common causes: reading from a channel that is never closed/written to, a goroutine waiting on a mutex that is never released, or a goroutine that was started but the program logic that would unblock it was removed. Prevention: always give goroutines a way to exit — a context for cancellation or a done channel. runtime.NumGoroutine() detects leaks in tests.',
+      vars:{'goroutine leak':'goroutine blocked forever; consumes memory + stack; accumulates over time in long-running servers','done channel pattern':'ch := make(chan struct{}); close(ch) when done; goroutine selects on done: case <-done: return','goleak (test library)':'goleak.VerifyNone(t) in TestMain asserts no goroutines are leaked after each test'},
+      tone:'bad',
+      callout:'CIAM: a Go CIAM API uses one goroutine per HTTP request (handled by net/http automatically). For parallel token introspection + DB lookup per request: start two goroutines with errgroup. If either fails, the shared context cancels — both goroutines respect ctx.Done() and stop. Without ctx.Done() handling in the goroutines, a timed-out request still has goroutines running in the background, accumulating under load and eventually causing OOM.'
+    }
+  ],
+  code:[
+    '// Goroutine: go + function call',
+    'go func(id int) {',
+    '  result := processUser(id)',
+    '  results <- result  // send to channel',
+    '}(userID)  // pass loop var to avoid closure capture bug',
+    '',
+    '// WaitGroup: wait for a group of goroutines',
+    'var wg sync.WaitGroup',
+    'for _, u := range users {',
+    '  wg.Add(1)',
+    '  go func(user User) {',
+    '    defer wg.Done()',
+    '    process(user)',
+    '  }(u)',
+    '}',
+    'wg.Wait()  // blocks until all Done() calls received',
+    '',
+    '// Channel: unbuffered (sync) vs buffered (async)',
+    'ch := make(chan int)      // unbuffered: both block until rendezvous',
+    'bch := make(chan int, 10) // buffered: send non-blocking until full',
+    'close(ch)                // signal no more values; receivers get zero value',
+    '',
+    '// select: non-deterministic channel wait',
+    'select {',
+    'case v := <-dataCh:',
+    '  process(v)',
+    'case <-ctx.Done():',
+    '  return ctx.Err()  // context cancelled/timed out — exit cleanly',
+    '}'
+  ]
+});
+</script>
+
 <script>
 (function(){
   const pfx='gc';

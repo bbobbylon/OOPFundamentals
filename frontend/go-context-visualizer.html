@@ -137,6 +137,81 @@
     <div class="key-insight"><strong><code>golang.org/x/sync/errgroup</code></strong> is the idiomatic way to run parallel context-aware sub-calls: the first error cancels the shared context, so the siblings stop immediately instead of finishing work nobody will use.</div>
   </section>
 </div>
+
+<!-- ── Code Walkthrough: Go Context ── -->
+<div id="cw-goctx"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-goctx',{
+  id:'cw-goctx',
+  title:'Go context — cancellation, deadlines, and request-scoped values',
+  subtitle:'context.Context is Go\'s mechanism for propagating cancellation, deadlines, and request-scoped values across API boundaries and goroutines. Every HTTP handler receives a context from r.Context(). Passing it to all downstream calls (DB queries, HTTP calls, goroutines) ensures that when the request is cancelled (client disconnects, timeout reached), all downstream work stops cleanly.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6],
+      note:'context.Background() and context.TODO(): Background() is the root context — it is never cancelled and has no deadline. Use it at program startup (main, server setup) or in tests. TODO() is a placeholder indicating "I know I need a context here but haven\'t decided which one yet." Every non-root context is derived from either Background() or another context — forming a tree.',
+      vars:{'context.Background()':'root context; never cancelled; use at startup, in main(), and as the base for derived contexts','context.TODO()':'placeholder; same as Background() but signals "fix this later"; grep for it to find missing context wiring','context tree':'each child context links to its parent; cancelling a parent cancels ALL children recursively'},
+      tone:'start'
+    },
+    {
+      lines:[8,9,10,11,12,13],
+      note:'context.WithTimeout and context.WithDeadline: create a child context that automatically cancels after a duration (WithTimeout) or at a specific time (WithDeadline). The cancel function MUST be deferred to release resources immediately when the work is done — even if the timeout has not fired. Leaking cancel functions causes memory leaks in long-running servers.',
+      vars:{'ctx, cancel := context.WithTimeout(parent, 5*time.Second)':'child context cancels after 5 seconds or when cancel() is called, whichever first','defer cancel()':'ALWAYS defer cancel; even if timeout fires first, calling cancel() is idempotent and free','select on ctx.Done()':'goroutines check the Done() channel; a closed channel = cancelled; check with: select { case <-ctx.Done(): return ctx.Err() }'},
+      tone:'ok'
+    },
+    {
+      lines:[15,16,17,18,19],
+      note:'context.WithCancel: creates a child context that is only cancelled when cancel() is called explicitly (no timeout). Use when you want to cancel work early in response to an event — e.g., the first of several parallel workers succeeds and you want to cancel the others. errgroup.WithContext() uses this pattern: the first error cancels the shared context, stopping all sibling goroutines.',
+      vars:{'ctx, cancel := context.WithCancel(parent)':'manual cancellation; cancel() called when the work is done or when an error occurs','errgroup.WithContext(parent)':'from golang.org/x/sync; creates a group + shared cancellable context; first error cancels all goroutines','ctx.Err()':'returns context.Canceled if cancel() was called, context.DeadlineExceeded if timed out; nil if still active'},
+      tone:'ok'
+    },
+    {
+      lines:[21,22,23,24,25],
+      note:'context.WithValue: attach a key-value pair to a context for propagation across API boundaries. Use sparingly — only for request-scoped metadata like requestId, authenticated user, or tracing span. Do NOT use for optional parameters or configuration. Keys must be unexported types to avoid collisions: type contextKey string — never use a plain string as the key.',
+      vars:{'type contextKey string':'unexported key type prevents collisions with other packages using the same string as a key','ctx = context.WithValue(ctx, requestIDKey, reqID)':'attaches reqID to ctx; retrieved with ctx.Value(requestIDKey).(string)','do not pass business data via context':'context values should be metadata (auth, tracing, requestID); pass business data as explicit function parameters'},
+      tone:'ok'
+    },
+    {
+      lines:[27,28,29,30,31],
+      note:'Context propagation rule: the FIRST parameter of every function that does I/O (DB query, HTTP call, goroutine wait) should be context.Context. Pass the ctx from the handler or caller through the entire call chain. Never store a context in a struct — always pass it as a parameter. This allows cancellation to propagate from the outermost handler to the deepest query.',
+      vars:{'ctx as first param':'convention in Go standard library: func (r *Rows) Scan(ctx context.Context, ...) — context always first','db.QueryContext(ctx, query, args...)':'database/sql and pgx both accept context; query is cancelled if ctx is cancelled mid-execution','http.NewRequestWithContext(ctx, ...)':'outgoing HTTP calls also accept context; client call is cancelled if ctx is cancelled'},
+      tone:'ok',
+      callout:'CIAM: in a Go-based CIAM API handler, derive contexts at every layer. Incoming HTTP request context (r.Context()) → WithTimeout(ctx, 5s) for the total request budget → pass to DB queries + outbound OIDC token introspection calls. When the request times out (ctx cancelled), both the Postgres query and the introspection HTTP call abort immediately, freeing resources. This prevents goroutine pile-up under high load when a downstream service is slow.'
+    }
+  ],
+  code:[
+    '// Context hierarchy',
+    'ctx := context.Background()  // root; use at startup/tests',
+    '',
+    '// WithTimeout — auto-cancel after duration',
+    'ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)',
+    'defer cancel()  // ALWAYS defer; releases timer resources',
+    '',
+    '// Pass ctx to all downstream calls',
+    'rows, err := db.QueryContext(ctx, "SELECT id, email FROM users WHERE id = $1", id)',
+    '// If ctx times out → query is cancelled → err = context.DeadlineExceeded',
+    '',
+    '// WithCancel — manual cancellation (errgroup pattern)',
+    'g, gctx := errgroup.WithContext(ctx)',
+    'g.Go(func() error { return fetchUser(gctx, userID) })',
+    'g.Go(func() error { return fetchRoles(gctx, userID) })',
+    'if err := g.Wait(); err != nil { return err }',
+    '// First error cancels gctx → other goroutine stops',
+    '',
+    '// WithValue — request-scoped metadata',
+    'type contextKey string',
+    'const requestIDKey contextKey = "requestID"',
+    'ctx = context.WithValue(ctx, requestIDKey, uuid.New().String())',
+    '// Retrieve:',
+    'reqID := ctx.Value(requestIDKey).(string)',
+    '',
+    '// ctx.Err() — check cancellation reason',
+    '// context.Canceled: cancel() was called',
+    '// context.DeadlineExceeded: timeout fired'
+  ]
+});
+</script>
+
 <script>
 (function(){
   const pfx='gctx';

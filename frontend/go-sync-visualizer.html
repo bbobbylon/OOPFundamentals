@@ -137,6 +137,88 @@
     <div class="key-insight"><strong>Closing in the right order is the whole trick.</strong> Close <code>jobs</code> after feeding so the <code>range</code> loops end and workers exit; then a separate goroutine does <code>wg.Wait()</code> and closes <code>results</code>, so the consumer's <code>range</code> terminates. Close too early and you send on a closed channel (panic); never close and the consumer blocks forever.</div>
   </section>
 </div>
+
+<!-- ── Code Walkthrough: Go Sync Primitives ── -->
+<div id="cw-gosync"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-gosync',{
+  id:'cw-gosync',
+  title:'Go sync primitives — Mutex, RWMutex, WaitGroup, Once, sync.Map, and worker pools',
+  subtitle:'Go\'s sync package provides the building blocks for safe concurrent access to shared state. sync.Mutex and sync.RWMutex protect critical sections. sync.WaitGroup waits for a group of goroutines to finish. sync.Once initializes shared state exactly once. sync.Map is a concurrent map optimized for read-heavy or append-only workloads. The worker pool pattern bounds concurrency.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6],
+      note:'sync.Mutex: the fundamental critical-section lock. Lock() acquires the mutex (blocks if held). Unlock() releases it. Always pair them with defer: defer mu.Unlock() immediately after Lock() guarantees release even if the function panics or returns early. Protect the MINIMUM region — lock, read/write shared data, unlock. Never do I/O or sleeps inside a locked region.',
+      vars:{'mu.Lock()':'acquire the exclusive lock; all other goroutines calling Lock() block until Unlock()','defer mu.Unlock()':'guaranteed release; placed immediately after Lock() so it fires on every exit path','sync.RWMutex':'read-write variant: RLock/RUnlock for concurrent reads; Lock/Unlock for exclusive writes'},
+      tone:'start'
+    },
+    {
+      lines:[8,9,10,11,12,13],
+      note:'sync.WaitGroup: coordinate goroutine completion. wg.Add(1) before launching each goroutine (not inside). defer wg.Done() as the first statement in each goroutine. wg.Wait() blocks until Done() has been called n times (n = total Add). Pattern: Add the count in the for-loop before spawning, not inside the goroutine — the goroutine might run before Add() if Add() is inside.',
+      vars:{'wg.Add(1) before go func()':'call Add before launching; not inside; race between goroutine start and Add is undefined','defer wg.Done()':'put it at the top of the goroutine; fires on all exit paths including panic-recovery','wg.Wait()':'blocks until all goroutines have called Done(); synchronization point before collecting results'},
+      tone:'ok'
+    },
+    {
+      lines:[15,16,17,18,19,20],
+      note:'sync.Once: run an initialization function exactly once, regardless of how many goroutines call Do. Classic use: lazy singleton initialization (parse config, connect to DB, build compiled regex). once.Do(f) runs f exactly once — even if called concurrently from 100 goroutines, only one executes f; the rest block until f returns. Once a Do completes, subsequent calls are no-ops.',
+      vars:{'sync.Once':'goroutine-safe one-time initialization; no double-check locking pattern needed in Go','once.Do(func(){...})':'calls the function at most once across all goroutines; subsequent calls are instant no-ops','use case':'singletons, compiled regexp (regexp.MustCompile), OIDC provider initialization, TLS config loading'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'sync.Map: a concurrent map optimized for: (1) write-once-read-many workloads (e.g., caches), (2) each key written and read by exactly one goroutine (sharded workloads). NOT a general-purpose map replacement — for write-heavy workloads, a regular map + sync.Mutex is faster. API: Store(key, value), Load(key) returns (value, ok), LoadOrStore, Delete, Range.',
+      vars:{'sync.Map{} (zero value)':'ready to use; no initialization required','m.LoadOrStore(key, value)':'atomically: if key exists return existing; else store and return new — useful for single-writer initialization','m.Range(func(k, v any) bool)':'iterate all entries; return false to stop; no guaranteed order; safe for concurrent use'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'Worker pool: bound concurrency to N workers. jobs channel: producer sends work in; workers consume. close(jobs) signals workers to stop (their range loop ends). A separate goroutine does wg.Wait() then close(results) to signal the consumer. close(results) before all workers are done would leave results unsent in buffers. Close channels in the right order: jobs → (wg.Wait) → results.',
+      vars:{'jobs := make(chan Job)':'unbuffered: producer blocks until a worker is ready — natural backpressure','close(jobs) after feeding':'signals workers\'s range loops to exit; never send on a closed channel','close(results) after wg.Wait()':'workers are all done when wg.Wait() returns; safe to close results; consumer\'s range exits'},
+      tone:'ok',
+      callout:'CIAM: a token validation service processes incoming requests concurrently. Use a worker pool with GOMAXPROCS workers to avoid goroutine explosion under burst traffic. Protect the shared JWKS key cache with sync.RWMutex: RLock for every token validation (concurrent reads), Lock only for key rotation (rare write). Use sync.Once to initialize the NimbusJwtDecoder / OIDC provider configuration exactly once at startup — prevents thundering-herd re-fetches of the OIDC discovery document.'
+    }
+  ],
+  code:[
+    '// Mutex — protect shared writes',
+    'var mu sync.Mutex',
+    'var balance int',
+    'func deposit(amount int) {',
+    '  mu.Lock()',
+    '  defer mu.Unlock()  // safe even on panic',
+    '  balance += amount  // only one goroutine at a time',
+    '}',
+    '',
+    '// WaitGroup — wait for goroutines',
+    'var wg sync.WaitGroup',
+    'for _, item := range items {',
+    '  wg.Add(1)  // Add BEFORE launching',
+    '  go func(i Item) { defer wg.Done(); process(i) }(item)',
+    '}',
+    'wg.Wait()  // blocks until all Done()',
+    '',
+    '// Once — lazy singleton',
+    'var (once sync.Once; cfg *Config)',
+    'func getConfig() *Config {',
+    '  once.Do(func() { cfg = loadConfig() })',
+    '  return cfg',
+    '}',
+    '',
+    '// sync.Map — concurrent cache',
+    'var cache sync.Map',
+    'cache.Store("token123", claims)',
+    'v, ok := cache.Load("token123")',
+    '',
+    '// Worker pool — bounded concurrency',
+    'jobs := make(chan Job); results := make(chan Result)',
+    'for w := 0; w < runtime.GOMAXPROCS(0); w++ {',
+    '  wg.Add(1)',
+    '  go func() { defer wg.Done(); for j := range jobs { results <- handle(j) } }()',
+    '}'
+  ]
+});
+</script>
+
 <script>
 (function(){
   const pfx='gsy';
