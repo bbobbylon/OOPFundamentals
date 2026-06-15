@@ -906,7 +906,70 @@
       </div>
       <div style="background:#0b1426;border-radius:8px;padding:12px;">
         <div style="font-size:11px;font-weight:700;color:var(--blue);margin-bottom:6px;">Actuator Integration</div>
-        <div style="font-size:11px;color:var(--muted);">Add <code style="color:var(--accent);">spring-boot-starter-actuator</code> + set <code>registerHealthIndicator: true</code> to expose circuit breaker state via <code>/actuator/health</code>.</div>
+        <div style="font-size:11px;color:var(--muted);">Add <code style="color:var(--accent);">spring-boot-starter-actuator</code> + set <code>registerHealthIndicator: true</code> to expose circuit breaker state via <code>/actuator/health</code>.</di
+
+<!-- ── Code Walkthrough: Resilience4j ── -->
+<div id="cw-r4j"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-r4j',{
+  id:'cw-r4j',
+  title:'Resilience4j — circuit breaker, retry, rate limiter, time limiter, bulkhead, and Spring Boot integration',
+  subtitle:'Resilience4j provides fault-tolerance patterns for Java. Circuit breaker: stop calling a broken service and return a fallback. Retry: automatically retry transient failures. Rate limiter: limit calls per time window. Time limiter: set a max duration for a call. Bulkhead: limit concurrent calls to a service. All composable via annotations or programmatic API. Spring Boot autoconfigures all patterns via resilience4j.* properties and registers health indicators.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'Circuit breaker states: CLOSED (normal operation, all calls pass through), OPEN (circuit tripped — calls fail immediately with CallNotPermittedException, fallback runs), HALF_OPEN (test state — allows a limited number of probe calls to check if the service recovered). CLOSED → OPEN: failure rate exceeds slidingWindowSize threshold (e.g., 5 failures in last 10 calls = 50% failure rate). waitDurationInOpenState: how long to stay OPEN before moving to HALF_OPEN. HALF_OPEN → CLOSED: permittedNumberOfCallsInHalfOpenState probe calls succeed. HALF_OPEN → OPEN: probe calls fail.',
+      vars:{'slidingWindowType: COUNT_BASED vs TIME_BASED':'COUNT_BASED: track last N calls; TIME_BASED: track calls in last N seconds; COUNT_BASED is more predictable for low-traffic services','OPEN state returns fallback immediately':'no call to the downstream service; prevents cascading timeouts; saves thread pool for other work; the service recovers faster without being hammered','minimumNumberOfCalls':'circuit breaker only evaluates the failure rate after this many calls; prevents tripping on the first failure of a new service'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'@CircuitBreaker annotation: @CircuitBreaker(name="pingService", fallbackMethod="fallbackGetUser"). The fallback method must have the same parameters + a Throwable parameter. The fallback runs for both OPEN circuit (CallNotPermittedException) and actual exceptions (if configured with recordExceptions). Properties: resilience4j.circuitbreaker.instances.pingService.slidingWindowSize=10, failureRateThreshold=50, waitDurationInOpenState=30s. Spring Boot metrics: circuit breaker state, calls success/failure, slow calls are automatically exported to Micrometer. /actuator/health shows circuit breaker state when registerHealthIndicator=true.',
+      vars:{'fallbackMethod signature':'String fallback(String userId, Throwable ex) — same params as original method + Throwable at the end; Spring routes to it when circuit is open or exception occurs','registerHealthIndicator: true':'exposes circuit breaker state in /actuator/health as resilience4j.circuitbreaker.pingService: CLOSED/OPEN/HALF_OPEN; alerts can be set on OPEN state','recordExceptions vs ignoreExceptions':'recordExceptions = counted as failures; ignoreExceptions = not counted; IllegalArgumentException is an ignoreException (not a downstream failure); RemoteServiceException is a recordException'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'Retry: @Retry(name="pingService", fallbackMethod="fallbackGetUser"). Retries on the configured exceptions. maxAttempts: total attempts including the first. waitDuration: fixed wait between retries. exponentialBackoff: multiplies wait by a factor each retry. retryExceptions: which exceptions to retry (transient: network timeout, 429, 503). ignoreExceptions: do not retry (400 Bad Request — retrying will not help). Jitter: add randomness to backoff to prevent thundering herd (all services retrying at the same time). Max total wait time: critical to prevent slow degradation of the system.',
+      vars:{'exponentialBackoffMultiplier':'initial wait 500ms, multiplier 2 → 500ms, 1000ms, 2000ms; add randomized jitter to prevent synchronized retries across instances','retryExceptions vs ignoreExceptions':'retry on: SocketTimeoutException, ServiceUnavailableException, RateLimitException; do NOT retry: BusinessRuleException, AuthorizationException (retrying does not help)','maxAttempts = 3 means 3 total calls':'first call + 2 retries; not 3 additional retries; configure this carefully — 3 × 2 second timeout = 6 seconds before giving up'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Rate limiter and time limiter: Rate limiter: @RateLimiter(name="pingService"). Limits calls per time period. limitForPeriod=10 (max calls), limitRefreshPeriod=1s (per second). Exceeds limit: RequestNotPermitted exception → fallback or 429 response. Use for: protecting downstream services, enforcing API quotas. Time limiter: @TimeLimiter(name="pingService"). Sets a max duration for an async call. timeoutDuration=3s. Exceeds duration: TimeoutException → fallback. Works with CompletableFuture (required for async). Bulkhead: limits concurrent calls. maxConcurrentCalls=20. Exceeds: BulkheadFullException → fallback.',
+      vars:{'RateLimiter for call-rate throttling':'different from HTTP rate limiting (Nginx/API Gateway level); this limits calls from this service to a downstream service; protects the downstream','TimeLimiter requires async call':'@TimeLimiter works with CompletableFuture return types; the timeout cancels the future; for synchronous calls, use @Timeout from Spring MVC or set connection/read timeouts on RestClient','Bulkhead prevents thread pool exhaustion':'if Ping service is slow and 20 threads are waiting, bulkhead prevents 21st from waiting; 21st gets fallback immediately; protects the thread pool from being consumed by one slow dependency'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'Composing patterns: @CircuitBreaker + @Retry = retry first, then trip the circuit. Application order in the annotation stack matters: @Retry wraps @CircuitBreaker means: retry → circuit breaker → actual call. If the circuit opens mid-retry, the retry sees CallNotPermittedException (not counted as a failure for retry — depends on config). Common composition: @TimeLimiter (fail fast) → @Retry (retry transient) → @CircuitBreaker (stop calling broken services). Use Resilience4j Decorators API for programmatic composition with fine-grained control. Spring Boot autoconfigures all: just add annotations + properties.',
+      vars:{'annotation order = execution order':'@CircuitBreaker is outermost; @Retry is next; @TimeLimiter is innermost; a timeout inside TimeLimiter is caught by Retry which retries; then if enough fail, CircuitBreaker opens','resilience4j.instances vs defaults':'resilience4j.circuitbreaker.configs.default sets defaults for all instances; resilience4j.circuitbreaker.instances.pingService overrides for a specific instance','test with Resilience4j Events endpoint':'/actuator/circuitbreakerevents — shows recent events (SUCCESS, ERROR, STATE_TRANSITION); useful for debugging circuit breaker behavior in dev/staging'},
+      tone:'ok',
+      callout:'CIAM Resilience4j: @CircuitBreaker(name="pingDirectory") wraps all Ping LDAP calls. slidingWindowSize=10, failureRateThreshold=50, waitDurationInOpenState=30s. Fallback: return cached user data for read operations (tolerate stale data during Ping outage); fail-fast for write operations (role changes must be consistent). @Retry(name="pingToken") wraps the token exchange (transient 503s from Ping). maxAttempts=3, exponentialBackoff, jitter. @TimeLimiter(name="pingDirectory") timeoutDuration=5s — prevents Ping LDAP slowness from exhausting the Spring Boot thread pool. Circuit breaker state exposed via /actuator/health — Kubernetes readiness probe checks it.'
+    }
+  ],
+  code:[
+    '// Resilience4j on Ping directory calls',
+    '@Service',
+    'public class PingUserService {',
+    '',
+    '  @CircuitBreaker(name="pingDirectory", fallbackMethod="cachedUser")',
+    '  @Retry(name="pingDirectory")',
+    '  @TimeLimiter(name="pingDirectory")',
+    '  public CompletableFuture<User> getUser(String userId) {',
+    '    return CompletableFuture.supplyAsync(() ->',
+    '      pingLdapClient.findUser(userId));',
+    '  }',
+    '',
+    '  public CompletableFuture<User> cachedUser(String userId, Throwable ex) {',
+    '    log.warn("Ping unavailable, using cache: {}", ex.getMessage());',
+    '    return CompletableFuture.completedFuture(userCache.get(userId));',
+    '  }',
+    '}'
+  ]
+});
+</script>
       </div>
     </div>
   </div>

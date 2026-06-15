@@ -215,6 +215,71 @@
 
 </div>
 
+<!-- ── Code Walkthrough: Spring Method Security ── -->
+<div id="cw-smethsec"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-smethsec',{
+  id:'cw-smethsec',
+  title:'Spring method security — @PreAuthorize, @PostAuthorize, SpEL expressions, hasRole vs hasAuthority, and custom security evaluators',
+  subtitle:'Spring Method Security (@EnableMethodSecurity) enforces authorization at the method level — not just at the HTTP layer. @PreAuthorize runs before the method and can reject the call. @PostAuthorize runs after the method and can reject the return value (but the method has already run). SpEL (Spring Expression Language) is the expression language used in annotations. Methods are AOP-proxied — the same proxy rules apply (self-invocation bypasses security).',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'@EnableMethodSecurity: add to a @Configuration class. Replaces @EnableGlobalMethodSecurity (deprecated). By default enables @PreAuthorize, @PostAuthorize, @Secured, @RolesAllowed. @PreAuthorize("hasRole(\'ADMIN\')") — only users with the ROLE_ADMIN authority (Spring adds ROLE_ prefix for hasRole). @PreAuthorize("hasAuthority(\'ADMIN\')") — exact match on the authority string (no ROLE_ prefix). @Secured("ROLE_ADMIN") — simpler, no SpEL, less flexible. @RolesAllowed("ADMIN") — JSR-250 standard annotation, equivalent to @Secured. Always prefer @PreAuthorize for flexibility.',
+      vars:{'hasRole() adds ROLE_ prefix':'hasRole("ADMIN") checks for the authority "ROLE_ADMIN"; if your JWT/LDAP groups have no ROLE_ prefix, use hasAuthority("ADMIN") instead','@EnableMethodSecurity replaces @EnableGlobalMethodSecurity':'the old annotation is deprecated in Spring Security 6; new annotation has better defaults (uses AuthorizationManager, not older AccessDecisionManager)','@PreAuthorize at class level':'annotate the class to apply to all methods; method-level annotation overrides class-level; useful for "everything requires at least USER role" with specific overrides'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'SpEL expressions: @PreAuthorize("hasAuthority(\'App-Admin\') and #request.tenantId == authentication.details.tenantId"). #request refers to the method parameter named "request". authentication is the current SecurityContextHolder authentication. principal is authentication.getPrincipal(). returnObject (in @PostAuthorize) is the method return value. SpEL supports &&/and, ||/or, !, hasAnyAuthority("ROLE_A","ROLE_B"), authentication.name, authentication.authorities. Custom method references: @PreAuthorize("@mySecurityBean.canAccess(#userId, authentication)").',
+      vars:{'#paramName accesses method arguments':'Spring Security reflects parameter names; requires -parameters compiler flag (Spring Boot sets this automatically); #user in @PreAuthorize refers to the User param','@beanName calls a Spring bean':'@PreAuthorize("@tenantSecurity.isSameTenant(#request, authentication)") calls tenantSecurity.isSameTenant() from the Spring context; enables complex multi-tenant checks','returnObject in @PostAuthorize':'@PostAuthorize("returnObject.ownerId == authentication.name") — method runs first, then Spring checks if the returned object belongs to the caller; use to prevent data leakage'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'hasRole vs hasAuthority: hasRole("ADMIN") → checks for "ROLE_ADMIN". hasAuthority("ADMIN") → checks for "ADMIN". When to use each: if your authentication source (JWT, LDAP, database) stores authorities with the ROLE_ prefix (e.g., ROLE_ADMIN), use hasRole. If authorities are stored without the prefix (e.g., App-Admin, read:users), use hasAuthority. JWT from Ping/Entra: typically no ROLE_ prefix — use hasAuthority. Spring Security UserDetails: GrantedAuthority.getAuthority() returns the full string — hasAuthority does exact string match. Never use both in the same application — pick one convention.',
+      vars:{'hasRole("ADMIN") checks "ROLE_ADMIN"':'Spring Security prefixes automatically; confusing when JWT authorities have no prefix; causes hasRole to never match for unprefixed authorities','JwtAuthenticationConverter maps JWT claims to authorities':'spring.security.oauth2.resourceserver.jwt.jwtAuthenticationConverterRef maps JWT roles/groups claims to GrantedAuthority; no ROLE_ prefix unless you add it','pick one convention application-wide':'either all authorities use ROLE_ prefix (use hasRole) or none do (use hasAuthority); mixing causes hard-to-diagnose 403 errors'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Custom PermissionEvaluator: implement PermissionEvaluator to support @PreAuthorize("hasPermission(#domain, \'read\')"). Method: boolean hasPermission(Authentication auth, Object targetDomainObject, Object permission). Register with MethodSecurityExpressionHandler. Use for: domain-object level security (can this user read this specific document?), policy engine integration (Ping policy evaluation). @PostFilter: @PostFilter("hasPermission(filterObject, \'read\')") — filters a returned collection, removing elements the user cannot access. @PreFilter: filters input collection before method runs.',
+      vars:{'hasPermission for domain object security':'check if the authenticated user has a specific permission on a specific object (not just a role); enables row-level security in Spring Security','PermissionEvaluator.hasPermission':'implements boolean hasPermission(Authentication auth, Object target, Object permission); target is the domain object; permission is a string like "read" or "APPROVE"','@PostFilter removes unauthorized items':'@PostFilter("hasPermission(filterObject, \'read\')") on a List<Document> return value; removes documents the user cannot read; the method still runs for all documents (query them efficiently before filtering)'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'Testing method security: use @WithMockUser or @WithSecurityContext. @WithMockUser(username="alice", roles={"ADMIN"}) — sets up a mock SecurityContext for the test. @WithMockUser(authorities={"App-Admin"}) — use for non-role authorities (no ROLE_ prefix). Test that unauthorized access throws AccessDeniedException: assertThrows(AccessDeniedException.class, () -> service.adminOnlyMethod()). Spring Security test dependency: spring-security-test. MockMvc integration: .with(SecurityMockMvcRequestPostProcessors.user("alice").roles("ADMIN")). Always test both authorized and unauthorized paths.',
+      vars:{'@WithMockUser for method security tests':'sets SecurityContextHolder for the test; the method security AOP proxy uses this context; no actual auth flow — just a mock principal','roles vs authorities in @WithMockUser':'roles={"ADMIN"} → adds ROLE_ADMIN authority (Spring adds prefix); authorities={"App-Admin"} → adds exactly App-Admin; match your annotation convention','test AccessDeniedException':'assertThrows(AccessDeniedException.class, () -> service.method()) — Spring Security throws AccessDeniedException (403) when @PreAuthorize fails; Spring MVC translates to 403 HTTP response'},
+      tone:'ok',
+      callout:'CIAM @PreAuthorize: @PreAuthorize("hasAuthority(\'App-Admin\') and @tenantService.isSameTenant(#userId, authentication)") — protects user update endpoint; requires both the App-Admin authority (from JWT groups claim) AND that the target userId belongs to the calling tenant. JwtAuthenticationConverter maps the JWT "groups" claim (array of strings like "App-Admin", "App-ReadOnly") to GrantedAuthority objects — no ROLE_ prefix. @PostAuthorize on getUser(): @PostAuthorize("returnObject.tenantId == authentication.details.tenantId") — prevents tenant A reading tenant B user data even if both are authenticated. @WithMockUser(authorities={"App-Admin"}) in all security tests.'
+    }
+  ],
+  code:[
+    '// @EnableMethodSecurity + custom SpEL bean',
+    '@Configuration',
+    '@EnableMethodSecurity',
+    'public class SecurityConfig {}',
+    '',
+    '@Service',
+    'public class TenantSecurity {',
+    '  public boolean isSameTenant(String userId, Authentication auth) {',
+    '    String callerTenant = auth.getDetails().toString();',
+    '    return userRepo.findById(userId)',
+    '      .map(u -> u.getTenantId().equals(callerTenant))',
+    '      .orElse(false);',
+    '  }',
+    '}',
+    '',
+    '// Protected service method',
+    '@PreAuthorize("hasAuthority(\'App-Admin\')" +',
+    '  " and @tenantSecurity.isSameTenant(#userId, authentication)")',
+    'public void updateUserRoles(String userId, List<String> roles) { ... }'
+  ]
+});
+</script>
+
 <script>
 // ── @PreAuthorize SpEL evaluator ────────────────────────────────────────────
 const CALLERS = {

@@ -189,7 +189,7 @@
 
   <!-- 7 -->
   <section>
-    <h2>7. One-sentence recap</h2>
+    <h2>7. One-sentence recap</h2><!-- walkthrough-anchor -->
     <div class="card card-accent">
       <p style="font-size:14px">🔤 Spring negotiates on <code>Accept</code>/<code>Content-Type</code> and uses <strong>Jackson</strong> to (de)serialize your DTO, where <strong>naming</strong> (camelCase default vs <code>@JsonProperty</code>/snake_case), <strong>dates</strong> (ISO-8601 strings by default — and just <code>string</code> in TS, never a real <code>Date</code>), and <strong>nulls/unknowns</strong> (<code>@JsonInclude(NON_NULL)</code>, <code>FAIL_ON_UNKNOWN_PROPERTIES</code>) are all explicit contract decisions your Angular <code>interface</code> must mirror exactly — so type it to the wire, mark omitted fields optional, and generate it from OpenAPI when you can.</p>
     </div>
@@ -291,6 +291,70 @@ function bind(id,key){
 }
 bind('t-name','name'); bind('t-date','date'); bind('t-null','null'); bind('t-rename','rename'); bind('t-ignore','ignore');
 renderAll();
+</script>
+
+<!-- ── Code Walkthrough: Spring Boot Serialization ── -->
+<div id="cw-serial"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-serial',{
+  id:'cw-serial',
+  title:'Spring Boot JSON serialization — Jackson, @JsonProperty, @JsonIgnore, ObjectMapper config, and content negotiation',
+  subtitle:'Spring Boot autoconfigures Jackson as the default JSON serializer/deserializer. Every @RestController method returns a Java object; Spring calls ObjectMapper to serialize it to JSON. Jackson annotations on your DTOs control naming (@JsonProperty), visibility (@JsonIgnore), null handling (@JsonInclude), and date formats. Content negotiation: the Accept header determines whether Spring returns JSON, XML, or another format. ObjectMapper is a shared singleton — configure it globally via @Bean or spring.jackson.* properties.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'Default Jackson behavior: serializes all public fields and properties with getters. Naming: Java camelCase maps to JSON camelCase by default (firstName → "firstName"). Dates: java.time.LocalDateTime serializes to an array [2024,1,15,10,30,0] by default — configure to ISO-8601 string: spring.jackson.serialization.write-dates-as-timestamps=false. Null fields: included by default (firstName: null in JSON). Unknown JSON fields: fail-on-unknown-properties=true by default — if the incoming JSON has fields not in the Java class, Jackson throws UnrecognizedPropertyException. Override globally or per-class with @JsonIgnoreProperties(ignoreUnknown=true).',
+      vars:{'write-dates-as-timestamps=false':'serializes LocalDateTime as "2024-01-15T10:30:00" instead of [2024,1,15,10,30,0]; almost always what you want for REST APIs','fail-on-unknown-properties':'prevents accidental data loss — unknown fields cause an error; for DTOs receiving external JSON (3rd party API) set ignoreUnknown=true or use @JsonIgnoreProperties(ignoreUnknown=true)','spring.jackson.default-property-inclusion=non_null':'global setting to exclude null fields from all responses; equivalent to @JsonInclude(JsonInclude.Include.NON_NULL) on every class'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'@JsonProperty: rename a field in JSON. @JsonProperty("first_name") private String firstName — JSON is "first_name" but Java field is firstName. Use for: external APIs with snake_case, legacy APIs with different naming, hiding internal names. Spring.jackson.property-naming-strategy=SNAKE_CASE sets global snake_case without per-field annotations. @JsonProperty on constructor parameters: @JsonCreator + @JsonProperty on constructor for deserialization without setters (immutable DTOs). @JsonAlias("fname") accepts multiple names during deserialization but serializes with the primary name.',
+      vars:{'@JsonProperty on getter vs field':'same effect; put it on the field for clarity; Jackson finds it on the getter too','SNAKE_CASE naming strategy globally':'spring.jackson.property-naming-strategy=SNAKE_CASE applies snake_case to all DTOs globally; faster than annotating every field; ensure the frontend knows about the global change','@JsonAlias for API versioning':'@JsonAlias({"user_id","userId"}) accepts both formats during deserialization; useful when transitioning from camelCase to snake_case without breaking clients'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'@JsonIgnore: completely exclude a field from both serialization and deserialization. @JsonIgnore on password field: never appears in JSON response, never read from JSON request. @JsonIgnoreProperties({"password","salt"}) on the class level: ignore multiple fields. @JsonIgnoreProperties(ignoreUnknown=true): ignore unknown incoming fields. @JsonInclude(JsonInclude.Include.NON_NULL): exclude null fields from output (per class or globally). @JsonInclude(NON_EMPTY): exclude null AND empty strings/collections. The difference: NON_NULL checks for null only; NON_EMPTY also excludes "" and [].',
+      vars:{'@JsonIgnore for security fields':'password, salt, internalScore — never include in API responses; @JsonIgnore prevents accidental exposure even if the field is added to the DTO','@JsonInclude(NON_NULL) for cleaner APIs':'clients get {"id":1,"name":"Alice"} instead of {"id":1,"name":"Alice","middleName":null,"deletedAt":null}; reduces response size and makes null vs absent distinction meaningful','@JsonIgnoreProperties on class level':'cleaner than annotating every field to ignore; use when the class has many fields that vary by API version or use case'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Custom ObjectMapper configuration: @Bean ObjectMapper objectMapper() { return Jackson2ObjectMapperBuilder.json().featuresToDisable(FAIL_ON_UNKNOWN_PROPERTIES).featuresToEnable(INDENT_OUTPUT).build(); }. Spring Boot auto-backs-off its ObjectMapper bean if you provide one — your bean replaces the default. Add Jackson modules: JavaTimeModule (java.time support), ParameterNamesModule (constructor parameter names). configure(DeserializationFeature.FAIL_ON_NUMBERS_FOR_ENUMS, true) — prevents "200" from being deserialized as an enum (security-relevant). @JsonComponent: register custom serializer/deserializer as a Spring bean (auto-discovered by Spring Boot).',
+      vars:{'Jackson2ObjectMapperBuilder vs new ObjectMapper()':'use the Builder — it applies Spring Boot defaults (JavaTimeModule, etc.) and respects spring.jackson.* properties; ObjectMapper() from scratch loses autoconfiguration','@JsonComponent for custom serializers':'@Component @JsonComponent class MoneySerializer extends JsonSerializer<Money>; Spring Boot auto-registers it; no manual ObjectMapper.registerModule() needed','ObjectMapper is a singleton':'shared across all requests; configure once at startup; never create new ObjectMapper() per request (expensive); inject @Autowired ObjectMapper for testing and programmatic use'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'Content negotiation: Spring MVC inspects the Accept header and returns the appropriate format. Accept: application/json → Jackson serializer. Accept: application/xml → Jackson XML module (jackson-dataformat-xml). Accept: */* → first configured content type (usually JSON). @RequestMapping(produces={"application/json","application/xml"}) — declare which formats an endpoint supports. Spring negotiates based on: Accept header (highest priority), URL extension (.json/.xml — legacy), request parameter (?format=json). For REST APIs: do not rely on URL extensions. For legacy SOAP → REST migration: produces=application/xml endpoint alongside produces=application/json endpoint.',
+      vars:{'Accept: application/json':'standard for REST APIs; always send from Angular clients; Spring returns JSON body; most clients send this header automatically','produces={"application/json"} on controller':'restrict endpoint to JSON only; returns 406 Not Acceptable if client sends Accept: application/xml without XML support configured; prevents accidental format leaking','jackson-dataformat-xml dependency':'add this Maven dependency to enable XML serialization via the same Jackson annotations; no code change needed — just adding the dependency enables XML content negotiation'},
+      tone:'ok',
+      callout:'CIAM serialization: @JsonIgnore on password and salt fields in UserDto. @JsonProperty("tenant_id") + SNAKE_CASE naming strategy for the Ping SCIM API integration. @JsonIgnoreProperties(ignoreUnknown=true) on Ping token response DTOs (different Ping versions return different fields). @JsonInclude(NON_NULL) on all API response DTOs (cleaner responses for Angular clients). Custom ObjectMapper @Bean with JavaTimeModule + FAIL_ON_UNKNOWN_PROPERTIES=false for the Ping API response DTOs only (separate ObjectMapper for external API calls). JWT claims mapped from Map<String,Object> using @JsonProperty and @JsonAlias to handle both Ping and Entra naming differences.'
+    }
+  ],
+  code:[
+    '// UserDto with Jackson annotations',
+    'public class UserDto {',
+    '  @JsonProperty("user_id")',
+    '  private String userId;',
+    '',
+    '  @JsonIgnore',
+    '  private String passwordHash;',
+    '',
+    '  @JsonInclude(JsonInclude.Include.NON_NULL)',
+    '  private String middleName;',
+    '',
+    '  @JsonIgnoreProperties(ignoreUnknown=true)',
+    '  // applied at class level for incoming Ping payloads',
+    '',
+    '  @JsonProperty("created_at")',
+    '  private LocalDateTime createdAt;',
+    '  // requires write-dates-as-timestamps=false',
+    '}'
+  ]
+});
 </script>
 </body>
 </html>

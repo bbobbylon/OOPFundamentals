@@ -323,6 +323,78 @@
 
 </div>
 
+<!-- ── Code Walkthrough: Token-Bucket Rate Limiter ── -->
+<div id="cw-rl"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-rl',{
+  id:'cw-rl',
+  title:'Bucket4j token-bucket rate-limit filter — line by line',
+  subtitle:'A servlet filter sits in front of the DispatcherServlet. Rate-limited requests are rejected here — before authentication or business logic runs, saving CPU and preventing brute-force.',
+  steps:[
+    {
+      lines:[1,2],
+      note:'@Component registers the class as a Spring bean so it is auto-wired into the servlet filter chain. @Order(1) places it FIRST — before Spring Security filters. This matters: we reject over-limit requests without running any auth logic, which prevents attackers from hammering the JWT validator.',
+      vars:{'@Order(1)':'runs before SecurityContextHolderFilter (order 100+)','OncePerRequestFilter':'guaranteed exactly once per request — no double-counting'},
+      tone:'start'
+    },
+    {
+      lines:[3],
+      note:'One Bucket per IP address, stored in a ConcurrentHashMap. In a single-instance deployment this is fine. For multiple instances (load balancer) the bucket must live in Redis — otherwise each instance has its own counter and the effective limit is N × limit.',
+      vars:{'ConcurrentHashMap':'thread-safe; concurrent requests from the same IP compete for the same bucket','multi-instance':'use Bucket4j + Redis (ProxyManager) to share state across pods'},
+      tone:'ok'
+    },
+    {
+      lines:[5,6,7,8,9,10],
+      note:'computeIfAbsent creates a bucket only once per new IP address. Bandwidth.classic(5, Refill.intervally(5, Duration.ofMinutes(1))) means: capacity = 5 tokens; refill all 5 every 60 seconds (greedy). Every request costs 1 token.',
+      vars:{'capacity 5':'allows 5 requests in a 60-second window','intervally':'refills ALL tokens at once after the interval (not drip-by-drip)','alternative':'Refill.greedy(5, Duration.ofMinutes(1)) drips 1 token every 12s'},
+      tone:'ok'
+    },
+    {
+      lines:[11],
+      note:'bucket.tryConsume(1) is atomic — it deducts a token and returns true (token was available) or false (bucket empty) in a single thread-safe operation. tryConsume never blocks; use bucket.asBlocking().consume() to wait instead of reject.',
+      vars:{'true':'1 token deducted; bucket has 4 remaining → pass through','false':'bucket was at 0 → rate limit triggered → return 429'},
+      tone:'ok'
+    },
+    {
+      lines:[12],
+      note:'chain.doFilter(req, res) passes the request to the next filter in the chain. From here it goes through Spring Security (authentication, authorization) and eventually reaches the controller. The rate-limiter is transparent to everything downstream.',
+      vars:{'chain.doFilter':'delegates to the next OncePerRequestFilter (SecurityContextHolderFilter)'},
+      tone:'ok'
+    },
+    {
+      lines:[14,15,16],
+      note:'When the bucket is empty, respond immediately with 429 Too Many Requests. The Retry-After header (seconds) tells well-behaved clients exactly how long to wait — required by RFC 6585. Never return 401/403 for rate limiting — that misleads the caller about the cause.',
+      vars:{'429':'Too Many Requests — not an auth error','Retry-After':'60 seconds until the bucket refills'},
+      tone:'ok',
+      callout:'CIAM: always rate-limit /api/auth/login and /api/auth/refresh. Without it, an attacker tries every password in a dictionary in seconds. Combine with IP + username keying so a single attacker cannot lock out all users by hammering different accounts.'
+    }
+  ],
+  code:[
+    '@Component @Order(1)',
+    'public class RateLimitFilter extends OncePerRequestFilter {',
+    '  private final Map<String,Bucket> buckets = new ConcurrentHashMap<>();',
+    '',
+    '  protected void doFilterInternal(',
+    '      HttpServletRequest req, HttpServletResponse res, FilterChain chain) {',
+    '    String ip = req.getRemoteAddr();',
+    '    Bucket bucket = buckets.computeIfAbsent(ip, k ->',
+    '      Bucket.builder()',
+    '        .addLimit(Bandwidth.classic(5, Refill.intervally(5, Duration.ofMinutes(1))))',
+    '        .build());',
+    '    if (bucket.tryConsume(1)) {',
+    '      chain.doFilter(req, res);',
+    '    } else {',
+    '      res.setStatus(429);',
+    '      res.setHeader("Retry-After", "60");',
+    '      res.getWriter().write("{\\"error\\":\\"Too Many Requests\\"}");',
+    '    }',
+    '  }',
+    '}'
+  ]
+});
+</script>
+
 <script>
 // ── token-bucket rate limiter sim ───────────────────────────────────────────
 const CAP=5;

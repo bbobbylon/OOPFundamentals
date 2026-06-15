@@ -206,6 +206,71 @@ conv.<span class="fn">setJwtGrantedAuthoritiesConverter</span>(<span class="kw">
 
 </div>
 
+<!-- ── Code Walkthrough: Multi-IDM Claim Mapping ── -->
+<div id="cw-multiidm"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-multiidm',{
+  id:'cw-multiidm',
+  title:'Multi-IDM JWT claim mapping — normalizing Ping, Entra, and Okta tokens to a unified principal model in Spring Security',
+  subtitle:'A CIAM platform may issue JWTs from different identity providers: Ping Federate, Microsoft Entra ID (Azure AD), or Okta. Each IDM uses different claim names for the same concept (user ID is "sub" in Ping, "oid" in Entra; groups are "groups" in Ping, "roles" in Entra). Spring Security must normalize these into a common principal model so downstream application code does not need to know which IDM issued the token. The solution: a custom JwtAuthenticationConverter that detects the IDM and maps claims to a standard AppAuthentication object.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'Detecting the IDM from the JWT: the issuer claim (iss) uniquely identifies the IDM. Ping: "https://ping.example.com". Entra: "https://login.microsoftonline.com/{tenantId}/v2.0". Okta: "https://{org}.okta.com/oauth2/default". Read iss from the JWT without full validation first: Jwts.parserBuilder().build().parseClaimsJwt(token.split("\\.")[0]+"..") — or inspect the header. In JwtAuthenticationConverter: the JWT is already validated (Spring Security verifier runs before converter). jwt.getClaimAsString("iss") is safe to read. Route to the appropriate mapper based on iss value.',
+      vars:{'iss claim identifies the IDM':'each issuer URL is unique; check contains("microsoftonline") for Entra, contains("ping") for Ping; more robust: exact iss URL list in configuration','JWT already validated by Spring Security':'the JwtDecoder validates signature and expiry before calling JwtAuthenticationConverter; you are working with trusted claims','JwtAuthenticationConverter runs after validation':'converts JWT to AbstractAuthenticationToken; the converted Authentication is stored in SecurityContextHolder; this is the right place for claim normalization'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'Ping Federate claim mapping: sub = userId (Ping-specific subject). groups = list of AD groups (array of strings). preferred_username = email/UPN. tenant_id = custom Ping claim. Map groups → GrantedAuthority: groups.stream().map(g -> new SimpleGrantedAuthority(g)). Filter for application groups: startsWith("App-"). Ping also includes standard OIDC claims: email, name, given_name. Custom Ping claims (added in token policy): custom:department, custom:costCenter. These are mapped to additional principal fields in the AppPrincipal.',
+      vars:{'groups claim in Ping JWT':'groups = ["App-Admin","App-ReadOnly","Domain-Users"]; map each to a GrantedAuthority; filter by prefix for app-relevant groups only','sub vs preferred_username in Ping':'sub is stable (internal user ID); preferred_username may change (email); use sub for user identity, preferred_username for display; do not use email as a stable ID (it can change)','custom: prefix for Ping custom claims':'Ping prefixes custom claims with "custom:" by default; configurable in token policy; map "custom:department" to AppPrincipal.department'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'Entra ID (Azure AD) claim mapping: oid = stable user object ID (use for identity, not sub which varies by app registration). preferred_username = UPN (email format). roles = application roles assigned in Azure (from app registration manifest). groups = group object IDs (not names — need Graph API call to resolve names, or use group claims in app manifest). tid = tenant ID (use for multi-tenant apps). JWT header: alg=RS256, kid identifies the signing key (fetched from OIDC discovery endpoint). Entra iss includes the tenantId: parse it from the issuer URL for tenant isolation.',
+      vars:{'oid is the stable Entra user ID':'sub varies per app registration; oid is stable across all apps in the tenant; always use oid for user identity in Entra multi-app environments','roles vs groups in Entra':'roles = app roles (App-Admin, App-ReadOnly — defined in your app registration, assigned to users/groups); groups = Azure AD group OIDs (need Graph API to resolve names); prefer app roles','tid = tenant ID from Entra JWT':'tid claim contains the Azure tenant GUID; use for tenant isolation; the iss also contains tenantId in the URL path'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Unified AppAuthentication and AppPrincipal: after detecting the IDM and extracting claims, construct a common AppAuthentication extends AbstractAuthenticationToken. AppPrincipal: userId (normalized from sub or oid), email, displayName, tenantId, idmType (PING, ENTRA, OKTA), authorities (List<GrantedAuthority>). Register the converter: http.oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> jwt.jwtAuthenticationConverter(myConverter))). Downstream code: (AppPrincipal) authentication.getPrincipal() — always works regardless of IDM. @PreAuthorize SpEL: authentication.principal.tenantId — works for all IDMs.',
+      vars:{'AbstractAuthenticationToken for custom auth':'extend AbstractAuthenticationToken; constructor takes GrantedAuthority collection; setAuthenticated(true) after construction; getCredentials() returns the JWT string','jwtAuthenticationConverter = the normalization point':'Spring Security calls this once per request after JWT validation; this is the right place to map IDM-specific claims to a universal model','(AppPrincipal) authentication.getPrincipal()':'cast is safe because your custom converter always creates an AppPrincipal; downstream services cast once and use the unified model'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'Multi-issuer JWT validation: a single Spring Boot app may accept tokens from both Ping and Entra. Two JwtDecoder beans (one per issuer) + JwtAuthenticationManagerResolver: resolves the correct decoder based on the iss claim in the token header. Spring Security 6: http.oauth2ResourceServer(oauth2 -> oauth2.authenticationManagerResolver(resolver)). The resolver reads the iss without signature verification (inspects the payload), routes to the right JwtAuthenticationManager (which has the correct JwksUri configured), then validates and converts. This enables a single API to accept tokens from multiple IDMs.',
+      vars:{'JwtAuthenticationManagerResolver per issuer':'one manager per IDM, each with its own JWKS URI; resolver inspects iss claim before signature verification to pick the right manager','JWKS URI per IDM':'Ping: https://ping.example.com/pf/JWKS; Entra: https://login.microsoftonline.com/{tid}/discovery/v2.0/keys; cached by Spring Security','issuer header inspection is safe':'reading the iss claim from the unverified JWT payload is safe because you select the decoder based on iss, and that decoder then verifies the signature; an attacker cannot spoof a Ping token as Entra because the Entra decoder will reject the Ping signature'},
+      tone:'ok',
+      callout:'CIAM multi-IDM: the CIAM Spring Boot app accepts tokens from both Ping Federate (internal SSO) and Entra ID (partner federation). JwtAuthenticationManagerResolver routes by iss: "login.microsoftonline.com" → EntraJwtDecoder (validates against Entra JWKS); "ping.example.com" → PingJwtDecoder (validates against Ping JWKS). After validation: MultiIdmJwtAuthenticationConverter maps to AppPrincipal — extracts sub/oid as userId, maps groups/roles to GrantedAuthority, normalizes tenantId. All @PreAuthorize expressions use authentication.principal.tenantId (not IDM-specific claims). Unit tests use both Ping-shaped and Entra-shaped JWTs to verify the converter handles both correctly.'
+    }
+  ],
+  code:[
+    '// Multi-IDM JWT converter',
+    '@Component',
+    'public class MultiIdmJwtAuthenticationConverter',
+    '    implements Converter<Jwt, AbstractAuthenticationToken> {',
+    '',
+    '  @Override',
+    '  public AbstractAuthenticationToken convert(Jwt jwt) {',
+    '    String iss = jwt.getClaimAsString("iss");',
+    '    if (iss.contains("microsoftonline")) return convertEntra(jwt);',
+    '    if (iss.contains("ping")) return convertPing(jwt);',
+    '    throw new JwtException("Unknown issuer: " + iss);',
+    '  }',
+    '',
+    '  private AppAuthentication convertEntra(Jwt jwt) {',
+    '    String userId = jwt.getClaimAsString("oid");',
+    '    List<String> roles = jwt.getClaimAsStringList("roles");',
+    '    // ... map to AppPrincipal',
+    '  }',
+    '}'
+  ]
+});
+</script>
+
 <script>
 // ── multi-IDM claim normalizer ──────────────────────────────────────────────
 const ROLE_MAP = { 'App.Admin':'ADMIN', 'admin':'ADMIN', 'user':'USER' };

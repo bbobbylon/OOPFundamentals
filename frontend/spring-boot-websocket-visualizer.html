@@ -505,6 +505,65 @@ stomp.connect({}, frame => {
 
 </div><!-- /container -->
 
+<!-- ── Code Walkthrough: Spring WebSocket ── -->
+<div id="cw-swsock"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-swsock',{
+  id:'cw-swsock',
+  title:'Spring Boot WebSocket — STOMP broker, SockJS fallback, security, and scaling to multiple nodes',
+  subtitle:'WebSocket provides a persistent, bidirectional TCP connection between client and server. Unlike HTTP (request/response), the server can push data to the client at any time. Spring Boot supports WebSocket via STOMP (Simple Text Oriented Messaging Protocol) over WebSocket. STOMP adds pub/sub on top of raw WebSocket. Clients subscribe to topics (/topic/xxx); servers publish messages to topics; Spring routes them. SockJS provides a fallback to long-polling for environments that block WebSocket.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'Spring WebSocket setup: @EnableWebSocketMessageBroker on @Configuration. configureMessageBroker: enableSimpleBroker("/topic", "/queue") — in-memory broker for topics (broadcast) and queues (point-to-point). setApplicationDestinationPrefixes("/app") — messages to /app/** are routed to @MessageMapping methods. registerStompEndpoints: addEndpoint("/ws").withSockJS() — the WebSocket handshake endpoint; SockJS fallback for browsers/environments that block WebSocket. Client: new SockJS("/ws"); stompClient = Stomp.over(sock); stompClient.connect({Authorization:"Bearer "+jwt}, onConnected).',
+      vars:{'/topic vs /queue':'/topic = broadcast to ALL subscribers; /queue = point-to-point to specific user; use /user/queue/notifications for per-user messages; Spring routes /user/** to the specific user session','SockJS fallback':'if WebSocket is blocked (corporate firewall, proxy), SockJS falls back to HTTP long-polling; transparent to the app code; stompClient.connect() works the same way','setApplicationDestinationPrefixes("/app")':'client sends to /app/chat; @MessageMapping("/chat") method handles it; the broker does NOT see /app/** messages (only @MessageMapping does); /topic/** and /queue/** go directly to the broker'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'@MessageMapping: handles messages from clients to the server. @MessageMapping("/chat") void handleChat(ChatMessage msg, Principal user) — the method runs in a Spring thread; Principal is the authenticated user. @SendTo("/topic/chat") return value: broadcasts the return value to all /topic/chat subscribers. @SendToUser("/queue/reply") sends only to the requesting user (if they subscribe to /user/queue/reply). convertAndSend: SimpMessagingTemplate.convertAndSend("/topic/chat", message) — push a message from any Spring component (service, scheduler) to a topic. convertAndSendToUser("/user/{userId}", "/queue/notifications", notification) — push to a specific user.',
+      vars:{'Principal in @MessageMapping':'Spring Security populates Principal from the JWT during the WebSocket handshake (via configureClientInboundChannel + JWT interceptor); username = JWT sub claim','@SendTo vs convertAndSend':'@SendTo on the method: sends the return value automatically; convertAndSend: programmatic push from any bean (e.g., after a background job completes); use convertAndSend for server-initiated pushes','SimpMessagingTemplate for server-push':'inject @Autowired SimpMessagingTemplate msg; from a @Service: msg.convertAndSendToUser(userId, "/queue/alert", payload); sends to the specific user wherever they are connected'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'WebSocket security: authenticate the WebSocket connection using a JWT. configureClientInboundChannel: add a ChannelInterceptor that reads the Authorization header from the STOMP CONNECT frame, validates the JWT (using the same JwtDecoder), and sets the StompHeaderAccessor Principal. After this, @MessageMapping methods receive an authenticated Principal. Subscription authorization: @MessageMapping methods can check Principal for authorization. Or use Spring Security message authorization: http.authorizeHttpRequests(...) does not apply to WebSocket messages — use configureClientInboundChannel for WebSocket-specific security.',
+      vars:{'JWT in STOMP CONNECT headers':'Angular client: stompClient.connect({"Authorization":"Bearer "+token}, callback); server ChannelInterceptor reads stompHeaderAccessor.getFirstNativeHeader("Authorization")','ChannelInterceptor for authentication':'implement ChannelInterceptor.preSend(); for CONNECT command: validate JWT; set StompHeaderAccessor.setUser(new UsernamePasswordAuthenticationToken(...)); store in SecurityContextHolder','WebSocket sessions do not use HTTP sessions':'each WebSocket connection is independent; authentication must happen per-connection (CONNECT frame); HTTP session cookies do NOT automatically apply'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Heartbeats and disconnects: STOMP heartbeats keep the connection alive. setTaskScheduler on the broker (required for heartbeats). Heartbeat intervals: setHeartBeatValue(10000, 10000) — 10 second send/receive. @EventListener(SessionDisconnectEvent.class) — called when a client disconnects; use to update user presence/status, remove from subscriptions. @EventListener(SessionConnectEvent.class) — called on STOMP CONNECT; log connections, enforce max-session-per-user limits. WebSocket timeout: the connection closes if either side stops sending heartbeats.',
+      vars:{'heartbeats prevent silent disconnects':'without heartbeats, a broken TCP connection (NAT timeout, proxy timeout) is not detected until the next message attempt; heartbeats fail fast','SessionDisconnectEvent for presence':'when user disconnects: update their "online" status in DB/Redis; notify their conversation partners; remove from active-user set','@EventListener vs @SubscribeMapping':'@SubscribeMapping handles initial subscription (one-time response); @EventListener listens to Spring events (connect, disconnect); both useful for presence tracking'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'Scaling to multiple nodes: the in-memory SimpleBroker only works on a single server. With multiple instances (load-balanced pods), a client connected to pod-A cannot receive messages published on pod-B. Fix: enableStompBrokerRelay pointing to RabbitMQ or ActiveMQ. All Spring Boot pods connect to the external broker; the external broker routes messages to the right subscriber regardless of which pod they are on. Spring Cloud Stream: alternative for event-driven microservices (Kafka, RabbitMQ); more complex than simple WebSocket relay but better for high-throughput. Redis Pub/Sub: lightweight alternative for simple cases.',
+      vars:{'enableStompBrokerRelay requires RabbitMQ with STOMP plugin':'RabbitMQ needs the STOMP plugin enabled; Spring connects to RabbitMQ as a STOMP relay; clients do not know the difference from SimpleBroker','connection pool to RabbitMQ':'configure relayPort, relayHost, clientLogin, clientPasscode, systemLogin, systemPasscode in enableStompBrokerRelay(); the relay uses a persistent connection to RabbitMQ','Redis Pub/Sub alternative':'simpler than RabbitMQ relay; publish to Redis channel; all pods subscribe; forward to connected WebSocket clients; no STOMP protocol at the Redis layer; custom implementation needed'},
+      tone:'ok',
+      callout:'CIAM WebSocket: real-time session monitoring dashboard uses Spring WebSocket. Admin connects via STOMP + SockJS with JWT in CONNECT headers. JWT validated in ChannelInterceptor — reuses same JwtDecoder as REST endpoints. SimpMessagingTemplate.convertAndSendToUser(adminId, "/queue/session-events", event) pushes session lifecycle events (login, logout, MFA challenge, token refresh) to the monitoring dashboard. enableStompBrokerRelay with RabbitMQ for multi-pod deployment on Kubernetes (3 replicas). SessionDisconnectEvent removes admin from active-monitor set. Subscription authorization: @PreAuthorize("hasAuthority(\'App-Admin\')") on the monitoring service called from @MessageMapping.'
+    }
+  ],
+  code:[
+    '// WebSocket JWT auth in ChannelInterceptor',
+    '@Override',
+    'public Message<?> preSend(Message<?> message, MessageChannel channel) {',
+    '  StompHeaderAccessor sha = StompHeaderAccessor.wrap(message);',
+    '  if (StompCommand.CONNECT.equals(sha.getCommand())) {',
+    '    String token = sha.getFirstNativeHeader("Authorization");',
+    '    if (token != null && token.startsWith("Bearer ")) {',
+    '      Jwt jwt = jwtDecoder.decode(token.substring(7));',
+    '      sha.setUser(new JwtAuthenticationToken(jwt));',
+    '    }',
+    '  }',
+    '  return message;',
+    '}'
+  ]
+});
+</script>
+
 <script>
 /* ─── SECTION 1: Polling vs WebSocket Demo ─────────────────────────────── */
 let pollTimer = null;

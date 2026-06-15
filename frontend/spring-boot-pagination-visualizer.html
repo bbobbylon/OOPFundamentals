@@ -477,6 +477,68 @@
 
 </div>
 
+<!-- ── Code Walkthrough: Spring Pagination ── -->
+<div id="cw-page"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-page',{
+  id:'cw-page',
+  title:'Spring Data pagination and filtering — Pageable, Page, Slice, dynamic queries, and cursor-based pagination',
+  subtitle:'Pagination divides large result sets into pages to improve performance and usability. Spring Data: pass a Pageable to repository methods; receive a Page<T> (with total count for UI) or Slice<T> (without total count, cheaper). Query parameters: GET /users?page=0&size=20&sort=lastName,asc. Spring Data MVC auto-resolves Pageable from request parameters. Filtering: use JPA Specifications, Querydsl, or Spring Data JPA query methods. Cursor-based pagination (keyset) is more efficient than offset for large datasets.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'Pageable and PageRequest: Pageable is the request object (page number, page size, sort). PageRequest.of(0, 20) — page 0 (zero-indexed), 20 items per page. PageRequest.of(0, 20, Sort.by("lastName").ascending()) — with sort. Page<User> userRepo.findAll(Pageable) — returns a Page<T>. Page contains: getContent() (the items), getTotalElements() (total count), getTotalPages(), hasNext(), hasPrevious(). Spring MVC auto-resolves Pageable from query params: ?page=0&size=20&sort=lastName,asc — requires @EnableSpringDataWebSupport. Default: page=0, size=20.',
+      vars:{'zero-indexed pages by default':'page=0 is the first page; page=1 is the second; set one-indexed-parameters=true if clients expect page=1 for first page','Page vs Slice':'Page extends Slice; adds getTotalElements() and getTotalPages() (extra SELECT COUNT query); Slice is cheaper (no count query, just knows hasNext)','Sort.by() chaining':'Sort.by("lastName").ascending().and(Sort.by("firstName").ascending()) — multi-column sort; maps to ORDER BY lastName ASC, firstName ASC'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'Page<T> response structure: the Page object itself is not suitable for API responses (it has Jackson issues with empty pages). Map to a custom PageResponse<T>: { "content": [...], "pageNumber": 0, "pageSize": 20, "totalElements": 150, "totalPages": 8, "last": false, "first": true }. Spring HATEOAS: PagedModel wraps Page with navigation links (self, next, prev, first, last). Spring Data REST exposes repositories as HATEOAS endpoints automatically with pagination. For simple REST: map Page to a custom DTO before returning from the controller.',
+      vars:{'do not return Page<T> directly from controllers':'Page has Spring-internal structure; serializes oddly; map to a plain DTO: PageResponse.of(page) → { content, totalElements, totalPages, page, size }','Spring HATEOAS PagedModel':'wraps Page with hypermedia links; client navigates next/prev via links not by constructing URLs; standard for HATEOAS APIs','PageImpl for testing':'new PageImpl<>(items, PageRequest.of(0,10), totalCount) — construct a Page<T> in tests without a real repository; useful for testing controller layer'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'Dynamic filtering with JPA Specifications: Specification<User> is a functional interface wrapping a Predicate. Combine specifications: Specification.where(isActive()).and(hasRole(role)).and(nameLike(query)). Repository extends JpaSpecificationExecutor<User>: findAll(spec, pageable). Benefit: type-safe, composable filters. Alternative: Querydsl (QuerydslPredicateExecutor, QUser.user.email.contains(...)). Alternative: custom @Query with optional params: @Query("SELECT u FROM User u WHERE (:role IS NULL OR :role IN elements(u.roles)) AND ..."). Spring Data JPA named query: @Query with JPQL.',
+      vars:{'Specification.where(spec1).and(spec2)':'builds a JPA Criteria predicate tree; each specification is independent and reusable; null-safe combination: and(null) is ignored','JpaSpecificationExecutor interface':'extend JpaRepository AND JpaSpecificationExecutor on the same repository interface; unlocks findAll(Specification, Pageable) and related methods','Querydsl for complex queries':'generate Q-classes from entities (APT annotation processor); QUser.user.email.startsWith("alice@"); type-safe; more readable than Specification for complex joins'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Sorting security: never allow the client to pass arbitrary sort fields. Validate that the sort property is in an allowed set. Spring Data: if the client passes sort=internalField or sort=password, JPA will include it in the ORDER BY. Fix: validate the sort field against a whitelist before constructing PageRequest. Or use a restricted Pageable: new PageRequest(page, size, sort) where sort is server-controlled based on a client-provided enum. @SortDefault on controller: @PageableDefault(size=20, sort="lastName", direction=Sort.Direction.ASC) — default sort when client does not specify.',
+      vars:{'whitelist sort fields':'Set<String> ALLOWED_SORT = Set.of("lastName","email","createdAt"); if (!ALLOWED_SORT.contains(sortField)) throw new BadRequestException("Invalid sort field")','@PageableDefault on method parameter':'@GetMapping("/users") Page<User> getUsers(@PageableDefault(size=20, sort="lastName") Pageable p) — default values when client does not specify page/size/sort','size limit to prevent abuse':'@Max(100) int size — validate that page size does not exceed a max (100); prevent client from requesting millions of records in one call'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'Cursor-based (keyset) pagination: instead of OFFSET (skip N rows), use WHERE id > lastSeenId ORDER BY id ASC LIMIT 20. More efficient for large datasets — OFFSET N requires the database to scan and discard N rows; keyset uses an index seek. Not supported natively in Spring Data — use a custom @Query: @Query("SELECT u FROM User u WHERE u.id > :cursor ORDER BY u.id ASC LIMIT 20"). Return the cursor (last item ID) in the response. Client passes cursor in the next request. Limitation: no random access (cannot jump to page 5); only forward/backward navigation. Use for infinite scroll, activity feeds.',
+      vars:{'OFFSET N = database scans N rows':'for page 1000 with size 20: database reads 20,000 + 20 rows, discards 20,000, returns 20; slow for large page numbers; keyset avoids this','keyset cursor = last seen ID':'store the ID (or timestamp) of the last item; next page request: WHERE id > cursor; O(log n) using the index; consistent across inserts/deletes','limitation: no total count or random access':'keyset cannot tell you how many pages there are; cannot jump to page 50; suitable for infinite scroll (mobile/social) not paginator UI (admin tables)'},
+      tone:'ok',
+      callout:'CIAM pagination: the admin user list uses Pageable with JPA Specification filtering. GET /admin/users?page=0&size=50&sort=lastName,asc&role=App-Admin&tenantId=tenant-123. UserSpecification combines: hasTenantId(tenantId), hasRole(role), isActive(). Sort whitelist: only lastName, email, createdAt allowed. The user activity audit log uses cursor-based pagination (infinite scroll, created_at > cursor) for performance (millions of audit events). Page<T> mapped to PageResponse<T> DTO before returning. @PageableDefault(size=20, sort="lastName") on the controller method for client-less pagination defaults.'
+    }
+  ],
+  code:[
+    '// JPA Specification for dynamic filtering',
+    'public class UserSpecification {',
+    '  public static Specification<User> hasTenant(String tenantId) {',
+    '    return (root, query, cb) ->',
+    '      tenantId == null ? null : cb.equal(root.get("tenantId"), tenantId);',
+    '  }',
+    '  public static Specification<User> hasRole(String role) {',
+    '    return (root, query, cb) ->',
+    '      role == null ? null : cb.isMember(role, root.get("roles"));',
+    '  }',
+    '}',
+    '',
+    '// Service usage',
+    'Specification<User> spec = where(hasTenant(tenantId)).and(hasRole(role));',
+    'Page<User> result = userRepo.findAll(spec,',
+    '  PageRequest.of(page, size, Sort.by("lastName")));'
+  ]
+});
+</script>
+
 <script>
 /* ---- product dataset ---- */
 const ALL_PRODUCTS = [

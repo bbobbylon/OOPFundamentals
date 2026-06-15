@@ -304,6 +304,62 @@
 
 </div>
 
+<!-- ── Code Walkthrough: Refresh Token Rotation ── -->
+<div id="cw-rtr"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-rtr',{
+  id:'cw-rtr',
+  title:'Server-side refresh token rotation with reuse detection — line by line',
+  subtitle:'Rotation makes each refresh token single-use: when a token is spent, a new one is issued. Reuse of a spent token signals theft — the server revokes the entire token family.',
+  steps:[
+    {
+      lines:[1,2],
+      note:'The RefreshToken entity stores a hash of the token (never the raw value), a familyId that links all rotated descendants to the same original login session, and a used flag. Storing the hash means a database breach exposes no usable tokens.',
+      vars:{'hash':'BCrypt or SHA-256 of the raw token string','familyId':'UUID shared by every rotation in a single session','used':'false = valid, true = already spent → reuse = theft'},
+      tone:'start'
+    },
+    {
+      lines:[4,5,6],
+      note:'To issue a new token: generate a cryptographically random UUID (SecureRandom-backed), hash it with BCrypt, and store the new entity in the SAME familyId. The raw token is returned to the client; the hash is stored in the DB.',
+      vars:{'UUID.randomUUID()':'128-bit random — statistically impossible to guess','BCrypt.hashpw()':'slow hash; database leak → tokens unusable','familyId':'same UUID inherited from the original login'},
+      tone:'ok'
+    },
+    {
+      lines:[8,9,10,11,12,13],
+      note:'On a refresh request: hash the incoming token and look it up. If not found → unknown token → 401. If found but already used → REUSE DETECTED → revoke the entire family and force re-login. If valid, mark it used and issue a new token.',
+      vars:{'not found':'never issued or already cleaned up → 401','used=true':'reuse → attacker replayed a stolen token → revoke family','used=false':'legitimate refresh → mark spent, issue new token'},
+      tone:'ok'
+    },
+    {
+      lines:[15,16],
+      note:'Revoking the family deletes (or marks all as revoked) every token in the familyId. This is what makes the detection actionable: if an attacker stole RT#1 and replayed it after the real client used it, the server catches the replay and terminates BOTH sessions — forcing both parties to log in again.',
+      vars:{'deleteAllByFamilyId()':'removes RT#1 through RT#N from the DB','effect':'attacker can no longer rotate; real client must log in again'},
+      tone:'ok',
+      callout:'CIAM: Entra and Ping handle rotation automatically for their issued tokens. You implement this yourself when building a custom Spring auth server or a BFF. Never store the raw token — always hash it. The familyId revocation is the security guarantee that makes rotation meaningful.'
+    }
+  ],
+  code:[
+    '@Entity class RefreshToken {',
+    '  String hash; UUID familyId; boolean used; LocalDateTime expires; }',
+    '',
+    'String raw = UUID.randomUUID().toString();',
+    'String hash = BCrypt.hashpw(raw, BCrypt.gensalt());',
+    'repo.save(new RefreshToken(hash, familyId, false, now().plusDays(7)));',
+    '',
+    'RefreshToken stored = repo.findByHash(BCrypt.hashpw(incoming, stored.hash));',
+    'if (stored == null)    throw new Unauthorized();',
+    'if (stored.used) {',
+    '  // reuse detected — stolen token replayed',
+    '  repo.deleteAllByFamilyId(stored.familyId);',
+    '  throw new Unauthorized("session revoked");',
+    '}',
+    'stored.used = true; repo.save(stored);',
+    'return issueNewToken(stored.familyId); // rotate'
+  ]
+});
+</script>
+
 <script>
 // ── refresh-token rotation + reuse detection ────────────────────────────────
 let issued, validId, used, active, stolenId;

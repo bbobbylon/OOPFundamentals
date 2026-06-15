@@ -234,6 +234,73 @@
 
 </div>
 
+<!-- ── Code Walkthrough: Security Filter Chain ── -->
+<div id="cw-sfc"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-sfc',{
+  id:'cw-sfc',
+  title:'SecurityFilterChain configuration — every line explained',
+  subtitle:'SecurityFilterChain is a list of servlet filters ordered by Spring Security. The first match in authorizeHttpRequests wins. Understanding this order is why 401 and 403 behave differently.',
+  steps:[
+    {
+      lines:[1,2],
+      note:'@Bean SecurityFilterChain — this method returns the configured chain to the Spring container. Spring Security creates a DelegatingFilterProxy that delegates to this chain for every request. The HttpSecurity builder API configures each filter\'s behavior.',
+      vars:{'SecurityFilterChain':'list of ~15 filters assembled in a fixed order','HttpSecurity http':'mutable builder; each .xxx() call configures a filter'},
+      tone:'start'
+    },
+    {
+      lines:[3],
+      note:'http.oauth2ResourceServer().jwt() installs BearerTokenAuthenticationFilter into the chain. This filter reads the Authorization: Bearer header, validates the JWT (signature, expiry, issuer), and stores an Authentication in the SecurityContext. If validation fails it stores nothing — the request continues as anonymous.',
+      vars:{'BearerTokenAuthenticationFilter':'slot 5 in the default chain','on success':'SecurityContext.authentication = JwtAuthenticationToken','on failure':'SecurityContext is empty → AnonymousAuthenticationFilter runs next'},
+      tone:'ok'
+    },
+    {
+      lines:[4,5,6,7,8,9],
+      note:'authorizeHttpRequests() configures the AuthorizationFilter (last filter before DispatcherServlet). Rules are evaluated IN ORDER — first match wins. requestMatchers("/actuator/health").permitAll() means the health endpoint never triggers auth, even if no Bearer token is present.',
+      vars:{'first match wins':'order matters — more specific paths must come before broader ones','permitAll()':'passes the request regardless of SecurityContext state','authenticated()':'requires a non-anonymous Authentication in the SecurityContext'},
+      tone:'ok'
+    },
+    {
+      lines:[9],
+      note:'.anyRequest().authenticated() is the catch-all: every URL not matched above must have a valid Authentication. Without this line, unmatched URLs would be permitted by default — a dangerous misconfiguration.',
+      vars:{'.anyRequest()':'matches any path/method not already matched','.authenticated()':'fails with AccessDeniedException if SecurityContext holds an anonymous principal'},
+      tone:'ok'
+    },
+    {
+      lines:[11,12,13],
+      note:'http.sessionManagement().sessionCreationPolicy(STATELESS) tells Spring not to create an HttpSession. Each request must re-authenticate via the Bearer token. Without this, Spring Security might create a session and cache the Authentication — wrong for a stateless REST API.',
+      vars:{'STATELESS':'no session created; no JSESSIONID cookie','implication':'SecurityContext is cleared after every request; the next request re-validates its JWT'},
+      tone:'ok'
+    },
+    {
+      lines:[14],
+      note:'http.csrf().disable() turns off the CsrfFilter. CSRF protection is for session-cookie auth (the browser automatically attaches cookies to cross-site requests). A Bearer-token REST API is not vulnerable to CSRF because the browser never automatically adds the Authorization header.',
+      vars:{'csrf().disable()':'removes CsrfFilter from the chain','when to KEEP csrf':'BFF / cookie-based auth — then you NEED CSRF protection'},
+      tone:'ok',
+      callout:'CIAM: the ExceptionTranslationFilter (always present) translates AccessDeniedException into HTTP: anonymous caller → 401 WWW-Authenticate: Bearer (needs to log in); authenticated but wrong role → 403 (wrong token, not a login problem). This is why 401 and 403 have different remedies.'
+    }
+  ],
+  code:[
+    '@Bean SecurityFilterChain chain(HttpSecurity http) throws Exception {',
+    '  http',
+    '    .oauth2ResourceServer(rs -> rs.jwt(Customizer.withDefaults()))',
+    '    .authorizeHttpRequests(authz -> authz',
+    '      .requestMatchers("/actuator/health").permitAll()',
+    '      .requestMatchers("/api/auth/**").permitAll()',
+    '      .requestMatchers(HttpMethod.GET,"/api/products/**").authenticated()',
+    '      .requestMatchers("/api/admin/**").hasRole("ADMIN")',
+    '      .anyRequest().authenticated())',
+    '',
+    '    .sessionManagement(sm ->',
+    '      sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))',
+    '    .csrf(csrf -> csrf.disable());',
+    '  return http.build();',
+    '}'
+  ]
+});
+</script>
+
 <script>
 // ── security filter-chain walker ────────────────────────────────────────────
 const FILTERS=[
