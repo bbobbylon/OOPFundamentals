@@ -329,6 +329,72 @@ Money total = a.plus(b);   <span class="com">// no lock needed</span></pre>
       </div>
       <div class="dlk-result" id="dlkResult"></div>
     </div>
+
+<!-- ── Code Walkthrough: Java Concurrency ── -->
+<div id="cw-conc"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-conc',{
+  id:'cw-conc',
+  title:'Java concurrency — data races, synchronized, deadlock, ConcurrentHashMap, AtomicInteger',
+  subtitle:'Concurrent bugs are invisible in single-thread tests and non-deterministic in production. Each tool below solves a specific problem: synchronized for mutual exclusion, ConcurrentHashMap for shared state, AtomicInteger for lock-free counters.',
+  steps:[
+    {
+      lines:[1,2,3],
+      note:'counter++ is NOT atomic. The JVM compiles it to 3 bytecode instructions: GETFIELD (load), IADD (add 1), PUTFIELD (store). Two threads can interleave: Thread A loads 5, Thread B loads 5, Thread A stores 6, Thread B stores 6. The second increment is LOST. The result is 6 instead of the correct 7. This is a data race.',
+      vars:{'data race':'two threads access shared state, at least one writes, no synchronization','counter++ bytecode':'GETFIELD counter → ICONST_1 → IADD → PUTFIELD counter (3 ops)','symptom':'intermittent wrong values, hard to reproduce — race windows are microseconds'},
+      tone:'bad'
+    },
+    {
+      lines:[5,6],
+      note:'synchronized acquires the object\'s intrinsic monitor lock before entering the method body and releases it on exit (even if an exception is thrown). Only ONE thread can hold the lock at a time — all other callers BLOCK at the method entrance until the lock is free. This makes counter++ atomic from the caller\'s perspective.',
+      vars:{'intrinsic monitor':'every Java object has one — this is its lock','BLOCK':'sleeping thread; no CPU consumed while waiting','performance cost':'context switch on contention — use Atomic* for simple counters instead'},
+      tone:'ok'
+    },
+    {
+      lines:[8,9,10,11],
+      note:'Deadlock: Thread A holds lockX and waits for lockY. Thread B holds lockY and waits for lockX. Neither can proceed — both wait forever. JVM does NOT recover from deadlocks automatically. Fix: always acquire MULTIPLE locks in the same global order (e.g., always X before Y in every code path). Or use tryLock() with a timeout.',
+      vars:{'deadlock detection':'jstack <pid> or VisualVM thread dump shows "BLOCKED" threads','tryLock()':'ReentrantLock.tryLock(100, MILLISECONDS) — gives up rather than blocking forever','same lock order':'global convention: always lockX before lockY — every code path must follow it'},
+      tone:'bad'
+    },
+    {
+      lines:[13,14,15],
+      note:'ConcurrentHashMap internally partitions into segments (Java 8+: node-level CAS). Multiple threads can read/write DIFFERENT keys simultaneously with no lock contention. computeIfAbsent() is atomic: read-check-write happens as one indivisible operation. Far faster than Collections.synchronizedMap(new HashMap<>()) under high contention.',
+      vars:{'ConcurrentHashMap':'segment-level or CAS locking — parallel reads/writes for different keys','computeIfAbsent':'atomic: reads key, if absent applies the lambda and inserts the result — no race','vs synchronizedMap':'synchronizedMap locks the WHOLE map for every operation; CHM locks segments'},
+      tone:'ok'
+    },
+    {
+      lines:[17,18],
+      note:'AtomicInteger uses a CPU-level CAS (Compare-And-Swap) instruction: "if the value is still X, atomically replace it with X+1; otherwise retry." No thread blocking, no context switch, no monitor lock. For single-variable counters (request counts, sequence IDs), always prefer AtomicInteger over synchronized int.',
+      vars:{'CAS':'hardware instruction — one CPU clock cycle, no OS involvement','incrementAndGet()':'returns the new value atomically; addAndGet(n) for arbitrary increments','LongAdder':'prefer over AtomicLong under very high contention — stripes the counter across CPUs'},
+      tone:'ok',
+      callout:'CIAM: Spring Security\'s SecurityContextHolder uses ThreadLocal (per-thread storage) — each HTTP thread has its own Authentication, so no synchronization is needed. Rate limiters (Bucket4j) use ConcurrentHashMap per-IP and AtomicLong for token counts. Knowing concurrency primitives lets you review security-critical code for races that could let unauthenticated requests slip through.'
+    }
+  ],
+  code:[
+    '// Data race — counter++ is NOT atomic',
+    'private int counter = 0;',
+    'void increment() { counter++; }  // 3 bytecode ops → race condition',
+    '',
+    '// synchronized fixes the race',
+    'synchronized void increment() { counter++; } // one thread at a time',
+    '',
+    '// Deadlock: A holds lockX, waits for lockY',
+    '//           B holds lockY, waits for lockX',
+    '// Fix: always acquire in the SAME ORDER in every code path',
+    '// Or:  ReentrantLock.tryLock(100, MILLISECONDS)',
+    '',
+    '// ConcurrentHashMap — parallel access per-key',
+    'ConcurrentHashMap<String,Integer> map = new ConcurrentHashMap<>();',
+    'map.computeIfAbsent("alice", k -> 0); // atomic read-check-write',
+    '',
+    '// AtomicInteger — lock-free via CPU CAS instruction',
+    'AtomicInteger count = new AtomicInteger(0);',
+    'count.incrementAndGet(); // no lock, no blocking'
+  ]
+});
+</script>
+
     <script>
     (function(){
       const NODES=[

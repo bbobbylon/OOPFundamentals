@@ -165,6 +165,89 @@
 
 </div>
 
+<!-- ── Code Walkthrough: Auth Identity Live ── -->
+<div id="cw-ail"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-ail',{
+  id:'cw-ail',
+  title:'Spring Security auth flow — from HTTP request to SecurityContext, step by step',
+  subtitle:'Every HTTP request to a secured Spring Boot endpoint travels through the SecurityFilterChain before reaching your controller. The chain validates the JWT, populates the SecurityContext, and checks authorization rules — all before your @GetMapping method body executes.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6],
+      note:'The SecurityFilterChain is a list of Servlet filters that run IN ORDER for every request. DelegatingFilterProxy bridges the Servlet container\'s filter chain to Spring\'s ApplicationContext. Spring Security registers ~15 filters automatically when you call http.oauth2ResourceServer(). You can log which filters run with logging.level.org.springframework.security.web.FilterChainProxy=DEBUG.',
+      vars:{'DelegatingFilterProxy':'Servlet filter that delegates to a Spring-managed filter bean (not a Spring Security class itself)','FilterChainProxy':'Spring Security\'s meta-filter; holds the SecurityFilterChain list','15 filters':'includes: SecurityContextFilter, UsernamePasswordAuthFilter, BearerTokenAuthFilter, ExceptionTranslationFilter, AuthorizationFilter'},
+      tone:'start'
+    },
+    {
+      lines:[8,9,10,11],
+      note:'BearerTokenAuthenticationFilter: extracts the Bearer token from Authorization header (DefaultBearerTokenResolver). Calls NimbusJwtDecoder.decode() which: fetches the JWK Set (cached), verifies the JWT signature with the IdP\'s public key, and validates exp, nbf, iss, aud. On success → creates a JwtAuthenticationToken and calls SecurityContextHolder.getContext().setAuthentication(token).',
+      vars:{'NimbusJwtDecoder':'validates signature + all standard claims; throws JwtException on any failure → 401','JwtAuthenticationToken':'extends AbstractAuthenticationToken; principal = the Jwt object; authorities from JwtAuthenticationConverter','SecurityContextHolder':'ThreadLocal<SecurityContext>; this thread\'s Authentication is now set for the duration of the request'},
+      tone:'ok'
+    },
+    {
+      lines:[13,14,15,16],
+      note:'ExceptionTranslationFilter catches security exceptions and converts them to HTTP responses. AuthenticationException (no valid token) → 401 with WWW-Authenticate: Bearer. AccessDeniedException (authenticated but wrong role) → 403. This filter sits AFTER BearerTokenAuthFilter in the chain and handles the exceptions those filters throw.',
+      vars:{'AuthenticationException':'thrown when token is missing, expired, has wrong iss/aud, or signature is invalid → 401','AccessDeniedException':'thrown by AuthorizationFilter when the user lacks the required authority → 403','EntryPoint':'for 401: BearerTokenAuthenticationEntryPoint; for 403: AccessDeniedHandlerImpl'},
+      tone:'ok'
+    },
+    {
+      lines:[18,19,20,21,22],
+      note:'AuthorizationFilter (the last filter): reads the SecurityContext authentication object and checks it against the authorization rules configured in authorizeHttpRequests(). First-match-wins: rules are checked in the ORDER they are defined. .requestMatchers("/api/public/**").permitAll() must come BEFORE .anyRequest().authenticated() or the public rule never fires.',
+      vars:{'first-match-wins':'order matters — .requestMatchers("/api/admin/**").hasRole("ADMIN") before .anyRequest().authenticated()','SecurityContext at this point':'already populated by BearerTokenAuthFilter — contains JwtAuthenticationToken with authorities','.anyRequest().authenticated()':'catches everything not matched by earlier rules — must be LAST'},
+      tone:'warn'
+    },
+    {
+      lines:[24,25,26,27,28],
+      note:'@PreAuthorize fires AFTER the AuthorizationFilter but BEFORE the controller method body. Spring wraps the controller in a CGLIB proxy at startup. The proxy intercepts the method call, evaluates the SpEL expression ("hasAuthority(\'ROLE_ADMIN\')") against the SecurityContext, and either proceeds to the real method or throws AccessDeniedException → 403.',
+      vars:{'CGLIB proxy':'a generated subclass of your controller; method call is intercepted by Spring AOP','SpEL evaluation':'hasAuthority("ROLE_ADMIN") checks the GrantedAuthority list of the current JwtAuthenticationToken','method body':'only executes if AuthorizationFilter AND @PreAuthorize both pass'},
+      tone:'ok'
+    },
+    {
+      lines:[30,31,32],
+      note:'Inside the controller method: call SecurityContextHolder.getContext().getAuthentication() to get the current JwtAuthenticationToken. Cast getPrincipal() to Jwt and read claims directly. Prefer injecting JwtAuthenticationToken (or Authentication) as a method parameter — Spring injects the current auth object via argument resolution.',
+      vars:{'getPrincipal()':'returns the Jwt object — contains all JWT claims as a Map<String,Object>','getClaimAsString("sub")':'the stable user ID; use as the DB primary key foreign reference','method parameter injection':'@GetMapping void list(JwtAuthenticationToken auth) — Spring resolves this automatically'},
+      tone:'ok',
+      callout:'CIAM: this entire filter chain runs on EVERY request to a protected endpoint — typically in under 1ms total. NimbusJwtDecoder caches the JWK Set (refreshed only when an unknown kid appears). SecurityContextHolder is cleared at the end of every request by SecurityContextPersistenceFilter — there is NO session state for JWT resource servers (STATELESS). Each request is fully self-contained and verifies the JWT independently.'
+    }
+  ],
+  code:[
+    '// SecurityFilterChain: 15 filters run IN ORDER on every request',
+    '// DelegatingFilterProxy → FilterChainProxy → SecurityFilterChain',
+    '// Key filters in order:',
+    '//   SecurityContextHolderFilter → populates empty context',
+    '//   BearerTokenAuthenticationFilter → validates JWT → sets Authentication',
+    '//   ExceptionTranslationFilter → AuthenticationException→401, AccessDenied→403',
+    '',
+    '// BearerTokenAuthenticationFilter:',
+    '// 1. Extract: Authorization: Bearer <token>',
+    '// 2. NimbusJwtDecoder.decode() → validate sig + exp + iss + aud',
+    '// 3. JwtAuthenticationConverter → map claims to GrantedAuthority list',
+    '// 4. SecurityContextHolder.getContext().setAuthentication(jwtToken)',
+    '',
+    '// ExceptionTranslationFilter catches downstream exceptions:',
+    '// AuthenticationException → 401 (WWW-Authenticate: Bearer)',
+    '// AccessDeniedException  → 403',
+    '',
+    '// AuthorizationFilter — checks request against authorizeHttpRequests() rules',
+    '// First-match-wins!',
+    '// .requestMatchers("/api/public/**").permitAll()   // MUST be before anyRequest',
+    '// .requestMatchers("/api/admin/**").hasRole("ADMIN")',
+    '// .anyRequest().authenticated()                    // MUST be last',
+    '',
+    '// @PreAuthorize (CGLIB proxy): runs AFTER AuthorizationFilter',
+    '@GetMapping("/api/users")',
+    '@PreAuthorize("hasAuthority(\'ROLE_ADMIN\')")',
+    'public List<User> list(JwtAuthenticationToken auth) {',
+    '  // auth.getPrincipal() → Jwt object',
+    '  Jwt jwt = (Jwt) auth.getPrincipal();',
+    '  String userId = jwt.getClaimAsString("sub");',
+    '}'
+  ]
+});
+</script>
+
 <script>
 // Cross-link into the hub iframe (keeps the shell); standalone, the href just loads.
 document.addEventListener('click', function (e) {
