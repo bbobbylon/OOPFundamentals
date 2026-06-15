@@ -3,6 +3,7 @@ package com.bob.devhub.service;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
+import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetails;
@@ -22,6 +23,21 @@ public class JwtService {
 
     @Value("${app.jwt.expiration-ms}")
     private long expirationMs;
+
+    /**
+     * Fail fast at startup if the signing secret is missing or too weak. HS256
+     * requires a key of at least 256 bits (32 bytes); a blank or short secret would
+     * otherwise only blow up lazily on the first token operation. Validating here
+     * turns a latent runtime failure into an obvious deployment error at boot.
+     */
+    @PostConstruct
+    void validateSecret() {
+        int bytes = secret == null ? 0 : secret.getBytes(StandardCharsets.UTF_8).length;
+        if (bytes < 32) {
+            throw new IllegalStateException(
+                    "app.jwt.secret must be set and at least 32 bytes (256 bits) for HS256; got " + bytes + " byte(s)");
+        }
+    }
 
     public String generateToken(UserDetails user) {
         long now = System.currentTimeMillis();

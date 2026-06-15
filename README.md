@@ -206,6 +206,11 @@ app with user accounts and cross-device progress sync:
 > guards → Spring filter chain → method security) — so you're never staring at 340+
 > files wondering where to begin.
 
+> **🏗️ Want the full architecture?** See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — C4
+> context/container/component diagrams, the data model, the two security filter chains, and a
+> sequence diagram for **every** flow (register, login HS256, OIDC RS256, per-request validation,
+> RBAC 403/200, navigation, progress sync, account stats, code execution), plus deployment topologies.
+
 You can run it three ways. Pick the one you need:
 
 | Mode | Backend | Accounts? | Use it for |
