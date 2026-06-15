@@ -145,6 +145,78 @@
     <div class="key-insight"><strong>The decision hinges on validation.</strong> Dataclasses (and NamedTuple/TypedDict) <em>trust</em> their annotations — they never check types at runtime. The moment data crosses a trust boundary (an HTTP body, a token from an IdP, a config file), use Pydantic so a wrong type or missing field is a clean validation error, not a deep-in-the-code crash later.</div>
   </section>
 </div>
+
+<!-- ── Code Walkthrough: Python Dataclasses ── -->
+<div id="cw-pydcl"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-pydcl',{
+  id:'cw-pydcl',
+  title:'Python dataclasses — @dataclass, field(), frozen, __post_init__, slots, and dataclass vs Pydantic',
+  subtitle:'@dataclass (PEP 557) auto-generates __init__, __repr__, __eq__ from class-body field annotations. Dataclasses are the standard Python way to define data-centric classes without boilerplate. They sit between plain namedtuples (immutable, no defaults, no methods) and full Pydantic models (validation, serialization). Understanding when to use each is a daily Python engineering decision.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'@dataclass basics: annotate fields in the class body; @dataclass generates __init__ and __repr__ and __eq__ automatically. field() for fine-grained control: field(default=...), field(default_factory=list) (NEVER use mutable defaults directly — will raise ValueError), field(repr=False) to hide in repr, field(compare=False) to exclude from __eq__, field(init=False) for fields not set via __init__ (set in __post_init__). Order matters: fields without defaults must come before fields with defaults (like function parameters).',
+      vars:{'field(default_factory=list)':'creates a new list for each instance; NEVER write field: list = [] directly (mutable default is shared)','field(init=False)':'not settable in __init__; typically set in __post_init__ based on other fields; e.g., computed fields','field(repr=False)':'excluded from __repr__ output; useful for large or sensitive fields (passwords, tokens)'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'@dataclass(frozen=True): makes the instance immutable (fields are read-only after __init__). A frozen dataclass can be used as a dict key or in a set (it is hashable — __hash__ is auto-generated). @dataclass(order=True): generates __lt__, __le__, __gt__, __ge__ based on field comparison (in declaration order). Combine frozen=True + order=True for sortable, hashable value objects. @dataclass(eq=False): do NOT generate __eq__ (use identity comparison). __post_init__: called at the end of __init__; use for validation and computing derived fields.',
+      vars:{'frozen=True':'fields cannot be reassigned after __init__; raises FrozenInstanceError; enables hashing; use for value objects','order=True':'generates comparison methods; fields compared in declaration order; useful for sorting events by timestamp','__post_init__(self)':'called by generated __init__ after setting fields; validate invariants; compute derived fields with object.__setattr__(self, "computed", val) in frozen dataclasses'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'@dataclass(slots=True) (Python 3.10+): generates __slots__ automatically. Benefits: faster attribute access, lower memory per instance (no __dict__ per instance), prevents accidental dynamic attribute creation. Use for high-frequency value objects (JWT claims, token records) where you create many instances. @dataclass(kw_only=True) (Python 3.10+): all fields must be passed as keyword arguments — prevents positional argument confusion with many fields. KW_ONLY sentinel in field declarations: fields before KW_ONLY are positional; fields after are keyword-only.',
+      vars:{'slots=True':'replaces __dict__ with fixed-slot storage; 10-30% memory saving per instance; faster attribute access; cannot add new attributes at runtime','kw_only=True':'@dataclass(kw_only=True); all fields keyword-only in __init__; great for data classes with many fields to avoid positional argument bugs','KW_ONLY sentinel':'from dataclasses import KW_ONLY; fields after KW_ONLY = ... are keyword-only while earlier fields remain positional'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'dataclasses.asdict() / dataclasses.astuple(): recursive conversion to dict/tuple (deep conversion — nested dataclasses also converted). Useful for JSON serialization: json.dumps(dataclasses.asdict(obj)). dataclasses.replace(instance, field=new_value): returns a new instance with specified fields changed (non-mutating update — works on frozen dataclasses too). dataclasses.fields(MyClass): returns tuple of Field objects — inspect field names, types, defaults for meta-programming or serialization.',
+      vars:{'dataclasses.asdict()':'deep conversion to dict; nested dataclasses recursively converted; lists/tuples of dataclasses also converted; final output has no dataclass instances','dataclasses.replace(obj, x=5)':'returns a new instance with x=5 and all other fields copied; does NOT modify original; works with frozen dataclasses','dataclasses.fields(cls)':'tuple of Field objects; each has .name, .type, .default, .default_factory; use for generic serializers and schema generators'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'Dataclass vs Pydantic vs TypedDict: Dataclass = structured class with auto-__init__, mutable, no runtime validation, fast to create, not a dict. TypedDict = IS a dict at runtime, no validation, type checking only by mypy. Pydantic = validated on creation, raises ValidationError for bad input, .model_dump() for serialization, JSON schema generation, nested model validation. Rule: internal data structures (passing between functions you control) → dataclass. Untrusted external data (HTTP request body, JWT claims, config file) → Pydantic. JSON-keyed interop → TypedDict.',
+      vars:{'dataclass use case':'internal data structures, events, value objects, DTOs between internal service layers; no validation overhead','Pydantic use case':'anywhere data crosses a trust boundary: HTTP body, JWT claims, env var config, CSV/JSON import; validates and coerces','TypedDict use case':'typing JSON response shapes without adding a class; interops naturally with json.loads(); mypy-checked but zero runtime behavior'},
+      tone:'ok',
+      callout:'CIAM Python: use @dataclass(frozen=True, slots=True) for JWT claim DTOs (JwtClaims(sub, iss, aud, scp, exp)) — immutable (claims should not be mutated), hashable (use as dict key for caching), and memory-efficient (potentially thousands created per minute). Use Pydantic for TokenRequest validation (grant_type, client_id, scope — Pydantic validates and coerces types from form-encoded data). dataclasses.asdict(claims) for converting to dict before logging (structured logging with sub/scp/exp). dataclasses.replace(claims, scp="read:limited") for scope-narrowed token records.'
+    }
+  ],
+  code:[
+    '# @dataclass — JWT claims',
+    '@dataclass(frozen=True, slots=True)',
+    'class JwtClaims:',
+    '    sub: str',
+    '    iss: str',
+    '    aud: list[str] = field(default_factory=list)',
+    '    scp: str = ""',
+    '    exp: int = 0',
+    '',
+    '    def __post_init__(self):',
+    '        if not self.sub:',
+    '            raise ValueError("sub claim required")',
+    '',
+    '# dataclasses.asdict — for logging',
+    'claims = JwtClaims(sub="alice", iss="https://ping.example.com")',
+    'log.info("Token validated", extra=dataclasses.asdict(claims))',
+    '',
+    '# dataclasses.replace — scope narrowing',
+    'narrowed = dataclasses.replace(claims, scp="read:limited")',
+    '',
+    '# Pydantic for external input (HTTP body)',
+    'class TokenRequest(BaseModel):',
+    '    grant_type: Literal["client_credentials", "authorization_code"]',
+    '    client_id: str',
+    '    scope: str = "openid"'
+  ]
+});
+</script>
+
 <script>
 (function(){
   const pfx='pydc';

@@ -322,6 +322,73 @@
   </div>
 </div>
 
+<!-- ── Code Walkthrough: Ping Provisioning ── -->
+<div id="cw-pingprov"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-pingprov',{
+  id:'cw-pingprov',
+  title:'Identity provisioning — SCIM 2.0, JIT provisioning, outbound sync, and deprovisioning lifecycle',
+  subtitle:'Identity provisioning = the lifecycle management of user accounts across systems. In CIAM: inbound provisioning (create accounts when users register or are imported from an HR system), outbound provisioning (sync identity data to downstream apps — Salesforce, ServiceNow), just-in-time (JIT) provisioning (create an account in PingDirectory on first SAML login), and deprovisioning (disable/delete accounts on offboarding). SCIM 2.0 is the standard REST API for provisioning.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'SCIM 2.0 (System for Cross-domain Identity Management): REST API standard for user provisioning. Base URL: /scim/v2/. Resources: /Users (CRUD for user accounts), /Groups (CRUD for group memberships), /Schemas (list supported schemas), /ServiceProviderConfig (capabilities). Core SCIM operations: POST /scim/v2/Users (create), GET /scim/v2/Users?filter=userName eq "alice" (search), PATCH /scim/v2/Users/{id} (update attributes), DELETE /scim/v2/Users/{id} (delete). PingDirectory exposes SCIM 2.0 at port 8080/8443. PingFederate has a SCIM server as an inbound provisioner.',
+      vars:{'SCIM filter syntax':'filter=userName eq "alice"; filter=emails.value co "@example.com"; filter=active eq true; filter=groups.display eq "Admins"','PATCH op types':'{"op":"replace","path":"active","value":false} to disable; {"op":"add","path":"groups","value":[{"value":"id123"}]} to add group membership','SCIM bulk endpoint':'POST /scim/v2/Bulk with array of operations; transactional batch; error handling per operation; much more efficient than individual API calls for mass provisioning'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'Just-In-Time (JIT) provisioning: when a user successfully authenticates via SAML/OIDC for the first time, automatically create their account in the target system using attributes from the assertion/token. PingFederate JIT provisioning: SP connection → Provisioning tab → enable JIT → map assertion attributes to LDAP attributes → PingDirectory creates/updates the user. Attribute mapping: SAML "email" → LDAP "mail", SAML "department" → LDAP "ou", SAML "groups" → LDAP "isMemberOf". Useful for SSO federations where you cannot pre-provision all users.',
+      vars:{'JIT create vs update':'first login → create user; subsequent logins → update attributes (optional); keep user data in sync with IdP without batch imports','attribute mapping accuracy':'JIT depends on the SP connection attribute contract; wrong mapping = wrong attributes in directory; test with a pilot user before rolling out','JIT and missing required attributes':'if a required LDAP attribute is not in the SAML assertion, JIT fails; define default values for non-critical attributes; require critical attributes in the assertion'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'Outbound provisioning (push to target apps): PingFederate outbound provisioning connectors push account changes to SaaS apps. Trigger: user data change in PingDirectory → PingFederate provisioning service detects change → sends SCIM/REST/SOAP call to target app. Target connectors: Salesforce (REST), ServiceNow (SCIM), Active Directory (LDAP write), Box (SCIM), Google Workspace (Google Directory API). Provisioning events: account creation, attribute update, group membership change, account deactivation. Failed events → retry queue → dead letter queue → alert.',
+      vars:{'provisioning connector':'Ping-supplied or custom connector; maps PingDirectory attributes to target app schema; handles pagination and rate limiting','retry queue':'failed provisioning events (target app down, transient error) are retried with exponential backoff; configurable retry count and delay','outbound sync vs JIT':'outbound sync = push changes proactively; JIT = create on first login; use both: outbound sync for existing users, JIT for new federation partners'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Deprovisioning lifecycle: the hardest part of IAM. Leaver process: HR system fires event → SCIM PATCH /Users/{id} {active: false} → PingDirectory marks account inactive → PingFederate SCIM pushes deactivation to all target apps → access tokens revoked (opaque) or wait for JWT expiry (short lifetime + blacklist). Orphaned accounts (active in SaaS but user left) are a compliance risk — regular access reviews (certification campaigns in PingOne or IDM) discover and remediate them. Immediate revocation for terminated employees: push deactivation event + revoke all refresh tokens at PingFederate.',
+      vars:{'account deactivation vs deletion':'deactivate first (active=false); delete after data retention period (90 days); GDPR right-to-erasure = deletion of PII; anonymization is an alternative','refresh token revocation on termination':'POST /oauth/revoke for all known refresh tokens; or revoke by username at PingFederate admin API; access tokens remain valid until exp (short lifetime mitigates this)','orphaned account discovery':'SCIM /Users?filter=active eq true from target app → diff against PingDirectory active users → flag discrepancies → access review workflow'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'PingIDM (ForgeRock Identity Management / PingOne Advanced Identity Cloud): full lifecycle management orchestrator. Reconciliation: compares identity store (HR system) with target systems and detects/corrects discrepancies (missing accounts, wrong attributes, orphaned accounts). Workflow: approval workflows for access requests (user requests Salesforce Admin → manager approves → PingIDM provisions). Password sync: intercepts AD password changes and syncs to other systems. Scripted connectors: Groovy scripts for custom REST/SOAP systems. IDM is the "glue" that connects all provisioning sources and targets.',
+      vars:{'reconciliation runs':'scheduled or event-triggered; compares source (authoritative: HR) with target (managed: LDAP/SaaS); creates, updates, deletes to match source','IDM workflow':'approval workflow using IDM\'s built-in engine; email notifications; delegation; escalation; audit trail for compliance','Groovy connector':'IDM scripted connector reads/writes to any system via Groovy; HTTP client for REST APIs; powerful but requires maintenance'},
+      tone:'ok',
+      callout:'CIAM provisioning stack: Workday (source of truth for employees) → PingIDM reconciliation → PingDirectory (identity store, SCIM endpoint). New customer registration: Angular SPA → Spring Boot API → SCIM POST /Users to PingDirectory. JIT provisioning for partner federation: SAML assertion → PingFederate JIT connector → PingDirectory. Deprovisioning: HR termination event → PingIDM workflow → SCIM PATCH active=false → PingFederate pushes to all SP connections. Access reviews: PingOne Advanced Identity Cloud certification campaigns quarterly. All changes logged to immutable audit log for SOC 2 compliance.'
+    }
+  ],
+  code:[
+    '# SCIM 2.0 — create user',
+    'POST /scim/v2/Users',
+    '{',
+    '  "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],',
+    '  "userName": "alice@example.com",',
+    '  "name": { "givenName": "Alice", "familyName": "Smith" },',
+    '  "emails": [{ "value": "alice@example.com", "primary": true }],',
+    '  "active": true',
+    '}',
+    '',
+    '# SCIM 2.0 — deactivate (leaver process)',
+    'PATCH /scim/v2/Users/alice-user-id',
+    '{',
+    '  "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],',
+    '  "Operations": [',
+    '    { "op": "replace", "path": "active", "value": false }',
+    '  ]',
+    '}',
+    '',
+    '# Revoke all refresh tokens for terminated user',
+    'DELETE /pf-admin-api/v1/oauth/userAccessSessions?username=alice'
+  ]
+});
+</script>
+
 <script>
 function showStage(name) {
   document.querySelectorAll('.lifecycle-detail').forEach(d => d.classList.remove('show'));

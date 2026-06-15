@@ -193,6 +193,79 @@ oauth2_scheme = <code class="fn">OAuth2PasswordBearer</code>(tokenUrl=<code clas
     ...</pre>
   </section>
 </div>
+
+<!-- ── Code Walkthrough: FastAPI Deep ── -->
+<div id="cw-fastapi"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-fastapi',{
+  id:'cw-fastapi',
+  title:'FastAPI deep — dependency injection, lifespan, background tasks, response models, and security schemes',
+  subtitle:'FastAPI is a high-performance async Python web framework built on Starlette + Pydantic. It generates OpenAPI schemas automatically from type hints, validates request/response data via Pydantic, and handles async routes natively. The Depends() system is the core of FastAPI\'s power: composable, testable dependency injection for auth, DB connections, rate limiting, and shared logic. Understanding Depends, lifespan, and security schemes is essential for production FastAPI CIAM services.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'Depends() — dependency injection: Depends(get_db) injects a database session; FastAPI calls get_db() and passes the result as the parameter. Dependencies can themselves have dependencies (nested). Dependencies are cached per request by default (scope="request" — called once per request, not once per route). use_cache=False forces re-execution. Common patterns: get_db (yields DB session, commits/rolls back on exit), get_current_user (validates JWT, returns User), require_scope (validates JWT scope). Dependencies can be async def or regular def.',
+      vars:{'Depends(fn)':'calls fn with its own dependencies injected; result passed as the parameter value; cached once per request by default','async def dependency':'if the dependency makes I/O calls (DB lookup, JWKS fetch), make it async def; FastAPI awaits it automatically','Annotated[X, Depends(fn)]':'the modern syntax (Python 3.9+); type annotation + dependency in one; CommonDep = Annotated[User, Depends(get_current_user)]; reuse across routes'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'Lifespan context manager (FastAPI 0.95+): replaces deprecated @app.on_event. @asynccontextmanager async def lifespan(app): setup_code(); yield; teardown_code(). app = FastAPI(lifespan=lifespan). Setup: create shared aiohttp.ClientSession, initialize DB connection pool, load JWKS keys. Teardown: close session and pool. Resources in lifespan are accessible via app.state (or as module-level variables). Enables proper async setup/teardown without blocking the event loop. Also used in testing: override lifespan to use test DB.',
+      vars:{'lifespan @asynccontextmanager':'yield splits setup and teardown; code before yield = startup; code after yield = shutdown; AsyncContextManager protocol','app.state':'attached to the FastAPI app instance; lifespan sets app.state.db_pool = pool; route handlers access request.app.state.db_pool','lifespan testing':'TestClient uses the lifespan; test fixtures can override app.state before requests; integration-test the full startup sequence'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'Response models and status codes: @app.get("/users", response_model=list[UserResponse], status_code=200). response_model filters and serializes the return value — only fields declared in UserResponse are included (prevents leaking internal fields). response_model=None to disable filtering. status_code: default 200 for GET, set 201 for POST (resource creation). HTTPException(status_code=404, detail="User not found", headers={"WWW-Authenticate": "Bearer"}). JSONResponse for custom response construction. Response class for streaming or custom headers.',
+      vars:{'response_model':'Pydantic model; FastAPI serializes and validates the response; strips internal-only fields; generates the OpenAPI response schema','HTTPException':'raise it anywhere in route or dependency; FastAPI converts to HTTP error response; headers={} adds response headers (WWW-Authenticate for 401)','status_code=201':'return 201 Created for POST routes that create resources; FastAPI default is 200; set on the decorator'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Security schemes: HTTPBearer() extracts "Bearer <token>" from Authorization header. OAuth2PasswordBearer(tokenUrl="/token") extracts Bearer token and documents it in OpenAPI. APIKeyHeader(name="X-API-Key") for API key auth. Custom: class JwtAuth: async def __call__(self, credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer())): token = credentials.credentials; claims = await validate_jwt(token); return claims. Inject as CommonJwt = Annotated[JwtClaims, Depends(JwtAuth())]. Scopes: SecurityScopes in Depends(require_scope("read:identity")) for fine-grained scope enforcement.',
+      vars:{'HTTPBearer()':'extracts Authorization: Bearer <token>; raises 403 if missing (not 401); combine with your JWT validator','OAuth2PasswordBearer':'documents tokenUrl in OpenAPI Swagger UI; enables "Authorize" button; extracts Bearer token; purely documentation + extraction, no validation','SecurityScopes':'FastAPI scopes parameter in Depends; @app.get("/", dependencies=[Security(require_scope, scopes=["read:identity"])]) — declarative scope requirements'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'Background tasks and path/query params: BackgroundTasks.add_task(fn, *args) runs fn after the response is sent — use for logging, notifications, cache invalidation. Does NOT support database transactions in the background task (DB session is closed when the response is sent). Path params: @app.get("/{user_id}") → user_id: str in function signature. Query params: parameter with no Path/Body annotation and not in path = query param. Body params: param: BodyModel (Pydantic model) → request body (JSON). Combine: def route(id: int, filter: str = Query(None), body: BodyModel = Body(...))',
+      vars:{'BackgroundTasks':'add_task(send_email, to=user.email) — executes after response; do NOT use for critical business logic (failures are silent)','Query(None, min_length=1)':'Pydantic validation on query params; None = optional; min_length/max_length/regex/alias for validation and OpenAPI docs','Path(ge=1, le=9999)':'Pydantic validation on path params; ge=greater-or-equal; le=less-or-equal; alias for renaming; title/description for OpenAPI'},
+      tone:'ok',
+      callout:'CIAM FastAPI: create a JwtValidator dependency class (caches JWKS keys, validates signature + exp + aud + scp). CommonJwt = Annotated[JwtClaims, Depends(JwtValidator())]. Use lifespan to create a shared aiohttp.ClientSession for JWKS fetching. @app.get("/identity/{user_id}", response_model=UserResponse, dependencies=[Security(require_scope, scopes=["read:identity"])]) gates the endpoint on scope. BackgroundTasks logs the access event to the CIAM audit log asynchronously. HTTPException(status_code=401, headers={"WWW-Authenticate": \'Bearer realm="ciam"\'}) for token validation failures — returns proper OAuth2 error format.'
+    }
+  ],
+  code:[
+    '# Dependency — JWT validator',
+    'class JwtValidator:',
+    '    async def __call__(self,',
+    '        creds: HTTPAuthorizationCredentials = Depends(HTTPBearer())',
+    '    ) -> JwtClaims:',
+    '        return await validate_jwt(creds.credentials)',
+    '',
+    'CommonJwt = Annotated[JwtClaims, Depends(JwtValidator())]',
+    '',
+    '# Lifespan — shared HTTP session',
+    '@asynccontextmanager',
+    'async def lifespan(app: FastAPI):',
+    '    app.state.http = aiohttp.ClientSession()',
+    '    yield',
+    '    await app.state.http.close()',
+    '',
+    'app = FastAPI(lifespan=lifespan)',
+    '',
+    '# Route — response model + background task',
+    '@app.get("/identity/{user_id}",',
+    '    response_model=UserResponse, status_code=200)',
+    'async def get_user(user_id: str, claims: CommonJwt,',
+    '    bg: BackgroundTasks, req: Request):',
+    '    user = await db.get(user_id)',
+    '    bg.add_task(audit_log, user_id, claims.sub)',
+    '    return user'
+  ]
+});
+</script>
+
 <script>
 (function(){
   const pfx='ff';
