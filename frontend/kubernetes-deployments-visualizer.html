@@ -159,6 +159,79 @@ kubectl rollout history deployment/api-server
 </section>
 </div>
 
+<!-- ── Code Walkthrough: Kubernetes Deployments ── -->
+<div id="cw-k8sdeploy"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-k8sdeploy',{
+  id:'cw-k8sdeploy',
+  title:'Kubernetes Deployments — ReplicaSets, rolling updates, health probes, and resource limits',
+  subtitle:'A Deployment is the declarative way to run a stateless application in Kubernetes. It manages ReplicaSets (which manage Pods). Deployments handle: desired replica count, rolling update strategy (zero-downtime), rollback, and pod template changes. Health probes (liveness, readiness, startup) tell Kubernetes whether your pod is alive and ready to receive traffic.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'Deployment anatomy: apiVersion: apps/v1, kind: Deployment. spec.replicas = desired pod count. spec.selector.matchLabels selects which pods this Deployment manages (must match pod template labels). spec.template = the pod template (all pods created by this Deployment use this template). Changes to the template trigger a rolling update. The Deployment creates and manages ReplicaSets; do not manage ReplicaSets directly.',
+      vars:{'selector.matchLabels':'must match template.metadata.labels; if they do not match, the Deployment controller ignores those pods','spec.replicas':'desired number of pod replicas; HorizontalPodAutoscaler can override this dynamically','immutable fields':'certain pod template fields (like container port names) cannot be changed in-place; delete + recreate the Deployment'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'Rolling update strategy: spec.strategy.type: RollingUpdate. maxUnavailable: 0 (no pods taken down before new ones are ready — zero-downtime but needs 2x capacity during rollout). maxSurge: 1 (one extra pod above replicas during rollout). Rollback: kubectl rollout undo deployment/myapp (restores previous ReplicaSet). kubectl rollout status deployment/myapp watches progress. kubectl rollout pause / resume for canary-style control.',
+      vars:{'maxUnavailable: 0, maxSurge: 1':'zero-downtime rolling update; at least replicas pods always running; one extra pod during transition','RollingUpdate vs Recreate':'RollingUpdate = zero downtime; Recreate = delete all then start new (causes downtime; use only for development)','kubectl rollout undo':'reverts to previous ReplicaSet; Kubernetes keeps revision history (spec.revisionHistoryLimit, default 10)'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'Health probes: livenessProbe — if it fails, Kubernetes restarts the container (use for deadlock detection: if the app is alive but stuck). readinessProbe — if it fails, the pod is removed from Service endpoints (no traffic sent — use for "not ready to accept requests" during startup or maintenance). startupProbe — while it is running, liveness and readiness probes are disabled (use for apps with slow startup — avoids premature restarts).',
+      vars:{'livenessProbe failure':'kubelet kills + restarts the container; use for irrecoverable states (deadlock, corrupted state)','readinessProbe failure':'pod removed from Service endpoint slices; no traffic; use for slow startup, graceful shutdown, dependency unavailability','startupProbe + liveness':'startupProbe runs first (initial slow check); only after it succeeds does liveness take over (fast periodic check)'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Resource requests and limits: requests.cpu and requests.memory are used by the scheduler to find a node with enough capacity (guaranteed minimum). limits.cpu and limits.memory are the maximum. Exceeding CPU limit = CPU throttling (no kill). Exceeding memory limit = OOMKilled. Best practice: set requests = limits for predictable behavior (Guaranteed QoS class). For Spring Boot: set -XX:MaxRAMPercentage=75 so the JVM heap fits within the memory limit.',
+      vars:{'requests vs limits':'requests = scheduler hint (guaranteed); limits = hard cap; set them equal for Guaranteed QoS class','CPU: 500m':'500 millicores = 0.5 CPU; 1000m = 1 CPU core; CPU is compressible (throttled, not killed when over limit)','memory: 512Mi':'mebibytes; memory is NOT compressible; exceeding the limit causes OOMKill; set -XX:MaxRAMPercentage to stay under'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'Deployment best practices: always set resource requests and limits. Always define readiness and liveness probes. Use minReadySeconds to prevent premature traffic. Set terminationGracePeriodSeconds >= your app\'s graceful shutdown time (default 30s; Spring Boot needs 30s for in-flight requests + JVM shutdown). Add preStop lifecycle hook to delay shutdown (gives load balancer time to deregister the pod before SIGTERM). Label pods consistently for NetworkPolicy and monitoring selectors.',
+      vars:{'terminationGracePeriodSeconds':'SIGTERM is sent; app has this many seconds to clean up before SIGKILL; set to 30-60s for Spring Boot','preStop hook':'lifecycle.preStop.exec.command: sleep 5; small delay before SIGTERM ensures load balancer deregisters first','minReadySeconds':'pod must be ready for this many seconds before counted as available; prevents flapping deployments'},
+      tone:'ok',
+      callout:'CIAM: your Spring Boot JWT validation service Deployment should have: replicas: 3 (HA), rollingUpdate with maxUnavailable: 0, readinessProbe on /actuator/health/readiness (Spring Boot Actuator), livenessProbe on /actuator/health/liveness, resources.requests/limits (512Mi memory, 500m CPU), and terminationGracePeriodSeconds: 60. The readiness probe ensures no traffic is sent while the service is fetching its JWKS keys from Entra at startup. The liveness probe restarts the pod if it enters a deadlock state during concurrent token validation.'
+    }
+  ],
+  code:[
+    'apiVersion: apps/v1',
+    'kind: Deployment',
+    'metadata: { name: ciam-api }',
+    'spec:',
+    '  replicas: 3',
+    '  selector: { matchLabels: { app: ciam-api } }',
+    '  strategy:',
+    '    type: RollingUpdate',
+    '    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }',
+    '  template:',
+    '    metadata: { labels: { app: ciam-api } }',
+    '    spec:',
+    '      terminationGracePeriodSeconds: 60',
+    '      containers:',
+    '      - name: ciam-api',
+    '        image: myregistry/ciam-api:1.0.0',
+    '        resources:',
+    '          requests: { memory: "512Mi", cpu: "250m" }',
+    '          limits:   { memory: "512Mi", cpu: "500m" }',
+    '        readinessProbe:',
+    '          httpGet: { path: /actuator/health/readiness, port: 8080 }',
+    '          initialDelaySeconds: 10',
+    '        livenessProbe:',
+    '          httpGet: { path: /actuator/health/liveness, port: 8080 }',
+    '          initialDelaySeconds: 30',
+    '        lifecycle:',
+    '          preStop: { exec: { command: ["sleep", "5"] } }'
+  ]
+});
+</script>
+
 <script>
 (function(){
 const pfx='kd';

@@ -153,6 +153,78 @@
 </section>
 </div>
 
+<!-- ── Code Walkthrough: Kubernetes Services and Networking ── -->
+<div id="cw-k8ssvc"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-k8ssvc',{
+  id:'cw-k8ssvc',
+  title:'Kubernetes Services and Networking — ClusterIP, Ingress, DNS, NetworkPolicy, and CIAM traffic flow',
+  subtitle:'A Kubernetes Service provides a stable DNS name and IP for a set of pods (selected by labels). Services abstract away ephemeral pod IPs. ClusterIP is internal-only. NodePort exposes on every node\'s port. LoadBalancer creates a cloud load balancer. Ingress routes external HTTP traffic to multiple services. NetworkPolicy controls which pods can communicate with which.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'ClusterIP (default): stable virtual IP reachable only within the cluster. kube-proxy programs iptables/IPVS rules to load-balance traffic across pod endpoints. DNS: service-name.namespace.svc.cluster.local resolves to the ClusterIP. CoreDNS is the cluster DNS server. Service discovery: within the same namespace, you can use just service-name. Across namespaces: service-name.namespace. When pods are added/removed, the Service endpoint slice updates automatically.',
+      vars:{'ClusterIP':'virtual IP; iptables/IPVS load-balances to pod endpoints; only accessible from within the cluster','service.namespace.svc.cluster.local':'full DNS name; within same namespace just service name works; always use DNS not pod IPs','spec.selector':'selects pods to route traffic to; must match pod labels; if empty selector, endpoints are manually managed'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'Ingress: routes external HTTP/HTTPS traffic to ClusterIP Services based on host + path rules. Requires an Ingress Controller (nginx-ingress, traefik, AWS ALB Ingress Controller, etc.) — Ingress without a controller does nothing. TLS: reference a kubernetes.io/tls Secret in the Ingress tls block. cert-manager can auto-issue and renew Let\'s Encrypt or internal CA certificates. IngressClass selects which Ingress Controller handles the resource.',
+      vars:{'Ingress rules':'host: api.example.com + path: /api → routes to ciam-api Service port 8080','nginx.ingress.kubernetes.io annotations':'configure nginx-specific options: rate limiting, CORS headers, upstream timeout, proxy buffering','cert-manager ClusterIssuer':'automatically provisions TLS certificates from Let\'s Encrypt or an internal CA; annotate Ingress with cert-manager.io/cluster-issuer'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'NetworkPolicy: restricts pod-to-pod and pod-to-external traffic at the IP level (L3/L4). Default: all pods can communicate with all other pods (allow-all). A NetworkPolicy with an empty podSelector selects all pods in the namespace. Ingress rules: allow traffic from specific pods (by label) or namespaces. Egress rules: allow traffic to specific destinations. Requires a CNI plugin that supports NetworkPolicy (Calico, Cilium, Weave).',
+      vars:{'default deny pattern':'create a NetworkPolicy that selects all pods with empty ingress/egress rules; then add explicit allow policies','podSelector: {}':'selects ALL pods in the namespace (when used as the NetworkPolicy target or in a from/to rule)','namespaceSelector':'allow traffic from all pods in a specific namespace (by namespace label); useful for monitoring namespace scraping Prometheus'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Service types summary: ClusterIP (internal only, default). NodePort (exposes on each Node\'s IP:nodePort 30000-32767; use for dev/testing). LoadBalancer (creates cloud load balancer — AWS NLB/ALB, GCP LB; expensive; use Ingress instead for HTTP). ExternalName (DNS CNAME alias to external service — e.g., map internal-db to rds.amazonaws.com). Headless Service (spec.clusterIP: None) — DNS returns pod IPs directly; used for StatefulSets and service mesh discovery.',
+      vars:{'LoadBalancer':'one cloud load balancer per Service; use sparingly; prefer Ingress for multiple HTTP services','ExternalName':'no proxying; just DNS CNAME; use to abstract RDS endpoints (swap without redeploying apps)','Headless (clusterIP: None)':'for StatefulSets (stable pod DNS), gRPC (client-side load balancing), and service meshes that need individual pod addresses'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'CIAM traffic flow: Internet → AWS ALB / Azure Application Gateway → Ingress Controller (nginx) → Ingress resource (routes by host) → ClusterIP Service → pod endpoints (3 JWT validation replicas). The Ingress handles TLS termination (cert-manager TLS cert). The Service load-balances across healthy (readiness-probe-passing) pods. NetworkPolicy restricts: only allow traffic TO ciam-api FROM the ingress-controller namespace; only allow traffic FROM ciam-api TO the postgres Service.',
+      vars:{'TLS termination at Ingress':'Ingress controller handles TLS; pods receive plain HTTP from the Ingress; simpler cert management','internal mTLS (service mesh)':'Istio/Linkerd add mTLS between pods automatically; Ingress → Service → pod traffic is encrypted','zero-trust networking':'NetworkPolicy default-deny + explicit allow; no pod can reach another unless explicitly permitted'},
+      tone:'ok',
+      callout:'CIAM: your JWT validation service sits behind the Ingress at /api. Configure CORS in the Ingress nginx annotations (nginx.ingress.kubernetes.io/enable-cors: "true", cors-allow-origin: "https://your-angular-app.azurewebsites.net"). NetworkPolicy: allow ingress from namespace ingress-controller; allow egress to Entra JWKS endpoint (via FQDN egress policy if using Cilium). This ensures only the Ingress Controller can reach your CIAM API, and your CIAM API can only call Entra — nothing else. Zero-trust in practice.'
+    }
+  ],
+  code:[
+    '# ClusterIP Service — internal DNS access',
+    'apiVersion: v1',
+    'kind: Service',
+    'metadata: { name: ciam-api, namespace: ciam-prod }',
+    'spec:',
+    '  selector: { app: ciam-api }',
+    '  ports: [{ port: 80, targetPort: 8080 }]',
+    '  # type: ClusterIP (default)',
+    '',
+    '# Ingress — external HTTPS → ClusterIP',
+    'apiVersion: networking.k8s.io/v1',
+    'kind: Ingress',
+    'metadata:',
+    '  name: ciam-api',
+    '  annotations:',
+    '    cert-manager.io/cluster-issuer: letsencrypt-prod',
+    '    nginx.ingress.kubernetes.io/enable-cors: "true"',
+    'spec:',
+    '  tls: [{ hosts: [api.example.com], secretName: ciam-tls }]',
+    '  rules:',
+    '  - host: api.example.com',
+    '    http: { paths: [{ path: /api, pathType: Prefix,',
+    '              backend: { service: { name: ciam-api, port: { number: 80 }}}}]}',
+    '',
+    '# NetworkPolicy — default deny + allow from ingress',
+    '# ingress from: namespaceSelector: matchLabels: kubernetes.io/metadata.name: ingress-nginx'
+  ]
+});
+</script>
+
 <script>
 (function(){
 const pfx='ks';

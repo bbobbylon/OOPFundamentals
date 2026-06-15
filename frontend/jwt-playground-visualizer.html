@@ -217,6 +217,81 @@
 
 </div>
 
+<!-- ── Code Walkthrough: JWT Structure ── -->
+<div id="cw-jwtpg"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-jwtpg',{
+  id:'cw-jwtpg',
+  title:'JWT anatomy — header, payload, signature, base64url encoding, and claim validation',
+  subtitle:'A JSON Web Token (JWT) is three base64url-encoded JSON objects joined by dots: header.payload.signature. The header names the algorithm; the payload carries claims (sub, iss, aud, exp, iat, nbf, and custom claims); the signature proves the token has not been tampered with. Decoding is trivial (base64url decode); verification requires the public key.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'JWT structure: eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.signature. Three base64url segments separated by dots. Base64url uses - instead of + and _ instead of / and omits padding (=). Segment 1 (header): alg (algorithm: RS256, ES256, HS256), typ (JWT), kid (key ID for JWKS lookup). Segment 2 (payload): registered claims + custom claims. Segment 3 (signature): HMAC or RSA/ECDSA signature over header + "." + payload using the key specified by alg+kid.',
+      vars:{'base64url != base64':'base64url uses - and _ (URL-safe); no padding =; standard base64 uses + and / (not URL-safe)','alg + kid in header':'alg = signing algorithm; kid = key ID to find the public key in JWKS; both required for RS256 verification','three segments always':'split on \'.\'; exactly 3 parts; if not 3 parts → not a valid JWT (reject before parsing)'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'Registered claims (RFC 7519): iss (issuer — who created the token), sub (subject — who the token represents, usually user ID or email), aud (audience — who the token is intended for; your API\'s client ID), exp (expiration, Unix epoch seconds), iat (issued at), nbf (not valid before). All are optional by the spec but iss, sub, aud, and exp are mandatory in OAuth 2.0 CIAM practice. exp should always be validated.',
+      vars:{'aud claim':'must match your API\'s expected audience (application client ID); prevents tokens issued for other apps being used on your API','exp claim':'Unix epoch seconds (long); compare to current time; reject if current > exp; add a small clock skew tolerance (60 seconds)','sub claim':'the stable identifier for the user; in Entra ID this is an Object ID GUID (not email — email can change)'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'Custom claims: scopes (scp in Entra: "User.Read openid profile"), app roles (roles: ["Admin","Reader"]), tenant ID (tid in Entra), and any other application-specific data. Custom claims are set by the authorization server or by API claims mapping policies. In Spring Security: jwt.getClaim("scp") or jwt.getClaimAsStringList("roles"). Never put sensitive data (passwords, secrets, PII) in JWT claims — the payload is base64url ENCODED not ENCRYPTED (anyone can decode it).',
+      vars:{'scp vs roles':'scp = delegated scopes (user-granted); roles = app roles (assigned in Azure portal); different authorization checks','JWT is not encrypted':'base64url is encoding, not encryption; use JWE (JSON Web Encryption) if you need confidentiality','custom claims mapping':'in Entra: configure optional claims in the app registration manifest; in Ping: use token mapping rules'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'JWT validation steps (all must pass): (1) verify the token has 3 parts and is well-formed base64url. (2) decode the header, find the kid. (3) look up the public key in the JWKS by kid. (4) verify the signature using the public key and the alg from the header. (5) check exp > now. (6) check nbf <= now (if present). (7) check iss matches your expected issuer. (8) check aud contains your API audience. Spring Security NimbusJwtDecoder handles all of these.',
+      vars:{'step 4 (signature) is the security guarantee':'prevents forgery; without this step anyone can create any claims','step 7 (iss)':'prevents tokens from one tenant being used on another tenant\'s API','step 8 (aud)':'prevents tokens issued for App A from being replayed on App B within the same Entra tenant'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'JWT debugging tools: jwt.io decodes any JWT in the browser (never paste production tokens). The playground below generates and validates JWTs locally. A tampered JWT has a valid header+payload but an invalid signature — validation step 4 rejects it. An expired JWT has a valid signature but exp < now — step 5 rejects it. An audience mismatch has valid signature and timing but aud does not match — step 8 rejects it. Each failure gives a different error code in Spring Security.',
+      vars:{'401 Unauthorized':'invalid signature, expired, or malformed JWT; MSAL catches this and silently refreshes','403 Forbidden':'valid JWT but missing required scope or role; user is authenticated but not authorized; MSAL cannot fix this','jwt.io':'decode any JWT in browser; shows header/payload/signature; use for debugging NEVER paste real prod tokens'},
+      tone:'ok',
+      callout:'CIAM: the JWT is the contract between your Angular frontend (which gets it from Entra/Ping) and your Spring Boot API (which validates it). Every CIAM developer must be able to: decode a JWT at jwt.io to check its claims, identify which claim is failing validation (aud? iss? exp?), and configure Spring Boot NimbusJwtDecoder with the correct issuer URI and audience. The most common misconfiguration: audience claim mismatch (Spring Boot API expects "api://client-id" but the token carries "client-id" or the full URI).'
+    }
+  ],
+  code:[
+    '// JWT structure: header.payload.signature (base64url encoded)',
+    '// Header: { "alg": "RS256", "typ": "JWT", "kid": "abc123" }',
+    '// Payload: { "sub": "user123", "iss": "https://sts.windows.net/{tenant}/",',
+    '//            "aud": "api://my-api-client-id", "exp": 1735686000,',
+    '//            "iat": 1735682400, "scp": "User.Read", "roles": ["Admin"] }',
+    '// Signature: RSA-SHA256(base64url(header) + "." + base64url(payload), privateKey)',
+    '',
+    '// Decode (NOT verify) in Java',
+    'String[] parts = token.split("\\\\.", 3);',
+    'String payloadJson = new String(Base64.getUrlDecoder().decode(parts[1]));',
+    '// {"sub":"user123","iss":"...","aud":"...","exp":1735686000,...}',
+    '',
+    '// Full validation — Spring Boot (all 8 checks automatic)',
+    '@Bean JwtDecoder jwtDecoder() {',
+    '  NimbusJwtDecoder decoder = NimbusJwtDecoder.withJwkSetUri(jwksUri).build();',
+    '  decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(',
+    '    JwtValidators.createDefaultWithIssuer(issuer),',
+    '    new JwtClaimValidator<>("aud", aud -> aud.contains(expectedAudience))',
+    '  ));',
+    '  return decoder;',
+    '}',
+    '',
+    '// Extract claim in Spring Security controller',
+    '@GetMapping("/me")',
+    'public UserDto me(@AuthenticationPrincipal Jwt jwt) {',
+    '  String sub = jwt.getSubject();',
+    '  List<String> roles = jwt.getClaimAsStringList("roles");',
+    '  return new UserDto(sub, roles);',
+    '}'
+  ]
+});
+</script>
+
 <script>
 // Cross-link into the hub iframe (keeps the shell); standalone, the href just loads.
 document.addEventListener('click', function (e) {
