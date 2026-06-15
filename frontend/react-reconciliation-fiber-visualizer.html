@@ -132,6 +132,77 @@
     </div>
   </section>
 </div>
+
+<!-- ── Code Walkthrough: Reconciliation & Fiber ── -->
+<div id="cw-rfiber"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-rfiber',{
+  id:'cw-rfiber',
+  title:'Reconciliation and Fiber — work loop, lanes, time slicing, double buffering, and commit phases',
+  subtitle:'The Fiber reconciler is React internals. A Fiber is a JavaScript object representing a unit of work (one component). Reconciliation compares the current Fiber tree against a work-in-progress tree and computes the minimal DOM changes. Fiber makes reconciliation interruptible: the work loop yields to the browser between Fiber nodes, enabling time slicing (no more "UI jank" from large renders). Lanes model priority: user input is high priority, background updates are low priority.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'Fiber node structure: each component instance gets a Fiber object. Key fields: type (component function/class/"div"), stateNode (DOM node or class instance), pendingProps/memoizedProps, memoizedState (hook state linked list), flags (side effects: Placement, Update, Deletion), alternate (pointer to the other buffered tree). Tree structure: child (first child), sibling (next sibling), return (parent). React traverses this linked structure during reconciliation — not a recursive call stack (enables pausing/resuming).',
+      vars:{'Fiber = unit of work':'one Fiber per component instance; not recreated on every render (the same Fiber object is updated); stateNode is the class instance or DOM node','alternate pointer':'current tree Fiber ↔ work-in-progress Fiber; after commit, they swap; the "finished" tree becomes "current"; this is double buffering','memoizedState linked list':'hooks are stored as a linked list on the Fiber (first hook = first node, second hook = second node); this is why hooks must always be called in the same order'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'Render phase (work loop): React traverses the Fiber tree in a loop (not recursion). beginWork(fiber) processes a Fiber node (calls the component function, diffs children). completeWork(fiber) post-processes after all children are processed. The loop yields to the browser (using MessageChannel or scheduler.postTask) between Fiber nodes when the current time slice expires (usually ~5ms). If the browser has urgent work (user input), the work loop pauses and lets the browser handle it first. This is time slicing — it is only active in concurrent mode (createRoot).',
+      vars:{'beginWork + completeWork':'beginWork descends into children; completeWork ascends after children complete; both can mark Fibers with effects (Placement/Update/Deletion)','time slice yield':'the scheduler checks if the current time > deadline every ~100 Fibers; yields if true; pauses reconciliation, browser runs, scheduler resumes','legacy mode (ReactDOM.render)':'synchronous reconciliation; no yielding; no time slicing; entire tree reconciles in one call; blocks the main thread for large trees'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'Lanes and priority: React 18 uses a bitmask of 31 lanes to represent priority levels. SyncLane (highest): user interactions (click, input). InputContinuousLane: scroll, drag. DefaultLane: normal updates. TransitionLane: wrapped in startTransition. IdleLane (lowest): offscreen updates. React picks the highest-priority lane and works on it first. If a high-priority update interrupts a low-priority render, React throws away the incomplete work and starts a new render with both updates combined (interleaved rendering).',
+      vars:{'lane bitmask':'each lane is a bit in a 32-bit integer; React can check "are there any pending updates at or above this priority" in O(1)','startTransition → TransitionLane':'wrapping setState in startTransition marks the update as a transition; React can interrupt and restart it; user input never waits for transitions','interleaved rendering':'high-priority update interrupts low-priority render; React restarts from scratch combining both updates; ensures user input is never blocked'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Commit phase (uninterruptible): after reconciliation the work-in-progress tree is complete. The commit phase applies the effect list to the DOM in three sub-phases, all synchronous: (1) commitBeforeMutationEffects — reads DOM before mutations (getSnapshotBeforeUpdate, no visible change); (2) commitMutationEffects — applies all DOM mutations (Placement: insert, Update: patch, Deletion: remove); (3) commitLayoutEffects — runs useLayoutEffect synchronously after mutation. After these: browser paints. Then: passive effects (useEffect cleanup and setup) run asynchronously.',
+      vars:{'three commit sub-phases':'before-mutation (read), mutation (write), layout (sync post-mutation); all three complete before browser paints','useLayoutEffect fires in layout phase':'synchronous after DOM mutations but before paint; can read updated layout without flickering; heavy use blocks painting','useEffect fires in passive phase':'asynchronous after paint; does not block the browser; the phase runs when the browser is idle; cleanup runs before next effect'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'Strict Mode double-invocation: in React 18 development mode, React invokes render functions, hook initializers, and effect cleanup/setup twice — in rapid succession. This detects side effects that are not properly cleaned up (would cause bugs on Concurrent React where effects can be mounted/unmounted multiple times). In production: no double-invocation. Key invariant: if your component works correctly with double-invocation (idempotent render, proper cleanup), it works correctly in concurrent mode. Any bug revealed by Strict Mode is a real bug, not a false positive.',
+      vars:{'double-invocation detects non-idempotent render':'if render has side effects (console.log is fine; modifying external state is not), Strict Mode reveals it','effect mounted twice':'React simulates mount → unmount → remount in development; if cleanup does not fully undo the effect, a bug will appear; this is intentional','production behavior unchanged':'Strict Mode is development-only; double-invocation never happens in production builds; it is purely a dev-time safety check'},
+      tone:'ok',
+      callout:'CIAM Fiber/reconciliation: in the admin portal, the user table with 5,000 rows uses startTransition for role filter updates (TransitionLane) so typing in the filter stays on SyncLane (instant). The token inspector dialog is in its own Fiber subtree — when it opens, React only reconciles the dialog subtree (not the whole page). useLayoutEffect in the MFA code input reads the input dimensions after render (before paint) to position the tooltip correctly. Strict Mode revealed a missing cleanup in the useTokenRefresh hook — the interval was not being cleared on unmount.'
+    }
+  ],
+  code:[
+    '// Concurrent mode: startTransition for priority',
+    'function AdminUserList({ users }) {',
+    '  const [filter, setFilter] = useState("")',
+    '  const [filtered, setFiltered] = useState(users)',
+    '  const [isPending, startTransition] = useTransition()',
+    '',
+    '  const handleFilter = (e) => {',
+    '    const q = e.target.value',
+    '    setFilter(q)  // SyncLane — immediate',
+    '    startTransition(() => {  // TransitionLane — interruptible',
+    '      setFiltered(users.filter(u =>',
+    '        u.name.toLowerCase().includes(q.toLowerCase()))',
+    '      )',
+    '    })',
+    '  }',
+    '',
+    '  return (',
+    '    <>',
+    '      <input value={filter} onChange={handleFilter} />',
+    '      {isPending && <span>Filtering...</span>}',
+    '      <UserTable users={filtered} />',
+    '    </>',
+    '  )',
+    '}'
+  ]
+});
+</script>
+
 <script>
 (function(){
   const pfx='rf';

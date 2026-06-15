@@ -126,6 +126,80 @@
     <div class="key-insight"><strong>useId is for accessibility attributes, not list keys.</strong> It produces IDs derived from the component's position in the tree so the server-rendered HTML and the client hydration generate the <em>same</em> string — eliminating hydration mismatches. Never use it as a <code>key</code> in a list (keys need to come from your data), and never use <code>Math.random()</code> for IDs (it differs between server and client → hydration error).</div>
   </section>
 </div>
+
+<!-- ── Code Walkthrough: React Concurrent ── -->
+<div id="cw-rconc"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-rconc',{
+  id:'cw-rconc',
+  title:'React concurrent — useTransition, useDeferredValue, Suspense, startTransition, and streaming SSR',
+  subtitle:'Concurrent React (React 18) enables rendering interruptible work. The key insight: not all UI updates are equal. User input (typing, clicking) needs immediate feedback — high priority. Background updates (fetching, filtering large lists) can be lower priority. useTransition and useDeferredValue let you mark updates as non-urgent so React can interrupt them to handle more urgent user input. Suspense coordinates loading states. Streaming SSR renders progressively.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'useTransition: marks a state update as a non-urgent transition. const [isPending, startTransition] = useTransition(). Wrap the non-urgent update: startTransition(() => setSearchQuery(input)). React renders the transition in the background and keeps the UI responsive to input. isPending is true while the transition is in progress — use it to show a loading indicator without full page loading. The UI never "freezes" while computing the transition. Critical for: filtering large lists, tab switching, page navigation with data.',
+      vars:{'startTransition(() => setState(x))':'marks setState(x) as non-urgent; React may interrupt rendering to process higher-priority input','isPending':'true while the transition is being processed in the background; display a subtle loading indicator; do NOT use isPending to disable interaction','useTransition vs setTimeout':'useTransition = React-aware; React batches and schedules properly; setTimeout = workaround; use useTransition'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'useDeferredValue: like useTransition but for VALUE deferral instead of an update function. const deferredQuery = useDeferredValue(searchQuery). deferredQuery lags behind searchQuery during a transition. Use useDeferredValue when you cannot wrap the state setter in startTransition (e.g., the state is owned by a third-party component). Pass deferredQuery to the expensive rendering subtree — React re-renders with the new value when idle. The difference: useTransition = I control the update; useDeferredValue = I control the render.',
+      vars:{'useDeferredValue(value)':'returns a version of value that lags during transitions; React renders the component twice: once with old value (stable), once with new (deferred)','when to use over useTransition':'when you cannot wrap the setter (prop drilling, third-party state); or when you want to keep the old value rendering while new one loads','stale render with old value':'React shows the old rendered output until the deferred value updates; combine with opacity/visual indicators to signal "this is stale data"'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'Suspense for data fetching: <Suspense fallback={<Spinner />}><UserProfile /></Suspense>. When UserProfile suspends (throws a Promise during render — used internally by frameworks like Next.js, Relay, React Query v5), Suspense shows the fallback. When the promise resolves, React renders UserProfile. Nested Suspense boundaries: fine-grained loading states per component tree section. Suspense works with lazy loading: const Profile = React.lazy(() => import("./Profile")). Never throw promises manually — use framework-provided Suspense-compatible APIs.',
+      vars:{'<Suspense fallback={<X/>}>':'wraps any component that might suspend; shows fallback while suspended; multiple Suspense boundaries = different loading states for different sections','React.lazy(() => import())':'code splitting + Suspense integration; component loaded asynchronously; Suspense shows fallback until loaded; reduces initial bundle size','Next.js Suspense':'use <Suspense> in App Router layouts around async server component boundaries; enables streaming HTML response'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'startTransition without useTransition: import { startTransition } from "react" — call it without the hook, as a module-level function. Use in event handlers where you cannot use hooks (non-component code, utilities). flushSync(() => setState(x)) — forces synchronous rendering (bypasses concurrent mode deferral). Use flushSync for: measuring DOM after an update (getComputedStyle), integrating with non-React libraries that need synchronous DOM updates. flushSync can hurt performance — use only when necessary.',
+      vars:{'import { startTransition } from "react"':'module-level; use outside components or in non-hook contexts; same semantics as the hook version','flushSync(() => setState(x))':'forces synchronous render; no concurrent interruption; use for DOM measurements post-update','React.startTransition vs useTransition':'startTransition = no isPending; useTransition = includes isPending for loading indicator; prefer useTransition inside components'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'Streaming SSR and Selective Hydration: with React 18 + Next.js App Router (or react-dom/server renderToPipeableStream), the server streams HTML progressively. Sections wrapped in <Suspense> are sent as soon as their data is ready (not waiting for the slowest data). Client-side: selective hydration starts with the most interactive sections first. The user sees meaningful HTML immediately (no blank screen) and can interact with parts of the page before the whole thing is hydrated. This dramatically improves TTFB (Time to First Byte) and LCP (Largest Contentful Paint) metrics.',
+      vars:{'renderToPipeableStream':'React 18 server rendering; streams HTML; Suspense boundaries = streaming boundaries; replaces renderToString','Selective hydration':'React hydrates the component the user is about to interact with first; click on a button before full hydration = React immediately hydrates that subtree','<Suspense> in App Router server components':'wraps async server components; HTML for the suspended section streams in later; fallback shown first; improves perceived loading performance'},
+      tone:'ok',
+      callout:'CIAM React concurrent: useTransition for the user search/lookup in an admin portal — filtering thousands of identity records by name or email is non-urgent; wrap the filter state update in startTransition so the input stays responsive. Suspense for the token inspector panel — it fetches live token data (async); <Suspense fallback={<TokenSkeleton />}><TokenInspector /></Suspense> shows a skeleton while loading. useDeferredValue for search results list when the search state is managed by a URL-param driven hook outside your control. Streaming SSR in Next.js for the CIAM dashboard — stream the above-the-fold metrics first, defer the user activity graph.'
+    }
+  ],
+  code:[
+    '// useTransition — non-urgent filter update',
+    'function IdentitySearch() {',
+    '  const [query, setQuery] = useState("")',
+    '  const [results, setResults] = useState([])',
+    '  const [isPending, startTransition] = useTransition()',
+    '',
+    '  const handleInput = (e) => {',
+    '    const val = e.target.value',
+    '    setQuery(val)  // immediate — keep input responsive',
+    '    startTransition(() => {',
+    '      setResults(filterUsers(val))  // non-urgent',
+    '    })',
+    '  }',
+    '',
+    '  return (',
+    '    <>',
+    '      <input value={query} onChange={handleInput} />',
+    '      {isPending && <span>Searching...</span>}',
+    '      <ResultsList results={results} />',
+    '    </>',
+    '  )',
+    '}',
+    '',
+    '// Suspense — async token data',
+    '<Suspense fallback={<TokenSkeleton />}>',
+    '  <TokenInspector userId={userId} />',
+    '</Suspense>'
+  ]
+});
+</script>
+
 <script>
 (function(){
   const pfx='cc';

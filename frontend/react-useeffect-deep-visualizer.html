@@ -123,6 +123,74 @@
     <div class="key-insight"><strong>Effect → render → effect waterfalls are slow.</strong> Each effect that calls <code>setState</code> forces another render + paint before the user sees the final result. Deriving values during render (or in an event handler) collapses that into a single pass.</div>
   </section>
 </div>
+
+<!-- ── Code Walkthrough: useEffect Deep Dive ── -->
+<div id="cw-ued"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-ued',{
+  id:'cw-ued',
+  title:'useEffect deep dive — deps array patterns, stale closures, infinite loops, cleanup, AbortController, and the rules of effects',
+  subtitle:'useEffect is React\'s mechanism for synchronizing with external systems: the DOM, network, timers, subscriptions. The mental model shift: useEffect is not a lifecycle method (not "run once on mount"). It is a synchronization point: "when these deps change, re-run this synchronization." Understanding this model eliminates most useEffect bugs. The three most common bugs: (1) stale closure from missing deps, (2) infinite loop from object/function deps that change every render, (3) missing cleanup causing resource leaks.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'deps array patterns: useEffect(fn) — no deps array, runs after EVERY render (rare use case). useEffect(fn, []) — empty deps, runs once after mount. useEffect(fn, [a, b]) — runs when a or b changes. The deps array should contain every reactive value that the effect uses (React ESLint plugin enforces this). Common mistake: omitting a dep because "I only want it to run on mount." React treats this as a stale closure bug (the effect sees the initial value of the omitted dep forever). Fix: add the dep and use useCallback/useMemo to stabilize it if it would otherwise re-run too frequently.',
+      vars:{'deps = every reactive value used':'if your effect uses count, userId, or any function from the component, add it to deps; omitting a dep means the effect uses a stale version','stabilize functions with useCallback':'if the effect depends on a function that changes every render, wrap the function in useCallback — stable reference means the effect does not re-run needlessly','useEffect for external sync only':'if you can compute a value from state/props, do it during render; only use useEffect for external system synchronization (timers, subscriptions, fetch, DOM)'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'Stale closure: the effect captures the values at the time it runs. If a dep is missing, the effect uses the value from the render it was created in — even after re-renders change it. Example: setInterval(() => console.log(count), 1000) with [] deps — always logs the initial count. Fix: add count to deps (interval restarts when count changes) OR use a ref to hold the latest value (const latestCount = useRef(count); useEffect(() => { latestCount.current = count }); setInterval(() => console.log(latestCount.current), 1000)). The ref approach is used when you want a stable interval but always read the latest value.',
+      vars:{'stale closure = missing dep bug':'effect captures variables at creation time; if the variable changes but is not in deps, the effect uses the old value forever','latest ref pattern':'useRef stores the current value; interval reads from ref instead of closure; avoids re-running the effect on every count change; reads fresh value on each tick','functional setState avoids stale closure':'setCount(prev => prev + 1) — always uses the latest state; does not capture count in the closure; safe even with [] deps'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'Infinite loop patterns: useEffect(fn, [someObject]) — if someObject is created during render (const options = { debug: true } inside the component), it gets a new reference every render, triggering the effect every render, which triggers another render... Fix: move the object outside the component (if constant) or useRef/useMemo. Another infinite loop: useEffect(() => { setState(computedValue) }, [state]) — effect runs, updates state, trigger re-render, state changes, effect runs again. Fix: compute the value outside the effect (derived state), or include a condition to only update when the value actually changes.',
+      vars:{'new object in deps = infinite loop':'const obj = {}; useEffect(fn, [obj]) — obj is a new reference every render; effect runs every render; chain continues indefinitely','useMemo for stable object in deps':'const opts = useMemo(() => ({ debug: true }), []) — stable reference; effect dep is stable; no infinite loop','setState inside effect needs a condition':'if (newValue !== prevValue) setState(newValue) — add a guard so the effect does not set state when nothing changed; or compute the value during render instead'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Cleanup with AbortController: fetch requests that are no longer needed (component unmounted, deps changed) should be cancelled. useEffect(() => { const ac = new AbortController(); fetch(url, { signal: ac.signal }).then(r => r.json()).then(setData).catch(err => { if (err.name !== "AbortError") setError(err) }); return () => ac.abort(); }, [url]). The cleanup function (return) runs before the next effect runs AND on unmount. AbortController.abort() cancels the pending fetch. Check for AbortError to ignore the expected cancellation error. Without cleanup: race conditions — response from an old request can overwrite data from a newer request.',
+      vars:{'AbortController cancels in-flight fetch':'new AbortController(); fetch(url, { signal: controller.signal }); return () => controller.abort() — cleanup aborts if url changes or component unmounts','ignore AbortError':'catch(err) { if (err.name === "AbortError") return; setError(err) } — AbortError is expected on cleanup; only set error for real failures','cleanup runs before re-run':'when deps change, React runs the old cleanup before running the new effect; AbortController aborts the old request before the new one starts; prevents race conditions'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'Rules of effects — when NOT to use useEffect: (1) do not use useEffect to transform data for rendering (use derived state computed during render or useMemo); (2) do not use useEffect to handle user events (put logic directly in event handlers); (3) do not use useEffect to update parent state (pass the change up via callbacks instead); (4) do not use useEffect for subscriptions that React manages (use useSyncExternalStore). When effects are appropriate: syncing with external systems (WebSocket, DOM library, analytics beacon, third-party APIs, browser APIs like geolocation, ResizeObserver).',
+      vars:{'no useEffect for data transforms':'if (condition) { setDerived(computeFrom(state)) } in useEffect = extra render; compute during render: const derived = condition ? compute(state) : null','no useEffect for event logic':'submit handler should call the API directly; no useEffect watching form state and triggering fetch; event handler is synchronous and explicit','useSyncExternalStore for external stores':'subscribe to browser APIs (matchMedia, intersection observer, custom stores) via useSyncExternalStore; React re-renders only when the value changes; correct in concurrent mode'},
+      tone:'ok',
+      callout:'CIAM useEffect: OIDC silent token refresh uses useEffect(fn, []) with setInterval inside; return clears the interval on logout/unmount (avoids ghost refresh after logout). WebSocket for live token events: useEffect(() => { const ws = new WebSocket(wsUrl); ws.onmessage = (e) => setTokenEvent(JSON.parse(e.data)); return () => ws.close(); }, [wsUrl]). AbortController for all GET requests in the admin portal (component switches fast when the user navigates). Stale closure bug found in the token countdown — fixed by switching to functional setState (setSecondsLeft(prev => prev - 1)) instead of capturing secondsLeft in the interval closure.'
+    }
+  ],
+  code:[
+    '// useEffect with AbortController + cleanup',
+    'function useUserProfile(userId) {',
+    '  const [data, setData] = useState(null)',
+    '  const [error, setError] = useState(null)',
+    '',
+    '  useEffect(() => {',
+    '    if (!userId) return',
+    '    const ac = new AbortController()',
+    '',
+    '    fetch(`/api/users/${userId}`, { signal: ac.signal })',
+    '      .then(r => r.ok ? r.json() : Promise.reject(r.status))',
+    '      .then(setData)',
+    '      .catch(err => {',
+    '        if (err.name !== "AbortError") setError(err)',
+    '      })',
+    '',
+    '    return () => ac.abort()  // cleanup: cancel on userId change/unmount',
+    '  }, [userId])',
+    '',
+    '  return { data, error }',
+    '}'
+  ]
+});
+</script>
+
 <script>
 (function(){
   const pfx='ue';

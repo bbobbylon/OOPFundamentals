@@ -138,6 +138,77 @@
     <div class="key-insight"><strong>Server Actions replace many hand-written API routes for mutations.</strong> The form posts directly to the server function; you mutate, then <code>revalidatePath</code>/<code>redirect</code>. Because it degrades to a native form POST, it works without client JS. <strong>Treat the input as untrusted</strong> — validate inside the action (it's a public endpoint under the hood), and never trust client-passed identity; read the session server-side.</div>
   </section>
 </div>
+
+<!-- ── Code Walkthrough: Next.js App Router ── -->
+<div id="cw-rnext"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-rnext',{
+  id:'cw-rnext',
+  title:'Next.js App Router — layouts, server/client components, dynamic routes, loading.tsx, and RSC data fetching',
+  subtitle:'The Next.js App Router (Next.js 13+) is built on React Server Components. The file system is the router: app/users/[id]/page.tsx maps to /users/:id. Layouts (layout.tsx) wrap child routes persistently without unmounting. Server components (default) fetch data directly on the server. Client components ("use client") run in the browser and can use hooks/events. loading.tsx is automatic Suspense boundary. error.tsx is automatic Error Boundary.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'File-system routing: app/ directory. page.tsx = route segment component. layout.tsx = persistent wrapper (renders on every child navigation without remounting). loading.tsx = automatic Suspense fallback (shown while the page.tsx async component awaits data). error.tsx = Error Boundary (catches errors in the route segment). not-found.tsx = 404 page. Route groups: (auth)/login/page.tsx — the parenthesized segment does not appear in the URL. Dynamic segments: [id]/page.tsx — params.id in the component. Catch-all: [...slug]/page.tsx. Optional catch-all: [[...slug]]/page.tsx.',
+      vars:{'page.tsx = route component':'default export is the route component; receives { params, searchParams } props; can be async (server component)','layout.tsx wraps children persistently':'does not unmount on navigation between child routes; state in layout persists; fetch data once in layout and pass as props','loading.tsx = Suspense fallback':'automatic Suspense boundary around page.tsx; shown during async data fetch; replaces explicit <Suspense> wrapping'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'Server components (default in app/): async functions that run on the server. Can fetch data directly (fetch() with server-side cache, ORM queries, filesystem access). Output: serialized JSX streamed to the client. No useState, useEffect, onClick, browser APIs. Data fetching: async function Page() { const data = await db.query("..."); return <UserList users={data} />; }. Server component data fetching benefits: no API round-trip (server has direct DB access), sensitive data never reaches client, smaller JS bundle (server-only code is stripped). Mark as client with "use client" directive at top of file.',
+      vars:{'"use client" at top of file':'marks the entire module and its imports as client-side; cannot be undone deeper in the tree; keep "use client" components as leaf nodes','async server component':'can use await anywhere in the function body; Next.js automatically wraps in Suspense if needed; fetch() is deduped across components in one render pass','no useState/useEffect in server components':'hooks are client-only; RSC cannot have interactivity; pass event handlers as props from client component parents'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'Next.js extended fetch: fetch(url, { cache: "no-store" }) — no caching (always fresh). fetch(url, { next: { revalidate: 60 } }) — revalidate every 60 seconds (ISR-like). fetch(url) — cached indefinitely by default (static generation). revalidatePath("/users") and revalidateTag("users") — on-demand cache invalidation (call from Server Actions after mutations). Data colocation: each component fetches only its own data (React deduplicates identical fetch() calls within one render). No waterfall: parallel data fetching with Promise.all in server components.',
+      vars:{'cache: "no-store"':'opt out of caching; always fetch fresh on every request; equivalent to SSR (server-side rendering); use for real-time data','next: { revalidate: N }':'stale-while-revalidate with a time limit; serve cached data, regenerate in background after N seconds; good for semi-static data','revalidatePath/revalidateTag':'call from Server Actions after mutations; invalidates specific pages or tagged fetch entries; triggers regeneration on next request'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Server Actions ("use server"): async functions marked "use server" run on the server but can be called from client components. Used for form submissions, mutations. <form action={createUser}> — HTML form with a server action. The server action receives FormData. Progressive enhancement: works without JavaScript (HTML form submission). Inside server actions: call db.query(), revalidatePath(), redirect(). Security: server actions are validated on the server (cannot be forged client-side); inputs must still be validated (use Zod in the action).',
+      vars:{'"use server" in async function':'marks function as a server action; can be defined in a server component and passed to client, or in a separate "use server" file','form action={serverAction}':'replaces onSubmit; the form calls the server action with FormData; works without JS (progressive enhancement)','never trust FormData directly':'validate with Zod inside the action; server actions are authenticated (Next.js verifies the caller) but not input-safe'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'Route interceptors and parallel routes: parallel routes (@modal) render multiple pages simultaneously in the same layout (modal + background content). Interceptors ((.) or (..)): intercept a route to render a different component when navigating from within the app vs. direct URL access (soft navigation = modal; hard navigation = full page). Middleware (middleware.ts at root): runs before every request; use for auth redirects, locale detection, A/B testing. Middleware cannot import server-only code or access the DB — it runs at the edge (lightweight).',
+      vars:{'@modal slot in layout':'parallel route for modal overlay; layout renders both the page and @modal simultaneously; modal can be navigated back out of','middleware.ts at root':'runs on every request before the page; use for redirect if not authenticated; config.matcher to limit which paths it runs on','middleware cannot access DB':'runs on edge runtime (lightweight V8 worker); no Node.js APIs; no ORM; read JWT from cookies for auth checks'},
+      tone:'ok',
+      callout:'CIAM Next.js App Router: middleware.ts reads the JWT from cookies (httpOnly cookie set by the Ping callback), verifies the signature with the JWKS endpoint, and redirects to /login if invalid or expired. Server components fetch user data from the Ping directory API (no client exposure of tokens). Client components use "use client" only for interactive auth forms (login, MFA). Server action handles the PKCE callback: exchange the auth code, set the session cookie, revalidatePath("/dashboard"). loading.tsx shows a skeleton while user data is being fetched from Ping.'
+    }
+  ],
+  code:[
+    '// app/users/[id]/page.tsx — server component',
+    'async function UserPage({ params }: { params: { id: string } }) {',
+    '  const user = await fetchUser(params.id)  // runs on server',
+    '  return <UserProfile user={user} />',
+    '}',
+    '',
+    '// app/users/[id]/layout.tsx — persistent wrapper',
+    'export default function UserLayout({ children }) {',
+    '  return (',
+    '    <div>',
+    '      <UserSidebar /> {/* not remounted on child nav */}',
+    '      {children}',
+    '    </div>',
+    '  )',
+    '}',
+    '',
+    '// Server action — "use server"',
+    'async function updateRole(formData: FormData) {',
+    '  "use server"',
+    '  const userId = formData.get("userId") as string',
+    '  const role = formData.get("role") as string',
+    '  await db.users.update({ id: userId, role })',
+    '  revalidatePath(`/users/${userId}`)',
+    '}'
+  ]
+});
+</script>
+
 <script>
 (function(){
   const pfx='rnext';
