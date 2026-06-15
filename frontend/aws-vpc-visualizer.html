@@ -169,5 +169,75 @@
     </table>
   </div>
 </div>
+
+<!-- ── Code Walkthrough: AWS VPC ── -->
+<div id="cw-vpc"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-vpc',{
+  id:'cw-vpc',
+  title:'AWS VPC — CIDR blocks, public/private subnets, NAT gateway, and security groups',
+  subtitle:'A VPC (Virtual Private Cloud) is your isolated network inside AWS. Every production deployment lives inside a VPC. Understanding public vs private subnets, how the Internet Gateway and NAT Gateway control traffic flow, and how Security Groups act as stateful firewalls is essential for secure cloud architecture.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6],
+      note:'VPC CIDR block: when you create a VPC you assign a private IPv4 range (CIDR notation). 10.0.0.0/16 means 10.0.0.0 – 10.0.255.255 (65,536 addresses). You then subdivide this into subnets per AZ. Subnets take a slice of the VPC CIDR: 10.0.1.0/24 (256 addresses). AWS reserves 5 addresses per subnet (first 4 + last). Plan your CIDR carefully — you cannot change the VPC CIDR after creation without recreating.',
+      vars:{'10.0.0.0/16':'VPC range: 10.0.x.x — 65,536 IPs; large enough for multiple environments','10.0.1.0/24 (public)':'256 IPs; hosts the ALB and NAT Gateway; instances here CAN have public IPs','10.0.2.0/24 (private)':'256 IPs; hosts ECS tasks and RDS; NO public IPs; reaches internet via NAT Gateway'},
+      tone:'start'
+    },
+    {
+      lines:[8,9,10,11,12,13],
+      note:'Internet Gateway (IGW) vs NAT Gateway: attach an IGW to the VPC to allow bidirectional internet traffic for PUBLIC subnets (instances with public IPs). A NAT Gateway sits in a PUBLIC subnet and allows PRIVATE subnet resources to make OUTBOUND-only internet requests (pull Docker images from ECR, call AWS APIs) — but inbound internet traffic CANNOT reach private subnet instances.',
+      vars:{'Internet Gateway':'allows public subnet instances to send + receive traffic from the internet; required for ALB','NAT Gateway':'placed in public subnet; private subnet route table: 0.0.0.0/0 → NAT GW; one per AZ for HA','Elastic IP':'static public IPv4 attached to the NAT Gateway (and optionally to EC2 instances)'},
+      tone:'ok'
+    },
+    {
+      lines:[15,16,17,18,19],
+      note:'Route Tables: each subnet has a route table that says "where does traffic for this CIDR go?" Public subnet route table: local (10.0.0.0/16 → local VPC) + internet default (0.0.0.0/0 → Internet Gateway). Private subnet route table: local (10.0.0.0/16 → local VPC) + NAT default (0.0.0.0/0 → NAT Gateway). Private subnets HAVE NO direct route to the IGW.',
+      vars:{'10.0.0.0/16 → local':'VPC-internal traffic; reaches other subnets directly (ALB → ECS, ECS → RDS)','0.0.0.0/0 → igw-xxx':'public subnet default route: unknown destinations go to internet','0.0.0.0/0 → nat-xxx':'private subnet default route: outbound internet goes through NAT, not IGW'},
+      tone:'ok'
+    },
+    {
+      lines:[21,22,23,24,25],
+      note:'Security Groups vs NACLs: Security Groups are stateful, instance-level firewalls (most common). NACLs are stateless, subnet-level firewalls (secondary defense). Security Group rules: allow only — there is no explicit deny (implicit deny-all for unlisted traffic). NACLs: numbered rules evaluated in order; support both allow and deny; must explicitly allow return traffic (stateless).',
+      vars:{'Security Group':'stateful: return traffic auto-allowed; attach to EC2/ECS task/RDS; most teams only use SGs','NACL':'stateless subnet firewall; rule number order matters; rarely needed if SGs are configured correctly','SG reference (not CIDR)':'best practice: ALB-SG → ECS-SG rule references the ALB\'s security group ID, not a CIDR block'},
+      tone:'ok'
+    },
+    {
+      lines:[27,28,29,30,31],
+      note:'VPC Endpoints: instead of routing AWS API calls (S3, DynamoDB, Secrets Manager) out through the NAT Gateway (paid egress) and back in, a VPC Endpoint creates a private path inside the VPC. Interface Endpoint (powered by PrivateLink): for most AWS services, adds an ENI with a private IP to your subnet. Gateway Endpoint: free; for S3 and DynamoDB only. Reduces cost + attack surface.',
+      vars:{'Gateway Endpoint for S3':'free; add to route table: destination=S3 prefix-list, target=vpce-xxx; all S3 traffic stays internal','Interface Endpoint (PrivateLink)':'creates a private IP in your subnet for services like Secrets Manager, ECR, CloudWatch','PrivateLink':'AWS\'s mechanism for exposing services over private IPs; no traffic hits the public internet'},
+      tone:'ok',
+      callout:'CIAM VPC architecture: ALB in public subnets (internet-facing), ECS tasks in private subnets (no public IPs), RDS in isolated subnets (no route to NAT Gateway — DB traffic never goes to internet). Security groups: ALB-SG allows inbound 443 from 0.0.0.0/0. ECS-SG allows inbound 8080 from ALB-SG only. RDS-SG allows inbound 5432 from ECS-SG only. No resource is directly internet-reachable except the ALB.'
+    }
+  ],
+  code:[
+    '// VPC CIDR and subnet layout',
+    'VPC:              10.0.0.0/16   (65,536 addresses)',
+    'Public  subnet A: 10.0.1.0/24  (AZ us-east-1a) — ALB, NAT Gateway',
+    'Public  subnet B: 10.0.2.0/24  (AZ us-east-1b) — ALB (multi-AZ)',
+    'Private subnet A: 10.0.3.0/24  (AZ us-east-1a) — ECS tasks',
+    'Private subnet B: 10.0.4.0/24  (AZ us-east-1b) — ECS tasks',
+    '',
+    '// Internet Gateway (IGW) — public subnets',
+    '// NAT Gateway — in public subnet; gives private subnet outbound internet',
+    '// Private → outbound only: pull from ECR, call Secrets Manager API',
+    '// Public  → bidirectional: ALB receives inbound internet HTTPS',
+    '',
+    '// Route tables',
+    'Public  subnet: 10.0.0.0/16 → local | 0.0.0.0/0 → igw-xxxxx',
+    'Private subnet: 10.0.0.0/16 → local | 0.0.0.0/0 → nat-xxxxx',
+    '',
+    '// Security Group rules (CIAM stack)',
+    'ALB-SG:   inbound 443 from 0.0.0.0/0   (internet HTTPS)',
+    'ECS-SG:   inbound 8080 from ALB-SG      (only ALB can reach Spring Boot)',
+    'RDS-SG:   inbound 5432 from ECS-SG      (only ECS can reach Postgres)',
+    '',
+    '// VPC Gateway Endpoint (free — S3, DynamoDB)',
+    '// Keeps AWS API traffic inside the VPC — no NAT Gateway charges for S3'
+  ]
+});
+</script>
+
 </body>
 </html>

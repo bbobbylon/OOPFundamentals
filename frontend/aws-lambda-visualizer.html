@@ -285,5 +285,83 @@
     </table>
   </div>
 </div>
+
+<!-- ── Code Walkthrough: AWS Lambda ── -->
+<div id="cw-lambda"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-lambda',{
+  id:'cw-lambda',
+  title:'AWS Lambda — handler, event, context, cold start, and the execution lifecycle',
+  subtitle:'A Lambda function is an event-driven compute unit: AWS manages the server, OS, and runtime. You write a handler function, package it, and Lambda runs it on demand. Understanding the init/invoke/shutdown phases explains cold starts, shared state, and resource reuse.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6],
+      note:'The handler function signature: event is the input payload (API Gateway request, S3 event, SNS message, etc.) as a Java object or Map. context provides runtime info: function name, memory limit, remaining time, request ID. The return type is serialized to JSON and returned to the caller. For API Gateway, return APIGatewayProxyResponseEvent with status + body.',
+      vars:{'event':'the triggering payload; type depends on the event source (API Gateway → APIGatewayProxyRequestEvent)','context.getRemainingTimeInMillis()':'milliseconds until this invocation times out — useful for checkpointing long-running work','return value':'serialized to JSON; for API Gateway must include statusCode and body'},
+      tone:'start'
+    },
+    {
+      lines:[8,9,10,11,12,13],
+      note:'Execution lifecycle has 3 phases: INIT (cold start), INVOKE (warm invocations), and SHUTDOWN. INIT: Lambda downloads your ZIP/container, starts the JVM (for Java, ~2–5 seconds), loads your class (static initializers run), creates an instance, and calls the constructor. INVOKE: calls handleRequest() on the existing instance. WARM: subsequent invocations reuse the same JVM process — INIT does not run again.',
+      vars:{'cold start':'INIT phase — only happens when Lambda creates a NEW execution environment (first call, after idle, on scale-out)','warm invocation':'INVOKE only — the JVM is already running, instance already created — typically <100ms for Java','SnapStart (Java 21)':'snapshots the JVM after INIT; restores from snapshot on cold start — reduces cold start from ~5s to ~1s'},
+      tone:'warn'
+    },
+    {
+      lines:[15,16,17,18,19,20],
+      note:'Variables initialized OUTSIDE the handler are reused across warm invocations. A DynamoDB client or DB connection initialized at the class level is created ONCE (during INIT) and reused on every subsequent INVOKE — this is the main cold-start optimization. NEVER assume a fresh environment per invocation: static variables retain their values between warm calls.',
+      vars:{'static / class-level fields':'initialized in INIT phase; shared across all warm invocations of this execution environment','connection reuse':'DynamoDB, S3, HTTP clients initialized once → amortize the connection setup cost','WARNING: mutable state':'if you cache mutable data at class level, concurrent invocations on the SAME environment share it'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Lambda function URL or API Gateway: trigger Lambda via HTTPS. API Gateway adds auth (Cognito/IAM authorizer), rate limiting, request validation before calling Lambda. Lambda function URLs are simpler but direct (no API Gateway features). For a CIAM token-validation webhook, API Gateway + IAM or Cognito authorizer is the secure pattern.',
+      vars:{'API Gateway':' adds: auth, rate limiting, CORS, request/response transforms, WAF integration','function URL':'direct HTTPS URL to Lambda; add IAM auth (AWS_IAM type) or token auth via Lambda authorizer','timeout':'max 15 minutes; API Gateway default: 29 seconds; set Lambda timeout to match'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31],
+      note:'IAM Execution Role: Lambda assumes this role for the duration of the invocation. The role must have AWSLambdaBasicExecutionRole (write CloudWatch logs) plus your app-specific permissions (DynamoDB:GetItem, S3:GetObject, SES:SendEmail). The AWS SDK auto-reads credentials from Lambda\'s metadata — no access keys in code.',
+      vars:{'AWSLambdaBasicExecutionRole':'minimum required: allows writing to CloudWatch Logs (logs:CreateLogGroup, logs:PutLogEvents)','least-privilege':'only grant the exact DynamoDB tables, S3 buckets, SES resources this Lambda needs','env vars':'set in Lambda configuration → Environment variables; encrypted at rest by KMS; read via System.getenv()'},
+      tone:'ok',
+      callout:'CIAM: Lambda is perfect for stateless CIAM webhooks: Entra ID sends a user-created event → API Gateway validates the token → Lambda processes the event (provision in Ping IDM, sync to HR system). Spring Cloud Function lets you write normal @FunctionDefinition beans that run as Lambda handlers — same code runs locally and in Lambda. SnapStart (Java 21) makes Java Lambda cold starts competitive with Node.js and Python for latency-sensitive CIAM APIs.'
+    }
+  ],
+  code:[
+    '// Java Lambda handler',
+    'public class UserHandler implements RequestHandler<APIGatewayProxyRequestEvent,',
+    '                                                   APIGatewayProxyResponseEvent> {',
+    '  @Override public APIGatewayProxyResponseEvent handleRequest(',
+    '      APIGatewayProxyRequestEvent event, Context context) {',
+    '    return new APIGatewayProxyResponseEvent().withStatusCode(200).withBody("OK");',
+    '  }',
+    '}',
+    '',
+    '// Execution lifecycle',
+    '// INIT (cold start)  — download ZIP → start JVM → load class → constructor',
+    '// INVOKE             — handleRequest() called on the existing instance',
+    '// SHUTDOWN           — Lambda signals termination; extension hook fires',
+    '// Warm invocation:   INIT skipped; reuse existing JVM process',
+    '',
+    '// Static field reuse across warm invocations (key optimization)',
+    'public class UserHandler implements RequestHandler<...> {',
+    '  // initialized ONCE in INIT phase — reused on every warm INVOKE',
+    '  private static final DynamoDbClient ddb = DynamoDbClient.create();',
+    '  private static final S3Client s3 = S3Client.create();',
+    '}',
+    '',
+    '// API Gateway trigger — Lambda receives parsed request',
+    '// Authorization options:',
+    '// 1. API Gateway JWT authorizer (validates Bearer token from Entra/Cognito)',
+    '// 2. Lambda authorizer (custom auth logic)',
+    '// 3. IAM auth (AWS_IAM) — for internal service-to-service calls',
+    '',
+    '// IAM Execution Role — read via metadata endpoint (no access keys in code)',
+    '// Required: AWSLambdaBasicExecutionRole (CloudWatch Logs)',
+    '// Add: DynamoDB:GetItem on arn:aws:dynamodb:us-east-1:ACCOUNT:table/users',
+    'System.getenv("MY_CONFIG_VALUE") // environment variables read at runtime'
+  ]
+});
+</script>
 </body>
 </html>

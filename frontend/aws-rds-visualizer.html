@@ -310,6 +310,79 @@ spring.config.import: aws-secretsmanager:/prod/myapp/db</div>
   </div>
 </div>
 
+<!-- ── Code Walkthrough: AWS RDS ── -->
+<div id="cw-rds"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-rds',{
+  id:'cw-rds',
+  title:'AWS RDS — Multi-AZ, read replicas, connection pooling, and Spring Boot integration',
+  subtitle:'RDS (Relational Database Service) manages PostgreSQL/MySQL/Oracle on AWS: automated backups, patches, and failover. Understanding Multi-AZ vs read replicas, connection pooling sizes, and how Spring Boot connects via JDBC is essential for production CIAM deployments.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'Multi-AZ deployment: RDS maintains a SYNCHRONOUS standby replica in a different Availability Zone. All writes are committed to BOTH the primary and standby before acknowledging. If the primary fails (hardware, AZ outage, OS patch), RDS performs automatic failover in 1-2 minutes — DNS is updated to point to the standby. No data loss (synchronous replication). Your Spring Boot app just reconnects to the same endpoint.',
+      vars:{'Multi-AZ':'synchronous standby in a different AZ; automatic failover; the RDS endpoint DNS does NOT change','1-2 minute failover':'Spring Boot\'s HikariCP connection pool needs to handle connection failures and reconnect','NOT a read replica':'the standby does NOT accept read queries; it is purely a failover target'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13],
+      note:'Read Replicas: ASYNCHRONOUS replicas used for read-only query offloading. You get a SEPARATE endpoint for the replica (rds-replica.region.rds.amazonaws.com). Direct Spring Boot read-heavy queries (reports, audit logs) at the replica endpoint. Replication lag: typically < 1 second, but can grow under heavy write load. Do NOT use replicas for reads that require immediate consistency after a write.',
+      vars:{'separate endpoint':'replica has its own hostname; configure Spring Boot datasource for read-only with a second DataSource bean','replication lag':'writes go to primary; replicas apply them asynchronously; lag = time between write and replica visibility','async replication':'NOT for financial or auth data that requires immediate read-after-write consistency'},
+      tone:'ok'
+    },
+    {
+      lines:[15,16,17,18,19,20,21],
+      note:'Spring Boot HikariCP configuration: spring.datasource.hikari.maximumPoolSize controls the maximum number of DB connections. Default is 10. Key formula for sizing: pool size = (core_count * 2) + effective_disk_spindles. For a 2-vCPU Spring Boot container: pool size ≈ 5. Too many connections = DB connection limit hit; too few = thread contention waiting for a connection.',
+      vars:{'maximumPoolSize':'max concurrent connections to RDS; multiply by number of Spring Boot instances = total connections','connectionTimeout: 30000':'how long to wait for a connection from the pool before throwing; 30s is reasonable','idleTimeout: 600000':'remove idle connections after 10 minutes to free DB resources; always less than RDS timeout'},
+      tone:'ok'
+    },
+    {
+      lines:[23,24,25,26,27,28],
+      note:'Connection string for RDS: jdbc:postgresql://rds-host.region.rds.amazonaws.com:5432/mydb. NEVER hardcode the password in application.properties. Use AWS Secrets Manager: store the DB credentials as a secret, give the ECS task role secretsmanager:GetSecretValue permission, and use Spring Cloud AWS or the aws-secretsmanager-jdbc driver to inject at startup.',
+      vars:{'rds-host.region.rds.amazonaws.com':'the RDS endpoint; stays the same even after Multi-AZ failover','spring.datasource.password':'use ${DB_PASSWORD} env var; inject from Secrets Manager via ECS task secrets[] config','sslmode=require':'always enable SSL for RDS: append ?sslmode=require to the JDBC URL; RDS certificates are trusted by default'},
+      tone:'bad'
+    },
+    {
+      lines:[30,31,32,33],
+      note:'Spring Data JPA with RDS: @EnableTransactionManagement + @Transactional on service methods. For read-only operations annotate with @Transactional(readOnly=true) — Hibernate skips dirty checking and Spring can route to a read replica (if you configure AbstractRoutingDataSource). @Transactional propagation defaults ensure nested method calls share the same transaction.',
+      vars:{'@Transactional(readOnly=true)':'disables Hibernate dirty checking (faster); signals to connection routers that the replica is OK','AbstractRoutingDataSource':'Spring class for routing queries to primary vs replica based on a transaction context key','flush mode NEVER':'with readOnly=true, Hibernate never flushes changes to DB — extra safety for accidental mutations'},
+      tone:'ok',
+      callout:'CIAM: a production CIAM DB on RDS Multi-AZ ensures user profiles, OAuth2 tokens, and audit logs survive an AZ outage. Size the HikariCP pool carefully: 2 Spring Boot ECS tasks × 10 connections each = 20 connections to RDS. A db.t3.medium supports ~60 max connections (parameter group: max_connections). Stay under 70% utilization (42 connections). Use RDS Proxy to multiplex thousands of short-lived Lambda/ECS connections through a smaller pool.'
+    }
+  ],
+  code:[
+    '// Multi-AZ: synchronous standby → automatic failover in 1-2 min',
+    '// Primary: rds-primary.us-east-1.rds.amazonaws.com',
+    '// Standby: different AZ (e.g., us-east-1b); same endpoint DNS after failover',
+    '// Spring Boot just reconnects after HikariCP detects the connection failure',
+    '// NO data loss: writes committed to both before acknowledgement',
+    '',
+    '// Read Replica (async — separate endpoint)',
+    'spring.datasource.write.url=jdbc:postgresql://rds-primary.../mydb',
+    'spring.datasource.read.url=jdbc:postgresql://rds-replica.../mydb',
+    '// Route read-only queries to replica via AbstractRoutingDataSource',
+    '// Caution: replication lag — do not read replica immediately after a write',
+    '',
+    '// HikariCP connection pool sizing',
+    'spring.datasource.hikari.maximum-pool-size=5',
+    '  // formula: (cores * 2) + 1 per instance; 2 instances = 10 total',
+    'spring.datasource.hikari.connection-timeout=30000  // 30s before throwing',
+    'spring.datasource.hikari.idle-timeout=600000       // remove idle after 10 min',
+    'spring.datasource.hikari.max-lifetime=1800000      // replace after 30 min',
+    '',
+    '// JDBC connection — NEVER hardcode password',
+    'spring.datasource.url=jdbc:postgresql://rds-host.us-east-1.rds.amazonaws.com:5432/mydb?sslmode=require',
+    'spring.datasource.username=${DB_USER}      // from ECS secrets[] → Secrets Manager',
+    'spring.datasource.password=${DB_PASSWORD}  // from ECS secrets[] → Secrets Manager',
+    '',
+    '// Spring Data JPA',
+    '@Transactional                      // wraps write operations in a DB transaction',
+    '@Transactional(readOnly = true)     // skips dirty checking; can route to read replica'
+  ]
+});
+</script>
+
 <script>
 let foState = 'normal';
 function simulateFailover() {

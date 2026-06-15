@@ -248,6 +248,82 @@
   </div>
 </div>
 
+<!-- ── Code Walkthrough: AWS S3 ── -->
+<div id="cw-s3"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-s3',{
+  id:'cw-s3',
+  title:'AWS S3 — every operation from PutObject to presigned URLs and bucket policies',
+  subtitle:'S3 is object storage: flat namespace of buckets and objects (keys). There is no folder hierarchy — the "/" in a key name is just a convention. Every operation is an HTTP request to a global endpoint. Access is controlled by bucket policies (resource-based) and IAM policies (identity-based).',
+  steps:[
+    {
+      lines:[1,2,3,4],
+      note:'S3 key naming: the "folder" appearance (documents/reports/2024/q1.pdf) is a PREFIX — S3 has no real directories. The full string is the key. ListObjectsV2 with a prefix filter lists "files" in a "folder." PutObject creates or overwrites an object. S3 is eventually consistent for new objects (immediate read-after-write) but was historically eventually consistent for overwrites (now strong consistency since Dec 2020).',
+      vars:{'key':'the full object name including slashes: documents/reports/q1.pdf','bucket':'globally unique name across ALL AWS accounts — mycompany-assets must not be taken','strong read-after-write':'since Dec 2020: immediately readable after PUT — no need for delay'},
+      tone:'start'
+    },
+    {
+      lines:[6,7,8,9,10,11],
+      note:'AWS Java SDK S3Client operations: putObject() uploads a file. getObject() downloads it. deleteObject() removes it. listObjectsV2() lists objects with an optional prefix. Each call is signed with AWS Signature Version 4 (the SDK does this automatically using IAM credentials from the environment, ECS task role, or ~/.aws/credentials).',
+      vars:{'PutObjectRequest':'must specify bucket + key; body can be a Path, InputStream, or RequestBody.fromBytes()','S3Client.create()':'reads credentials from: (1) env vars → (2) Java system props → (3) ~/.aws → (4) ECS/EC2 metadata','ResponseBytes<GetObjectResponse>':'convenient for small files; for large files use streaming to avoid OutOfMemoryError'},
+      tone:'ok'
+    },
+    {
+      lines:[13,14,15,16,17,18],
+      note:'Presigned URLs: generate a time-limited URL that grants temporary access to a specific object WITHOUT requiring the recipient to have AWS credentials. The URL contains the signature embedded as query parameters. Use case: generate a presigned GET URL to let a user download their own profile photo directly from S3 — the download is direct, not proxied through your server.',
+      vars:{'presigned URL':'valid for 1 second to 7 days (168 hours max for POST/PUT); embedded signature','GetObjectPresignRequest':'builds a presigned GET URL — recipient can download the object without any IAM auth','no credentials needed':'the URL itself IS the credential — guard it like a password for its duration'},
+      tone:'ok'
+    },
+    {
+      lines:[20,21,22,23,24,25,26,27],
+      note:'Bucket Policy (JSON, resource-based): the bucket\'s own access control. This example blocks access from any principal who is NOT using an encrypted connection (aws:SecureTransport=false). Resource policies are evaluated ALONGSIDE IAM identity policies. For a public website bucket, add "Principal": "*", "Action": "s3:GetObject" — but always block public access using Block Public Access settings first.',
+      vars:{'aws:SecureTransport':'false if HTTP; true if HTTPS; Deny with condition = reject HTTP requests','Resource "/*"':'every object in the bucket; "bucket ARN" without /* covers bucket-level operations (e.g., ListBucket)','implicit deny':'even with no bucket policy, access is controlled by IAM — bucket policy adds additional restrictions'},
+      tone:'ok'
+    },
+    {
+      lines:[29,30,31],
+      note:'Block Public Access settings (account and bucket level): even if a bucket policy or object ACL tries to make an object public, Block Public Access overrides it. Always ENABLE all four block settings unless this specific bucket is intentionally a public static website. One of the most common AWS misconfigurations: S3 bucket with Block Public Access disabled and a loose bucket policy.',
+      vars:{'block all public access':'overrides bucket policies that would grant public access — the safety net','object ACLs':'legacy; prefer bucket policies + IAM; ACLs are simpler but less powerful','S3 Object Ownership':'set to BucketOwnerEnforced to disable ACLs entirely (recommended for new buckets)'},
+      tone:'bad',
+      callout:'CIAM: S3 is used for storing OAuth2 metadata files (OIDC discovery document JSON), user profile photos, and audit log exports. Use an IAM Role on the ECS task or Lambda for access — never access keys. Presigned URLs let users upload profile photos directly from Angular to S3 (the Angular app calls your Spring Boot API to get a presigned PUT URL, then uploads directly — your server never handles the binary data).'
+    }
+  ],
+  code:[
+    '// S3 object key = full path (no real folders)',
+    '// documents/reports/q1.pdf is a KEY, not a path',
+    '// ListObjectsV2 with prefix="documents/" lists "files in a folder"',
+    '',
+    '// AWS Java SDK v2 — basic operations',
+    'S3Client s3 = S3Client.create(); // reads creds from ECS task role / env',
+    'PutObjectRequest put = PutObjectRequest.builder().bucket("my-bucket").key("docs/q1.pdf").build();',
+    's3.putObject(put, RequestBody.fromFile(Path.of("q1.pdf")));',
+    'ResponseBytes<GetObjectResponse> obj = s3.getObjectAsBytes(GetObjectRequest.builder()',
+    '  .bucket("my-bucket").key("docs/q1.pdf").build());',
+    's3.deleteObject(b -> b.bucket("my-bucket").key("docs/q1.pdf"));',
+    '',
+    '// Presigned URL — time-limited access without AWS credentials',
+    'S3Presigner presigner = S3Presigner.create();',
+    'PresignedGetObjectRequest url = presigner.presignGetObject(b -> b',
+    '  .getObjectRequest(g -> g.bucket("my-bucket").key("user/avatar.jpg"))',
+    '  .signatureDuration(Duration.ofHours(1)));  // URL valid for 1 hour',
+    'String downloadUrl = url.url().toString();   // send to Angular; user downloads directly',
+    '',
+    '// Bucket Policy — Deny HTTP (require HTTPS)',
+    '{ "Statement": [{',
+    '  "Effect": "Deny",',
+    '  "Principal": "*",',
+    '  "Action": "s3:*",',
+    '  "Resource": ["arn:aws:s3:::my-bucket", "arn:aws:s3:::my-bucket/*"],',
+    '  "Condition": { "Bool": { "aws:SecureTransport": "false" } }',
+    '}]}',
+    '',
+    '// Always enable Block Public Access on every bucket',
+    '// IAM Role for ECS/Lambda — no access keys; SDK auto-reads task role'
+  ]
+});
+</script>
+
 <script>
 let selectedObj = null;
 function selectObj(el, idx) {
