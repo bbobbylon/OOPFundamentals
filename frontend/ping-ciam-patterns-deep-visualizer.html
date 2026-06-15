@@ -145,6 +145,75 @@
 
 </div>
 
+<!-- ── Code Walkthrough: CIAM Patterns ── -->
+<div id="cw-ciampat"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-ciampat',{
+  id:'cw-ciampat',
+  title:'CIAM design patterns — adaptive auth, step-up MFA, progressive profiling, device trust, zero trust',
+  subtitle:'Customer Identity and Access Management (CIAM) patterns differ from enterprise WIAM (workforce IAM) in two key ways: scale (millions of users vs thousands) and UX (friction must be minimal or customers leave). The core CIAM patterns — adaptive auth, step-up MFA, progressive profiling, and zero trust — balance security with experience by making security decisions contextual rather than uniform.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'CIAM vs WIAM: WIAM (workforce) — small user base, company-managed devices, can force VPN + MFA on every login, users have no choice. CIAM — millions of external customers, personal devices, must minimize friction or users abandon, competitors are one click away. CIAM design goals: (1) frictionless happy path (remember trusted devices, social login, passkeys), (2) step-up security only when risk warrants it, (3) progressive data collection (ask for profile data gradually, not all at once).',
+      vars:{'CIAM scale':'millions of external users; must handle peak registration storms (marketing campaigns); 99.99% availability SLA','WIAM vs CIAM friction':'WIAM: every login must be MFA — acceptable. CIAM: every login must be MFA — 40% cart abandonment. Use risk signals to decide.','progressive profiling':'collect email at registration; ask for address at first purchase; ask for birthday when unlocking a discount — not all at once'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'Adaptive authentication: real-time risk scoring that adjusts authentication requirements per-request. Risk signals: new/unrecognized device (no device fingerprint cookie), impossible travel (login from New York then Tokyo in 1 hour), bad IP reputation (TOR exit node, known bot), anomalous time (3am login for a user who always logs in 9am-5pm), credential stuffing patterns (rapid sequential failed logins across accounts). High risk → step-up MFA. Medium risk → soft MFA prompt. Low risk → frictionless login.',
+      vars:{'risk score 0-100':'0 = trusted device + normal behavior + known IP; 100 = new device + impossible travel + TOR; threshold at 60 → MFA required','device fingerprint':'HMAC of browser characteristics stored in a long-lived cookie; re-established via MFA when detected on new device','impossible travel':'(distance between last login location) / (time between logins) > max travel speed; configurable threshold; flag, not automatic block'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'Step-up MFA: user already has a session (auth level 1 = password login) but tries to access a resource requiring auth level 2 (MFA). Spring Security resource server checks claim: if JWT lacks mfa_verified=true, redirect to step-up journey. PingAM step-up journey: read existing session → evaluate risk → present TOTP/push notification → on success, issue new token with elevated claims. The resource server checks authLevel (not re-authenticates the password). Session is elevated, not recreated.',
+      vars:{'auth_level claim':'0 = unauthenticated; 1 = password only; 2 = password + MFA; custom claim in JWT; resource server checks before granting access to sensitive APIs','step-up vs re-auth':'step-up = elevate existing session with MFA; re-auth = full new login (used after password change, suspicious activity); different UX','PingAM acr_values':'OIDC acr_values parameter requests a specific auth level; PingAM routes to the appropriate journey based on requested acr_values'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Device trust and passwordless: device fingerprinting (browser fingerprint → long-lived cookie), device registration (register a trusted device after first MFA — future logins on this device skip MFA), passkeys (WebAuthn — FIDO2 resident credential stored on device TPM/secure enclave; biometric-gated; phishing-resistant). Passkeys are the gold standard for CIAM: zero friction (biometric) + maximum security (phishing-resistant). PingOne + PingAM support WebAuthn registration and assertion natively.',
+      vars:{'WebAuthn registration':'user proves identity once with password+MFA; creates a passkey (private key on device, public key in server); future logins = biometric only','WebAuthn assertion':'server sends challenge; device signs with private key; server verifies with stored public key; private key never leaves device','device cookie lifespan':'typically 30-365 days; refresh on each recognized login; invalidate on security events (breach, suspicious activity)'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'Zero trust for CIAM APIs: never trust, always verify — even authenticated users. Every API call re-validates: JWT signature + claims (not expired, right audience, right scopes), authorization (does this user have access to THIS resource, not just any resource), rate limiting (prevent abuse), anomaly detection (API access pattern matches historical behavior). Short-lived tokens (15 min) + refresh token rotation. Token binding (bind token to client certificate) for high-security contexts. @PreAuthorize at method level for fine-grained control.',
+      vars:{'token max age':'access tokens: 15-60 min; refresh tokens: 1-30 days (short for financial, longer for consumer apps); never infinite','refresh token rotation':'on each use, issue new refresh token + invalidate old one; if old token reused, detect theft and revoke entire family','@PreAuthorize per-method':'Spring Security: @PreAuthorize("hasAuthority(\'SCOPE_read:identity\') and #userId == authentication.name") — scope + ownership check'},
+      tone:'ok',
+      callout:'CIAM stack: Ping Federate (SP connections, OAuth clients, token policies) + PingAM (authentication journey trees, adaptive auth, step-up MFA, passkeys) + PingDirectory (identity store, SCIM provisioning) + Spring Boot resource server (JWT validation with NimbusJwtDecoder, @PreAuthorize scopes + ownership) + Angular frontend (MSAL Interceptor for Entra, or OIDC client for Ping). The adaptive auth engine sits in PingAM journey trees, evaluating risk signals and routing to the right MFA node.'
+    }
+  ],
+  code:[
+    '// Spring Boot — step-up MFA gate',
+    '@GetMapping("/account/sensitive")',
+    '@PreAuthorize("hasAuthority(\'SCOPE_read:sensitive\')")',
+    'public ResponseEntity<SensitiveData> getSensitive(',
+    '    @AuthenticationPrincipal Jwt jwt) {',
+    '  if (!"true".equals(jwt.getClaimAsString("mfa_verified"))) {',
+    '    return ResponseEntity.status(403)',
+    '      .header("X-Step-Up-Required", "mfa")',
+    '      .build();',
+    '  }',
+    '  return ResponseEntity.ok(sensitiveService.get(jwt.getSubject()));',
+    '}',
+    '',
+    '// Angular — detect step-up response and redirect',
+    'intercept(req, next) {',
+    '  return next.handle(req).pipe(',
+    '    tap(r => {',
+    '      if (r.headers?.get("X-Step-Up-Required") === "mfa") {',
+    '        this.router.navigate(["/step-up"]);',
+    '      }',
+    '    })',
+    '  );',
+    '}'
+  ]
+});
+</script>
+
 <script>
 const SIGNALS=[
   {id:'dev',  l:'New / unrecognized device',  d:'no device cookie',           w:22},

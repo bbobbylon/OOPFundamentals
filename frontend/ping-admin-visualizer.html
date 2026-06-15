@@ -352,6 +352,77 @@ curl -X POST https://pingfederate:9031/as/revoke_token.oauth2 \
   </div>
 </div>
 
+<!-- ── Code Walkthrough: Ping Federate Admin ── -->
+<div id="cw-pingadmin"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-pingadmin',{
+  id:'cw-pingadmin',
+  title:'Ping Federate admin — SP connections, OAuth clients, token policies, IdP adapters, and resource servers',
+  subtitle:'Ping Federate is an enterprise federation server that brokers identity across protocols (SAML 2.0, WS-Fed, OAuth 2.0/OIDC). The admin console (and Admin API at /pf-admin-api/v1/) lets you configure: SP connections (who can receive tokens), IdP adapters (how users authenticate), OAuth clients (which apps can request tokens), token policies (lifetime and claims), and resource servers (APIs that accept access tokens). This is the core CIAM infra layer.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'SP Connections (Service Provider): define the trust relationship between Ping Federate (IdP) and a consuming application (SP). Each SP connection specifies: the protocol (SAML 2.0/WS-Fed/OAuth), the SP\'s entity ID or client ID, the assertion consumer service (ACS) URL where tokens/assertions are sent, attribute mapping (which user attributes go in the assertion), and signing certificates. SP connections are the primary object for enterprise SSO federations. Each SaaS app (Salesforce, ServiceNow) gets its own SP connection.',
+      vars:{'entity ID':'unique URI identifying the SP; must match what the SP sends in AuthnRequest; e.g., https://salesforce.com','ACS URL':'assertion consumer service URL; where Ping Federate POST the SAML response; must match exactly','attribute mapping':'map from Ping identity data store (LDAP/database attributes) to assertion attributes (email, groups, employee ID)'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'IdP Adapters: how users actually authenticate in Ping Federate. HTML Form Adapter (username/password form, integrates with LDAP/AD), Kerberos Adapter (Windows integrated auth, SSO on corporate network), Certificate Adapter (client certificate PKI auth), Reference ID Adapter (delegates to an external auth system via callback). Adapters are reused across multiple SP connections. Adapter contract: defines which attributes the adapter can assert (username, email, groups).',
+      vars:{'HTML Form Adapter':'most common; presents login form; validates against configured LDAP/AD or internal user store; supports lockout policies','Kerberos Adapter':'Windows domain auth; no password prompt on corporate network; requires SPN registration in AD; transparent SSO','Adapter contract':'the set of attributes the adapter outputs (e.g., username, email); SP connection maps from contract to assertion attributes'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'OAuth Clients: applications registered to request tokens from Ping Federate\'s OAuth AS. Configure: client ID + client secret (or PKCE for public clients), grant types (authorization_code/client_credentials/refresh_token), redirect URIs (must match exactly for security), scopes the client is allowed to request, token lifetime overrides, and which access token type (JWT vs opaque). client_credentials grant for service-to-service (M2M) flows, authorization_code + PKCE for user-facing apps.',
+      vars:{'client_credentials grant':'service-to-service; client authenticates with its own credentials; no user involved; short-lived access token only','authorization_code + PKCE':'user-facing; app exchanges auth code for tokens; PKCE prevents code interception; required for SPAs and mobile apps','redirect URI':'must be an exact match (or use registered pattern); any mismatch = OAuth error; prevents open redirect attacks'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Token Policies: govern access token and ID token content. Access token lifetime (default 60 min for user tokens; 2-8 hours for M2M). Include user attributes as custom claims (scp = requested scopes, groups, employee_id, tid = tenant ID). Choose token type: JWT (self-contained, verifiable without Ping) vs opaque (requires Ping introspection endpoint). ID token scopes (OpenID, profile, email) control what user info is returned to the OIDC client.',
+      vars:{'JWT access token':'self-contained; resource server validates locally using Ping\'s JWKS; no network call per request; preferred for microservices','opaque access token':'random string; resource server must call Ping introspection /oauth/introspect for each request; better for revocation','custom claims mapping':'Attributes → Claims mapping in token policy; add groups, employee_id, tenant from LDAP/DB; consumed by resource server @PreAuthorize'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'Resource Servers: APIs registered in Ping Federate that accept access tokens. Define: the resource server\'s base URL (for documentation/scope management), the scopes it owns (e.g., read:identity, write:identity), scope validation mode (allow-all vs explicit). The resource server definition links to the access token management policy that governs what tokens it accepts. Ping Federate\'s Admin API (/pf-admin-api/v1/) lets you manage all these objects programmatically for IaC (Terraform provider for Ping Federate or direct REST).',
+      vars:{'scope ownership':'each scope is associated with a resource server; clients must request these scopes; Ping validates client is allowed to request them','/pf-admin-api/v1/':'Swagger UI available at https://your-pf-host:9999/pf-admin-api/; use for IaC and automated provisioning','Ping Terraform provider':'hashicorp/pingfederate Terraform provider manages SP connections, clients, policies as code; commit config to Git for auditability'},
+      tone:'ok',
+      callout:'CIAM: the full access token flow — 1) SPA calls authorization_code + PKCE; 2) Ping Federate HTML Form Adapter authenticates user against Entra/LDAP; 3) Token Policy maps groups + employee_id into JWT claims (scp, groups, tid); 4) Spring Boot resource server validates the JWT against Ping\'s JWKS endpoint, extracts scp and groups into a GrantedAuthority list; 5) @PreAuthorize("hasAuthority(\'SCOPE_read:identity\')") gates the API. Register the Spring Boot API as a Ping resource server with the scopes it owns.'
+    }
+  ],
+  code:[
+    '# Ping Admin API — OAuth client registration',
+    'POST /pf-admin-api/v1/oauthServerSettings/clients',
+    '{',
+    '  "clientId": "ciam-spa",',
+    '  "grantTypes": ["AUTHORIZATION_CODE"],',
+    '  "requirePkce": true,',
+    '  "redirectUris": ["https://app.example.com/callback"],',
+    '  "scopes": [{"name":"openid"},{"name":"read:identity"}]',
+    '}',
+    '',
+    '# Token Policy — add custom claims to JWT',
+    '# Map LDAP attribute "memberOf" → JWT claim "groups"',
+    '# Map LDAP attribute "employeeID" → JWT claim "employee_id"',
+    '',
+    '# Spring Boot resource server — validate Ping JWT',
+    'spring:',
+    '  security:',
+    '    oauth2:',
+    '      resourceserver:',
+    '        jwt:',
+    '          jwk-set-uri: https://ping.example.com/pf/JWKS',
+    '',
+    '# Ping resource server registration',
+    'POST /pf-admin-api/v1/oauth/resourceOwnerCredentialsMappings',
+    '# Grant scope: read:identity, write:identity to ciam-spa client'
+  ]
+});
+</script>
+
 <script>
 function showAdminSection(name) {
   const sections = ['sp-connections','idp-adapters','oauth-clients','token-policy','resource-servers','certificates','audit-log'];

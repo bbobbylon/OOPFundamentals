@@ -157,6 +157,76 @@
 
 </div>
 
+<!-- ── Code Walkthrough: Ping Platform Deep ── -->
+<div id="cw-pingplat"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-pingplat',{
+  id:'cw-pingplat',
+  title:'Ping platform deep — PingGateway chains, PingAM policy engine, session management, and token transformation',
+  subtitle:'Deep Ping platform: PingGateway request processing (chains + routes + filters), PingAM session management (CTS-backed distributed sessions, session upgrading), policy engine (resource-based authorization, policy sets, conditions), and token transformation (SAML → JWT, opaque → JWT via introspection). These are the components that CIAM engineers configure and maintain daily.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'PingGateway chains and routes: a route matches incoming requests (by URL pattern, HTTP method, header). Each matched route runs a chain of filters. Filters modify the request/response pipeline: ClientRegistrationFilter (OIDC client), TokenIntrospectionFilter (validate opaque token), HeaderFilter (add/remove/transform headers), ThrottlingFilter (rate limiting), JwtValidationFilter (local JWT validation via JWKS). Filters are JSON-configured (or Groovy/JavaScript scripted for complex logic). Route priority: more specific routes take precedence over wildcards.',
+      vars:{'route condition':'baseURI matching + HTTP method filter; e.g., "^/api/v1/identity/.*" matches + verify JWT before forwarding','ChainOfFilters':'ordered list of filters; each can pass (next filter), return (short-circuit with response), or throw; pipeline model like Angular HttpInterceptors','ThrottlingFilter':'rate limiting per IP or per authenticated principal; configured with requests-per-second + burst size; returns 429 Too Many Requests'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'PingAM session management: sessions are stored in CTS (Core Token Service) — a distributed token store backed by PingDirectory. Session properties: uid (user identifier), authLevel (0/1/2), maxSessionTime, maxIdleTime, deviceFingerprint, lastAuthTime. Session lookup: PingGateway calls PingAM /json/sessions/<token>?_action=validate before forwarding. Session upgrade: call /json/authenticate with existing session token to add higher auth level without full re-authentication. Session invalidation: POST /json/sessions/<token>?_action=logout.',
+      vars:{'CTS (Core Token Service)':'PingDirectory schema extension that stores session tokens; multi-master replicated; supports millions of concurrent sessions','session property':'key-value pairs attached to the session; read/write from scripted decision nodes; drives step-up MFA decisions in journey trees','maxIdleTime vs maxSessionTime':'maxIdleTime = inactivity timeout (reset on each request); maxSessionTime = absolute limit (even if active); both configurable per auth level'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'PingAM policy engine: resource-based authorization evaluated server-side. Policy set = collection of policies for a resource type (e.g., "REST API resources"). Policy = resource pattern + actions (GET/POST/PUT/DELETE) + subjects (who) + conditions (when) + response attributes (what to return). Subjects: authenticated users, group membership, OAuth2 client. Conditions: IP range, time of day, device trust level, auth level, custom scripted condition. PingGateway calls policy engine via /json/policies?_action=evaluate to authorize each request.',
+      vars:{'policy evaluation request':'POST /json/realms/root/policies?_action=evaluate; body: {resources: [url], subject: {ssoToken: ...}, environment: {IP: [...]}}','policy response':'{ "advices": {}, "actions": {"GET": true}, "attributes": {"employee_id": ["12345"]} }; attributes injected as headers by PingGateway','policy conditions':'IP filter, time/day, amr (authentication method ref), OAuth2Scope, script-based; combined with AND/OR; evaluated at request time'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Token transformation: PingGateway converts between token formats. SAML → JWT: PingGateway receives a SAML assertion in a SOAP header, validates it against PingFederate, extracts attributes, mints a JWT. Opaque → JWT: PingGateway introspects opaque token at PingFederate /oauth/introspect, receives claims JSON, signs a local JWT — downstream services get JWT without round-tripping to PingFederate. JWT → JWT: re-sign with different audience (audience restriction for internal microservices) — service mesh token. Token exchange: RFC 8693 at PingFederate /oauth/token with grant_type=urn:ietf:params:oauth:grant-type:token-exchange.',
+      vars:{'opaque token introspection cache':'PingGateway caches introspection results for token_exp - now seconds; avoids introspection on every request; configurable TTL','RFC 8693 token exchange':'external user token → internal service token; changes audience, scope, or token type; implemented in PingFederate; used for microservice-to-microservice delegation','audience downscoping':'mint narrow-scope JWT for each backend service; external token has broad scopes; internal tokens scoped to just what each service needs'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'PingGateway and Spring Boot integration: two patterns. Pattern A (token validation at gateway): PingGateway validates JWT, extracts claims, injects X-User-Id + X-User-Groups headers → Spring Boot reads headers (trusts PingGateway IP range). Pattern B (JWT passthrough): PingGateway forwards Authorization header unchanged → Spring Boot validates JWT itself. Pattern A: simpler Spring Boot config but tight coupling to PingGateway. Pattern B: defense in depth, Spring Boot still validates, works without PingGateway. Production: usually Pattern B with PingGateway as an additional layer.',
+      vars:{'X-User-Id header injection':'PingGateway reads JWT sub claim, injects as X-User-Id header; Spring reads @RequestHeader("X-User-Id"); never trust these headers without IP whitelist','IP whitelist for gateway headers':'Spring Boot behind PingGateway must only accept X-User-* headers from PingGateway IP range; reject or ignore if from other sources','Pattern B advantage':'Spring Boot validates signature independently; if PingGateway is misconfigured or bypassed, forged headers do not grant access'},
+      tone:'ok',
+      callout:'CIAM platform deep integration: PingGateway (ThrottlingFilter + JwtValidationFilter + AudienceRestrictionFilter) → PingAM (session validation + policy evaluation) → PingFederate (token issuance + JWKS) → PingDirectory (user attributes via LDAP/SCIM). Spring Boot sits behind PingGateway as a resource server. Configure PingGateway route to: 1) validate JWT signature via PingFederate JWKS; 2) call PingAM policy engine for authorization; 3) inject X-Employee-Id + X-Groups headers; 4) forward to Spring Boot. Spring Boot reads headers + does method-level @PreAuthorize checks.'
+    }
+  ],
+  code:[
+    '// PingGateway route (JSON config)',
+    '{',
+    '  "name": "ApiRoute",',
+    '  "condition": "${matches(request.uri.path, \'^/api/.*\')}",',
+    '  "handler": {',
+    '    "type": "Chain",',
+    '    "config": {',
+    '      "filters": [',
+    '        {',
+    '          "type": "JwtValidationFilter",',
+    '          "config": {',
+    '            "jwksUri": "https://ping.example.com/pf/JWKS",',
+    '            "verificationSecretId": "jwks-secrets"',
+    '          }',
+    '        },',
+    '        {',
+    '          "type": "ThrottlingFilter",',
+    '          "config": { "rate": { "numberOfRequests": 100, "duration": "1 second" } }',
+    '        }',
+    '      ],',
+    '      "handler": "BackendService"',
+    '    }',
+    '  }',
+    '}'
+  ]
+});
+</script>
+
 <script>
 const PCOMP=[
   {id:'client', ic:'🌐', nl:'Client',       ns:'browser / mobile / SPA'},
