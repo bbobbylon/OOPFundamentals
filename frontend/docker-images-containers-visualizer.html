@@ -304,6 +304,78 @@ docker run -d \
   </div>
 </div>
 
+<!-- ── Code Walkthrough: Docker Images vs Containers ── -->
+<div id="cw-imgcont"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-imgcont',{
+  id:'cw-imgcont',
+  title:'Docker images vs containers — layers, lifecycle, and the registry workflow',
+  subtitle:'An image is a blueprint (read-only, layered filesystem). A container is a running instance of an image (adds a writable layer on top). Understanding the layer model explains why builds are fast (cache), why images are small (shared layers), and why you never write to a container\'s filesystem in production (data lost on restart).',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6],
+      note:'Image layers: each Dockerfile instruction (FROM, RUN, COPY, ADD) creates a new read-only layer identified by its SHA-256 hash. Layers are cached. If a layer\'s instruction and its inputs have not changed, Docker reuses the cached layer — no re-execution. Critical ordering: put COPY pom.xml + RUN mvn dependency:go-offline BEFORE COPY src — so the dependency download layer is cached across builds even when source changes.',
+      vars:{'layer SHA-256':'the hash of the instruction + inputs; cache HIT if the hash matches a stored layer','COPY pom.xml first':'the pom.xml layer changes rarely; it caches the 5-min dependency download; src/ layer changes every commit','docker history myimage':'lists each layer, its size, and the instruction that created it; diagnoses bloated images'},
+      tone:'start'
+    },
+    {
+      lines:[8,9,10,11,12,13],
+      note:'Container lifecycle: created → running → stopped → removed. docker run creates AND starts. docker stop sends SIGTERM (graceful shutdown), waits grace period, then SIGKILL. docker rm removes the stopped container. The writable layer (any files written during the container\'s life) is DELETED with docker rm — use named volumes for data that should persist across container restarts.',
+      vars:{'docker run -d':'detached mode: starts the container in the background; returns the container ID','docker stop <id>':'sends SIGTERM then SIGKILL after grace period (default 10s); Spring Boot Actuator /actuator/shutdown cooperates','docker rm <id>':'removes the container and its writable layer; image is unaffected; data written to non-volume paths is LOST'},
+      tone:'ok'
+    },
+    {
+      lines:[15,16,17,18,19,20],
+      note:'Named volumes: docker volume create my-data creates a persistent, named volume managed by Docker. Mount it into a container with -v my-data:/app/data. The volume data survives docker stop/rm — only docker volume rm deletes it. Use named volumes for database data, uploaded files, and anything that must survive container restarts. Bind mounts (-v /host/path:/container/path) mount a host directory — use in development for live code reloading.',
+      vars:{'named volume (-v my-data:/app/data)':'data persists across container restarts; lives in Docker\'s managed storage area on the host','bind mount (-v $(pwd)/src:/app/src)':'mounts a host directory into the container; live reload in dev; NOT for production','inspect a volume':'docker volume inspect my-data → shows Mountpoint (the host path Docker manages)'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Image tagging and registry workflow: images are addressed as registry/repository:tag. docker build -t myapp:1.0.0 builds and tags. docker tag myapp:1.0.0 registry.example.com/myapp:1.0.0 creates an alias for pushing. docker push sends the image to the registry. docker pull fetches it on another machine. Use semantic version tags + latest for the most recent build. Never use "latest" as the ONLY tag in production — it masks what version is actually running.',
+      vars:{'registry/repo:tag':'default registry is Docker Hub; ECR uses accountId.dkr.ecr.region.amazonaws.com/repo:tag','docker build --no-cache':'forces full rebuild, ignoring all cached layers; use to ensure a clean build','docker push needs login':'docker login (or aws ecr get-login-password | docker login) before pushing to a private registry'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31],
+      note:'Useful diagnostic commands: docker ps (running containers), docker ps -a (all including stopped), docker logs <id> (stdout/stderr), docker exec -it <id> /bin/sh (shell into running container for inspection — NOT for production troubleshooting in ECS Fargate: use ECS Exec instead), docker inspect <id> (full metadata JSON including mounts, env vars, networking).',
+      vars:{'docker logs -f <id>':'follow: stream new log lines as they appear; Ctrl+C to stop; equivalent to tail -f','docker exec -it <id> sh':'attach an interactive shell; not available on Fargate tasks without ECS Exec enabled','docker inspect --format':'go template to extract specific fields: docker inspect --format \'{{.NetworkSettings.IPAddress}}\' <id>'},
+      tone:'ok',
+      callout:'CIAM: the Spring Boot CIAM container must handle SIGTERM gracefully for rolling deployments. Spring Boot 2.3+ and its default Tomcat/Undertow graceful shutdown: set server.shutdown=graceful and spring.lifecycle.timeout-per-shutdown-phase=30s. When ECS sends SIGTERM before replacing the task, Spring finishes in-flight requests (up to 30s) before exiting. Without this, requests in flight during a deployment get a connection reset.'
+    }
+  ],
+  code:[
+    '// Image layers: order matters for cache efficiency',
+    'FROM eclipse-temurin:21-jre AS runtime',
+    'WORKDIR /app',
+    'COPY --from=builder /app/target/*.jar app.jar  // one layer for the JAR',
+    '// Each COPY/RUN = one layer; SHA-256 determines cache HIT or MISS',
+    '',
+    '// Container lifecycle',
+    'docker run -d -p 8080:8080 --name myapp myapp:1.0.0  // create + start',
+    'docker stop myapp     // SIGTERM → wait → SIGKILL (graceful shutdown)',
+    'docker rm myapp       // remove container + its writable layer (data LOST)',
+    '// Image is untouched; run again anytime',
+    '',
+    '// Named volumes — persist data across container restarts',
+    'docker volume create myapp-data',
+    'docker run -v myapp-data:/app/uploads myapp:1.0.0',
+    '// Bind mount (dev only): -v $(pwd)/config:/app/config',
+    '',
+    '// Registry workflow',
+    'docker build -t myapp:1.0.0 .',
+    'docker tag myapp:1.0.0 123456789.dkr.ecr.us-east-1.amazonaws.com/myapp:1.0.0',
+    'docker push 123456789.dkr.ecr.us-east-1.amazonaws.com/myapp:1.0.0',
+    '',
+    '// Diagnostics',
+    'docker ps -a           // all containers (running + stopped)',
+    'docker logs -f myapp   // stream container stdout/stderr',
+    'docker exec -it myapp sh  // interactive shell for debugging'
+  ]
+});
+</script>
+
 <script>
 function toggleLayer(el) {
   const wasOpen = el.classList.contains('open');

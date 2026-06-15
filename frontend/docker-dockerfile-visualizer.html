@@ -248,6 +248,84 @@ RUN mvn package -DskipTests</div>
   </div>
 </div>
 
+<!-- ── Code Walkthrough: Dockerfile ── -->
+<div id="cw-dkr"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-dkr',{
+  id:'cw-dkr',
+  title:'Dockerfile — every instruction in a multi-stage Spring Boot build',
+  subtitle:'A Dockerfile is a recipe for a reproducible, isolated filesystem. Multi-stage builds separate the build environment (JDK + Maven) from the runtime (JRE only), producing a slim, secure image. Layer caching makes rebuilds fast.',
+  steps:[
+    {
+      lines:[1,2],
+      note:'FROM sets the base image — the starting filesystem. Every Dockerfile must begin with FROM. eclipse-temurin:21-jdk is the official OpenJDK 21 distribution (JDK = Java Development Kit, includes javac and Maven). AS builder NAMES this stage so later stages can reference it with --from=builder.',
+      vars:{'eclipse-temurin':'official OpenJDK distribution from Adoptium (formerly AdoptOpenJDK)','21-jdk':'JDK 21 (LTS) — includes full compiler and tools; ~580 MB image','AS builder':'stage name — referenced in COPY --from=builder in Stage 2'},
+      tone:'start'
+    },
+    {
+      lines:[3],
+      note:'WORKDIR /app creates and sets the current working directory inside the image for all subsequent COPY, RUN, and CMD instructions. Using a named workdir (not the root /) prevents accidentally overwriting container OS files and makes paths in logs predictable.',
+      vars:{'/app':'created inside the container — does not exist in the base image until WORKDIR','relative paths':'COPY src ./src puts source at /app/src inside the container'},
+      tone:'ok'
+    },
+    {
+      lines:[4,5],
+      note:'LAYER CACHING trick: copy ONLY pom.xml first, then download dependencies. Docker caches each instruction as a layer keyed to its inputs. If pom.xml has NOT changed, this layer is served from cache — the slow Maven dependency download (30–60s) is SKIPPED entirely. Copying all source first (COPY . .) would invalidate this cache on every source edit.',
+      vars:{'cache hit':'pom.xml unchanged → Docker reuses the cached Maven download layer','cache miss':'pom.xml changed → re-runs mvn dependency:go-offline → downloads all JARs again','dependency:go-offline':'downloads all required JARs into ~/.m2 INSIDE the image'},
+      tone:'ok'
+    },
+    {
+      lines:[6,7],
+      note:'NOW copy the source code. Source changes frequently, so this layer is rarely cached — that is intentional. RUN mvn package compiles the code and produces target/*.jar. Key insight: the expensive dependency download (prior layer) is still cached, so only the compile step re-runs on source changes.',
+      vars:{'-DskipTests':'skips unit tests for faster image builds; remove for CI/CD pipelines','target/*.jar':'the Spring Boot fat JAR produced by spring-boot-maven-plugin — ~40–80 MB'},
+      tone:'ok'
+    },
+    {
+      lines:[9,10],
+      note:'Stage 2 starts a COMPLETELY FRESH image: eclipse-temurin:21-jre — the Java RUNTIME only (~200 MB). No Maven, no javac, no source code, no test artifacts. The builder stage is DISCARDED from the final image. This is the security and size benefit of multi-stage builds.',
+      vars:{'21-jre':'JRE = Java Runtime Environment; no compiler; ~200 MB vs ~580 MB for JDK','attack surface':'no Maven, no source code, no compiler in the production image — fewer CVEs'},
+      tone:'ok'
+    },
+    {
+      lines:[11,12],
+      note:'COPY --from=builder copies the compiled JAR from the builder stage into the runtime image. Only this one JAR file crosses into the final image. Everything else the builder stage created (Maven cache, source files, .class files, test results) is discarded.',
+      vars:{'--from=builder':'references the named AS builder stage by name','*.jar glob':'matches myapp-0.0.1-SNAPSHOT.jar produced by spring-boot-maven-plugin'},
+      tone:'ok'
+    },
+    {
+      lines:[13],
+      note:'EXPOSE 8080 is DOCUMENTATION metadata — it tells orchestrators and developers which port the container listens on. It does NOT publish the port. You still need -p 8080:8080 in docker run or ports: in docker-compose.yml. Kubernetes reads EXPOSE to auto-configure container ports in the Pod spec.',
+      vars:{'EXPOSE':'metadata only — no networking effect by itself; port is still internal','docker run -p 9090:8080':'maps host port 9090 to container port 8080'},
+      tone:'ok'
+    },
+    {
+      lines:[14],
+      note:'ENTRYPOINT in exec form (JSON array) runs java directly as PID 1 — no shell wrapper. docker stop sends SIGTERM directly to the JVM → Spring Boot graceful shutdown (drains in-flight requests, closes DB connections). Shell form ("java -jar app.jar") wraps in /bin/sh -c → SIGTERM goes to the shell, not the JVM → abrupt kill.',
+      vars:{'exec form':'["java","-jar","app.jar"] → JVM is PID 1 → receives SIGTERM','shell form':'java -jar app.jar → /bin/sh is PID 1 → JVM may not receive SIGTERM','graceful shutdown':'spring.lifecycle.timeout-per-shutdown-phase=30s in application.properties'},
+      tone:'ok',
+      callout:'CIAM: multi-stage Dockerfiles are the standard for Spring Boot + Spring Security CIAM services. The slim JRE image reduces the CVE surface for your token-validation microservice. EXPOSE 8080 aligns with Kubernetes liveness/readiness probes (GET /actuator/health:8080). Add ENV JAVA_OPTS="-XX:MaxRAMPercentage=75" so the JVM caps heap at 75% of the container memory limit — otherwise the JVM sees the host RAM and over-allocates, causing OOM kills.'
+    }
+  ],
+  code:[
+    '# Stage 1: build (JDK + Maven)',
+    'FROM eclipse-temurin:21-jdk AS builder',
+    'WORKDIR /app',
+    'COPY pom.xml .',
+    'RUN mvn dependency:go-offline -q   # cached layer — skipped if pom.xml unchanged',
+    'COPY src ./src',
+    'RUN mvn package -DskipTests -q    # compile; dependencies are already in cache',
+    '',
+    '# Stage 2: run (JRE only — 200 MB vs 580 MB)',
+    'FROM eclipse-temurin:21-jre AS runtime',
+    'WORKDIR /app',
+    'COPY --from=builder /app/target/*.jar app.jar  # only the JAR crosses over',
+    'EXPOSE 8080                                     # metadata: documents the port',
+    'ENTRYPOINT ["java", "-jar", "app.jar"]          # exec form → JVM is PID 1'
+  ]
+});
+</script>
+
 <script>
 function showDetail(id) {
   const detail = document.getElementById('d-' + id);

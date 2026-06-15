@@ -239,6 +239,77 @@ mvn spring-boot:build-image -Dspring-boot.build-image.imageName=myapp:1.0
   </div>
 </div>
 
+<!-- ── Code Walkthrough: Docker + Spring Boot ── -->
+<div id="cw-dkrsb"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-dkrsb',{
+  id:'cw-dkrsb',
+  title:'Dockerizing Spring Boot — multi-stage Dockerfile, JVM flags, and health checks',
+  subtitle:'A production-ready Spring Boot Docker image uses multi-stage builds to separate compilation from the runtime image, sets JVM memory flags appropriate for containerized environments, and includes a HEALTHCHECK that lets orchestrators (ECS, Kubernetes) know when the app is ready. Getting these right prevents OOM kills and failed rolling deployments.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7,8],
+      note:'Multi-stage build: Stage 1 (AS builder) uses the full JDK + Maven image to compile and package the JAR. Stage 2 (AS runtime) uses a slim JRE-only image and copies just the JAR from Stage 1. The final image contains no Maven, no source code, no .m2 cache — only the JRE and the fat JAR. Result: build-stage image may be 600 MB; runtime image is ~200 MB.',
+      vars:{'FROM eclipse-temurin:21-jdk AS builder':'the build stage; full JDK for javac + maven; 400 MB; NOT the final image','FROM eclipse-temurin:21-jre AS runtime':'JRE only (no javac/jdk tools); smaller attack surface + smaller image','COPY --from=builder':'cross-stage copy; takes the JAR from stage 1 without importing the 400 MB build stage'},
+      tone:'start'
+    },
+    {
+      lines:[10,11,12,13,14,15],
+      note:'Dependency caching: COPY pom.xml before COPY src and run mvn dependency:go-offline (or mvn package -DskipTests). This creates a Docker layer for the dependency download. Since pom.xml changes rarely but src/ changes every commit, the dependency layer is served from cache on every subsequent build where only code changed. This turns a 4-minute full build into a 30-second incremental one.',
+      vars:{'mvn dependency:go-offline -q':'downloads all dependencies into the layer; cached until pom.xml changes','COPY pom.xml .  (before COPY src)':'pom.xml is small and changes rarely; source is large and changes often; separate their layers','maven.repo.local=/root/.m2':'the dependency cache location; stays in the builder stage; not in the final image'},
+      tone:'ok'
+    },
+    {
+      lines:[17,18,19,20,21],
+      note:'JVM memory flags for containers: without explicit settings, the JVM reads the HOST machine\'s memory (e.g., 64 GB) and sizes the heap to 25% (16 GB) — even if the container limit is 512 MB. The container then gets OOM-killed. Fix: -XX:+UseContainerSupport (default in JDK 11+) reads cgroup memory limits correctly. -XX:MaxRAMPercentage=75.0 sets heap to 75% of the container\'s memory limit. For a 1 GB container: heap = 768 MB.',
+      vars:{'-XX:+UseContainerSupport':'JDK 11+ default; reads Linux cgroup memory limits instead of host memory; set explicitly to be safe','-XX:MaxRAMPercentage=75.0':'heap = 75% of the container memory limit; leave 25% for metaspace, threads, native memory','-Xms=-Xmx (avoid in containers)':'hard-coded heap sizes do not adapt to different container sizes; use MaxRAMPercentage instead'},
+      tone:'ok'
+    },
+    {
+      lines:[23,24,25,26],
+      note:'HEALTHCHECK: Docker (and ECS) calls this command periodically to determine container health. A Spring Boot /actuator/health endpoint returns HTTP 200 when the app is healthy (DB connections OK, custom health checks pass) and 503 when not. ECS waits for the health check to pass before routing traffic — prevents a broken deployment from killing all healthy tasks.',
+      vars:{'--interval=30s':'check health every 30 seconds','--retries=3':'mark unhealthy after 3 consecutive failures (90 seconds)','curl -f http://localhost:8080/actuator/health':'"-f" = fail (return non-zero) on HTTP 4xx/5xx; Spring Actuator returns 200 when UP, 503 when DOWN'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31],
+      note:'ENTRYPOINT exec form vs shell form: ENTRYPOINT ["java", "-jar", "app.jar"] (array = exec form) runs java directly as PID 1 — Docker SIGTERM goes directly to the JVM. ENTRYPOINT java -jar app.jar (string = shell form) wraps in /bin/sh -c, making sh PID 1 — SIGTERM goes to sh which may not forward it to java. Use exec form ALWAYS for proper graceful shutdown.',
+      vars:{'exec form (JSON array)':'java becomes PID 1; SIGTERM received directly; Spring Boot graceful shutdown works','shell form (string)':'sh -c is PID 1; SIGTERM goes to sh; JVM may never receive it; container force-killed after timeout','EXPOSE 8080':'metadata only; documents which port the app listens on; does NOT publish the port (use -p at runtime)'},
+      tone:'ok',
+      callout:'CIAM: set spring.profiles.active=prod via ENTRYPOINT ["java", "-XX:+UseContainerSupport", "-XX:MaxRAMPercentage=75.0", "-Dspring.profiles.active=prod", "-jar", "app.jar"]. The prod profile activates application-prod.properties which has the correct issuer-uri for the production Entra tenant. Do not bake the issuer-uri into the image — inject it as an environment variable (-e SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI=...) so the same image runs in staging and prod with different tenants.'
+    }
+  ],
+  code:[
+    '# Multi-stage Dockerfile for Spring Boot',
+    '# Stage 1: build',
+    'FROM eclipse-temurin:21-jdk AS builder',
+    'WORKDIR /app',
+    'COPY pom.xml .                                  # layer 1: pom only',
+    'RUN mvn dependency:go-offline -q               # layer 2: deps (cached!)',
+    'COPY src ./src                                  # layer 3: source',
+    'RUN mvn package -DskipTests -q                 # layer 4: compiled JAR',
+    '',
+    '# Stage 2: runtime (no JDK, no Maven, no source)',
+    'FROM eclipse-temurin:21-jre AS runtime',
+    'WORKDIR /app',
+    'COPY --from=builder /app/target/*.jar app.jar  # only the JAR',
+    '',
+    '# JVM memory flags for containers',
+    'ENTRYPOINT ["java",',
+    '  "-XX:+UseContainerSupport",    # read cgroup limits (JDK 11+ default)',
+    '  "-XX:MaxRAMPercentage=75.0",   # heap = 75% of container memory limit',
+    '  "-jar", "app.jar"]',
+    '',
+    '# Health check (ECS waits for this before routing traffic)',
+    'HEALTHCHECK --interval=30s --timeout=5s --retries=3 \\',
+    '  CMD curl -f http://localhost:8080/actuator/health || exit 1',
+    '',
+    'EXPOSE 8080  # documentation only; use -p 8080:8080 at runtime'
+  ]
+});
+</script>
+
 <script>
 function showDf(id) {
   const el = document.getElementById('df-' + id);
