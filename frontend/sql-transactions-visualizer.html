@@ -143,6 +143,66 @@
 </section>
 </div>
 
+<!-- ── Code Walkthrough: SQL Transactions ── -->
+<div id="cw-sqltx"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-sqltx',{
+  id:'cw-sqltx',
+  title:'SQL transactions and ACID — BEGIN/COMMIT/ROLLBACK, isolation levels, locking, deadlocks, and MVCC',
+  subtitle:'A transaction is a group of SQL statements that execute as a single unit. ACID guarantees: Atomicity (all succeed or all fail), Consistency (DB constraints never violated), Isolation (concurrent transactions do not interfere), Durability (committed data survives crashes). Without transactions: a partial transfer (debit without credit) leaves money in limbo. BEGIN; debit; credit; COMMIT; is a two-step transfer that either fully completes or fully reverts.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'BEGIN / COMMIT / ROLLBACK: BEGIN starts a transaction. All statements after BEGIN are buffered until COMMIT (written to disk) or ROLLBACK (discarded). SAVEPOINT name creates a partial rollback point within a transaction. ROLLBACK TO SAVEPOINT name undoes back to the savepoint but keeps the transaction open. RELEASE SAVEPOINT name discards the savepoint. Autocommit: by default, every SQL statement outside BEGIN is auto-committed (its own transaction). In a connection pool: connections are reused; always explicitly ROLLBACK on error to clean up any open transaction state. In Spring: @Transactional handles BEGIN/COMMIT/ROLLBACK automatically.',
+      vars:{'every statement is a transaction':'without explicit BEGIN, each SELECT/INSERT/UPDATE is its own auto-committed transaction; cannot roll back after the statement completes','SAVEPOINT for nested rollback':'BEGIN; INSERT A; SAVEPOINT sp1; INSERT B; ROLLBACK TO sp1; -- B is rolled back, A is still in the transaction; COMMIT; -- A is committed; the ROLLBACK did not cancel A','connection pool and open transactions':'a connection returned to the pool with an uncommitted transaction can corrupt the next request that gets that connection; always ROLLBACK on exception before returning the connection'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'ACID properties: Atomicity — all operations in a transaction succeed or all fail; no partial updates. The DB writes a WAL (Write-Ahead Log) so if a crash occurs mid-transaction, it replays the log on recovery. Consistency — all DB constraints (foreign keys, unique, check) are satisfied at commit time. Isolation — transactions execute as if there are no other concurrent transactions (at SERIALIZABLE level); lower levels allow certain anomalies for performance. Durability — after COMMIT, the data is written to disk (WAL fsync); a power failure after COMMIT does not lose the data. Sync mode: fsync=on (default in Postgres) — WAL written synchronously; fsync=off is faster but risks data loss on crash.',
+      vars:{'WAL for atomicity and durability':'WAL records every change before applying it; on crash: replay the WAL from the last checkpoint; COMMIT only acknowledged after WAL is fsynced to disk','consistency = DB enforces its own rules':'at COMMIT: all FK constraints, unique constraints, check constraints must hold; if any fail: COMMIT fails with a constraint violation; the application must handle and retry','isolation is not free':'full SERIALIZABLE isolation has a performance cost; most applications use READ COMMITTED (Postgres default); choose the minimum isolation level that prevents the anomalies your app is sensitive to'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'Isolation levels and anomalies: READ UNCOMMITTED allows dirty reads (read another transaction uncommitted data); not supported in Postgres (treated as READ COMMITTED). READ COMMITTED has no dirty reads; phantom reads and non-repeatable reads possible; Postgres default; safe for most OLTP. REPEATABLE READ means the same row read twice returns the same value; no non-repeatable reads; phantom reads still possible. SERIALIZABLE provides full isolation; transactions execute as if serial; prevents all anomalies including phantom reads. SELECT ... FOR UPDATE acquires a row-level exclusive lock; other transactions block on the same row until your transaction commits.',
+      vars:{'non-repeatable read':'T1 reads row; T2 updates and commits; T1 reads same row again and gets a different value; prevented by REPEATABLE READ and above','phantom read':'T1 reads rows matching condition; T2 inserts a new matching row and commits; T1 re-queries and sees the new phantom row; prevented by SERIALIZABLE only','SELECT FOR UPDATE in Postgres':'BEGIN; SELECT * FROM accounts WHERE id=1 FOR UPDATE; UPDATE accounts SET balance=balance-100 WHERE id=1; COMMIT; locks the row at SELECT time; no other transaction can UPDATE it until commit'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Deadlocks: T1 holds lock on row A, waits for row B. T2 holds lock on row B, waits for row A. Neither can proceed. The DB detects the cycle and kills one transaction with ERROR: deadlock detected. Prevention: always acquire locks in a consistent order (sort IDs before locking: ORDER BY id FOR UPDATE). Deadlocks in INSERT: multiple transactions inserting rows that trigger FK constraint checks on the same parent row can deadlock. Fix: use LOCK TABLE ... IN SHARE ROW EXCLUSIVE MODE before the bulk insert. Lock timeouts: SET lock_timeout = 5s means the transaction fails if it waits more than 5 seconds for a lock (prevents indefinite blocking).',
+      vars:{'consistent lock ordering prevents deadlocks':'if T1 always locks user_id=1 before user_id=2, and T2 also does, they will never deadlock; deadlocks only form when T1 locks A then B and T2 locks B then A','lock_timeout prevents cascade blocking':'slow transaction holds lock; other transactions pile up waiting; set lock_timeout to fail fast; combine with application-level retry logic','deadlock vs lock wait':'deadlock = two transactions waiting on each other (the DB kills one); lock wait = one transaction waiting for another (it waits until timeout); monitor with pg_stat_activity.wait_event_type=Lock'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'MVCC (Multi-Version Concurrency Control): Postgres gives every transaction a snapshot of the DB at its start time. Readers see the committed state as of the transaction start. Writers create new row versions. No read locks: readers never block writers; writers never block readers. Dead rows: old row versions accumulate; VACUUM removes them. Long transactions block VACUUM. Monitor with pg_stat_activity for transactions with state="idle in transaction" running for hours. Transaction wraparound: every row has an xmin (creation transaction ID). After 2 billion transactions, IDs wrap around and Postgres cannot tell old from new; run VACUUM FREEZE periodically.',
+      vars:{'MVCC = snapshot isolation for reads':'a long-running SELECT sees a consistent snapshot; INSERTs from concurrent transactions are invisible (committed after snapshot); this is why you can have a consistent read without locking','idle in transaction is dangerous':'application opens a transaction, does work, but crashes or times out without COMMIT or ROLLBACK; connection sits idle with the transaction open; blocks VACUUM and holds locks; set statement_timeout and idle_in_transaction_session_timeout in Postgres','VACUUM FREEZE':'runs VACUUM and also freezes old row XIDs; prevents transaction ID wraparound (a catastrophic event requiring Postgres downtime to fix); let autovacuum handle it or run manually during low-traffic periods'},
+      tone:'ok',
+      callout:'CIAM SQL transactions: refresh token rotation uses SERIALIZABLE isolation. BEGIN; SELECT * FROM refresh_tokens WHERE user_id=:id FOR UPDATE; validate; INSERT new_token; DELETE old_token; COMMIT. The FOR UPDATE prevents two concurrent refresh requests from both getting new tokens. @Transactional(isolation=SERIALIZABLE) in Spring wraps this. Deadlock prevention: token operations always lock in (user_id, token_id) order. lock_timeout=3s to fail fast on lock contention. idle_in_transaction_session_timeout=30s in production. VACUUM autovacuum_vacuum_scale_factor=0.01 on refresh_tokens (frequent INSERT/DELETE) and login_events (high-churn).'
+    }
+  ],
+  code:[
+    '-- Refresh token rotation with FOR UPDATE',
+    'BEGIN;',
+    '',
+    'SELECT id, token, expires_at',
+    'FROM refresh_tokens',
+    'WHERE user_id = $1',
+    '  AND token = $2',
+    '  AND expires_at > NOW()',
+    'FOR UPDATE; -- exclusive row lock',
+    '',
+    'DELETE FROM refresh_tokens WHERE id = $3;',
+    'INSERT INTO refresh_tokens(user_id, token, expires_at)',
+    "  VALUES($1, $new_token, NOW() + INTERVAL '30 days');",
+    'COMMIT;'
+  ]
+});
+</script>
+
 <script>
 (function(){
 const pfx='st';
