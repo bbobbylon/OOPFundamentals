@@ -196,6 +196,78 @@ spring:
   </section>
 </div>
 
+<!-- ── Code Walkthrough: Cryptographic Keys and Signing ── -->
+<div id="cw-keysign"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-keysign',{
+  id:'cw-keysign',
+  title:'Cryptographic keys and JWT signing — RSA vs ECDSA, JWK sets, RS256 verification, key rotation',
+  subtitle:'Every OAuth 2.0 access token is cryptographically signed. The authorization server (Entra, Ping Identity) signs the JWT with its private key; your Spring Boot API verifies it using the corresponding public key from the JWKS endpoint. Understanding asymmetric signing, the JWK Set format, RS256 vs ES256, and key rotation is essential CIAM knowledge.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6],
+      note:'Asymmetric signing: the authorization server holds a PRIVATE RSA or EC key. It signs the JWT header+payload with that key to produce the signature. The API (resource server) fetches the PUBLIC key from the JWKS endpoint and verifies the signature. Anyone can verify; only the authorization server can sign. The private key NEVER leaves the authorization server. The public key is public information — published at /.well-known/jwks.json.',
+      vars:{'private key (sign)':'signs JWTs; held only by the authorization server; if leaked, attacker can forge tokens for any user','public key (verify)':'verifies signatures; your Spring Boot app fetches this from JWKS; safe to cache publicly','asymmetric vs symmetric':'RS256 (RSA) and ES256 (ECDSA) are asymmetric — verification key != signing key; HS256 (HMAC) is symmetric — same secret signs and verifies (not suitable for public APIs)'},
+      tone:'start'
+    },
+    {
+      lines:[8,9,10,11,12,13],
+      note:'JWK Set (JSON Web Key Set): the JWKS endpoint returns a JSON object with a "keys" array. Each key has: kty (key type: RSA or EC), use (sig = signing), kid (key ID), alg (RS256 or ES256), and the key material (n+e for RSA modulus+exponent; x+y for EC coordinates). The JWT header contains kid — your verifier matches kid to the correct public key in the JWKS. This enables key rotation: publish multiple keys, rotate gracefully.',
+      vars:{'kid (key ID)':'identifies which public key was used to sign this JWT; match JWT header kid to JWKS keys array','kty: RSA / EC':'RSA keys: n (modulus) + e (exponent); EC keys: crv (P-256/P-384) + x + y (curve point)','JWKS URL':'always at issuerURL + /.well-known/jwks.json; e.g., https://login.microsoftonline.com/{tenant}/discovery/v2.0/keys'},
+      tone:'ok'
+    },
+    {
+      lines:[15,16,17,18,19,20],
+      note:'RS256 vs ES256: RS256 (RSA + SHA-256) uses 2048 or 4096-bit keys; signature is 256-512 bytes. Widely supported. ES256 (ECDSA + P-256 + SHA-256) uses 256-bit keys; signatures are 64 bytes — smaller, faster, same security level. Entra ID uses RS256 by default. Ping Identity supports both. Spring Boot NimbusJwtDecoder handles both automatically when the JWKS endpoint returns the correct key type.',
+      vars:{'RS256':'RSA-PKCS1v1.5 + SHA-256; 2048-bit key minimum; large signature; ubiquitous; what Entra ID uses','ES256':'ECDSA + P-256 + SHA-256; 256-bit key; 64-byte signature; faster; growing adoption; Ping supports it','alg header claim':'the JWT header alg field declares which algorithm was used; verifier must check alg matches the expected algorithm (alg confusion attacks)'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Spring Boot NimbusJwtDecoder: configure with the JWKS URI. It automatically fetches the public keys, caches them, and matches kid. spring.security.oauth2.resourceserver.jwt.jwk-set-uri = https://login.microsoftonline.com/{tenant}/discovery/v2.0/keys. NimbusJwtDecoder validates: signature, exp (not expired), nbf (not before), iss (issuer matches), aud (audience matches your API client ID). All checks must pass.',
+      vars:{'jwk-set-uri property':'the only config needed; Spring auto-configures the rest; NimbusJwtDecoder fetches+caches keys','issuer-uri property':'Spring fetches /.well-known/openid-configuration and derives jwk-set-uri; also validates iss claim','JwtValidators.createDefaultWithIssuer(issuer)':'creates a composite validator: issuer + expiry + nbf; add AudienceValidator separately for aud claim'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'Key rotation: authorization servers periodically rotate their signing keys. The new key is published in the JWKS with a new kid before the old key retires. Tokens signed with the old kid are still valid until their exp claim. NimbusJwtDecoder handles this automatically: if verification fails (unknown kid), it re-fetches the JWKS and retries once. In production: cache JWKS aggressively (they change rarely) but support cache-invalidation on unknown kid.',
+      vars:{'kid mismatch re-fetch':'if the JWT kid is not in the cached JWKS, NimbusJwtDecoder fetches the JWKS again once; prevents failing during key rotation','key overlap period':'authorization server publishes new key before retiring old one; tokens signed with old key are valid until their exp; overlap = max token lifetime','JWKS caching':'cache JWKS for 1 hour default; but refresh immediately when an unknown kid is encountered; Spring JWKSource handles this automatically'},
+      tone:'ok',
+      callout:'CIAM: your Spring Boot API only needs one property: spring.security.oauth2.resourceserver.jwt.jwk-set-uri pointing to Entra\'s or Ping\'s JWKS endpoint. NimbusJwtDecoder fetches the RS256 public keys, caches them, verifies signatures, and checks exp/iss/aud automatically. Add an AudienceValidator for your API\'s audience (application client ID) — without it, tokens issued for other apps in the same tenant are accepted by your API. This is the most commonly missed configuration in CIAM Spring Boot setups.'
+    }
+  ],
+  code:[
+    '// Asymmetric JWT signing flow',
+    '// Auth server: sign JWT with PRIVATE key',
+    '// API: verify JWT with PUBLIC key from JWKS',
+    '',
+    '// JWKS response (/.well-known/jwks.json)',
+    '{ "keys": [{ "kty":"RSA","use":"sig","kid":"abc123",',
+    '             "alg":"RS256","n":"...modulus...","e":"AQAB" }] }',
+    '',
+    '// Spring Boot resource server — minimal config',
+    'spring.security.oauth2.resourceserver.jwt.jwk-set-uri=\\',
+    '  https://login.microsoftonline.com/{tenantId}/discovery/v2.0/keys',
+    '',
+    '// Programmatic — add audience validation',
+    '@Bean JwtDecoder jwtDecoder() {',
+    '  NimbusJwtDecoder decoder = NimbusJwtDecoder',
+    '    .withJwkSetUri(jwksUri).build();',
+    '  OAuth2TokenValidator<Jwt> validators =',
+    '    new DelegatingOAuth2TokenValidator<>(',
+    '      JwtValidators.createDefaultWithIssuer(issuer),',
+    '      new AudienceValidator(audience));',
+    '  decoder.setJwtValidator(validators);',
+    '  return decoder;',
+    '}',
+    '',
+    '// JWT header — alg + kid link token to the correct JWKS key',
+    '{ "alg": "RS256", "kid": "abc123", "typ": "JWT" }'
+  ]
+});
+</script>
+
 <script>
 document.addEventListener('click', function (e) {
   var a = e.target.closest('a.dd-link'); if (!a || !a.dataset.file) return;
