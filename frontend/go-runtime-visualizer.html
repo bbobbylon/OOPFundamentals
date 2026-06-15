@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Go: Runtime — Scheduler &amp; GC</title>
+  <style>
+    .who-goroutine{background:#00acd7;color:#fff}
+    .who-scheduler{background:#5dc9e2;color:#1a1a1a}
+    .who-osthread{background:#4ade80;color:#1a1a1a}
+    .who-gc{background:#fbbf24;color:#1a1a1a}
+    .who-escape{background:#a78bfa;color:#fff}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:18px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:monospace}
+    .code-block{background:#0b1426;border-left:3px solid var(--accent);border-radius:0 6px 6px 0;padding:12px 16px;font-family:monospace;font-size:12.5px;line-height:1.6;overflow-x:auto;margin:10px 0;color:#e2e8f0}
+    .key-insight{background:rgba(0,172,215,0.07);border:1px solid rgba(0,172,215,0.3);border-radius:8px;padding:14px;margin:12px 0;font-size:13px}
+    .key-insight strong{color:#00acd7}
+    code{background:#0b1426;padding:1px 5px;border-radius:3px;font-family:monospace;font-size:12px;color:#ffd43b}
+    .go-table{border-collapse:collapse;width:100%;font-size:13px;margin:14px 0}
+    .go-table th{background:rgba(0,172,215,0.1);color:var(--accent);border:1px solid rgba(255,255,255,.1);padding:8px 12px;text-align:left}
+    .go-table td{border:1px solid rgba(255,255,255,.1);padding:7px 11px;vertical-align:top;font-family:monospace;font-size:12px}
+  </style>
+  <link rel="stylesheet" href="devhub.css" />
+</head>
+<body class="track-go">
+<div class="container">
+  <a class="back" href="app.html">&larr; Dev Hub</a>
+  <h1>Go: Runtime — Scheduler &amp; GC</h1>
+  <p class="sub">The GMP scheduler that multiplexes millions of goroutines onto a few OS threads, growable goroutine stacks, the concurrent garbage collector, and escape analysis.</p>
+
+  <!-- ── INTRO ── -->
+  <div style="background:#1e293b;border:1px solid #00add8;border-left:3px solid #00add8;border-radius:10px;padding:20px 22px;margin:12px 0 28px">
+    <div style="font-size:15px;font-weight:800;color:#5dc9e2;margin-bottom:10px">How one Go process runs hundreds of thousands of goroutines on a handful of threads</div>
+    <p style="font-size:14px;color:#cbd5e1;margin:0 0 10px">
+      Go's runtime is a small operating system bundled into your binary. Concurrency rides on the <strong style="color:#5dc9e2">GMP scheduler</strong>: a <strong style="color:#00acd7">G</strong> is a goroutine (a tiny task with its own stack), an <strong style="color:#4ade80">M</strong> is an OS thread (a "machine"), and a <strong style="color:#5dc9e2">P</strong> is a logical processor — a scheduling context with a local run queue, capped at <code>GOMAXPROCS</code> (default = CPU cores). The scheduler multiplexes <em>many</em> G onto <em>few</em> M through the P's: each P pulls goroutines from its local queue and runs them on an M; idle P's <strong>steal</strong> work from busy ones to stay balanced; and when a goroutine makes a blocking syscall, its M is handed off so the P can keep running other goroutines. Goroutines are cheap because their <strong style="color:#00acd7">stacks start at ~2&nbsp;KB</strong> and grow/shrink by copying as needed — versus ~1&nbsp;MB for an OS thread — so 100,000+ goroutines is routine. Since Go 1.14 the scheduler is <strong>asynchronously preemptible</strong>, so a tight CPU loop can't starve its neighbors. Memory is reclaimed by a <strong style="color:#fbbf24">concurrent, tri-color mark-sweep garbage collector</strong> that runs mostly alongside your code with sub-millisecond stop-the-world pauses; it is non-generational and non-compacting, and its frequency is tuned by <code>GOGC</code> (default 100 = collect when the heap doubles) and bounded by <code>GOMEMLIMIT</code>. Finally, the compiler's <strong style="color:#a78bfa">escape analysis</strong> decides whether each value lives on the cheap stack or the GC-managed heap — keeping allocations on the stack is the single biggest lever for reducing GC pressure.
+    </p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:12px">
+      <div style="background:#0b1426;border:1px solid #334155;border-radius:8px;padding:10px 12px">
+        <div style="font-size:10.5px;font-weight:800;color:#00add8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">G, M, P</div>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code>G = goroutine  (~2KB stack, millions of them) &#10;M = OS thread  (the "machine" that runs code) &#10;P = processor  (run queue; count = GOMAXPROCS) &#10;&#10;// many G  ⇄  P (= cores)  ⇄  M (threads) &#10;runtime.GOMAXPROCS(0) // # of P's &#10;runtime.NumGoroutine() // live G count</code></p>
+      </div>
+      <div style="background:#0b1426;border:1px solid #334155;border-radius:8px;padding:10px 12px">
+        <div style="font-size:10.5px;font-weight:800;color:#fbbf24;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">Tuning the GC</div>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code>GOGC=100   // default: GC when heap grows 100% &#10;GOGC=200   // less often, more RAM, less CPU &#10;GOGC=off   // disable (batch jobs only) &#10;&#10;GOMEMLIMIT=512MiB  // soft memory ceiling &#10;// the GC works harder as you near it — &#10;// prevents OOM on a fixed-memory container</code></p>
+      </div>
+      <div style="background:#0b1426;border:1px solid #334155;border-radius:8px;padding:10px 12px">
+        <div style="font-size:10.5px;font-weight:800;color:#a78bfa;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">Go runtime vs the JVM</div>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><strong>JVM</strong>: OS threads (~1MB each), a generational compacting GC (G1/ZGC), JIT warm-up. <strong>Go</strong>: goroutines (~2KB) on a userspace scheduler, a non-generational non-compacting concurrent collector tuned for <em>low pause</em> over throughput, AOT-compiled (no warm-up). Result: Go starts in milliseconds and holds tens of thousands of cheap concurrent connections — great for gateways/sidecars; the JVM often wins raw throughput on long-lived CPU-bound work.</p>
+      </div>
+    </div>
+    <div style="padding:9px 13px;background:#0b1426;border-radius:7px;border-left:3px solid #f59e0b">
+      <span style="font-size:11px;font-weight:800;color:#f59e0b;text-transform:uppercase;letter-spacing:.05em">In a CIAM context:</span>
+      <span style="font-size:12.5px;color:#94a3b8;margin-left:6px">This is why a Go auth gateway shrugs off 10k+ simultaneous connections: a goroutine-per-connection at ~2&nbsp;KB is feasible where a thread-per-request model (classic Spring MVC at ~1&nbsp;MB/thread) would exhaust memory. For predictable token-validation p99 latency, set <code>GOMEMLIMIT</code> to your container's memory and consider a higher <code>GOGC</code> to trade RAM for fewer GC cycles. And cutting per-request heap allocations (reuse buffers, avoid pointers that escape) directly shrinks GC pauses under load.</span>
+    </div>
+  </div>
+
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">Scenario</span>
+      <div class="userseg" id="grtSeg">
+        <button class="on" data-s="gmp">GMP Scheduling</button>
+        <button data-s="stacks">Goroutine Stacks</button>
+        <button data-s="gc">Garbage Collector</button>
+        <button data-s="escape">Escape Analysis</button>
+      </div>
+      <button class="rt-run" id="grtRun">&#9654; Run</button>
+      <span class="rt-pill" id="grtPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="grtDiag">
+        <div class="rt-rail"></div>
+        <div class="rt-chip" id="grtChip">&#x2192;</div>
+        <div class="rt-node" data-n="GOROUTINE"><span class="ic">&#x1f9f5;</span><div><div class="nl">G — goroutine</div><div class="ns">~2KB stack</div></div><span class="who who-badge who-goroutine">GOROUTINE</span></div>
+        <div class="rt-node" data-n="SCHEDULER"><span class="ic">&#x1f5c2;&#xfe0f;</span><div><div class="nl">P — run queue</div><div class="ns">GOMAXPROCS</div></div><span class="who who-badge who-scheduler">SCHEDULER</span></div>
+        <div class="rt-node" data-n="OSTHREAD"><span class="ic">&#x1f9f5;</span><div><div class="nl">M — OS thread</div><div class="ns">runs on a core</div></div><span class="who who-badge who-osthread">OSTHREAD</span></div>
+        <div class="rt-node" data-n="GC"><span class="ic">&#x267b;&#xfe0f;</span><div><div class="nl">GC</div><div class="ns">concurrent mark-sweep</div></div><span class="who who-badge who-gc">GC</span></div>
+        <div class="rt-node" data-n="ESCAPE"><span class="ic">&#x1f9ed;</span><div><div class="nl">escape analysis</div><div class="ns">stack vs heap</div></div><span class="who who-badge who-escape">ESCAPE</span></div>
+      </div>
+      <div class="rt-inspect" id="grtInspect">
+        <div class="rt-dir" id="grtDir">STEP 0 / 5</div>
+        <div class="rt-cap" id="grtCap">Pick a scenario and press &#9654; Run</div>
+        <div class="rt-payload" id="grtPayload"></div>
+        <div class="rt-headers" id="grtHeaders"><span class="ht">INSPECTOR</span>(waiting)</div>
+      </div>
+    </div>
+    <div class="rt-result" id="grtResult"></div>
+    <div class="rt-legend"><span>&#x1f7e2; efficient</span><span>&#x1f534; pressure / cost</span><span>&#x25a1; computing</span></div>
+  </div>
+  <div class="who-row">
+    <span class="who-badge who-goroutine">G — goroutine</span>
+    <span class="who-badge who-scheduler">P — processor</span>
+    <span class="who-badge who-osthread">M — thread</span>
+    <span class="who-badge who-gc">GC — collector</span>
+    <span class="who-badge who-escape">ESCAPE — stack/heap</span>
+  </div>
+
+  <section>
+    <h2>1. The GMP Scheduler</h2>
+    <table class="go-table">
+      <tr><th>Part</th><th>Is</th><th>Count</th></tr>
+      <tr><td><strong>G</strong></td><td>a goroutine — task + its own growable stack</td><td>thousands to millions</td></tr>
+      <tr><td><strong>M</strong></td><td>an OS thread (a "machine") that executes code</td><td>as needed (blocking syscalls add more)</td></tr>
+      <tr><td><strong>P</strong></td><td>a logical processor with a local run queue; the right to run Go code</td><td><code>GOMAXPROCS</code> (default = CPU cores)</td></tr>
+    </table>
+    <div class="key-insight"><strong>Work stealing + syscall handoff keep cores busy.</strong> Each P runs goroutines from its local queue; an idle P steals half of another's queue rather than sitting idle. When a goroutine blocks in a syscall, the runtime detaches its P onto a fresh/idle M so the remaining goroutines keep running — your CPU is never parked just because one goroutine is waiting on disk or network.</div>
+  </section>
+
+  <section>
+    <h2>2. Goroutine Stacks: Small and Growable</h2>
+    <div class="grid2">
+      <div>
+        <div class="code-block"><span style="color:#a78bfa">// 100k goroutines? ~200MB of stack — fine.</span><br>for i := 0; i &lt; 100_000; i++ {<br>&nbsp;&nbsp;go handle(conn[i])<br>}<br><span style="color:#a78bfa">// each G starts at ~2KB, grows on demand,</span><br>fmt.Println(runtime.NumGoroutine())</div>
+      </div>
+      <div class="panel">
+        <p style="font-size:13px;color:var(--muted)">A goroutine's stack begins at about <strong>2&nbsp;KB</strong>. When it needs more, the runtime allocates a bigger stack and <em>copies</em> the frames over (updating pointers); it shrinks during GC when over-sized. An OS thread, by contrast, reserves ~1&nbsp;MB up front. That 500&times; difference is why "one goroutine per connection/request" is idiomatic in Go and would be reckless with threads.</p>
+      </div>
+    </div>
+    <div class="key-insight"><strong>Cheap to start, but not free to leak.</strong> A goroutine blocked forever (on a channel nobody sends to, or a request with no timeout) lives until the process dies — a goroutine leak. Watch <code>runtime.NumGoroutine()</code> climbing without bound, and always give blocking operations a <code>context</code> deadline so they can exit.</div>
+  </section>
+
+  <section>
+    <h2>3. The Garbage Collector</h2>
+    <table class="go-table">
+      <tr><th>Property</th><th>Go's GC</th></tr>
+      <tr><td>Algorithm</td><td>concurrent <strong>tri-color mark-sweep</strong> — runs alongside your code</td></tr>
+      <tr><td>Pauses</td><td>two brief stop-the-world points; total pause typically <strong>sub-millisecond</strong></td></tr>
+      <tr><td>Generational?</td><td><strong>No</strong> (tuned for low latency, not throughput) — and non-compacting</td></tr>
+      <tr><td>Tuning</td><td><code>GOGC</code> (default 100 = collect at 2&times; live heap) · <code>GOMEMLIMIT</code> (soft ceiling)</td></tr>
+    </table>
+    <div class="key-insight"><strong><code>GOMEMLIMIT</code> is the fix for OOM-killed containers.</strong> Set it to (a bit under) the container's memory limit and the GC runs more aggressively as the heap approaches it, trading CPU to avoid the kill. Pair with a higher <code>GOGC</code> to reduce routine cycles while still being protected by the hard ceiling. A <em>write barrier</em> lets the collector mark concurrently while your goroutines keep mutating pointers.</div>
+  </section>
+
+  <section>
+    <h2>4. Escape Analysis: Stack vs Heap</h2>
+    <div class="grid2">
+      <div>
+        <div class="code-block"><span style="color:#a78bfa"># see what escapes:</span><br>go build -gcflags=<span style="color:#c3e88d">'-m'</span> ./...<br><br><span style="color:#a78bfa">// stays on the stack (no escape) — free</span><br>func sum(a, b int) int { return a + b }<br><br><span style="color:#a78bfa">// escapes to the heap → GC work</span><br>func newUser() *User { return &amp;User{} } <span style="color:#a78bfa">// addr outlives the call</span></div>
+      </div>
+      <div class="panel">
+        <p style="font-size:13px;color:var(--muted)">The compiler proves whether a value's lifetime stays within its function. If it does, the value lives on the <strong>stack</strong> (freed automatically when the function returns — zero GC cost). If a pointer to it <em>escapes</em> (returned, stored in a heap structure, captured by a closure that outlives the call), it must go on the <strong>heap</strong>, creating future GC work. <code>-gcflags=-m</code> prints each decision ("moved to heap", "does not escape").</p>
+      </div>
+    </div>
+    <div class="key-insight"><strong>Fewer heap allocations = shorter GC pauses.</strong> The biggest wins: reuse buffers (<code>sync.Pool</code>, or pass a <code>[]byte</code> in rather than returning a fresh one), avoid returning pointers to short-lived values, and pre-size slices/maps. Profile allocations with <code>go test -benchmem</code> and <code>pprof</code> (<code>-memprofile</code>) before optimizing — measure, don't guess.</div>
+  </section>
+</div>
+<script>
+(function(){
+  const pfx='grt';
+  const SCEN={
+    gmp:{label:'GMP Scheduling',steps:[
+      {node:'GOROUTINE',hdr:'go f() creates a G and queues it',pay:{code:'go handle(conn)',creates:'a goroutine (G) with its own ~2KB stack',cost:'a few hundred nanoseconds — not an OS thread'},ins:'The go keyword creates a goroutine: a lightweight task with a tiny stack. It is placed on a run queue, not handed an OS thread directly. Creating one is orders of magnitude cheaper than spawning a thread.'},
+      {node:'SCHEDULER',hdr:'A P pulls the G from its local run queue',pay:{P:'a logical processor; there are GOMAXPROCS of them (= cores)',queues:'each P has a local run queue + there is a global queue',balance:'idle P steals half of a busy P\'s queue (work stealing)'},tone:'ok',ins:'Goroutines are scheduled by P\'s — logical processors capped at GOMAXPROCS. Each P keeps a local queue for cache-friendly, lock-light scheduling; when a P runs dry it steals work from another P so no core sits idle while work exists.'},
+      {node:'OSTHREAD',hdr:'An M (OS thread) runs the G on a core',pay:{M:'the OS thread bound to a P to execute Go code',many_G_few_M:'thousands of G multiplexed onto ~GOMAXPROCS M',preemption:'since Go 1.14, async preemption stops a tight loop hogging a P'},tone:'ok',ins:'A P attaches to an M (OS thread) to actually run goroutines on a CPU. Many goroutines share each thread; the scheduler rotates them, and asynchronous preemption (Go 1.14+) interrupts a goroutine stuck in a tight loop so it cannot starve the others on that P.'},
+      {node:'OSTHREAD',hdr:'Blocking syscall? Hand off the P to keep running',pay:{event:'goroutine calls a blocking syscall (disk/network)',action:'its M parks on the syscall; the P detaches to a fresh/idle M',result:'other goroutines keep executing — the core is not wasted'},tone:'ok',ins:'When a goroutine blocks in a syscall, its M waits with it, but the runtime detaches that M\'s P and pairs the P with another M so the remaining goroutines run on. This is why blocking I/O in Go does not stall your other work — the scheduler hides it.'}
+    ],result:{tone:'ok',text:'✅ GMP: many G multiplexed onto GOMAXPROCS P\'s onto OS-thread M\'s; work stealing + syscall handoff keep every core busy'}},
+
+    stacks:{label:'Goroutine Stacks',steps:[
+      {node:'GOROUTINE',hdr:'Each goroutine starts with a ~2KB stack',pay:{start:'~2KB per goroutine',thread:'an OS thread reserves ~1MB',ratio:'~500x cheaper → 100k goroutines ≈ 200MB, totally feasible'},ins:'A goroutine\'s stack is tiny at birth. That is the whole reason "one goroutine per connection/request" is idiomatic — the same pattern with OS threads (1MB each) would exhaust memory at a few thousand.'},
+      {node:'GOROUTINE',hdr:'Stacks grow (and shrink) by copying',pay:{grow:'need more space → allocate a bigger stack, copy frames, fix pointers',shrink:'GC reclaims oversized stacks',contrast:'fixed-size OS thread stacks cannot do this'},tone:'ok',ins:'When a goroutine needs more stack, the runtime allocates a larger one and copies the existing frames over, rewriting internal pointers. It can also shrink during GC. This contiguous, growable stack is what lets goroutines start small yet handle deep recursion.'},
+      {node:'GOROUTINE',hdr:'Cheap to create — but a leak lives forever',pay:{leak:'a goroutine blocked on a channel/IO with no timeout never exits',symptom:'runtime.NumGoroutine() climbs without bound',fix:'give blocking ops a context deadline; ensure a path to return'},tone:'bad',ins:'Goroutines are cheap to start but are not garbage-collected while blocked — one parked forever on a channel nobody sends to, or an IO call with no timeout, leaks until the process exits. Monitor NumGoroutine() and always bound blocking with a context.'}
+    ],result:{tone:'ok',text:'✅ ~2KB growable stacks make 100k+ goroutines routine; but a blocked goroutine leaks — always give it a timeout/exit path'}},
+
+    gc:{label:'Garbage Collector',steps:[
+      {node:'GC',hdr:'Concurrent tri-color mark-sweep',pay:{marks:'walks live objects (roots → reachable) concurrently with your code',sweeps:'reclaims unmarked memory',write_barrier:'tracks pointer writes so concurrent marking stays correct'},ins:'Go\'s collector marks reachable objects while your goroutines keep running, using a write barrier to notice pointers that change mid-mark. Then it sweeps the unreachable. Most of the work overlaps with normal execution.'},
+      {node:'GC',hdr:'Pauses are sub-millisecond by design',pay:{stw:'two brief stop-the-world points (start/end of mark)',total_pause:'typically well under 1ms',tradeoff:'optimized for LOW LATENCY, not peak throughput; non-generational, non-compacting'},tone:'ok',ins:'Only two short stop-the-world moments bracket the concurrent mark, so total pause time is tiny — the design goal is predictable low latency. The cost is that it is non-generational and non-compacting, so it can do more total work than the JVM\'s throughput-tuned collectors.'},
+      {node:'GC',hdr:'Tune with GOGC and GOMEMLIMIT',pay:{GOGC:'default 100 → collect when the heap grows 100% since last GC',higher_GOGC:'fewer collections, more RAM, less CPU',GOMEMLIMIT:'soft memory ceiling — GC works harder near it to avoid OOM'},tone:'ok',ins:'GOGC trades memory for CPU: raise it to collect less often (using more RAM), lower it for a tighter heap. GOMEMLIMIT sets a soft cap so a container does not get OOM-killed — as the heap nears the limit the GC runs more aggressively. Together they give predictable memory behavior.'}
+    ],result:{tone:'ok',text:'✅ Concurrent tri-color mark-sweep, sub-ms pauses, low-latency focus; tune with GOGC (CPU↔RAM) and GOMEMLIMIT (OOM guard)'}},
+
+    escape:{label:'Escape Analysis',steps:[
+      {node:'ESCAPE',hdr:'The compiler decides stack vs heap per value',pay:{tool:'go build -gcflags=-m',stack:'value lifetime stays in the function → stack (free on return)',heap:'a pointer escapes the function → heap (GC-managed)'},ins:'Escape analysis proves whether a value can stay on the stack. Stack values are freed automatically when the function returns — zero GC cost. Only values whose address outlives the call are forced onto the heap. -gcflags=-m prints every decision.'},
+      {node:'ESCAPE',hdr:'What makes a value escape',pay:{escapes:['return &local','store a pointer in a heap structure/slice','capture in a closure that outlives the call','pass to interface{} sometimes'],stays:'pure value math, locals not addressed'},tone:'bad',ins:'Returning the address of a local, stashing a pointer somewhere longer-lived, or capturing a variable in a goroutine/closure all force heap allocation. Each heap allocation is future GC work — in a hot request path, thousands per second add up to real pause time.'},
+      {node:'ESCAPE',hdr:'Reduce heap allocations to reduce GC pauses',pay:{techniques:['reuse buffers via sync.Pool','pass a []byte in rather than returning a new one','pre-size slices/maps with make(..., n)'],measure:'go test -benchmem ; pprof -memprofile — profile before optimizing'},tone:'ok',ins:'Fewer heap allocations means less for the GC to track and sweep, which shortens pauses under load. The proven techniques are buffer reuse (sync.Pool), avoiding escaping returns, and pre-sizing. Always measure with -benchmem and pprof first — optimize the allocations that actually show up.'}
+    ],result:{tone:'ok',text:'✅ Escape analysis: stack (free) vs heap (GC work); cut heap allocs (sync.Pool, pre-size, no escaping returns) to shrink pauses — measure first'}}
+  };
+
+  const nodes=['GOROUTINE','SCHEDULER','OSTHREAD','GC','ESCAPE'];
+  function posOf(n){const i=nodes.indexOf(n);return i<0?50:10+i*18;}
+  let cur='gmp',timers2=[],running2=false;
+  function reset2(){timers2.forEach(clearTimeout);timers2=[];running2=false;const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='ready';nodes.forEach(n=>{const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');if(el)el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();});const chip=document.getElementById(pfx+'Chip');if(chip){chip.style.left='5%';chip.textContent='→';}const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP 0 / '+SCEN[cur].steps.length;const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent='Pick a scenario and press ▶ Run';const pay=document.getElementById(pfx+'Payload');if(pay)pay.textContent='';const hdr=document.getElementById(pfx+'Headers');if(hdr)hdr.innerHTML='<span class="ht">INSPECTOR<\/span>(waiting)';const res=document.getElementById(pfx+'Result');if(res){res.textContent='';res.className='rt-result';}const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=false;}
+  function applyStep2(s,idx,total){const chip=document.getElementById(pfx+'Chip');if(chip){chip.style.left=posOf(s.node)+'%';chip.textContent='→';}nodes.forEach(n=>{const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');if(!el)return;el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();if(n===s.node){if(s.tone==='ok')el.className+=' vchk cur';else if(s.tone==='bad')el.className+=' vskip curbad';else el.className+=' cur';}});const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP '+idx+' / '+total;const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent=s.hdr;const pay=document.getElementById(pfx+'Payload');if(pay)pay.textContent=JSON.stringify(s.pay,null,2);const hdrEl=document.getElementById(pfx+'Headers');if(hdrEl)hdrEl.innerHTML='<span class="ht">INSPECTOR<\/span>'+s.ins;}
+  function run2(){reset2();running2=true;const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=true;const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='running…';const steps=SCEN[cur].steps;steps.forEach((s,i)=>timers2.push(setTimeout(()=>applyStep2(s,i+1,steps.length),(i+1)*2000)));timers2.push(setTimeout(()=>{const r=SCEN[cur].result;const res=document.getElementById(pfx+'Result');if(res){res.textContent=r.text;res.className='rt-result show '+(r.tone==='ok'?'ok':'bad');}const pill2=document.getElementById(pfx+'Pill');if(pill2)pill2.textContent='done';running2=false;const btn2=document.getElementById(pfx+'Run');if(btn2)btn2.disabled=false;},(steps.length+1)*2000));}
+  document.getElementById(pfx+'Run').onclick=run2;
+  document.querySelectorAll('#'+pfx+'Seg button').forEach(b=>{b.onclick=()=>{if(running2)return;cur=b.dataset.s;document.querySelectorAll('#'+pfx+'Seg button').forEach(x=>x.classList.toggle('on',x===b));reset2();};});
+  reset2();
+})();
+</script>
+</body>
+</html>

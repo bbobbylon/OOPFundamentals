@@ -13,8 +13,6 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.AuthenticationManager;
-import org.springframework.security.authentication.AuthenticationProvider;
-import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
 import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -111,7 +109,6 @@ public class SecurityConfig {
                         .accessDeniedHandler(restAccessDeniedHandler()))
                 .headers(h -> h.frameOptions(f -> f.sameOrigin())
                                .httpStrictTransportSecurity(hsts -> hsts.disable()))
-                .authenticationProvider(authProvider())
                 // Constructed here (not a bean) so Spring Boot won't ALSO register it
                 // as a global servlet filter — see JwtAuthFilter's class comment.
                 .addFilterBefore(new JwtAuthFilter(jwtService, userDetailsService),
@@ -160,15 +157,6 @@ public class SecurityConfig {
         source.registerCorsConfiguration("/api/**", config);
         source.registerCorsConfiguration("/oauth2/**", config);
         return source;
-    }
-
-    @Bean
-    public AuthenticationProvider authProvider() {
-        // Spring Security 7 (Spring Boot 4): UserDetailsService is now a
-        // constructor argument; the no-arg ctor + setUserDetailsService() were removed.
-        DaoAuthenticationProvider provider = new DaoAuthenticationProvider(userDetailsService);
-        provider.setPasswordEncoder(passwordEncoder());
-        return provider;
     }
 
     @Bean

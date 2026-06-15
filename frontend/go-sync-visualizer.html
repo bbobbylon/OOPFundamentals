@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Go: sync &amp; Worker Pools</title>
+  <style>
+    .who-mutex{background:#00acd7;color:#fff}
+    .who-rwmutex{background:#5dc9e2;color:#1a1a1a}
+    .who-waitgroup{background:#4ade80;color:#1a1a1a}
+    .who-atomic{background:#fbbf24;color:#1a1a1a}
+    .who-pool{background:#a78bfa;color:#fff}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:18px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:monospace}
+    .code-block{background:#0b1426;border-left:3px solid var(--accent);border-radius:0 6px 6px 0;padding:12px 16px;font-family:monospace;font-size:12.5px;line-height:1.6;overflow-x:auto;margin:10px 0;color:#e2e8f0}
+    .key-insight{background:rgba(0,172,215,0.07);border:1px solid rgba(0,172,215,0.3);border-radius:8px;padding:14px;margin:12px 0;font-size:13px}
+    .key-insight strong{color:#00acd7}
+    code{background:#0b1426;padding:1px 5px;border-radius:3px;font-family:monospace;font-size:12px;color:#ffd43b}
+    .go-table{border-collapse:collapse;width:100%;font-size:13px;margin:14px 0}
+    .go-table th{background:rgba(0,172,215,0.1);color:var(--accent);border:1px solid rgba(255,255,255,.1);padding:8px 12px;text-align:left}
+    .go-table td{border:1px solid rgba(255,255,255,.1);padding:7px 11px;vertical-align:top;font-family:monospace;font-size:12px}
+  </style>
+  <link rel="stylesheet" href="devhub.css" />
+</head>
+<body class="track-go">
+<div class="container">
+  <a class="back" href="app.html">&larr; Dev Hub</a>
+  <h1>Go: <code>sync</code> &amp; Worker Pools</h1>
+  <p class="sub">Mutex and RWMutex, WaitGroup and Once, the lock-free <code>sync/atomic</code> package, and the bounded worker-pool pattern — coordinating goroutines without data races.</p>
+
+  <!-- ── INTRO ── -->
+  <div style="background:#1e293b;border:1px solid #00add8;border-left:3px solid #00add8;border-radius:10px;padding:20px 22px;margin:12px 0 28px">
+    <div style="font-size:15px;font-weight:800;color:#5dc9e2;margin-bottom:10px">"Don't communicate by sharing memory" — so when do you reach for sync?</div>
+    <p style="font-size:14px;color:#cbd5e1;margin:0 0 10px">
+      Go's motto is <em>share memory by communicating</em> (use channels), but plenty of real code does need to guard shared state, and that's what the <code>sync</code> and <code>sync/atomic</code> packages are for. A <strong style="color:#00acd7">sync.Mutex</strong> gives mutual exclusion: <code>mu.Lock(); defer mu.Unlock()</code> ensures one goroutine at a time touches the protected data — the fix for the data race the race detector catches. A <strong style="color:#5dc9e2">sync.RWMutex</strong> splits that into <code>RLock</code> (many concurrent readers) and <code>Lock</code> (one exclusive writer) — a big win for read-heavy state like a cache. A <strong style="color:#4ade80">sync.WaitGroup</strong> lets one goroutine wait for a set of others: <code>wg.Add(n)</code>, each worker <code>defer wg.Done()</code>, then <code>wg.Wait()</code> blocks until the count hits zero. <strong style="color:#4ade80">sync.Once</strong> runs an initializer exactly once even under concurrency — the idiom for lazy singletons. When the shared state is a single number or pointer, <strong style="color:#fbbf24">sync/atomic</strong> (<code>atomic.AddInt64</code>, <code>CompareAndSwap</code>, <code>atomic.Value</code>) is lock-free and faster than a mutex. And the capstone pattern, the <strong style="color:#a78bfa">worker pool</strong>, bounds concurrency: instead of spawning a goroutine per task (which can exhaust memory or hammer a downstream), you start a fixed number of workers that pull from a jobs channel and push to a results channel. The two rules that prevent most bugs: <strong>always pair Lock with a deferred Unlock</strong>, and <strong>never copy a sync type after first use</strong> (pass <code>*T</code>, not <code>T</code>) — <code>go vet</code> flags a copied lock.
+    </p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:12px">
+      <div style="background:#0b1426;border:1px solid #334155;border-radius:8px;padding:10px 12px">
+        <div style="font-size:10.5px;font-weight:800;color:#00add8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">RWMutex-guarded cache</div>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code>type Cache struct &#123; &#10;    mu sync.RWMutex &#10;    m  map[string]*JWKS &#10;&#125; &#10;func (c *Cache) Get(k string) *JWKS &#123; &#10;    c.mu.RLock() &#10;    defer c.mu.RUnlock() &#10;    return c.m[k]        // many readers &#10;&#125; &#10;func (c *Cache) Put(k string, v *JWKS) &#123; &#10;    c.mu.Lock() &#10;    defer c.mu.Unlock() &#10;    c.m[k] = v           // one writer &#10;&#125;</code></p>
+      </div>
+      <div style="background:#0b1426;border:1px solid #334155;border-radius:8px;padding:10px 12px">
+        <div style="font-size:10.5px;font-weight:800;color:#a78bfa;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">Bounded worker pool</div>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code>jobs := make(chan Job) &#10;results := make(chan Result) &#10;var wg sync.WaitGroup &#10;for i := 0; i &lt; 8; i++ &#123; // 8 workers &#10;    wg.Add(1) &#10;    go func() &#123; &#10;        defer wg.Done() &#10;        for j := range jobs &#123; // drain &#10;            results &lt;- handle(j) &#10;        &#125; &#10;    &#125;() &#10;&#125; &#10;// feed jobs, close(jobs), wg.Wait()</code></p>
+      </div>
+      <div style="background:#0b1426;border:1px solid #334155;border-radius:8px;padding:10px 12px">
+        <div style="font-size:10.5px;font-weight:800;color:#fbbf24;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">Go sync vs Java concurrency</div>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><strong>Java</strong>: <code>synchronized</code> blocks / <code>ReentrantLock</code> (Mutex), <code>ReadWriteLock</code> (RWMutex), <code>CountDownLatch</code> (WaitGroup), <code>AtomicInteger</code> (atomic), <code>ExecutorService</code> thread pools (worker pool). <strong>Go</strong>: same toolbox, but note <code>sync.Mutex</code> is <em>not reentrant</em> — a goroutine that re-locks a mutex it already holds deadlocks (Java's <code>synchronized</code> is reentrant). And Go favors goroutines + channels over an executor; a worker pool is a handful of plain goroutines, not a framework.</p>
+      </div>
+    </div>
+    <div style="padding:9px 13px;background:#0b1426;border-radius:7px;border-left:3px solid #f59e0b">
+      <span style="font-size:11px;font-weight:800;color:#f59e0b;text-transform:uppercase;letter-spacing:.05em">In a CIAM context:</span>
+      <span style="font-size:12.5px;color:#94a3b8;margin-left:6px">A JWKS / token cache is the textbook <code>RWMutex</code> case — thousands of concurrent token validations <em>read</em> the keys while a background refresh occasionally <em>writes</em> them. Lazy-load the signing keys exactly once with <code>sync.Once</code> so a burst of first requests doesn't fetch the JWKS five times. And when you must validate a batch of tokens against an external IdP, a bounded <strong>worker pool</strong> (say 16 workers) keeps you from opening 10,000 simultaneous connections and getting rate-limited or OOM-killed.</span>
+    </div>
+  </div>
+
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">Scenario</span>
+      <div class="userseg" id="gsySeg">
+        <button class="on" data-s="mutex">Mutex / RWMutex</button>
+        <button data-s="waitgroup">WaitGroup / Once</button>
+        <button data-s="atomic">atomic (lock-free)</button>
+        <button data-s="pool">Worker Pool</button>
+      </div>
+      <button class="rt-run" id="gsyRun">&#9654; Run</button>
+      <span class="rt-pill" id="gsyPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="gsyDiag">
+        <div class="rt-rail"></div>
+        <div class="rt-chip" id="gsyChip">&#x2192;</div>
+        <div class="rt-node" data-n="MUTEX"><span class="ic">&#x1f512;</span><div><div class="nl">Mutex</div><div class="ns">one at a time</div></div><span class="who who-badge who-mutex">MUTEX</span></div>
+        <div class="rt-node" data-n="RWMUTEX"><span class="ic">&#x1f4d6;</span><div><div class="nl">RWMutex</div><div class="ns">many readers</div></div><span class="who who-badge who-rwmutex">RWMUTEX</span></div>
+        <div class="rt-node" data-n="WAITGROUP"><span class="ic">&#x1f9ee;</span><div><div class="nl">WaitGroup</div><div class="ns">Add/Done/Wait</div></div><span class="who who-badge who-waitgroup">WAITGROUP</span></div>
+        <div class="rt-node" data-n="ATOMIC"><span class="ic">&#x269b;&#xfe0f;</span><div><div class="nl">atomic</div><div class="ns">lock-free</div></div><span class="who who-badge who-atomic">ATOMIC</span></div>
+        <div class="rt-node" data-n="POOL"><span class="ic">&#x1f3ed;</span><div><div class="nl">Worker Pool</div><div class="ns">bounded N</div></div><span class="who who-badge who-pool">POOL</span></div>
+      </div>
+      <div class="rt-inspect" id="gsyInspect">
+        <div class="rt-dir" id="gsyDir">STEP 0 / 5</div>
+        <div class="rt-cap" id="gsyCap">Pick a scenario and press &#9654; Run</div>
+        <div class="rt-payload" id="gsyPayload"></div>
+        <div class="rt-headers" id="gsyHeaders"><span class="ht">INSPECTOR</span>(waiting)</div>
+      </div>
+    </div>
+    <div class="rt-result" id="gsyResult"></div>
+    <div class="rt-legend"><span>&#x1f7e2; safe</span><span>&#x1f534; race / deadlock</span><span>&#x25a1; computing</span></div>
+  </div>
+  <div class="who-row">
+    <span class="who-badge who-mutex">MUTEX — exclusive</span>
+    <span class="who-badge who-rwmutex">RWMUTEX — read-heavy</span>
+    <span class="who-badge who-waitgroup">WAITGROUP — wait for N</span>
+    <span class="who-badge who-atomic">ATOMIC — lock-free</span>
+    <span class="who-badge who-pool">POOL — bounded</span>
+  </div>
+
+  <section>
+    <h2>1. Mutex &amp; RWMutex</h2>
+    <div class="grid2">
+      <div>
+        <div class="code-block"><span style="color:#a78bfa">// Mutex: exactly one goroutine in the critical section</span><br>var mu sync.Mutex<br>mu.Lock()<br>defer mu.Unlock()<br>balance += amount<br><br><span style="color:#a78bfa">// RWMutex: concurrent reads, exclusive writes</span><br>var rw sync.RWMutex<br>rw.RLock(); v := m[k]; rw.RUnlock()  <span style="color:#a78bfa">// reader</span><br>rw.Lock();  m[k] = v; rw.Unlock()    <span style="color:#a78bfa">// writer</span></div>
+      </div>
+      <div class="panel">
+        <p style="font-size:13px;color:var(--muted)">Use a plain <code>Mutex</code> by default; reach for <code>RWMutex</code> only when reads vastly outnumber writes (its bookkeeping is heavier, so it loses on write-heavy or low-contention data). Keep critical sections small — hold the lock only around the shared access, not around slow I/O. <code>defer Unlock()</code> guarantees release even on a panic or early return.</p>
+      </div>
+    </div>
+    <div class="key-insight"><strong>Go mutexes are not reentrant.</strong> If a function holding the lock calls another that also locks the same mutex, it deadlocks. Structure code so the locked region doesn't call back into locking code — or split into a public method that locks and a private one that assumes the lock is held.</div>
+  </section>
+
+  <section>
+    <h2>2. WaitGroup &amp; Once</h2>
+    <div class="grid2">
+      <div>
+        <div class="code-block"><span style="color:#a78bfa">// WaitGroup: wait for N goroutines to finish</span><br>var wg sync.WaitGroup<br>for _, u := range urls {<br>&nbsp;&nbsp;wg.Add(1)<br>&nbsp;&nbsp;go func(u string) {<br>&nbsp;&nbsp;&nbsp;&nbsp;defer wg.Done()<br>&nbsp;&nbsp;&nbsp;&nbsp;fetch(u)<br>&nbsp;&nbsp;}(u)<br>}<br>wg.Wait() <span style="color:#a78bfa">// blocks until count == 0</span></div>
+      </div>
+      <div class="panel">
+        <p style="font-size:13px;color:var(--muted)"><strong>Call <code>wg.Add</code> before launching the goroutine</strong>, not inside it — otherwise <code>Wait</code> can race past before the goroutine registers. <code>defer wg.Done()</code> in the worker keeps the count correct even on panic. <code>sync.Once</code> is the companion for one-time work: <code>var once sync.Once; once.Do(initFn)</code> runs <code>initFn</code> exactly once no matter how many goroutines call it concurrently — the standard lazy-singleton / lazy-init idiom.</p>
+      </div>
+    </div>
+    <div class="key-insight"><strong>A negative WaitGroup counter panics.</strong> More <code>Done()</code> calls than <code>Add()</code> (a stray defer, double-Done) crashes with "negative WaitGroup counter." Match every <code>Add(1)</code> with exactly one <code>Done()</code>.</div>
+  </section>
+
+  <section>
+    <h2>3. sync/atomic — Lock-Free for Single Values</h2>
+    <table class="go-table">
+      <tr><th>Operation</th><th>Use</th></tr>
+      <tr><td><code>atomic.AddInt64(&amp;n, 1)</code></td><td>concurrent counter without a mutex</td></tr>
+      <tr><td><code>atomic.LoadInt64</code> / <code>StoreInt64</code></td><td>safe read/write of a shared int</td></tr>
+      <tr><td><code>atomic.CompareAndSwap...</code> (CAS)</td><td>lock-free state machines / flags</td></tr>
+      <tr><td><code>atomic.Value</code> / <code>atomic.Pointer[T]</code></td><td>atomically swap a whole config/snapshot pointer</td></tr>
+    </table>
+    <div class="key-insight"><strong>Atomics are for one variable, not an invariant across several.</strong> If two fields must change together (e.g. balance <em>and</em> a log entry), atomics can't keep them consistent — you need a mutex. Reach for atomic only when the entire shared state is a single number or pointer.</div>
+  </section>
+
+  <section>
+    <h2>4. The Worker Pool: Bounded Concurrency</h2>
+    <div class="code-block">jobs := make(chan Job)<br>results := make(chan Result)<br>var wg sync.WaitGroup<br><br><span style="color:#a78bfa">// start a FIXED number of workers</span><br>for w := 0; w &lt; 8; w++ {<br>&nbsp;&nbsp;wg.Add(1)<br>&nbsp;&nbsp;go func() {<br>&nbsp;&nbsp;&nbsp;&nbsp;defer wg.Done()<br>&nbsp;&nbsp;&nbsp;&nbsp;for j := range jobs { results &lt;- handle(j) } <span style="color:#a78bfa">// drain until closed</span><br>&nbsp;&nbsp;}()<br>}<br>go func() { for _, j := range allJobs { jobs &lt;- j }; close(jobs) }() <span style="color:#a78bfa">// feed, then close</span><br>go func() { wg.Wait(); close(results) }() <span style="color:#a78bfa">// close results when workers done</span><br>for r := range results { collect(r) } <span style="color:#a78bfa">// consume</span></div>
+    <div class="key-insight"><strong>Closing in the right order is the whole trick.</strong> Close <code>jobs</code> after feeding so the <code>range</code> loops end and workers exit; then a separate goroutine does <code>wg.Wait()</code> and closes <code>results</code>, so the consumer's <code>range</code> terminates. Close too early and you send on a closed channel (panic); never close and the consumer blocks forever.</div>
+  </section>
+</div>
+<script>
+(function(){
+  const pfx='gsy';
+  const SCEN={
+    mutex:{label:'Mutex / RWMutex',steps:[
+      {node:'MUTEX',hdr:'Mutex makes the critical section exclusive',pay:{code:'mu.Lock()\ndefer mu.Unlock()\nbalance += amount',guarantee:'one goroutine at a time touches balance',fixes:'the data race -race would otherwise report'},tone:'ok',ins:'A Mutex serializes access: a second goroutine calling Lock() blocks until the first Unlocks. Wrapping the shared write in Lock/defer Unlock turns the racy balance += amount into a safe critical section.'},
+      {node:'RWMUTEX',hdr:'RWMutex: many readers OR one writer',pay:{readers:'RLock() — concurrent, do not block each other',writer:'Lock() — exclusive, waits for readers to finish',good_for:'read-heavy state (caches, config)'},tone:'ok',ins:'RWMutex lets unlimited readers hold RLock simultaneously, but a writer Lock waits for all readers to release and blocks new ones. For data read far more than written, this beats a plain Mutex by allowing read parallelism.'},
+      {node:'MUTEX',hdr:'Keep the locked region tiny — and never reenter',pay:{do:'lock → touch shared data → unlock; no slow I/O inside',gotcha:'a method holding the lock calling another that locks the same mutex → DEADLOCK (Go mutexes are not reentrant)'},tone:'bad',ins:'Hold the lock only around the shared access — never around a network call. And remember Go mutexes are not reentrant: re-locking a held mutex deadlocks. Split into a public Lock-ing method and a private method that assumes the lock is held.'}
+    ],result:{tone:'ok',text:'✅ Mutex = exclusive critical section; RWMutex = concurrent reads + exclusive writes; small regions, defer Unlock, no reentry'}},
+
+    waitgroup:{label:'WaitGroup / Once',steps:[
+      {node:'WAITGROUP',hdr:'Add before launching; Done in the worker',pay:{code:'wg.Add(1)\ngo func(){ defer wg.Done(); fetch(u) }()',rule:'Add BEFORE the go statement, not inside the goroutine'},ins:'WaitGroup is a concurrent counter. Call Add(1) before starting each goroutine (calling it inside risks Wait racing past), and defer Done() so the count drops even if the worker panics.'},
+      {node:'WAITGROUP',hdr:'Wait() blocks until the counter hits zero',pay:{code:'wg.Wait()',blocks:'until every Done() has run',then:'all goroutines have finished — safe to read their results'},tone:'ok',ins:'Wait() parks the caller until the counter reaches zero, i.e. every launched goroutine called Done(). After Wait returns, all the work is complete — the standard fan-out-then-join pattern.'},
+      {node:'ATOMIC',hdr:'sync.Once: run an initializer exactly once',pay:{code:'var once sync.Once\nonce.Do(loadJWKS)  // even if 100 goroutines call it',result:'loadJWKS runs once; the rest block until it finishes, then proceed'},tone:'ok',ins:'Once.Do guarantees its function runs a single time across all goroutines and that everyone sees the completed result. It is the idiomatic lazy singleton / lazy-init — perfect for loading signing keys or building a client once on first use.'}
+    ],result:{tone:'ok',text:'✅ WaitGroup: Add before go, defer Done, Wait to join. Once.Do: exactly-once init under concurrency'}},
+
+    atomic:{label:'atomic (lock-free)',steps:[
+      {node:'ATOMIC',hdr:'atomic.AddInt64 — a counter with no mutex',pay:{code:'var n int64\natomic.AddInt64(&n, 1)  // safe from many goroutines',vs_mutex:'no Lock/Unlock; a single CPU instruction',read:'atomic.LoadInt64(&n)'},tone:'ok',ins:'For a lone shared integer, sync/atomic is lock-free: AddInt64 is an atomic hardware operation, faster and simpler than a mutex. Always pair atomic writes with atomic Loads — a plain read of an atomically-written variable is still a race.'},
+      {node:'MUTEX',hdr:'But atomics only protect ONE variable',pay:{ok:'n++ on a single counter → atomic',not_ok:'balance -= x AND append to ledger → need a Mutex',reason:'atomics cannot keep two values consistent together'},tone:'bad',ins:'The moment correctness depends on two pieces of state changing together, atomics cannot help — there is no atomic "do both." That invariant needs a Mutex around the whole update. Atomic is a single-value optimization, not a general replacement for locking.'},
+      {node:'ATOMIC',hdr:'atomic.Pointer / Value: swap a whole snapshot',pay:{code:'var cfg atomic.Pointer[Config]\ncfg.Store(newCfg)   // writers swap the pointer\nc := cfg.Load()     // readers get a consistent snapshot',pattern:'copy-on-write config reload'},tone:'ok',ins:'To hot-swap an entire immutable config, store a *Config in an atomic.Pointer. Readers Load a consistent snapshot lock-free; a writer builds a new Config and Stores the new pointer. No reader ever sees a half-updated config — copy-on-write done right.'}
+    ],result:{tone:'ok',text:'✅ atomic = lock-free for a single number/pointer (counters, flags, config swap); use a Mutex when multiple values must stay consistent'}},
+
+    pool:{label:'Worker Pool',steps:[
+      {node:'POOL',hdr:'Start a FIXED number of workers draining a jobs channel',pay:{code:'for w := 0; w < 8; w++ {\n  wg.Add(1)\n  go func(){ defer wg.Done(); for j := range jobs { results <- handle(j) } }()\n}',why:'bounds concurrency — NOT one goroutine per task'},ins:'Eight workers each range over the shared jobs channel, so at most eight tasks run at once. This caps memory and downstream load — the alternative (go handle(j) per task) can spawn 10k goroutines and exhaust resources or trip rate limits.'},
+      {node:'POOL',hdr:'Feed jobs, then close(jobs) to signal "no more"',pay:{code:'go func(){ for _, j := range allJobs { jobs <- j }; close(jobs) }()',effect:'closing jobs makes every worker\'s `range jobs` loop end → workers return → Done()'},tone:'ok',ins:'A feeder goroutine sends all jobs then closes the channel. A closed channel makes the workers\' range loops terminate cleanly once drained, so each worker returns and calls Done(). Closing is how you say "that is all the work."'},
+      {node:'WAITGROUP',hdr:'wg.Wait() then close(results); consumer ranges results',pay:{code:'go func(){ wg.Wait(); close(results) }()\nfor r := range results { collect(r) }',order:'workers exit → Wait returns → close(results) → consumer range ends'},tone:'ok',ins:'A separate goroutine waits for all workers to finish, then closes results, which ends the consumer\'s range. Order matters: close jobs to stop workers, Wait for them, then close results. Get it wrong and you either send on a closed channel (panic) or block forever.'}
+    ],result:{tone:'ok',text:'✅ Worker pool = N goroutines draining a jobs chan → results chan; close jobs to stop workers, Wait, then close results'}}
+  };
+
+  const nodes=['MUTEX','RWMUTEX','WAITGROUP','ATOMIC','POOL'];
+  function posOf(n){const i=nodes.indexOf(n);return i<0?50:10+i*18;}
+  let cur='mutex',timers2=[],running2=false;
+  function reset2(){timers2.forEach(clearTimeout);timers2=[];running2=false;const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='ready';nodes.forEach(n=>{const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');if(el)el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();});const chip=document.getElementById(pfx+'Chip');if(chip){chip.style.left='5%';chip.textContent='→';}const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP 0 / '+SCEN[cur].steps.length;const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent='Pick a scenario and press ▶ Run';const pay=document.getElementById(pfx+'Payload');if(pay)pay.textContent='';const hdr=document.getElementById(pfx+'Headers');if(hdr)hdr.innerHTML='<span class="ht">INSPECTOR<\/span>(waiting)';const res=document.getElementById(pfx+'Result');if(res){res.textContent='';res.className='rt-result';}const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=false;}
+  function applyStep2(s,idx,total){const chip=document.getElementById(pfx+'Chip');if(chip){chip.style.left=posOf(s.node)+'%';chip.textContent='→';}nodes.forEach(n=>{const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');if(!el)return;el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();if(n===s.node){if(s.tone==='ok')el.className+=' vchk cur';else if(s.tone==='bad')el.className+=' vskip curbad';else el.className+=' cur';}});const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP '+idx+' / '+total;const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent=s.hdr;const pay=document.getElementById(pfx+'Payload');if(pay)pay.textContent=JSON.stringify(s.pay,null,2);const hdrEl=document.getElementById(pfx+'Headers');if(hdrEl)hdrEl.innerHTML='<span class="ht">INSPECTOR<\/span>'+s.ins;}
+  function run2(){reset2();running2=true;const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=true;const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='running…';const steps=SCEN[cur].steps;steps.forEach((s,i)=>timers2.push(setTimeout(()=>applyStep2(s,i+1,steps.length),(i+1)*2000)));timers2.push(setTimeout(()=>{const r=SCEN[cur].result;const res=document.getElementById(pfx+'Result');if(res){res.textContent=r.text;res.className='rt-result show '+(r.tone==='ok'?'ok':'bad');}const pill2=document.getElementById(pfx+'Pill');if(pill2)pill2.textContent='done';running2=false;const btn2=document.getElementById(pfx+'Run');if(btn2)btn2.disabled=false;},(steps.length+1)*2000));}
+  document.getElementById(pfx+'Run').onclick=run2;
+  document.querySelectorAll('#'+pfx+'Seg button').forEach(b=>{b.onclick=()=>{if(running2)return;cur=b.dataset.s;document.querySelectorAll('#'+pfx+'Seg button').forEach(x=>x.classList.toggle('on',x===b));reset2();};});
+  reset2();
+})();
+</script>
+</body>
+</html>
