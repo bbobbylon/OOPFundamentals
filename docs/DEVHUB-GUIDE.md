@@ -201,7 +201,20 @@ rather than a pile of pages.
 
 ---
 
-*This guide is updated as new tracks and deep-dives land. **Newest pass — TypeScript Modules animated hero (2026-06-13):**
+*This guide is updated as new tracks and deep-dives land. **Newest pass — Intro cards rolled out across all 344 pages (2026-06-14):**
+Every content page in the DevHub now opens with a rich **plain-English intro card** before the visualizer — a 150+ word paragraph explaining what the concept is and why it matters, three mini-cards with concrete code examples, and an amber **"In CIAM / Your Job"** callout bar tying the topic to real full-stack CIAM work (Ping + Entra + Spring Boot + Angular + Azure/AWS). This covers all 18 tracks:
+**Shell** ([CLI Basics](../frontend/shell-cli-basics-visualizer.html), [Bash](../frontend/shell-bash-visualizer.html), [PowerShell](../frontend/shell-powershell-visualizer.html), [CMD](../frontend/shell-cmd-visualizer.html));
+**Identity** ([RBAC deep](../frontend/rbac-deep-visualizer.html), [Keys & Signing](../frontend/identity-keys-signing-deep-visualizer.html));
+**Spring Boot** ([OAuth2 Resource Server](../frontend/spring-boot-oauth2-resource-server-visualizer.html));
+**Angular** ([SSR & Hydration](../frontend/angular-ssr-hydration-visualizer.html));
+**Java** ([Variables & Types](../frontend/java-variables-types-visualizer.html), [Records & Sealed](../frontend/java-records-sealed-visualizer.html));
+**Full-Stack** ([Request Round-Trip](../frontend/fullstack-request-roundtrip-deep-visualizer.html));
+**Interview Prep** ([Spring+Angular Q&amp;A](../frontend/interview-spring-angular-visualizer.html), [Graphs](../frontend/interview-graphs-visualizer.html), [Dynamic Programming](../frontend/interview-dynamic-programming-visualizer.html), [Arrays & Strings](../frontend/interview-arrays-strings-visualizer.html), [Linked Lists](../frontend/interview-linked-lists-visualizer.html), [Trees](../frontend/interview-trees-visualizer.html));
+**DSA** ([Sorting](../frontend/sorting-visualizer.html), [Big-O](../frontend/big-o-visualizer.html));
+and the two standalone tools pages: [HTTP &amp; REST](../frontend/http-rest-visualizer.html) and [System Design](../frontend/system-design-visualizer.html).
+Each intro card color-codes to the track accent and is structured identically so a learner always knows where to look for background before diving into the animation.
+
+**Previous pass — TypeScript Modules animated hero (2026-06-13):**
 [TypeScript Modules](../frontend/typescript-modules-visualizer.html) received a full animated hero (mo-* prefix, 4 scenarios, 950ms chip, live inspector):
 **import type erasure** — `import type { User }` is erased completely at emit (zero JS runtime cost), vs `import { getUser }` (value) which is kept; valid only in type-position annotations, not `new User()`;
 **verbatimModuleSyntax** — the tsconfig flag that makes every import explicit (`import type` vs value import required); prevents bundler-invisible dead imports; `import { type X, getUser }` inline syntax for mixed modules; essential in Angular 17+ projects;
