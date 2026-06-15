@@ -647,6 +647,76 @@ sslCtx.init(kmf.getKeyManagers(), tmf.getTrustManagers(), <span class="kw">null<
 
 <footer>Java Networking — OOP Fundamentals Visualizer</footer>
 
+<!-- ── Code Walkthrough: Java Networking ── -->
+<div id="cw-javanw"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-javanw',{
+  id:'cw-javanw',
+  title:'Java networking — java.net.http.HttpClient, SSL/TLS, sockets, and HTTP/2',
+  subtitle:'Java 11\'s java.net.http.HttpClient replaced the legacy HttpURLConnection. It supports HTTP/1.1 and HTTP/2, async requests (CompletableFuture), and streaming. For CIAM work: making HTTP calls to token endpoints, JWKS endpoints, and downstream APIs. SSL/TLS configuration, custom trust stores, and certificate pinning are important for secure inter-service communication.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7],
+      note:'java.net.http.HttpClient: fluent builder API. HttpClient.newBuilder() creates a client with configurable connection timeout, follow redirects, HTTP version (HTTP_2 with fallback to HTTP_1_1), SSL context, and executor. Clients are thread-safe and should be reused across requests (not created per request — they have a connection pool). HttpRequest.newBuilder() builds a request with URI, headers, method, and body.',
+      vars:{'HttpClient.newHttpClient()':'minimal default client; HTTP/1.1; no custom SSL; OK for simple use cases','connectTimeout(Duration.ofSeconds(5))':'connection timeout only; set read/request timeout on the request via HttpRequest.timeout()','HttpClient is thread-safe':'create once, reuse; has a built-in connection pool; creating per-request wastes connections'},
+      tone:'start'
+    },
+    {
+      lines:[9,10,11,12,13,14],
+      note:'Synchronous vs async HTTP: client.send(request, BodyHandlers.ofString()) is synchronous (blocks). client.sendAsync(request, BodyHandlers.ofString()) returns CompletableFuture<HttpResponse<String>> — non-blocking. Async: chain with .thenApply() to transform the body and .exceptionally() to handle failures. Use async for concurrent calls (fetch JWKS + validate token in parallel). BodyPublishers.ofString(json) for POST with JSON body.',
+      vars:{'BodyHandlers.ofString()':'reads response body as String; also ofInputStream() for streaming, ofFile(path) to save to disk','BodyPublishers.ofString(body)':'POST body as string; set Content-Type: application/json header manually','sendAsync + CompletableFuture':'multiple async requests in parallel; join all with CompletableFuture.allOf(f1, f2, f3)'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,20],
+      note:'SSL/TLS configuration: SSLContext.getInstance("TLS") and TrustManagerFactory for custom trust stores. Load a PKCS12 or JKS trust store with KeyStore.getInstance("PKCS12"). For mutual TLS (mTLS): also configure a KeyManagerFactory with the client certificate. HttpClient.newBuilder().sslContext(sslContext) applies the custom SSL context. Important: never disable all SSL validation (TrustManager that accepts everything) in production.',
+      vars:{'SSLContext.getInstance("TLS")':'standard TLS context; use "TLSv1.3" to require TLS 1.3 minimum','TrustManagerFactory.PKIX (X.509)':'validates certificate chain against the trust store; use your custom CA certificate for internal services','PKCS12 trust store':'.p12 file; modern standard; JKS is legacy; load with KeyStore.getInstance("PKCS12")'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24,25,26],
+      note:'Calling OIDC/OAuth endpoints with HttpClient: fetch OIDC discovery document (/.well-known/openid-configuration) as JSON. POST to the token endpoint with application/x-www-form-urlencoded body (grant_type=client_credentials + client_id + client_secret + scope). Parse response JSON to extract access_token. Use client_credentials grant for machine-to-machine calls (no user interaction). Store the token and reuse until exp - buffer.',
+      vars:{'application/x-www-form-urlencoded':'OAuth token endpoint expects form-encoded body, NOT JSON; use BodyPublishers.ofString("grant_type=client_credentials&...")','client_credentials grant':'M2M token; no user involved; use for service-to-service auth; scope = requested API scope','token expiry buffer':'refresh the token when (exp - now) < 60 seconds; avoids using an expired token due to clock skew'},
+      tone:'ok'
+    },
+    {
+      lines:[28,29,30,31,32],
+      note:'HTTP/2 and WebSocket: HttpClient.version(Version.HTTP_2) requests HTTP/2 (server must support it). HTTP/2 multiplexes multiple requests over one TCP connection — reduces latency for many parallel calls. WebSocket: HttpClient.newWebSocketBuilder().buildAsync(uri, listener) creates a WebSocket. Useful for streaming token events or push notifications. java.net.Socket: low-level; use for custom protocols. ServerSocket: accept() blocks waiting for client connections.',
+      vars:{'HTTP/2 multiplexing':'multiple requests share one TCP connection; reduces TLS handshake overhead for many calls','WebSocket listener interface':'onOpen, onText, onBinary, onClose, onError callbacks; call ws.request(n) to request more messages','Socket vs HttpClient':'Socket for raw TCP (custom binary protocols); HttpClient for HTTP; never use Socket for HTTP unless specifically needed'},
+      tone:'ok',
+      callout:'CIAM: every CIAM backend service makes HTTP calls: fetch JWKS keys from Entra/Ping OIDC endpoint; exchange client credentials for M2M access tokens; call downstream APIs with the user\'s access token. Create one shared HttpClient bean (Spring @Bean singleton) with connection timeout + custom trust store (if private CA). Use sendAsync for parallel calls (fetch JWKS + call permissions service concurrently). Always set request timeout (HttpRequest.timeout()) to prevent indefinite hanging on slow auth servers.'
+    }
+  ],
+  code:[
+    '// java.net.http.HttpClient — reusable singleton',
+    'HttpClient client = HttpClient.newBuilder()',
+    '  .connectTimeout(Duration.ofSeconds(5))',
+    '  .version(HttpClient.Version.HTTP_2)',
+    '  .build();',
+    '',
+    '// GET JWKS endpoint',
+    'HttpRequest req = HttpRequest.newBuilder()',
+    '  .uri(URI.create("https://login.microsoftonline.com/.../discovery/v2.0/keys"))',
+    '  .timeout(Duration.ofSeconds(10))',
+    '  .GET().build();',
+    'HttpResponse<String> resp = client.send(req, BodyHandlers.ofString());',
+    '',
+    '// POST to token endpoint (client_credentials grant)',
+    'String body = "grant_type=client_credentials&client_id=...&client_secret=...&scope=...";',
+    'HttpRequest tokenReq = HttpRequest.newBuilder()',
+    '  .uri(URI.create("https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"))',
+    '  .header("Content-Type", "application/x-www-form-urlencoded")',
+    '  .POST(BodyPublishers.ofString(body))',
+    '  .build();',
+    '',
+    '// Async — parallel JWKS + token validation',
+    'CompletableFuture<HttpResponse<String>> jwksFuture = client.sendAsync(req, BodyHandlers.ofString());',
+    'jwksFuture.thenApply(r -> r.body()).thenAccept(jwks -> cacheJwks(jwks));'
+  ]
+});
+</script>
+
 <script>
 function show(id,el){
   document.querySelectorAll('.tc').forEach(t=>t.classList.remove('active'));

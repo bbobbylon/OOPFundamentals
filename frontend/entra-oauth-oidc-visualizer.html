@@ -280,6 +280,77 @@ Response: {
   </div>
 </div>
 
+<!-- ── Code Walkthrough: OAuth2 PKCE ── -->
+<div id="cw-pkce"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-pkce',{
+  id:'cw-pkce',
+  title:'OAuth2 Authorization Code + PKCE — every step from login click to API call',
+  subtitle:'PKCE (Proof Key for Code Exchange) lets public clients — Angular SPAs, mobile apps — safely use OAuth2 without a client secret. The app proves it initiated the flow by revealing a pre-committed secret only at token exchange time.',
+  steps:[
+    {
+      lines:[1,2,3],
+      note:'PKCE: instead of a static client_secret, the app generates a fresh random verifier for EVERY login. It sends only the SHA-256 hash (challenge) during authorization. The verifier itself is never transmitted during the browser redirect — only given to the IdP at the token exchange step, where the network call is encrypted (HTTPS).',
+      vars:{'verifier':'32 random bytes → base64url → stored in app memory / sessionStorage','challenge':'SHA-256(verifier) → base64url → safe to send in the URL','why SHA-256':'one-way hash; IdP stores challenge; can only verify by re-hashing the original verifier'},
+      tone:'start'
+    },
+    {
+      lines:[5,6,7,8,9],
+      note:'Authorization URL: redirect the user\'s browser to the IdP login page. scope lists what the app is requesting: openid (OIDC identity), profile (name, email), and the API scope. The challenge goes in the URL — it is safe because it is a one-way hash. state parameter (omitted here for brevity) prevents CSRF attacks on the redirect.',
+      vars:{'response_type=code':'requests an authorization code (not a token directly)','scope':'openid → id_token; profile → name/email; api://my-api/read → access token with this scope','code_challenge_method=S256':'S256 = SHA-256 (the only standardized method; plain is not recommended)'},
+      tone:'ok'
+    },
+    {
+      lines:[11,12],
+      note:'After successful login and consent, the IdP redirects the browser to redirect_uri with a short-lived, single-use authorization code. The code expires in ~10 minutes. An attacker who intercepts the URL gets only the code — useless without the verifier. The browser never sees the tokens directly.',
+      vars:{'authorization code':'single-use, short-lived (~10 min), useless without the PKCE verifier','redirect_uri':'must match EXACTLY what is registered in the IdP App Registration'},
+      tone:'ok'
+    },
+    {
+      lines:[14,15,16,17,18,19],
+      note:'Token exchange: the app sends the auth code PLUS the original verifier to the token endpoint over HTTPS. The IdP hashes the verifier with SHA-256 and checks it equals the challenge from step 2. Match → issue tokens. Mismatch → reject. This proves the entity requesting tokens is the same one that initiated the flow.',
+      vars:{'grant_type=authorization_code':'token exchange grant type','code_verifier':'the ORIGINAL secret — IdP checks SHA-256(verifier) == challenge stored from step 2','no client_secret':'public clients (SPA/mobile) cannot safely store secrets — PKCE replaces it'},
+      tone:'ok'
+    },
+    {
+      lines:[21,22,23,24],
+      note:'The IdP returns three tokens: access_token (short-lived JWT for API calls, typically 60 min), id_token (OIDC identity JWT — who is the user), refresh_token (long-lived, used to silently get new access tokens). The Angular MSAL library caches these and automatically refreshes the access_token before it expires.',
+      vars:{'access_token':'Bearer <token> in every API call Authorization header','id_token':'contains sub, email, name — user identity (NOT sent to APIs)','refresh_token':'long-lived (days–weeks); exchange for a new access_token silently'},
+      tone:'ok',
+      callout:'CIAM: Angular MSAL (Microsoft Authentication Library) handles all 5 steps automatically. Configure it with clientId and authority (Entra tenant URL) and call msalService.loginRedirect(). Your Spring Boot API receives only the access_token in the Authorization: Bearer header — it validates the JWT signature, iss, aud, and exp using NimbusJwtDecoder without any knowledge of the PKCE flow.'
+    }
+  ],
+  code:[
+    '// PKCE: generate verifier + challenge once per login',
+    'const verifier  = crypto.randomBytes(32).toString(\'base64url\');',
+    'const challenge = crypto.createHash(\'sha256\').update(verifier).digest(\'base64url\');',
+    '',
+    '// Step 1: redirect user to IdP login',
+    'const authURL = \'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize\'',
+    '  + \'?client_id=MY-APP&response_type=code\'',
+    '  + \'&scope=openid profile api://my-api/read\'',
+    '  + \'&code_challenge=\' + challenge + \'&code_challenge_method=S256\';',
+    '',
+    '// Step 2: IdP redirects back with auth code',
+    '// https://app.com/callback?code=AUTH_CODE',
+    '',
+    '// Step 3: exchange code for tokens (HTTPS POST, never a browser redirect)',
+    'POST /oauth2/v2.0/token',
+    '  grant_type=authorization_code',
+    '  &code=AUTH_CODE',
+    '  &redirect_uri=https://app.com/callback',
+    '  &client_id=MY-APP',
+    '  &code_verifier=VERIFIER    // IdP: SHA-256(verifier) must == challenge',
+    '',
+    '// Step 4: IdP returns',
+    '{ access_token:  \'eyJ...\',  // send as Bearer in API calls (60 min)',
+    '  id_token:      \'eyJ...\',  // user identity: sub, email, name',
+    '  refresh_token: \'ey0...\' } // silent re-auth (days–weeks)'
+  ]
+});
+</script>
+
 <script>
 let pkceStep = -1;
 function nextPKCE() {

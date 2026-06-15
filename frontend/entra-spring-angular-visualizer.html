@@ -395,6 +395,94 @@
   </div>
 </div>
 
+<!-- ── Code Walkthrough: Entra + Spring + Angular ── -->
+<div id="cw-esa"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-esa',{
+  id:'cw-esa',
+  title:'Entra ID + Spring Boot + Angular — every configuration line in the CIAM stack',
+  subtitle:'A production CIAM setup has three moving parts: Angular MSAL (acquires the token), Spring Boot NimbusJwtDecoder (validates it), and Entra ID (issues it). Misconfiguring any one of the 6 key values causes a 401 or 403. Every line below has one job.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6],
+      note:'Angular MSAL configuration: clientId identifies your app in Entra (from App Registration). authority tells MSAL which IdP and tenant to use for login. The tenant-id scopes the tokens to your organization. redirectUri must match EXACTLY what is registered in the App Registration\'s Authentication blade — a single character difference → AADSTS50011 error.',
+      vars:{'clientId':'GUID from Entra App Registration → Overview → Application (client) ID','tenant-id':'your Entra Directory (tenant) ID — found on the Azure portal home page','redirectUri':'must be in the "Redirect URIs" list in App Registration; case-sensitive'},
+      tone:'start'
+    },
+    {
+      lines:[8,9,10],
+      note:'MSAL Auth Guard: canActivate() calls msalService.instance.getAllAccounts(). If no active account → triggers loginRedirect(). If an account exists, returns true (route activates). This guard wraps every protected route — the user is redirected to Entra login before the Angular component even renders.',
+      vars:{'getAllAccounts()':'returns cached accounts from the MSAL token cache (sessionStorage/cookie)','loginRedirect()':'redirects browser to Entra login page; on success redirects back to redirectUri','route guard':'prevents Angular from rendering a component if the user is not logged in'},
+      tone:'ok'
+    },
+    {
+      lines:[12,13,14,15],
+      note:'Angular HttpInterceptor: reads the cached access token from MSAL and injects it as Bearer. The token is an access_token (not id_token) scoped to your Spring Boot API (api://your-api/User.Read). Without this interceptor, all Spring Boot API calls would return 401 — the token never reaches the server.',
+      vars:{'acquireTokenSilently()':'MSAL refreshes the token silently if it is expired — no user prompt','scopes: [api://...]':'requests an access_token scoped to your Spring Boot API, not just a profile token','interceptor order':'must run BEFORE any retry logic or error interceptors'},
+      tone:'ok'
+    },
+    {
+      lines:[17,18,19,20,21,22],
+      note:'Spring Boot resource server configuration: issuer-uri points to the Entra OIDC discovery document. Spring auto-fetches the JWK Set URL from {issuer}/.well-known/openid-configuration and uses it to verify JWT signatures. audiences restricts which aud claim values the resource server accepts — your api:// URI must match exactly.',
+      vars:{'issuer-uri':'Spring fetches {issuer}/.well-known/openid-configuration on startup to get the JWK Set URL','audiences':'Spring rejects any token whose aud does not include this value — prevents token substitution','tenant-id':'same value as Angular config; ensures both sides talk to the same Entra tenant'},
+      tone:'ok'
+    },
+    {
+      lines:[24,25,26,27,28,29,30],
+      note:'Spring Security filter chain: oauth2ResourceServer().jwt() tells Spring to validate Bearer tokens. The JwtAuthenticationConverter converts JWT claims into Spring GrantedAuthority objects. The lambda extracts the "roles" claim from the Entra token (Entra puts roles in a top-level "roles" array, not in "scope") and prefixes them with ROLE_ for Spring Security conventions.',
+      vars:{'oauth2ResourceServer().jwt()':'registers BearerTokenAuthenticationFilter; validates every request\'s Bearer token','JwtAuthenticationConverter':'maps JWT claims → GrantedAuthority list used by @PreAuthorize and hasRole()','claim "roles"':'Entra ID puts assigned app roles in a "roles" array in the access_token JWT payload'},
+      tone:'ok'
+    },
+    {
+      lines:[32,33,34,35,36],
+      note:'The controller uses @PreAuthorize to check the role extracted by JwtAuthenticationConverter. The JWT sub claim provides the stable user identifier (never use email — it can change). getPrincipal().getName() returns the sub claim value from the JWT. This is the only data you should use as the "logged in user" key in your database.',
+      vars:{'hasAuthority("ROLE_ADMIN")':'checks the GrantedAuthority list; must match the prefix added by JwtAuthenticationConverter','jwt.getClaimAsString("sub")':'the stable GUID user ID from Entra — use this as the user\'s primary key','never use email as key':'email can change in Entra; sub is immutable across renames and email changes'},
+      tone:'ok',
+      callout:'CIAM: this stack (Entra → MSAL → Angular → Bearer → Spring NimbusJwtDecoder → @PreAuthorize) is production-ready with zero custom token parsing code. For Ping Identity, swap the issuer-uri to your PingFederate / PingOne base URL and the audiences to your OAuth2 resource URI — the Spring Boot resource server code is identical. The only differences are the tenant-specific URLs and the claim names (Ping uses "sub" too, but may differ in how roles/groups are structured).'
+    }
+  ],
+  code:[
+    '// Angular: MSAL configuration (app.config.ts)',
+    'MsalModule.forRoot({ auth: {',
+    '  clientId: \'YOUR-CLIENT-ID\',',
+    '  authority: \'https://login.microsoftonline.com/YOUR-TENANT-ID\',',
+    '  redirectUri: \'http://localhost:4200\'',
+    '} })',
+    '',
+    '// Angular: route guard (MsalGuard)',
+    'canActivate(): boolean {',
+    '  return this.msalService.instance.getAllAccounts().length > 0;',
+    '}',
+    '',
+    '// Angular: HttpInterceptor injects Bearer token',
+    'const token = await this.msalService.acquireTokenSilently({',
+    '  scopes: [\'api://YOUR-API-ID/User.Read\'] });',
+    'req.clone({ setHeaders: { Authorization: `Bearer ${token.accessToken}` } })',
+    '',
+    '// Spring Boot: application.yml',
+    'spring.security.oauth2.resourceserver.jwt:',
+    '  issuer-uri: https://login.microsoftonline.com/YOUR-TENANT-ID/v2.0',
+    '  audiences: api://YOUR-API-ID',
+    '',
+    '// Spring Boot: SecurityFilterChain',
+    'http.oauth2ResourceServer(rs -> rs.jwt(jwt -> jwt',
+    '  .jwtAuthenticationConverter(converter())));',
+    '// JwtAuthenticationConverter maps "roles" claim → ROLE_ authorities',
+    'converter.setJwtGrantedAuthoritiesConverter(jwt ->',
+    '  jwt.getClaimAsStringList("roles").stream()',
+    '     .map(r -> new SimpleGrantedAuthority("ROLE_" + r)).toList());',
+    '',
+    '// Spring Boot: controller',
+    '@GetMapping("/api/users")',
+    '@PreAuthorize("hasAuthority(\'ROLE_ADMIN\')")',
+    'public List<User> list(JwtAuthenticationToken auth) {',
+    '  String userId = ((Jwt)auth.getPrincipal()).getClaimAsString("sub");',
+    '}'
+  ]
+});
+</script>
+
 <script>
 function showCode(name) {
   ['angular-config','angular-guard','angular-http','spring-config','spring-controller'].forEach(n => {
