@@ -4,7 +4,7 @@
 > the static visualizer frontend and the `devhub-backend` Spring Boot API.
 > Every diagram below is [Mermaid](https://mermaid.js.org) and renders on GitHub.
 >
-> **Companion docs:** [README](../README.md) (run/deploy) · [DEVHUB-GUIDE](DEVHUB-GUIDE.md) (the 18 learning tracks) · [HELP](../HELP.md) (command-line runbook).
+> **Companion docs:** [README](../README.md) (run/deploy) · [DEVHUB-GUIDE](DEVHUB-GUIDE.md) (the 18 learning tracks) · [API-REFERENCE](API-REFERENCE.md) (every endpoint) · [SECURITY](SECURITY.md) (auth model) · [HELP](../HELP.md) (command-line runbook).
 
 ---
 

@@ -73,6 +73,17 @@
     .live-btn:hover{ border-color:var(--accent); }
     .live-out{ background:#070b16; border:1px solid var(--border); border-radius:8px; padding:10px 12px; font-family:ui-monospace,monospace;
       font-size:11.5px; line-height:1.6; color:#cbd5e1; white-space:pre-wrap; word-break:break-word; min-height:90px; max-height:300px; overflow:auto; }
+
+    /* ── per-step data inspector ── */
+    .rt-sec{ margin:7px 0 0; }
+    .rt-sec:first-child{ margin-top:0; }
+    .rt-kv{ display:grid; grid-template-columns:max-content 1fr; gap:1px 10px; font-family:ui-monospace,monospace; font-size:10.5px; line-height:1.7; }
+    .rt-kv-k{ color:var(--muted); text-align:right; white-space:nowrap; }
+    .rt-kv-v{ color:#9fb0c9; word-break:break-all; white-space:pre-wrap; }
+    .rt-kv-v.ok  { color:#86efac; font-weight:700; }
+    .rt-kv-v.bad { color:#fca5a5; font-weight:700; }
+    .rt-kv-v.scope{ color:#7dd3fc; }
+    .rt-kv-v.role { color:#c4b5fd; }
   </style>
 </head>
 <body class="track-spring">
@@ -306,41 +317,263 @@ document.addEventListener('click', function (e) {
   const nodeEl=id=>document.querySelector('.rt-node[data-node="'+id+'"]');
   const nodeCenter=id=>{ const n=nodeEl(id); return n.offsetTop+n.offsetHeight/2; };
 
-  // compute the outcome → an array of steps
+  // ── per-step data builders ────────────────────────────────────────────────
+  function buildJWT(authArr){
+    const roles=authArr.filter(a=>a.startsWith('ROLE_')).map(a=>a.slice(5));
+    const scopes=authArr.filter(a=>a.startsWith('SCOPE_')).map(a=>a.slice(6));
+    return {alg:'RS256',kid:'idp-key-2024',sub:'user-001',email:'alice@example.com',
+      roles,scope:scopes.join(' ')||'(none)',exp:'valid · 3 599s remaining'};
+  }
+  function buildMockBody(method,path){
+    if(method==='DELETE') return '(empty body — 204 No Content)';
+    if(path==='/api/users'&&method==='GET')
+      return '[\n  { "id":1, "name":"Alice", "email":"alice@example.com" },\n  { "id":2, "name":"Bob",   "email":"bob@example.com"   }\n]';
+    if(method==='POST'&&path==='/api/users')
+      return '{ "id":3, "name":"New User", "email":"new@example.com" }';
+    if(path.indexOf('health')>=0)
+      return '{ "status":"UP", "components":{ "db":{"status":"UP"} } }';
+    if(path.indexOf('auth')>=0)
+      return '{ "token":"eyJhbGciOiJIUzI1NiJ9…", "expiresIn":3600 }';
+    return '{ "status":"ok", "path":"'+path+'" }';
+  }
+  function renderSections(secs){
+    return secs.map(sec=>
+      '<div class="rt-sec"><span class="ht">'+esc(sec.title)+'</span>'
+      +'<div class="rt-kv">'+sec.rows.map(r=>
+        '<div class="rt-kv-k">'+esc(r.k)+'</div>'
+        +'<div class="rt-kv-v'+(r.c?' '+r.c:'')+'">'+(r.html?r.v:esc(r.v))+'</div>'
+      ).join('')+'</div></div>'
+    ).join('');
+  }
+
+  // compute the outcome → an array of steps with live data per phase
   function plan(method, path){
     const auths=new Set(authoritiesNow());
     const steps=[]; const rule=firstRule(method,path);
+
     // 1. authentication
-    steps.push({node:'authn', tone:'ok', dir:authed?'🔑 authenticated':'🔑 anonymous',
-      cap:authed?'A valid Bearer token is present → an Authentication is set in the SecurityContext.':'No token → an anonymous Authentication.',
-      pay:authed?'Authorization: Bearer eyJ… (valid)':'(no Authorization header)',
-      hdr:{t:'authorities', b: authed ? (auths.size?[...auths].join('\n'):'(authenticated, but NO authorities)') : '(anonymous — no authorities)'} });
+    const jwt=buildJWT([...auths]);
+    if(authed){
+      steps.push({node:'authn',tone:'ok',dir:'🔑 authenticated',
+        cap:'A valid Bearer token is decoded and a full Authentication is placed in the SecurityContext.',
+        sections:[
+          {title:'HTTP Request Headers (outgoing)',rows:[
+            {k:'Authorization',v:'Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6ImlkcC1rZXktMjAyNCJ9… ('+jwt.alg+')',c:'ok'},
+            {k:'Content-Type',v:'application/json'},{k:'Host',v:'localhost:8081'},
+          ]},
+          {title:'JWT Claims (decoded payload)',rows:[
+            {k:'sub',v:'"user-001"'},{k:'email',v:'"alice@example.com"'},
+            {k:'roles',v:JSON.stringify(jwt.roles),c:jwt.roles.length?'role':'bad'},
+            {k:'scope',v:'"'+jwt.scope+'"',c:jwt.scope!=='(none)'?'scope':'bad'},
+            {k:'alg',v:jwt.alg},{k:'kid',v:'"'+jwt.kid+'"'},{k:'exp',v:jwt.exp,c:'ok'},
+          ]},
+          {title:'SecurityContext (post BearerTokenAuthenticationFilter)',rows:[
+            {k:'principal',v:'alice@example.com',c:'ok'},
+            {k:'authorities',v:auths.size?[...auths].join(', '):'(authenticated, no authorities)'},
+            {k:'authenticated',v:'true',c:'ok'},
+          ]},
+        ]});
+    } else {
+      steps.push({node:'authn',tone:'ok',dir:'🔑 anonymous',
+        cap:'No Authorization header — AnonymousAuthenticationFilter sets an anonymous principal.',
+        sections:[
+          {title:'HTTP Request Headers (outgoing)',rows:[
+            {k:'Authorization',v:'(absent — no Bearer token sent)',c:'bad'},
+            {k:'Content-Type',v:'application/json'},{k:'Host',v:'localhost:8081'},
+          ]},
+          {title:'SecurityContext (post AnonymousAuthenticationFilter)',rows:[
+            {k:'principal',v:'anonymousUser'},{k:'authorities',v:'[ROLE_ANONYMOUS]'},
+            {k:'authenticated',v:'true (anonymous)',c:'bad'},
+          ]},
+        ]});
+    }
+
     // 2. URL authz
     const rIdx=rules().indexOf(rule);
-    let urlMsg='matched '+ (rule?ruleText(rule):'(none)');
-    if(!rule){ steps.push({node:'authz',tone:'bad',dir:'🚦 no rule',cap:'No authorization rule matched — Spring requires anyRequest to be covered.',pay:'(misconfig)',hdr:{t:'matched rule',b:'none'},stop:403,ruleIdx:-1}); return steps; }
-    if(rule.type==='permitAll'){ steps.push({node:'authz',tone:'ok',dir:'🚦 permitAll',cap:'The matched rule is permitAll() — open, no authentication needed.',pay:method+' '+path,hdr:{t:'matched rule',b:rule.p+' → permitAll()'},ruleIdx:rIdx}); }
-    else if(rule.type==='authenticated'){ if(!authed){ steps.push({node:'authz',tone:'bad',dir:'🚦 needs auth',cap:'The rule requires authenticated() but the caller is anonymous → 401 Unauthorized.',pay:method+' '+path,hdr:{t:'matched rule',b:rule.p+' → authenticated()'},stop:401,ruleIdx:rIdx}); return steps; } steps.push({node:'authz',tone:'ok',dir:'🚦 authenticated',cap:'authenticated() satisfied — a token is present.',pay:method+' '+path,hdr:{t:'matched rule',b:rule.p+' → authenticated()'},ruleIdx:rIdx}); }
-    else { // hasRole / hasAuthority
-      const need = rule.type==='hasRole' ? 'ROLE_'+rule.arg : rule.arg;
-      if(!authed){ steps.push({node:'authz',tone:'bad',dir:'🚦 needs auth',cap:'This rule needs an authority, but the caller is anonymous → 401 (authenticate first).',pay:'needs '+need,hdr:{t:'matched rule',b:rule.p+' → '+ruleText(rule)},stop:401,ruleIdx:rIdx}); return steps; }
-      if(!auths.has(need)){ steps.push({node:'authz',tone:'bad',dir:'🚦 forbidden',cap:'Authenticated, but the required authority '+need+' is missing → 403 Forbidden (URL security).',pay:'needs '+need,hdr:{t:'have',b:[...auths].join('\n')||'(none)'},stop:403,ruleIdx:rIdx}); return steps; }
-      steps.push({node:'authz',tone:'ok',dir:'🚦 granted',cap:'URL security granted — the caller has '+need+'.',pay:'has '+need,hdr:{t:'matched rule',b:rule.p+' → '+ruleText(rule)},ruleIdx:rIdx});
+    if(!rule){
+      steps.push({node:'authz',tone:'bad',dir:'🚦 no rule',
+        cap:'No authorization rule matched — this is a Spring misconfiguration.',
+        sections:[{title:'Error',rows:[
+          {k:'cause',v:'No rule covers this request',c:'bad'},
+          {k:'fix',v:'Add .anyRequest().authenticated() as catch-all'},
+        ]}],stop:403,ruleIdx:-1}); return steps;
     }
+    if(rule.type==='permitAll'){
+      steps.push({node:'authz',tone:'ok',dir:'🚦 permitAll',
+        cap:'The matched rule is permitAll() — this endpoint is fully open, no authentication required.',
+        sections:[
+          {title:'URL Security evaluation (authorizeHttpRequests)',rows:[
+            {k:'method',v:method},{k:'path',v:path},
+            {k:'matched',v:rule.p+' → permitAll()',c:'ok'},
+            {k:'result',v:'✓ GRANTED — open to all',c:'ok'},
+          ]},
+          {title:'SecurityFilterChain Java config',rows:[
+            {k:'code',v:'.requestMatchers("'+rule.p+'").permitAll()'},
+          ]},
+        ],ruleIdx:rIdx});
+    } else if(rule.type==='authenticated'){
+      if(!authed){
+        steps.push({node:'authz',tone:'bad',dir:'🚦 needs auth',
+          cap:'This rule requires authenticated(), but the caller is anonymous → 401 Unauthorized.',
+          sections:[
+            {title:'URL Security evaluation',rows:[
+              {k:'method',v:method},{k:'path',v:path},
+              {k:'matched',v:rule.p+' → authenticated()'},
+              {k:'caller',v:'anonymous (no token)',c:'bad'},
+              {k:'result',v:'✗ 401 Unauthorized',c:'bad'},
+            ]},
+            {title:'HTTP Response sent to caller',rows:[
+              {k:'status',v:'401 Unauthorized',c:'bad'},
+              {k:'WWW-Authenticate',v:'Bearer realm="devhub"'},
+              {k:'body',v:'{ "status":401, "error":"Unauthorized" }'},
+            ]},
+          ],stop:401,ruleIdx:rIdx}); return steps;
+      }
+      steps.push({node:'authz',tone:'ok',dir:'🚦 authenticated',
+        cap:'authenticated() satisfied — a valid Bearer token is present.',
+        sections:[
+          {title:'URL Security evaluation',rows:[
+            {k:'method',v:method},{k:'path',v:path},
+            {k:'matched',v:rule.p+' → authenticated()',c:'ok'},
+            {k:'caller',v:'alice@example.com (authenticated)',c:'ok'},
+            {k:'result',v:'✓ GRANTED',c:'ok'},
+          ]},
+        ],ruleIdx:rIdx});
+    } else {
+      const need=rule.type==='hasRole'?'ROLE_'+rule.arg:rule.arg;
+      if(!authed){
+        steps.push({node:'authz',tone:'bad',dir:'🚦 needs auth',
+          cap:'This rule needs an authority, but the caller is anonymous → 401.',
+          sections:[
+            {title:'URL Security evaluation',rows:[
+              {k:'matched',v:rule.p+' → '+ruleText(rule)},
+              {k:'needs',v:need,c:'bad'},{k:'caller',v:'anonymous',c:'bad'},
+              {k:'result',v:'✗ 401 Unauthorized',c:'bad'},
+            ]},
+            {title:'HTTP Response sent to caller',rows:[
+              {k:'status',v:'401 Unauthorized',c:'bad'},
+              {k:'body',v:'{ "status":401, "error":"Unauthorized" }'},
+            ]},
+          ],stop:401,ruleIdx:rIdx}); return steps;
+      }
+      if(!auths.has(need)){
+        const dRows=[{k:'matched',v:rule.p+' → '+ruleText(rule)},{k:'needs',v:need,c:'bad'}];
+        if(auths.size)[...auths].forEach(a=>dRows.push({k:'caller has',v:a}));
+        else dRows.push({k:'caller has',v:'(none)',c:'bad'});
+        dRows.push({k:'result',v:'✗ 403 Forbidden (URL security)',c:'bad'});
+        steps.push({node:'authz',tone:'bad',dir:'🚦 forbidden',
+          cap:'Authenticated, but missing '+need+' → 403 Forbidden at the URL security gate.',
+          sections:[
+            {title:'URL Security evaluation',rows:dRows},
+            {title:'HTTP Response sent to caller',rows:[
+              {k:'status',v:'403 Forbidden',c:'bad'},
+              {k:'body',v:'{ "status":403, "error":"Forbidden", "missing":"'+need+'" }'},
+            ]},
+          ],stop:403,ruleIdx:rIdx}); return steps;
+      }
+      const gRows=[{k:'matched',v:rule.p+' → '+ruleText(rule),c:'ok'}];
+      [...auths].forEach(a=>gRows.push({k:a===need?'required ✓':'also has',v:a,c:a===need?'ok':''}));
+      gRows.push({k:'result',v:'✓ GRANTED',c:'ok'});
+      steps.push({node:'authz',tone:'ok',dir:'🚦 granted',
+        cap:'URL security passed — caller has the required authority.',
+        sections:[{title:'URL Security evaluation',rows:gRows}],ruleIdx:rIdx});
+    }
+
     // 3. dispatch
     const h=findHandler(method,path);
-    if(!h){ steps.push({node:'disp',tone:'bad',dir:'🧭 no handler',cap:'URL security passed, but no controller handles '+method+' '+path+' → 404 Not Found.',pay:method+' '+path,hdr:{t:'handler',b:'none mapped'},stop:404}); return steps; }
-    steps.push({node:'disp',tone:'ok',dir:'🧭 routed',cap:'The DispatcherServlet routed to '+h.h+'.',pay:method+' '+path,hdr:{t:'handler',b:h.h}});
+    if(!h){
+      steps.push({node:'disp',tone:'bad',dir:'🧭 no handler',
+        cap:'URL security passed, but no controller maps '+method+' '+path+' → 404 Not Found.',
+        sections:[
+          {title:'Handler mapping lookup',rows:[
+            {k:'request',v:method+' '+path},
+            {k:'result',v:'no @RequestMapping matched this URL',c:'bad'},
+          ]},
+          {title:'HTTP Response sent to caller',rows:[
+            {k:'status',v:'404 Not Found',c:'bad'},
+            {k:'note',v:'404 is decided AFTER URL security passes'},
+            {k:'body',v:'{ "status":404, "error":"Not Found", "path":"'+path+'" }'},
+          ]},
+        ],stop:404}); return steps;
+    }
+    const methAnn={GET:'@GetMapping',POST:'@PostMapping',DELETE:'@DeleteMapping',PUT:'@PutMapping'};
+    steps.push({node:'disp',tone:'ok',dir:'🧭 routed',
+      cap:'DispatcherServlet found a handler and selects '+h.h+' to process this request.',
+      sections:[
+        {title:'Handler mapping',rows:[
+          {k:'request',v:method+' '+path},
+          {k:'handler',v:h.h,c:'ok'},
+          {k:'annotation',v:(methAnn[method]||'@RequestMapping')+'("'+path.replace(/\/\d+$/,'/{id}')+'")'},
+          {k:'produces',v:'application/json'},
+        ]},
+        {title:'Spring internals',rows:[
+          {k:'HandlerAdapter',v:'RequestMappingHandlerAdapter'},
+          {k:'MessageConverter',v:'MappingJackson2HttpMessageConverter (JSON ↔ DTO)'},
+        ]},
+      ]});
+
     // 4. method security
     if(h.pre){
-      const need = h.pre.indexOf('hasRole')>=0 ? 'ROLE_'+(h.pre.match(/'([^']+)'/)||[])[1] : (h.pre.match(/'([^']+)'/)||[])[1];
-      if(!auths.has(need)){ steps.push({node:'pre',tone:'bad',dir:'🛡️ denied',cap:'@PreAuthorize('+h.pre+') failed — missing '+need+' → 403 Forbidden (method security).',pay:h.pre,hdr:{t:'have',b:[...auths].join('\n')||'(none)'},stop:403}); return steps; }
-      steps.push({node:'pre',tone:'ok',dir:'🛡️ passed',cap:'@PreAuthorize('+h.pre+') passed.',pay:h.pre,hdr:{t:'check',b:need+' present ✓'}});
+      const need=h.pre.indexOf('hasRole')>=0?'ROLE_'+(h.pre.match(/'([^']+)'/)||[])[1]:(h.pre.match(/'([^']+)'/)||[])[1];
+      if(!auths.has(need)){
+        steps.push({node:'pre',tone:'bad',dir:'🛡️ denied',
+          cap:'@PreAuthorize('+h.pre+') evaluated to false — missing '+need+' → 403 (method security gate).',
+          sections:[
+            {title:'@PreAuthorize evaluation (2nd gate)',rows:[
+              {k:'annotation',v:'@PreAuthorize("'+h.pre+'")'},
+              {k:'SpEL expr',v:h.pre},{k:'needs',v:need,c:'bad'},
+              {k:'caller has',v:auths.size?[...auths].join(', '):'(none)'},
+              {k:'result',v:'✗ false → AccessDeniedException → 403',c:'bad'},
+            ]},
+            {title:'Key distinction',rows:[
+              {k:'1st gate',v:'URL security — already PASSED'},
+              {k:'2nd gate',v:'@PreAuthorize — DENIED here → 403'},
+              {k:'proxy',v:'CGLIB proxy evaluates SpEL before delegating'},
+            ]},
+            {title:'HTTP Response sent to caller',rows:[
+              {k:'status',v:'403 Forbidden',c:'bad'},
+              {k:'body',v:'{ "status":403, "error":"Forbidden" }'},
+            ]},
+          ],stop:403}); return steps;
+      }
+      steps.push({node:'pre',tone:'ok',dir:'🛡️ passed',
+        cap:'@PreAuthorize('+h.pre+') evaluated to true — the controller method proceeds.',
+        sections:[
+          {title:'@PreAuthorize evaluation (2nd gate)',rows:[
+            {k:'annotation',v:'@PreAuthorize("'+h.pre+'")'},
+            {k:'SpEL expr',v:h.pre},{k:'needs',v:need,c:need.startsWith('ROLE_')?'role':'scope'},
+            {k:'caller has',v:need+' ✓',c:'ok'},{k:'result',v:'✓ true → proceeds to controller',c:'ok'},
+          ]},
+          {title:'Spring internals',rows:[
+            {k:'proxy',v:'CGLIB proxy: SpEL = true → delegates to real '+h.h},
+          ]},
+        ]});
     } else {
-      steps.push({node:'pre',tone:'ok',dir:'🛡️ none',cap:'No method-level @PreAuthorize on this handler — URL security already covered it.',pay:'(no @PreAuthorize)',hdr:{t:'method security',b:'none on this handler'}});
+      steps.push({node:'pre',tone:'ok',dir:'🛡️ none',
+        cap:'No @PreAuthorize on this handler — URL security already covered it.',
+        sections:[{title:'Method security',rows:[
+          {k:'@PreAuthorize',v:'(none on this handler)'},
+          {k:'URL gate',v:'already passed — no second check needed',c:'ok'},
+        ]}]});
     }
+
     // 5. controller
-    steps.push({node:'ctrl',tone:'ok',dir:'🎯 200 OK',cap:'The controller runs and returns its response.',pay:method+' '+path,hdr:{t:'response',b:'200 OK'},stop:200});
+    const respBody=buildMockBody(method,path);
+    const httpStatus=method==='DELETE'?'204 No Content':'200 OK';
+    const stopCode=method==='DELETE'?204:200;
+    steps.push({node:'ctrl',tone:'ok',dir:'🎯 '+httpStatus,
+      cap:'The controller method executes, builds its response, and returns the HTTP response to the caller.',
+      sections:[
+        {title:'Controller execution',rows:[
+          {k:'handler',v:h.h,c:'ok'},
+          {k:'returns',v:method==='POST'?'ResponseEntity.created(URI).body(UserDTO)':method==='DELETE'?'ResponseEntity.noContent().build()':'ResponseEntity.ok(List<UserDTO>)'},
+        ]},
+        {title:'HTTP Response sent to caller',rows:[
+          {k:'status',v:httpStatus,c:'ok'},
+          {k:'Content-Type',v:method==='DELETE'?'(empty body)':'application/json;charset=UTF-8'},
+          {k:'body',v:respBody},
+        ]},
+      ],stop:stopCode});
     return steps;
   }
 
@@ -352,7 +585,7 @@ document.addEventListener('click', function (e) {
     chip.classList.remove('ok','bad'); void chip.offsetWidth; chip.style.transition='';
     $('verdict').className='verdict'; $('dir').textContent='▶ READY'; $('dir').className='rt-dir';
     $('cap').textContent='Set the caller, pick a request, and press Fire — the request walks the chain step by step.';
-    $('pay').textContent=''; $('hdrs').innerHTML='<span class="ht">per-step detail</span>— the matched rule, the caller’s authorities, and each gate’s verdict appear here —';
+    $(‘pay’).textContent=’’; $(‘hdrs’).innerHTML=’<span style="color:var(--muted);font-size:10.5px;font-style:italic">Fire a request → per-step inspector: JWT claims · SecurityContext state · rule evaluation · response body appear here.</span>’;
   }
   function apply(st){
     document.querySelectorAll('.rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
@@ -361,8 +594,8 @@ document.addEventListener('click', function (e) {
     const chip=$('chip'); chip.textContent = st.stop?('→ '+st.stop):'req'; chip.classList.remove('ok','bad'); if(st.tone) chip.classList.add(st.tone);
     chip.style.opacity='1'; chip.style.top=nodeCenter(st.node)+'px';
     $('dir').textContent=st.dir; $('dir').className='rt-dir'+(st.tone==='bad'?' bad':'');
-    $('cap').textContent=st.cap; $('pay').textContent=st.pay||'';
-    $('hdrs').innerHTML='<span class="ht">'+st.hdr.t+'</span>'+esc(st.hdr.b);
+    $('cap').textContent=st.cap; $('pay').textContent='';
+    $('hdrs').innerHTML=st.sections?renderSections(st.sections):'<span class="ht">'+st.hdr.t+'</span>'+esc(st.hdr.b);
     if('ruleIdx' in st) renderRules(st.ruleIdx);
   }
   function fire(){

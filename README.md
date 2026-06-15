@@ -210,6 +210,8 @@ app with user accounts and cross-device progress sync:
 > context/container/component diagrams, the data model, the two security filter chains, and a
 > sequence diagram for **every** flow (register, login HS256, OIDC RS256, per-request validation,
 > RBAC 403/200, navigation, progress sync, account stats, code execution), plus deployment topologies.
+>
+> Also: **[docs/API-REFERENCE.md](docs/API-REFERENCE.md)** (every endpoint, payloads, curl) and **[docs/SECURITY.md](docs/SECURITY.md)** (token model, RBAC, secrets, threat model, deploy checklist).
 
 You can run it three ways. Pick the one you need:
 
