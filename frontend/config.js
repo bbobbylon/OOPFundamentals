@@ -25,7 +25,11 @@
 
 window.DEVHUB_API_BASE = (function () {
   // Deployed on GitHub Pages (HTTPS) → talk to your public backend.
-  // ⬇️ EDIT THIS ONE LINE to your deployed Render URL (HTTPS, no trailing slash).
+  // ⬇️ EDIT THIS ONE LINE to your deployed backend URL (HTTPS, no trailing slash).
+  //    Render:          https://devhub-backend.onrender.com
+  //    AWS App Runner:  https://xxxxxxxx.<region>.awsapprunner.com
+  //    Azure ACA:       https://devhub-backend.<region>.azurecontainerapps.io
+  //  (see docs/DEPLOYMENT.md for the full per-provider setup.)
   if (location.hostname.endsWith('github.io')) {
     return 'https://devhub-backend.onrender.com';
   }
