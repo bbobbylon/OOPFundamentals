@@ -418,6 +418,11 @@ register a local account and everything syncs to the local H2 database.
 
 ## Part 2 — Deploy the backend (Render + PostgreSQL)
 
+> **☁️ Deploying to AWS or Azure instead?** See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** — a
+> single "lift your working local stack to the cloud" guide covering **Render**, **AWS App Runner**,
+> and **Azure Container Apps**, with ready-made config files (`deploy/aws/`, `deploy/azure/`) and
+> manual-dispatch CI/CD workflows. The same image and env vars run on all three; only the host changes.
+
 > Render's free tier is used here because it has a one-click Postgres and builds
 > straight from the included `backend/Dockerfile`. Railway and Fly.io follow the
 > same shape — point them at the `backend/` dir and set the same env vars.
