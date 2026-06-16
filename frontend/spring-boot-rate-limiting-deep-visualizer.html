@@ -55,29 +55,32 @@
   <p class="subtitle">Your <code>/api/auth/login</code> is a magnet for <strong>brute-force</strong> and <strong>credential-stuffing</strong> attacks — without a throttle, an attacker can try millions of passwords. Two related defenses: <strong>rate limiting</strong> (cap requests per window, return <code>429</code>) and <strong>account lockout</strong> (too many failed logins → temporarily refuse). The trick is stopping attackers without handing them a way to lock out real users.</p>
 
   <!-- ── INTRO ── -->
-  <div style="background:#1e293b;border:1px solid #6abf69;border-left:3px solid #6abf69;border-radius:10px;padding:20px 22px;margin:12px 0 28px">
-    <div style="font-size:15px;font-weight:800;color:#6abf69;margin-bottom:10px">What is a credential-stuffing attack — and why does rate limiting stop it?</div>
-    <p style="font-size:14px;color:#cbd5e1;margin:0 0 10px">
-      A <strong style="color:#f87171">brute-force attack</strong> tries millions of password combinations against one account. A <strong style="color:#f87171">credential-stuffing attack</strong> takes a leaked username/password list (from another site's breach) and tries each pair against your login endpoint — because many users reuse passwords. Without rate limiting, an attacker can try 10,000 passwords per second. Most login flows are not slow enough to stop this naturally. <strong style="color:#e2e8f0">Rate limiting</strong> adds a cap: allow only 5 login attempts per IP per minute. On the 6th attempt: <code>429 Too Many Requests</code> with <code>Retry-After: 60</code>. The attacker can now try at most 5 per minute — a 2,000× reduction in attack speed. <strong style="color:#6abf69">Account lockout</strong> is complementary: after 10 failed attempts for a specific account, lock that account for 15 minutes. This stops targeted attacks against a single user. But lockout can be abused: an attacker deliberately fails 10 times to lock a real user out — so lockout thresholds and unlock mechanisms need careful design.
+  <div class="intro">
+    <div class="intro-head"><span class="ico">🚦</span> What is a credential-stuffing attack — and why does rate limiting stop it?</div>
+    <p class="intro-lead">
+      A <strong>brute-force</strong> attack tries millions of passwords against one account; <strong>credential stuffing</strong> takes a leaked username/password list from another breach and replays each pair against your login, banking on password reuse. Unthrottled, an attacker tries ~10,000/second. <strong>Rate limiting</strong> caps it — say 5 attempts per IP per minute, then <code>429 Too Many Requests</code> with <code>Retry-After: 60</code> — a 2,000× slowdown. <strong>Account lockout</strong> complements it (lock after 10 failures for one account), but it can be abused to deliberately lock real users out, so thresholds and unlock paths need care.
     </p>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:12px">
-      <div style="background:#0b1426;border:1px solid #334155;border-radius:8px;padding:10px 12px">
-        <div style="font-size:10.5px;font-weight:800;color:#6abf69;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">Bucket4j / Resilience4j rate limiting</div>
-        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><strong>Bucket4j</strong>: token-bucket algorithm. Each IP gets a bucket with 5 tokens. Each login attempt consumes 1 token. Tokens refill at 1/minute. Empty bucket: reject with 429. Redis-backed for multi-pod consistency: <code>ProxyManager.builder().build(redisClient).builder().addLimit(Bandwidth.classic(5, Refill.greedy(5, Duration.ofMinutes(1)))).build()</code>. Or use <strong>Resilience4j RateLimiter</strong>: annotation-based, simpler for service-method level limiting.</p>
+    <ul class="intro-gist">
+      <li><b>Throttle to defang stuffing.</b> Capping attempts/min turns 10k/s into 5/min.</li>
+      <li><b>Limit by IP <em>and</em> username</b> — IP catches single-source, username catches distributed attacks.</li>
+      <li><b>Limit early.</b> Gateway/filter, never the service layer (you've already spent the DB lookup).</li>
+      <li><b>Lockout cuts both ways</b> — design unlock so it can't become a DoS against real users.</li>
+    </ul>
+    <div class="intro-cards">
+      <div class="intro-mini">
+        <h4>Bucket4j / Resilience4j</h4>
+        <p><b>Bucket4j</b> token bucket: each IP gets 5 tokens, 1 per attempt, refilling 1/min; empty → 429. Redis-backed (<code>Bandwidth.classic(5, Refill.greedy(...))</code>) for multi-pod consistency. <b>Resilience4j RateLimiter</b> is annotation-based for method-level limits.</p>
       </div>
-      <div style="background:#0b1426;border:1px solid #334155;border-radius:8px;padding:10px 12px">
-        <div style="font-size:10.5px;font-weight:800;color:#22d3ee;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">Account lockout implementation</div>
-        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7">Track failed attempts per account in Redis: <code>INCR login:failures:{userId}</code>, <code>EXPIRE login:failures:{userId} 900</code> (15 min TTL). On successful login: <code>DEL login:failures:{userId}</code>. Before each login: <code>Integer failures = redis.get("login:failures:" + userId)</code>. If &ge;10: return 429 immediately, don't check password. Unlock: time-based (TTL expires) or manual (admin calls <code>POST /api/admin/users/{id}/unlock</code>). Alert: if &gt;100 accounts locked in 5 minutes → possible lockout DoS attack.</p>
+      <div class="intro-mini">
+        <h4>Account lockout</h4>
+        <p>Track per-account in Redis: <code>INCR login:failures:{userId}</code> + <code>EXPIRE …900</code>; clear on success. At ≥10, return 429 without checking the password. Unlock by TTL or admin <code>POST …/unlock</code>. Alert if &gt;100 accounts lock in 5 min (lockout-DoS).</p>
       </div>
-      <div style="background:#0b1426;border:1px solid #334155;border-radius:8px;padding:10px 12px">
-        <div style="font-size:10.5px;font-weight:800;color:#f59e0b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">Rate limiting at the right layer</div>
-        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7">Best: at the API Gateway or load balancer (before traffic reaches Spring Boot) — attacker gets blocked before any compute is spent. Second: in a Spring Security filter early in the chain — no service logic runs. Third: in a Spring Boot filter for endpoints not behind a gateway. Never in the service layer — by then you've already done DB lookups and spent compute. Use different limits for different endpoints: login (5/min), password reset (3/hour), user creation (10/min per authenticated admin).</p>
+      <div class="intro-mini">
+        <h4>The right layer</h4>
+        <p>Best at the gateway/LB (blocked before any compute), then a Security filter early in the chain, then a plain filter for un-gatewayed endpoints — never the service layer. Tune per endpoint: login 5/min, password reset 3/hour, admin create 10/min.</p>
       </div>
     </div>
-    <div style="padding:9px 13px;background:#0b1426;border-radius:7px;border-left:3px solid #f59e0b">
-      <span style="font-size:11px;font-weight:800;color:#f59e0b;text-transform:uppercase;letter-spacing:.05em">In CIAM:</span>
-      <span style="font-size:12.5px;color:#94a3b8;margin-left:6px"><code>POST /api/auth/login</code>: rate limit by IP (5/min) AND by username (10/hour). Username limit catches credential stuffing from distributed IPs; IP limit catches single-IP attacks. Log every failed attempt with IP, username (masked: first 2 chars + ***), and timestamp. Alert: if a single username gets &gt;10 failures in 5 minutes from different IPs = credential-stuffing pattern → auto-notify the user "someone is trying to access your account." Also rate-limit <code>POST /api/auth/password-reset</code> (3/hour per email) — prevents email flooding.</span>
-    </div>
+    <div class="intro-ciam"><span class="tag">CIAM:</span> <code>POST /api/auth/login</code> limited by IP (5/min) and username (10/hour); log each failure with IP, masked username, and timestamp. If one username gets &gt;10 failures in 5 min from different IPs, that's a stuffing pattern — notify the user "someone is trying to access your account." Also throttle <code>POST /api/auth/password-reset</code> (3/hour per email) to stop email flooding.</div>
   </div>
 
   <!-- rate-limiting animated hero -->

@@ -68,29 +68,32 @@
   <p class="subtitle">You added <code>@Transactional</code> and the rollback still didn't happen. <code>@Async</code> ran on the same thread. <code>@Cacheable</code> never cached. The annotation is right — but Spring applies it through a <strong>proxy</strong>, and the proxy only intercepts calls that come <em>through</em> it. Self-invocation and non-overridable methods slip past, and the advice <strong>silently does nothing</strong>. This is the single most common "but I added the annotation!" bug.</p>
 
   <!-- ── INTRO ── -->
-  <div style="background:#1e293b;border:1px solid #6abf69;border-left:3px solid #6abf69;border-radius:10px;padding:20px 22px;margin:12px 0 28px">
-    <div style="font-size:15px;font-weight:800;color:#6abf69;margin-bottom:10px">What is a Spring AOP proxy — and why does calling a method from the same class break @Transactional?</div>
-    <p style="font-size:14px;color:#cbd5e1;margin:0 0 10px">
-      When you annotate a method with <code>@Transactional</code>, <code>@Async</code>, or <code>@Cacheable</code>, Spring doesn't modify your class. Instead, it creates a <strong style="color:#e2e8f0">proxy</strong> — a wrapper class that sits in front of your bean. When another class calls your bean (via the injected proxy), the proxy intercepts the call, applies the advice (starts a transaction, submits to async pool, checks the cache), then calls your method. The critical rule: <strong style="color:#f87171">the proxy only intercepts calls that come from outside the class</strong>. When your method calls <code>this.anotherMethod()</code>, it bypasses the proxy — it calls the method directly on <code>this</code> (the real object). The transaction annotation on <code>anotherMethod</code> is completely ignored. This is not a bug — it's how Java method dispatch works. The proxy can't intercept <code>this.method()</code> calls because they never go through the proxy object.
+  <div class="intro">
+    <div class="intro-head"><span class="ico">🪞</span> What is a Spring AOP proxy — and why does a same-class call break @Transactional?</div>
+    <p class="intro-lead">
+      <code>@Transactional</code>, <code>@Async</code>, and <code>@Cacheable</code> don't modify your class — Spring wraps it in a <strong>proxy</strong> that sits in front of the bean. When another object calls in through the injected proxy, the proxy applies the advice (start a transaction, submit to the pool, check the cache) and then calls your method. The catch: <strong>the proxy only intercepts calls from outside</strong>. A <code>this.anotherMethod()</code> call goes straight to the real object and skips the proxy entirely, so the annotation on that method is ignored. It's not a bug — it's how Java dispatch works; internal calls never pass through the proxy.
     </p>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:12px">
-      <div style="background:#0b1426;border:1px solid #334155;border-radius:8px;padding:10px 12px">
-        <div style="font-size:10.5px;font-weight:800;color:#f87171;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">The self-invocation trap</div>
-        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7">In <code>UserService</code>: <code>void createUserAndSendEmail(User user) &#123; createUser(user); sendWelcomeEmail(user); &#125; @Transactional void createUser(User u) &#123;...&#125; @Async void sendWelcomeEmail(User u) &#123;...&#125;</code>. <code>createUserAndSendEmail</code> calls both methods via <code>this</code>. Neither annotation fires. <code>createUser</code> has no transaction. <code>sendWelcomeEmail</code> runs on the caller's thread. You see no error — it just silently does wrong things.</p>
+    <ul class="intro-gist">
+      <li><b>Advice lives on the proxy, not your class.</b> External calls get it; internal ones don't.</li>
+      <li><b>Self-invocation silently no-ops</b> the annotation — no transaction, no async, no cache, no error.</li>
+      <li><b>Best fix: extract to another bean</b> so the call crosses a proxy boundary.</li>
+      <li><b>final breaks CGLIB.</b> A final method/class can't be subclassed, so it can't be proxied.</li>
+    </ul>
+    <div class="intro-cards">
+      <div class="intro-mini">
+        <h4>The self-invocation trap</h4>
+        <p><code>createUserAndSendEmail()</code> calling <code>this.createUser()</code> (<code>@Transactional</code>) and <code>this.sendWelcomeEmail()</code> (<code>@Async</code>) fires neither — no transaction, runs on the caller's thread, no error. It just silently does the wrong thing.</p>
       </div>
-      <div style="background:#0b1426;border:1px solid #334155;border-radius:8px;padding:10px 12px">
-        <div style="font-size:10.5px;font-weight:800;color:#4ade80;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">The fixes</div>
-        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><strong>Fix 1 (best)</strong>: extract to a separate service class: <code>userEmailService.sendWelcomeEmail(user)</code> — called via the proxy, @Async fires. <strong>Fix 2 (self-inject)</strong>: <code>@Lazy @Autowired UserService self</code>, then call <code>self.createUser(user)</code> — goes through the proxy. <strong>Fix 3 (AspectJ)</strong>: use load-time weaving (complex setup) so advice is woven into the class bytecode, not a proxy — self-invocation works. Fix 1 is almost always the right answer.</p>
+      <div class="intro-mini">
+        <h4>The fixes</h4>
+        <p><b>Best:</b> extract to a separate service so the call goes through the proxy. <b>Self-inject:</b> <code>@Lazy @Autowired UserService self</code> then <code>self.createUser(...)</code>. <b>AspectJ:</b> load-time weaving bakes advice into bytecode (complex). Extraction is almost always right.</p>
       </div>
-      <div style="background:#0b1426;border:1px solid #334155;border-radius:8px;padding:10px 12px">
-        <div style="font-size:10.5px;font-weight:800;color:#f59e0b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px">The final method trap</div>
-        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7">Spring's default CGLIB proxy extends your class (subclassing). <code>final</code> methods can't be overridden — the proxy can't wrap them. <code>@Transactional final void createUser()</code> — the annotation is silently ignored. <code>final</code> classes can't be proxied at all (no subclass possible). Fix: remove <code>final</code> from any method that needs Spring's proxy annotations. This is why Lombok's <code>@Builder</code> and similar don't interfere — they generate non-final methods by default.</p>
+      <div class="intro-mini">
+        <h4>The final method trap</h4>
+        <p>CGLIB proxies subclass your bean, so a <code>final</code> method can't be wrapped — <code>@Transactional final void …</code> is silently ignored, and a <code>final</code> class can't be proxied at all. Remove <code>final</code> from anything needing proxy annotations.</p>
       </div>
     </div>
-    <div style="padding:9px 13px;background:#0b1426;border-radius:7px;border-left:3px solid #f59e0b">
-      <span style="font-size:11px;font-weight:800;color:#f59e0b;text-transform:uppercase;letter-spacing:.05em">Debug proxy issues:</span>
-      <span style="font-size:12.5px;color:#94a3b8;margin-left:6px">Confirm your bean is a proxy: in the debugger, inspect the injected field — its class name will be something like <code>UserService$$SpringCGLIB$$0</code>. That's the proxy. If it's just <code>UserService</code>, Spring couldn't proxy it (maybe it's <code>final</code>). For <code>@Transactional</code> issues: set <code>logging.level.org.springframework.transaction=DEBUG</code> — Spring logs "Getting transaction for [class.method]" when a transaction starts and "Completing transaction" when it commits. If you don't see those logs for a method you annotated, the proxy is being bypassed.</span>
-    </div>
+    <div class="intro-ciam"><span class="tag">Debug proxy issues:</span> In the debugger, inspect the injected field — a class name like <code>UserService$$SpringCGLIB$$0</code> means it's a proxy; plain <code>UserService</code> means Spring couldn't proxy it (maybe <code>final</code>). For transactions, set <code>logging.level.org.springframework.transaction=DEBUG</code> and look for "Getting transaction for [class.method]". No such log on an annotated method = the proxy is being bypassed.</div>
   </div>
 
   <!-- 1 -->
