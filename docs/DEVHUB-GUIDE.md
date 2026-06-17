@@ -52,6 +52,7 @@ Or jump straight to any file linked below.
 | ⎈ **Kubernetes** | pods, deployments, services, config & secrets, Helm, Spring on K8s | [Kubernetes Fundamentals](../frontend/kubernetes-fundamentals-visualizer.html) |
 | 🗄️ **SQL & Databases** | SQL, indexes & query plans, transactions/ACID, CTEs, normalization, Postgres | [SQL Fundamentals](../frontend/sql-fundamentals-visualizer.html) |
 | ⌨️ **Shell & Scripting** | CLI basics, **Bash**, **PowerShell** objects, **CMD/Batch** — three shells side by side | [CLI Basics](../frontend/shell-cli-basics-visualizer.html) |
+| 🎓 **Exam Prep — Practice Tests** | 6 timed/scored mock exams (203 Q), a **readiness dashboard**, **learning paths**, and **spaced-repetition flashcards** (118 cards) | [Readiness Dashboard](../frontend/exam-readiness.html) · [Learning Paths](../frontend/learning-paths.html) · [exams](../frontend/exam-aws-developer.html) |
 
 Pages are tagged **beginner → intermediate → advanced → expert**. The deepest
 ones are the **`*-deep`** / **`*-lab`** companion pages (34 of them) — each takes a
@@ -201,9 +202,74 @@ the right `track-*` body class, then register it in the `TRACKS` array in
 pages so a learner can follow a thread — that's what makes the hub feel like a wiki
 rather than a pile of pages.
 
+### The assessment layer (practice exams)
+
+The DevHub isn't only *exposition* — the **🎓 Exam Prep** track adds **retrieval
+practice**, the part that actually makes knowledge stick and turns "I read it" into
+"I can pass the cert." It is one reusable engine plus per-exam data:
+
+- [`frontend/devhub-quiz.js`](../frontend/devhub-quiz.js) — a dependency-free engine.
+  Call `DevHubQuiz.render(rootEl, bank)` and it paints the whole experience:
+  - **Practice mode** — untimed; each question reveals the answer, a full
+    explanation, and a **"Learn more →"** link that `postMessage`s the hub
+    (`type:'dlh-navigate'`) to the matching visualizer page.
+  - **Exam mode** — *N* random questions, a countdown timer, and a pass/fail
+    verdict at the cert's real pass mark.
+  - **Per-domain breakdown** on the results screen (red bars = study here), plus a
+    **localStorage attempt history** (best score + recent attempts) so a learner can
+    watch readiness climb over time.
+  - Questions and choices are **shuffled** each attempt; supports single- and
+    multi-select; keyboard `1-8` to answer, `←/→` to navigate.
+- Each exam is a **standalone page** (e.g. [`exam-aws-developer.html`](../frontend/exam-aws-developer.html))
+  that links the engine and supplies a **question bank** inline. A bank entry:
+
+  ```js
+  { id:'iam-creds', domain:'Security & IAM', difficulty:'medium',
+    stem:'Your ECS task needs to read a secret…',
+    code:null,                                   // optional monospace block
+    choices:['…','…','…','…'], answer:1,         // index — or [0,2] with multi:true
+    explanation:'Use a task role — the SDK auto-discovers temp creds…',
+    ref:{ label:'IAM visualizer', file:'aws-iam-visualizer.html' } }
+  ```
+
+  To add an exam: create `frontend/exam-<name>.html` from the AWS one, write the
+  bank (each question's `ref.file` should point at the page that teaches it), and
+  register the page under the **Exam Prep** track in `TRACKS`. The bank is pure
+  data — no engine changes needed.
+- [`frontend/quiz-banks.js`](../frontend/quiz-banks.js) — a **manifest** (metadata
+  only: `id`, `title`, `cert`, `file`, `track`, `passPct`, `count`, `available`)
+  listing every exam. Keep an exam's `id`/`passPct`/`count` in sync with its page.
+  `available:false` entries render as "coming soon," so the manifest doubles as a
+  roadmap. After adding an exam, add its manifest row too.
+- [`frontend/exam-readiness.html`](../frontend/exam-readiness.html) — the
+  **readiness dashboard**. It reads the manifest + `DevHubQuiz.loadHistory(id)` for
+  each exam and renders an overall "avg best" ring, a per-exam best-score bar
+  against the pass mark (green = pass-ready), attempt counts, and the **weakest
+  domain** (aggregated from saved attempts — which is why `finish()` persists the
+  per-domain breakdown). New exams appear here automatically once they're in the
+  manifest.
+- [`frontend/learning-paths.html`](../frontend/learning-paths.html) — **named
+  learning paths**. Each cert/goal is an *ordered* curriculum: a `PATHS` array of
+  steps (each `[file, title, tag]`) ending in a capstone exam. Click a step to
+  `dlh-navigate` to that visualizer; the capstone shows your best score. This is
+  what turns the 380-page library into a *course with a finish line*.
+- [`frontend/devhub-flashcards.js`](../frontend/devhub-flashcards.js) — the
+  **spaced-repetition flashcard engine** (`DevHubFlash.render(rootEl, deck)`). A
+  Leitner 5-box system: a card you know moves up a box (seen less); a card you miss
+  drops to box 1 (seen most). Mastery = the share in box 5; box state persists in
+  localStorage per deck. A deck is `{ id, title, subtitle, accent, cards:[{front,
+  back, hint}] }`. Current decks: [AWS Services](../frontend/flashcards-aws.html),
+  [Big-O](../frontend/flashcards-bigo.html),
+  [HTTP Codes](../frontend/flashcards-http.html),
+  [Spring Annotations](../frontend/flashcards-spring.html). Add a deck = new
+  `flashcards-<topic>.html` from one of these + register it under Exam Prep.
+
 ---
 
-*This guide is updated as new tracks and deep-dives land. **Newest pass — Intro cards rolled out across all 344 pages (2026-06-14):**
+*This guide is updated as new tracks and deep-dives land. **Newest pass — Assessment layer launched (2026-06-16):**
+The DevHub now *tests* you, not just teaches you. A new **🎓 Exam Prep** track introduces a reusable practice-exam engine ([`devhub-quiz.js`](../frontend/devhub-quiz.js)) with Practice and timed Exam modes, per-domain score breakdowns, and saved attempt history — the retrieval-practice loop that's the difference between reading the material and passing the certification. The full set is now live: **6 exams / 203 questions** — [AWS Cloud Practitioner](../frontend/exam-aws-practitioner.html) (CLF-C02, 41 Q), [AWS Developer](../frontend/exam-aws-developer.html) (DVA-C02, 24 Q), [AWS Solutions Architect](../frontend/exam-aws-sa-associate.html) (SAA-C03, 37 Q), [Java OCP](../frontend/exam-java-ocp.html) (1Z0-830, 20 Q), [Spring Professional](../frontend/exam-spring-professional.html) (41 Q), and [Coding Interview / DSA](../frontend/exam-dsa-interview.html) (40 Q) — each question linked back to the visualizer that teaches it. Plus a **[readiness dashboard](../frontend/exam-readiness.html)** (one "am I ready?" scorecard), **[learning paths](../frontend/learning-paths.html)** (ordered curriculum → capstone exam, library→course), and **spaced-repetition [flashcards](../frontend/flashcards-aws.html)** (4 decks / 118 cards: AWS services, Big-O, HTTP codes, Spring annotations). Every bank passes an automated integrity check (answers in range, refs resolve, manifest in sync). See **"The assessment layer"** above for the formats.
+
+**Previous pass — Intro cards rolled out across all 344 pages (2026-06-14):**
 Every content page in the DevHub now opens with a rich **plain-English intro card** before the visualizer — a 150+ word paragraph explaining what the concept is and why it matters, three mini-cards with concrete code examples, and an amber **"In CIAM / Your Job"** callout bar tying the topic to real full-stack CIAM work (Ping + Entra + Spring Boot + Angular + Azure/AWS). This covers all 18 tracks:
 **Shell** ([CLI Basics](../frontend/shell-cli-basics-visualizer.html), [Bash](../frontend/shell-bash-visualizer.html), [PowerShell](../frontend/shell-powershell-visualizer.html), [CMD](../frontend/shell-cmd-visualizer.html));
 **Identity** ([RBAC deep](../frontend/rbac-deep-visualizer.html), [Keys & Signing](../frontend/identity-keys-signing-deep-visualizer.html));
