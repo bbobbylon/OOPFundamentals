@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Rust Web — Axum, Tokio &amp; Type-Driven Handlers</title>
+  <style>
+    .who-REQ{background:#22d3ee;color:#062a30}
+    .who-RT{background:#f74c00;color:#2a0c00}
+    .who-ROUTER{background:#ffd43b;color:#3a2c00}
+    .who-MW{background:#a78bfa;color:#1a1030}
+    .who-EXT{background:#dea584;color:#2e1a0c}
+    .who-HDL{background:#fb7185;color:#3a0712}
+    .who-RESP{background:#4ade80;color:#04230f}
+    .who-WARN{background:#f87171;color:#2a0606}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
+    .code-block{background:#0b1426;border-left:3px solid #f74c00;border-radius:0 6px 6px 0;padding:12px 16px;font-family:ui-monospace,monospace;font-size:12.5px;line-height:1.6;overflow-x:auto;margin:10px 0;color:#e2e8f0}
+    .key-insight{background:rgba(247,76,0,0.08);border:1px solid rgba(247,76,0,0.32);border-radius:8px;padding:14px;margin:12px 0;font-size:13px}
+    .key-insight strong{color:#ff7a3d}
+    code{background:#0b1426;padding:1px 5px;border-radius:3px;font-family:ui-monospace,monospace;font-size:12px;color:#ffd43b}
+  </style>
+  <link rel="stylesheet" href="devhub.css" />
+</head>
+<body class="track-rust">
+<div class="container">
+  <a class="back" href="app.html">&larr; Dev Hub</a>
+  <h1>Rust Web — Axum, Tokio &amp; Type-Driven Handlers</h1>
+  <p class="sub">How Rust builds web services: <strong>Tokio</strong> (the async runtime) drives thousands of concurrent connections on a small thread pool, and <strong>Axum</strong> turns ordinary <code>async fn</code>s into handlers — wiring requests to them through the type system with <strong>extractors</strong>. Fast, safe, and remarkably ergonomic.</p>
+
+  <!-- ── INTRO ── -->
+  <div class="intro">
+    <div class="intro-head"><span class="ico">🦀</span> What is the Rust web stack — and why async + types?</div>
+    <p class="intro-lead">
+      A Rust web server has two layers. Underneath is <strong>Tokio</strong>, an asynchronous runtime: instead of one OS thread per request (expensive), Tokio runs many <strong>futures</strong> (lazy state machines produced by <code>async fn</code>) on a small pool of worker threads. When a future hits <code>.await</code> on I/O that isn't ready, it <em>yields</em> the thread so another task can run, and the runtime resumes it later when the data arrives. That's how a handful of threads serve tens of thousands of concurrent connections. On top sits <strong>Axum</strong> (built on the <code>tower</code> middleware ecosystem and <code>hyper</code>). You write plain <code>async fn</code> handlers and register them on a <strong>Router</strong> (<code>route("/users/:id", get(show))</code>). The magic is <strong>extractors</strong>: each handler argument is a type that knows how to pull itself out of the request — <code>Path(id): Path&lt;u32&gt;</code> parses a URL segment, <code>Json(body): Json&lt;CreateUser&gt;</code> deserializes and validates the JSON body, <code>State(db)</code> injects shared state. If an extractor can't produce its value (bad JSON, missing param) it returns a <strong>rejection</strong> — a 400/422 — and your handler never runs. The return type implements <code>IntoResponse</code>, and a <code>Result&lt;Json&lt;T&gt;, AppError&gt;</code> maps cleanly onto status codes. The result: the compiler verifies your request wiring, and the same ownership/borrow guarantees from the language carry into a fearlessly-concurrent server.
+    </p>
+    <ul class="intro-gist">
+      <li><b>Tokio</b> — async runtime; futures yield on <code>.await</code> so few threads serve many connections.</li>
+      <li><b>Axum Router</b> — map method + path → an <code>async fn</code> handler (on tower/hyper).</li>
+      <li><b>Extractors</b> — typed handler args parse the request; failure → an automatic rejection.</li>
+      <li><b>IntoResponse + Result</b> — return types become responses; errors map to status codes.</li>
+    </ul>
+    <div class="intro-cards">
+      <div class="intro-mini">
+        <h4>A router and a handler</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code>let app = Router::new() &#10;    .route("/users/:id", get(show)) &#10;    .with_state(db); &#10;&#10;async fn show( &#10;    State(db): State&lt;Db&gt;,      // shared state &#10;    Path(id): Path&lt;u32&gt;,      // URL segment → u32 &#10;) -&gt; Result&lt;Json&lt;User&gt;, AppError&gt; { &#10;    let u = db.find(id).await?;   // ? propagates err &#10;    Ok(Json(u))                   // → 200 + JSON &#10;}</code></p>
+      </div>
+      <div class="intro-mini">
+        <h4>Extractors &amp; async I/O</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code>async fn create( &#10;    Json(input): Json&lt;CreateUser&gt;,  // parse+deser body &#10;) -&gt; impl IntoResponse { &#10;    // bad JSON → 422 rejection, handler never runs &#10;    let row = sqlx::query(...) &#10;        .execute(&amp;pool) &#10;        .await        // yields the thread while DB works &#10;        .unwrap(); &#10;    (StatusCode::CREATED, Json(row)) &#10;}</code></p>
+      </div>
+      <div class="intro-mini">
+        <h4>Spring Boot comparison</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><strong>Tokio</strong> ≈ the Netty event loop / Spring WebFlux's reactor — non-blocking I/O on few threads. The <strong>Router</strong> ≈ <code>@RequestMapping</code>. <strong>Extractors</strong> are the killer feature: <code>Path&lt;u32&gt;</code> ≈ <code>@PathVariable</code>, <code>Json&lt;T&gt;</code> ≈ <code>@RequestBody</code> + <code>@Valid</code>, <code>State&lt;T&gt;</code> ≈ an injected bean — but type-checked, so a wiring mistake won't compile. <strong>tower</strong> middleware ≈ the servlet filter chain. <code>IntoResponse</code> ≈ <code>ResponseEntity</code>; <code>Result&lt;T, AppError&gt;</code> ≈ a <code>@ControllerAdvice</code> exception handler mapping errors to status codes.</p>
+      </div>
+    </div>
+    <div class="intro-ciam"><span class="tag">CIAM with Axum:</span> a JWT-verifying API gateway is a natural fit — a tower middleware (or a custom extractor like <code>AuthUser</code>) verifies the RS256 token against the IdP's JWKS and rejects with 401 before the handler runs; an extractor that checks a claim/scope can reject with 403. Because extraction is type-driven, a handler that needs an authenticated admin simply takes an <code>AdminUser</code> argument — if the request can't satisfy it, Axum returns the rejection and the handler body is unreachable (the compiler guarantees you handled it). Tokio's non-blocking I/O keeps token introspection and JWKS fetches off the worker threads, and Rust's no-GC determinism keeps auth-hot-path latency predictable.</div>
+  </div>
+
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="rwSeg">
+        <button data-s="runtime" class="on">① Tokio: the async runtime</button>
+        <button data-s="lifecycle">② Axum request lifecycle</button>
+        <button data-s="extractors">③ extractors (type-driven)</button>
+        <button data-s="errors">④ Result → status codes</button>
+      </span>
+      <button class="rt-run" id="rwRun">▶ Play</button>
+      <span class="rt-pill" id="rwPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="rwDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="rwDir">▶ READY</span>
+        <div class="rt-cap" id="rwCap">Pick a scenario and press ▶ Play</div>
+        <div class="rt-payload" id="rwPay"></div>
+        <div class="rt-headers" id="rwHdr"></div>
+        <div class="rt-result" id="rwRes"></div>
+      </div>
+    </div>
+    <div class="who-row">
+      <span class="who-badge who-REQ">REQ — request</span>
+      <span class="who-badge who-RT">RT — Tokio runtime</span>
+      <span class="who-badge who-ROUTER">ROUTER — Axum router</span>
+      <span class="who-badge who-MW">MW — tower middleware</span>
+      <span class="who-badge who-EXT">EXT — extractor</span>
+      <span class="who-badge who-HDL">HDL — handler (async fn)</span>
+      <span class="who-badge who-RESP">RESP — IntoResponse</span>
+    </div>
+  </div>
+
+  <section>
+    <h2>1. async fn returns a future; .await drives it</h2>
+    <div class="code-block"><span style="color:#c792ea">async fn</span> <span style="color:#82aaff">show</span>(id: u32) -&gt; User {<br>&nbsp;&nbsp;<span style="color:#c792ea">let</span> u = db.<span style="color:#82aaff">find</span>(id).<span style="color:#82aaff">await</span>;   <span style="color:#a78bfa">// yields the thread while the DB works</span><br>&nbsp;&nbsp;u<br>}<br><span style="color:#a78bfa">// calling show(7) does NOTHING yet — it returns a Future (a lazy state machine).</span><br><span style="color:#a78bfa">// Tokio polls it; at .await it parks the task and runs others until I/O is ready.</span></div>
+    <div class="key-insight"><strong>Futures are lazy; the runtime drives them.</strong> An <code>async fn</code> compiles to a state machine that does nothing until polled. Tokio's executor polls many futures on a few threads; when one hits an <code>.await</code> that isn't ready, it returns <code>Pending</code> and the thread runs another task — cooperative, non-blocking concurrency. This is why a small thread pool serves enormous connection counts, the same reason Node's event loop or Spring WebFlux scale.</div>
+  </section>
+
+  <section>
+    <h2>2. The router maps paths to handlers</h2>
+    <div class="code-block"><span style="color:#c792ea">let</span> app = Router::<span style="color:#82aaff">new</span>()<br>&nbsp;&nbsp;.<span style="color:#82aaff">route</span>(<span style="color:#c3e88d">"/users"</span>, <span style="color:#82aaff">get</span>(list).<span style="color:#82aaff">post</span>(create))<br>&nbsp;&nbsp;.<span style="color:#82aaff">route</span>(<span style="color:#c3e88d">"/users/:id"</span>, <span style="color:#82aaff">get</span>(show))<br>&nbsp;&nbsp;.<span style="color:#82aaff">layer</span>(TraceLayer::<span style="color:#82aaff">new_for_http</span>())   <span style="color:#a78bfa">// tower middleware</span><br>&nbsp;&nbsp;.<span style="color:#82aaff">with_state</span>(db);<br><br>axum::<span style="color:#82aaff">serve</span>(listener, app).<span style="color:#82aaff">await</span>?;</div>
+    <p style="font-size:12px;color:var(--muted)">A <code>Router</code> maps method + path to handler functions and stacks <code>tower</code> middleware via <code>.layer(...)</code> (tracing, auth, compression, timeouts) — the filter chain. <code>.with_state(db)</code> makes shared state available to every handler through the <code>State</code> extractor.</p>
+  </section>
+
+  <section>
+    <h2>3. Errors are values — map them to responses</h2>
+    <div class="code-block"><span style="color:#c792ea">enum</span> <span style="color:#4ec9b0">AppError</span> { NotFound, Unauthorized, Db(sqlx::Error) }<br><br><span style="color:#c792ea">impl</span> IntoResponse <span style="color:#c792ea">for</span> AppError {<br>&nbsp;&nbsp;<span style="color:#c792ea">fn</span> <span style="color:#82aaff">into_response</span>(self) -&gt; Response {<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#c792ea">let</span> code = <span style="color:#c792ea">match</span> self {<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;AppError::NotFound =&gt; StatusCode::NOT_FOUND,        <span style="color:#a78bfa">// 404</span><br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;AppError::Unauthorized =&gt; StatusCode::UNAUTHORIZED, <span style="color:#a78bfa">// 401</span><br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;AppError::Db(_) =&gt; StatusCode::INTERNAL_SERVER_ERROR,<br>&nbsp;&nbsp;&nbsp;&nbsp;};<br>&nbsp;&nbsp;&nbsp;&nbsp;(code, Json(json!({ <span style="color:#c3e88d">"error"</span>: code.to_string() }))).<span style="color:#82aaff">into_response</span>()<br>&nbsp;&nbsp;}<br>}</div>
+    <div class="key-insight"><strong>One place to map errors to status.</strong> Because a handler returns <code>Result&lt;T, AppError&gt;</code> and <code>AppError</code> implements <code>IntoResponse</code>, the <code>?</code> operator can bubble any error up, and Axum turns it into the right HTTP status — Rust's equivalent of a Spring <code>@ControllerAdvice</code> / <code>@ExceptionHandler</code>, but checked by the compiler.</div>
+  </section>
+</div>
+
+<!-- ── Code Walkthrough ── -->
+<div id="cw-rw"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-rw',{
+  id:'cw-rw',
+  title:'An Axum handler, line by line — extractors, async await, Result',
+  subtitle:'A complete Axum endpoint. The function signature IS the request wiring: each argument is an extractor, the return type is the response, and ? turns a not-found into a 404 — all type-checked.',
+  steps:[
+    {lines:[1,2,3],note:'The handler is an ordinary async fn. Its ARGUMENTS are extractors: State(db) injects shared state (the DB handle), Path(id): Path<u32> pulls the :id URL segment and parses it to u32. If id is not a valid u32, Axum returns a 400 rejection and this body never runs.',vars:{'async fn show':'a plain async handler','State(db): State<Db>':'shared state injected','Path(id): Path<u32>':'URL :id → u32 (or 400)'},tone:'start'},
+    {lines:[3],note:'The return type Result<Json<User>, AppError> declares the two outcomes. Json<User> serializes to a 200 JSON body; AppError implements IntoResponse and maps to a status code. The compiler forces you to produce one or the other.',vars:{'Result<Json<User>, AppError>':'success or typed error','Json<User>':'→ 200 + JSON','AppError':'→ mapped status (404/401/500)'},tone:'ok'},
+    {lines:[4],note:'db.find(id).await does async I/O — at .await the task yields the worker thread so Tokio can run other requests until the DB responds. The ? operator unwraps Ok, or returns early with the error converted into AppError (a missing row → AppError::NotFound).',vars:{'.await':'yields the thread during I/O','?':'unwrap Ok, or early-return the Err','missing row':'→ AppError::NotFound → 404'},tone:'ok'},
+    {lines:[5],note:'On success we wrap the user in Json(...) and return Ok. Axum calls into_response on it: Json sets the content-type and serializes the body with a 200. The whole request-to-response path was verified by the type checker.',vars:{'Ok(Json(user))':'success arm','into_response()':'Json → 200 + application/json','verified':'by the compiler, before runtime'},tone:'ok',callout:'CIAM: extractors make auth a type. Replace Path(id) with an AuthUser extractor that verifies the JWT against the IdP JWKS — if the token is missing/invalid it returns 401 and show never runs; if it lacks the needed scope, return AppError::Unauthorized (403). The signature documents the security contract, and the compiler proves the unauthenticated path is unreachable inside the handler. Tokio keeps the JWKS fetch and DB call non-blocking so the auth hot path stays low-latency.'}
+  ],
+  code:[
+    'async fn show(',
+    '    State(db): State<Db>,        // shared state (≈ injected bean)',
+    '    Path(id): Path<u32>,         // :id segment → u32, else 400',
+    ') -> Result<Json<User>, AppError> {',
+    '    let user = db.find(id).await?;  // async I/O; ? → 404 if NotFound',
+    '    Ok(Json(user))                 // → 200 + application/json',
+    '}'
+  ]
+});
+</script>
+
+<script>
+(function(){
+  const P='rw', $=id=>document.getElementById(id);
+  const SCEN={
+    runtime:{ req:'Tokio runtime', intro:'Tokio runs many futures on a small thread pool. An async fn returns a lazy future; .await yields the thread on not-ready I/O so other tasks run. Watch two requests share one worker thread.',
+      nodes:[
+        {id:'spawn',icon:'🟢',nl:'2 requests → 2 tasks',ns:'futures spawned',who:'REQ'},
+        {id:'poll',icon:'⚙️',nl:'executor polls task A',ns:'runs until .await',who:'RT'},
+        {id:'await',icon:'⏸️',nl:'A hits .await (DB I/O)',ns:'returns Pending, yields',who:'RT'},
+        {id:'switch',icon:'🔁',nl:'thread runs task B',ns:'no thread sat idle',who:'RT'},
+        {id:'resume',icon:'▶️',nl:'A\'s I/O ready → resume A',ns:'few threads, many conns',who:'RESP'},
+      ],
+      steps:[
+        {node:'spawn',chip:'spawn',cap:'Two requests become two async tasks',pay:{taskA:'GET /users/1',taskB:'GET /users/2',each:'an async fn → a Future (lazy state machine)'},ins:'Each incoming request becomes a <strong>future</strong> — a lazy state machine. Calling an <code>async fn</code> does no work yet; the runtime must poll it. Tokio spawns both as tasks.'},
+        {node:'poll',chip:'poll A',tone:'ok',cap:'The executor polls task A',pay:{worker_thread:'#1',polling:'task A',runs:'synchronous work up to the first .await'},ins:'A worker thread picks task A and polls it. It executes the handler\'s code up to the first <code>.await</code> on something not yet ready.'},
+        {node:'await',chip:'.await',tone:'ok',cap:'A awaits DB I/O → yields the thread',pay:{at:'db.find(1).await',poll_result:'Pending (DB not done)',action:'task A is parked; thread is FREED'},ins:'A\'s database call isn\'t ready, so its <code>poll</code> returns <code>Pending</code>. Crucially, the thread is <strong>not blocked</strong> — Tokio parks task A and reuses the thread immediately.'},
+        {node:'switch',chip:'run B',tone:'ok',cap:'The same thread now runs task B',pay:{worker_thread:'#1 (same one)',now_running:'task B',benefit:'zero idle threads waiting on I/O'},ins:'The freed thread runs task B while A\'s I/O is in flight. One thread is doing useful work for two requests — the essence of async concurrency.'},
+        {node:'resume',chip:'resume',tone:'ok',cap:'A\'s I/O completes → A is resumed',pay:{event:'DB row for request 1 arrives',tokio:'wakes task A, re-polls it to completion',scaling:'N threads serve >>N concurrent connections'},ins:'When A\'s data arrives, the runtime wakes it and polls it to completion. A handful of threads thus serve tens of thousands of concurrent connections — far cheaper than a thread per request.'},
+      ], result:{cls:'ok',text:'✅ Tokio: async fns are lazy futures; .await yields the thread on not-ready I/O so the runtime multiplexes many tasks onto few threads. Non-blocking concurrency.'} },
+
+    lifecycle:{ req:'Axum request lifecycle', intro:'A request enters Tokio/hyper, runs through tower middleware, is routed to a handler, whose extractors parse the request before the body runs, and the return value becomes the response.',
+      nodes:[
+        {id:'req',icon:'📨',nl:'GET /users/42',ns:'HTTP request',who:'REQ'},
+        {id:'hyper',icon:'🦀',nl:'hyper on Tokio',ns:'parses HTTP, spawns a task',who:'RT'},
+        {id:'mw',icon:'🧱',nl:'tower middleware (.layer)',ns:'tracing, auth, timeout',who:'MW'},
+        {id:'route',icon:'🗺️',nl:'Router matches',ns:'/users/:id → show',who:'ROUTER'},
+        {id:'ext',icon:'📤',nl:'extractors run',ns:'Path, State, Json',who:'EXT'},
+        {id:'hdl',icon:'🎯',nl:'handler async fn',ns:'returns IntoResponse',who:'HDL'},
+      ],
+      steps:[
+        {node:'req',chip:'GET',cap:'A request arrives',pay:{method:'GET',path:'/users/42',headers:{accept:'application/json'}},ins:'A client request reaches the server socket that Tokio is listening on.'},
+        {node:'hyper',chip:'hyper',tone:'ok',cap:'hyper parses it and spawns a task',pay:{layer:'hyper (HTTP) on the Tokio runtime',action:'parse request, spawn an async task to handle it'},ins:'<code>hyper</code> (the HTTP implementation Axum builds on) parses the bytes into a typed <code>Request</code> and the runtime spawns a task to handle it — non-blocking from byte one.'},
+        {node:'mw',chip:'layers',tone:'ok',cap:'tower middleware layers run',pay:{layers:['TraceLayer','TimeoutLayer','auth middleware'],pattern:'each wraps the inner service (Service trait)'},ins:'Registered <code>.layer(...)</code> middleware runs in order — tracing, timeouts, compression, auth. Each is a tower <code>Service</code> wrapping the next: Axum\'s filter chain. Auth middleware can short-circuit with a 401 here.'},
+        {node:'route',chip:'route',tone:'ok',cap:'The router selects a handler',pay:{matched:'/users/:id',method:'GET',dispatch:'show',captured:{id:'42'}},ins:'The <code>Router</code> matches method + path and selects the <code>show</code> handler, capturing <code>:id = 42</code> for an extractor to read.'},
+        {node:'ext',chip:'extract',tone:'ok',cap:'Extractors parse the request first',pay:{'Path<u32>':'42','State<Db>':'shared DB handle',rule:'any extractor failure → rejection (4xx), handler skipped'},ins:'Before the handler body runs, each argument extractor pulls its value from the request. <code>Path&lt;u32&gt;</code> parses <code>42</code>; <code>State</code> injects the DB. A failure (bad param/body) returns a rejection and the body never executes.'},
+        {node:'hdl',chip:'200',tone:'ok',cap:'The handler runs and returns a response',pay:{handler:'show',returns:'Result<Json<User>, AppError>',into_response:'Json → 200 application/json'},ins:'The <code>async fn</code> runs (awaiting I/O as needed), returns a value implementing <code>IntoResponse</code>, and Axum converts it to the HTTP response — sent back through the middleware to the client.'},
+      ], result:{cls:'ok',text:'✅ Lifecycle: hyper/Tokio → tower middleware → Router → extractors (parse or reject) → handler → IntoResponse. The type system wires the request to the function.'} },
+
+    extractors:{ req:'extractors', intro:'An extractor is a handler-argument type that knows how to build itself from the request. Watch typed extraction succeed for good input, and produce an automatic rejection for bad input.',
+      nodes:[
+        {id:'sig',icon:'🧩',nl:'fn create(Json(body): Json<CreateUser>)',ns:'arg = extractor',who:'EXT'},
+        {id:'path',icon:'🔢',nl:'Path<u32> parses :id',ns:'segment → typed value',who:'EXT'},
+        {id:'json',icon:'📦',nl:'Json<CreateUser> deserializes',ns:'body → struct',who:'EXT'},
+        {id:'bad',icon:'🚫',nl:'invalid body → rejection',ns:'422, handler skipped',who:'WARN'},
+        {id:'ok',icon:'✅',nl:'valid → typed args',ns:'handler runs',who:'HDL'},
+      ],
+      steps:[
+        {node:'sig',chip:'args',cap:'Handler arguments declare what to extract',pay:{signature:'create(State(db): State<Db>, Json(body): Json<CreateUser>)',idea:'each arg type implements FromRequest / FromRequestParts'},ins:'In Axum the function signature <em>is</em> the request contract. Each argument is an <strong>extractor</strong> — a type implementing <code>FromRequest</code> that knows how to pull itself out of the request.'},
+        {node:'path',chip:'Path',tone:'ok',cap:'Path<u32> parses a URL segment to a type',pay:{from:'/users/42','Path<u32>':42,fail_case:'/users/abc → 400 (not a u32)'},ins:'<code>Path&lt;u32&gt;</code> reads the captured <code>:id</code> and parses it to <code>u32</code> — Axum\'s <code>@PathVariable</code>. A non-numeric segment yields a 400 automatically; the handler never sees bad data.'},
+        {node:'json',chip:'Json',tone:'ok',cap:'Json<T> deserializes and validates the body',pay:{body:'{"email":"a@b.com","name":"Ada"}','Json<CreateUser>':{email:'a@b.com',name:'Ada'},does:'read body + serde deserialize into the struct'},ins:'<code>Json&lt;CreateUser&gt;</code> reads the request body and deserializes it (via <code>serde</code>) into your struct — <code>@RequestBody</code> + structural validation. Type mismatches are caught here.'},
+        {node:'bad',chip:'422',tone:'bad',cap:'Malformed input → automatic rejection',pay:{body:'{"email": 123}',rejection:'JsonRejection → 422 Unprocessable Entity',handler:'NEVER runs'},ins:'If the body is malformed or a field has the wrong type, the <code>Json</code> extractor returns a <strong>rejection</strong> — a 422 response — and the handler body is skipped entirely. Bad input cannot reach your logic.'},
+        {node:'ok',chip:'typed',tone:'ok',cap:'Valid input → fully-typed handler arguments',pay:{db:'<shared state>',body:{email:'a@b.com',name:'Ada'},handler:'runs with guaranteed-valid, typed data'},ins:'When every extractor succeeds, the handler runs with strongly-typed, already-validated arguments. The compiler verified the wiring; the runtime guaranteed the values. No manual parsing, no defensive null checks.'},
+      ], result:{cls:'ok',text:'✅ Extractors: typed handler args parse themselves from the request (Path, Json, State, AuthUser…). Bad input → an automatic 4xx rejection; the handler only ever sees valid data.'} },
+
+    errors:{ req:'Result → status codes', intro:'Handlers return Result<T, AppError>. The ? operator bubbles errors up, and because AppError implements IntoResponse, each variant maps to an HTTP status. One typed error enum is your global exception handler.',
+      nodes:[
+        {id:'call',icon:'🎯',nl:'db.find(id).await?',ns:'fallible async call',who:'HDL'},
+        {id:'ok',icon:'✅',nl:'Ok(user)',ns:'? unwraps → continue',who:'RESP'},
+        {id:'err',icon:'⚠️',nl:'Err(NotFound)',ns:'? returns early',who:'WARN'},
+        {id:'map',icon:'🗺️',nl:'AppError::into_response',ns:'match variant → status',who:'RESP'},
+        {id:'resp',icon:'📤',nl:'404 / 401 / 500 JSON',ns:'consistent error body',who:'RESP'},
+      ],
+      steps:[
+        {node:'call',chip:'?',cap:'A fallible call with the ? operator',pay:{code:'let user = db.find(id).await?;',find_returns:'Result<User, AppError>','?':'unwrap Ok, or early-return Err'},ins:'<code>db.find(id)</code> returns a <code>Result</code>. The <code>?</code> operator is the fork: on <code>Ok</code> it unwraps and continues; on <code>Err</code> it returns that error from the handler immediately.'},
+        {node:'ok',chip:'Ok',tone:'ok',cap:'Ok → unwrap and proceed',pay:{value:'user found',continues:'Ok(Json(user)) → 200'},ins:'If the row exists, <code>?</code> hands you the <code>User</code> and execution continues to build a 200 response. The happy path reads linearly — no try/catch nesting.'},
+        {node:'err',chip:'Err',tone:'bad',cap:'Err → the handler returns early',pay:{error:'AppError::NotFound',behavior:'? converts + returns it from show()',body:'rest of the handler is skipped'},ins:'If <code>find</code> returns <code>Err(NotFound)</code>, <code>?</code> returns it straight out of the handler. Errors are ordinary values, propagated explicitly — but concisely.'},
+        {node:'map',chip:'match',tone:'ok',cap:'IntoResponse maps the variant to a status',pay:{impl:'impl IntoResponse for AppError',match:{NotFound:404,Unauthorized:401,Db:500}},ins:'Because <code>AppError</code> implements <code>IntoResponse</code>, Axum calls it on the returned error. A <code>match</code> maps each variant to the right <code>StatusCode</code> — your single, compiler-checked error-to-HTTP mapping.'},
+        {node:'resp',chip:'404',tone:'bad',cap:'A consistent error response is sent',pay:{status:404,body:{error:'Not Found'},consistency:'every handler shares this mapping'},ins:'The client gets a clean <code>404</code> with a JSON error body. Every handler that returns <code>AppError</code> shares this mapping — Rust\'s equivalent of a Spring <code>@ControllerAdvice</code>, enforced by types.'},
+      ], result:{cls:'ok',text:'✅ Result + IntoResponse: ? propagates typed errors out of the handler; one impl maps each AppError variant to a status code. Centralized, compiler-checked error handling.'} },
+  };
+
+  let scen='runtime', running=false, timers=[];
+  function clearT(){timers.forEach(clearTimeout);timers=[];}
+  function nodeEl(id){return document.querySelector('#'+P+'Diagram .rt-node[data-node="'+id+'"]');}
+  function nodeCenter(id){const n=nodeEl(id);return n?n.offsetTop+n.offsetHeight/2:0;}
+  function renderNodes(k){
+    let h='<div class="rt-rail"></div><div class="rt-chip" id="'+P+'Chip">→</div>';
+    SCEN[k].nodes.forEach(n=>{ h+='<div class="rt-node" data-node="'+n.id+'"><span class="ic">'+n.icon+'</span><div style="flex:1;min-width:0"><div class="nl">'+n.nl+'</div><div class="ns">'+n.ns+'</div></div><span class="who who-'+n.who+'">'+n.who+'</span></div>'; });
+    $(P+'Diagram').innerHTML=h;
+  }
+  function reset(){
+    renderNodes(scen); const s=SCEN[scen];
+    const chip=$(P+'Chip'); chip.style.transition='none'; chip.style.top=nodeCenter(s.steps[0].node)+'px'; chip.style.opacity='0'; chip.classList.remove('ok','bad'); void chip.offsetWidth; chip.style.transition='';
+    $(P+'Res').className='rt-result';
+    $(P+'Dir').textContent='▶ READY'; $(P+'Dir').className='rt-dir';
+    $(P+'Cap').textContent=s.intro;
+    $(P+'Pay').textContent='';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>— the runtime, router, extractors &amp; response appear here per step —';
+    $(P+'Pill').textContent=s.req;
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false;
+  }
+  function applyStep(steps,i){
+    const st=steps[i];
+    document.querySelectorAll('#'+P+'Diagram .rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
+    const n=nodeEl(st.node); n.classList.remove('vchk','vskip'); n.classList.add(st.tone==='bad'?'vskip':'vchk'); n.classList.add('cur'); if(st.tone==='bad')n.classList.add('curbad'); void n.offsetWidth; n.classList.add('rtpulse');
+    const chip=$(P+'Chip'); chip.textContent=st.chip||'→'; chip.classList.remove('ok','bad'); if(st.tone)chip.classList.add(st.tone==='bad'?'bad':'ok'); chip.style.opacity='1'; chip.style.top=nodeCenter(st.node)+'px';
+    $(P+'Dir').textContent=st.dir||('STEP '+(i+1)+' / '+steps.length); $(P+'Dir').className='rt-dir'+(st.tone==='bad'?' bad':'');
+    $(P+'Cap').textContent=st.cap;
+    $(P+'Pay').textContent=st.pay?JSON.stringify(st.pay,null,2):'';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>'+st.ins;
+  }
+  function run(){
+    if(running)return; running=true; clearT(); reset();
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=true); $(P+'Run').disabled=true;
+    $(P+'Pill').textContent='running…';
+    const s=SCEN[scen]; let i=0;
+    (function tick(){
+      if(i>=s.steps.length){ const r=$(P+'Res'); r.className='rt-result show '+(s.result.cls||'ok'); r.textContent=s.result.text; running=false; document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false; $(P+'Pill').textContent='done'; return; }
+      applyStep(s.steps,i); i++; timers.push(setTimeout(tick,2000));
+    })();
+  }
+  document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.onclick=()=>{ if(running)return; scen=b.dataset.s; document.querySelectorAll('#'+P+'Seg button').forEach(x=>x.classList.toggle('on',x===b)); reset(); });
+  $(P+'Run').onclick=run;
+  reset();
+})();
+</script>
+</body>
+</html>

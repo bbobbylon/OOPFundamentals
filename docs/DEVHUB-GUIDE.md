@@ -53,6 +53,7 @@ Or jump straight to any file linked below.
 | 🐿️ **Go** | types, goroutines/channels, interfaces, errors, HTTP server, **web frameworks (Gin/Echo/Fiber)**, generics | [Go Fundamentals](../frontend/go-fundamentals-visualizer.html) |
 | 🐘 **PHP & Laravel** | PHP’s shared-nothing request model, then **Laravel** — lifecycle, routing, middleware, Eloquent ORM | [PHP Fundamentals & the Request Model](../frontend/php-fundamentals-visualizer.html) |
 | 💎 **Ruby & Rails** | Ruby’s pure-object model (everything is a message, blocks, mixins, duck typing), then **Rails** — lifecycle, Active Record, MVC, strong params | [Ruby Fundamentals & the Object Model](../frontend/ruby-fundamentals-visualizer.html) |
+| 🦀 **Rust** | ownership, borrowing & the **borrow checker** (memory safety, no GC), then the **async web stack** — Tokio + Axum, type-driven extractors | [Ownership, Borrowing & the Borrow Checker](../frontend/rust-fundamentals-visualizer.html) |
 | ⎈ **Kubernetes** | pods, deployments, services, config & secrets, Helm, Spring on K8s | [Kubernetes Fundamentals](../frontend/kubernetes-fundamentals-visualizer.html) |
 | 🗄️ **SQL & Databases** | SQL, indexes & query plans, transactions/ACID, CTEs, normalization, Postgres | [SQL Fundamentals](../frontend/sql-fundamentals-visualizer.html) |
 | ⌨️ **Shell & Scripting** | CLI basics, **Bash**, **PowerShell** objects, **CMD/Batch** — three shells side by side | [CLI Basics](../frontend/shell-cli-basics-visualizer.html) |

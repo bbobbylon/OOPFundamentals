@@ -171,7 +171,7 @@ Beyond the static visualizers, this repo ships a full **Dev Learning Hub** web
 app with user accounts and cross-device progress sync:
 
 - **`frontend/`** — the hub app (`app.html`): **400+ interactive visualizers** across
-  **23 tracks**, a searchable **two-level sidebar** (each track's pages are grouped into
+  **24 tracks**, a searchable **two-level sidebar** (each track's pages are grouped into
   **collapsible sub-sections**, so you're never faced with hundreds of links at once),
   progress tracking, streaks, and a sign-in/register modal.
   The flow / lifecycle pages default to an **animated step-walk with a live inspector** of
@@ -192,7 +192,8 @@ app with user accounts and cross-device progress sync:
   Generators & Iterators, and Exceptions** alongside OOP, collections, type hints, asyncio, and **FastAPI · Django · Flask** — plus **⚛️ React**,
   **🐿️ Go** (now with **web frameworks — Gin/Echo/Fiber**), a **🐘 PHP & Laravel** track (PHP's shared-nothing request
   model, then Laravel lifecycle/routing/middleware/Eloquent), a **💎 Ruby & Rails** track (Ruby's pure-object model — messages,
-  blocks, mixins, duck typing — then Rails lifecycle/Active Record/MVC), **⎈ Kubernetes**, **🗄️ SQL & Databases**, and a **⌨️ Shell & Scripting** track
+  blocks, mixins, duck typing — then Rails lifecycle/Active Record/MVC), a **🦀 Rust** track (ownership/borrowing & the borrow
+  checker — memory safety without a GC — then the async Tokio/Axum web stack), **⎈ Kubernetes**, **🗄️ SQL & Databases**, and a **⌨️ Shell & Scripting** track
   (CLI Basics, **Bash** scripting, **PowerShell**'s object pipeline, and **CMD/Batch**, shown side by side).
   The **🧪 Playgrounds** track now hosts six *live* sandboxes — a **TypeScript Playground** (the real `tsc`: type-checks,
   emits JS, runs it), a **Python Playground** (real CPython via Pyodide, with tracebacks), a **Shell Playground**
@@ -203,7 +204,7 @@ app with user accounts and cross-device progress sync:
   login, and per-user topic progress, backed by H2 (local) or PostgreSQL (prod).
 
 > **📖 New to the hub? Start with the [DevHub Guided Tour](docs/DEVHUB-GUIDE.md).**
-> It maps the 23 tracks and hands you ready-made learning paths — including a featured
+> It maps the 24 tracks and hands you ready-made learning paths — including a featured
 > *"how a CIAM app works, end to end"* walkthrough (Angular OIDC login → tokens →
 > guards → Spring filter chain → method security) — so you're never staring at 340+
 > files wondering where to begin.
