@@ -46,7 +46,7 @@ Or jump straight to any file linked below.
 | 🔐 **Identity & Auth** | JWTs, **tokens/keys & signing**, OAuth2/OIDC, Entra ID, Ping, claims | [Tokens, Keys & Signing](../frontend/identity-keys-signing-deep-visualizer.html) |
 | 🐛 **Debugging** | find bugs faster: CORS, 401-vs-403, JWTs (more stacks coming) | [CORS Failures](../frontend/debugging-cors-visualizer.html) |
 | 🧪 **Playgrounds** | six *live* sandboxes — real `tsc`, real CPython, a Bash/PowerShell/CMD shell, HTTP, JWT, Spring | [TypeScript Playground](../frontend/typescript-playground-visualizer.html) |
-| 🐍 **Python** | fundamentals, functions/scope, **decorators, generators, exceptions**, OOP, type hints, asyncio, FastAPI | [Python Fundamentals](../frontend/python-fundamentals-visualizer.html) |
+| 🐍 **Python** | fundamentals, functions/scope, **decorators, generators, exceptions**, OOP, type hints, asyncio, **FastAPI · Django · Flask** | [Python Fundamentals](../frontend/python-fundamentals-visualizer.html) |
 | ⚛️ **React** | JSX/Fiber, hooks, state management, Router v6, forms, performance | [React Fundamentals](../frontend/react-fundamentals-visualizer.html) |
 | 🟢 **Node.js & TypeScript Backend** | the single-threaded event loop & runtime, Express, **NestJS** (Spring-style DI), Fastify | [Node.js Runtime & the Event Loop](../frontend/node-fundamentals-visualizer.html) |
 | 🟣 **C# & .NET** | C# for Java devs, **ASP.NET Core** (pipeline + DI), async/await & Tasks, Entity Framework Core | [ASP.NET Core — Pipeline, DI & Endpoints](../frontend/aspnet-core-visualizer.html) |
