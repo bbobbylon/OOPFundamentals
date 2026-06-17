@@ -50,7 +50,8 @@ Or jump straight to any file linked below.
 | ⚛️ **React** | JSX/Fiber, hooks, state management, Router v6, forms, performance | [React Fundamentals](../frontend/react-fundamentals-visualizer.html) |
 | 🟢 **Node.js & TypeScript Backend** | the single-threaded event loop & runtime, Express, **NestJS** (Spring-style DI), Fastify | [Node.js Runtime & the Event Loop](../frontend/node-fundamentals-visualizer.html) |
 | 🟣 **C# & .NET** | C# for Java devs, **ASP.NET Core** (pipeline + DI), async/await & Tasks, Entity Framework Core | [ASP.NET Core — Pipeline, DI & Endpoints](../frontend/aspnet-core-visualizer.html) |
-| 🐿️ **Go** | types, goroutines/channels, interfaces, errors, HTTP server, generics | [Go Fundamentals](../frontend/go-fundamentals-visualizer.html) |
+| 🐿️ **Go** | types, goroutines/channels, interfaces, errors, HTTP server, **web frameworks (Gin/Echo/Fiber)**, generics | [Go Fundamentals](../frontend/go-fundamentals-visualizer.html) |
+| 🐘 **PHP & Laravel** | PHP’s shared-nothing request model, then **Laravel** — lifecycle, routing, middleware, Eloquent ORM | [PHP Fundamentals & the Request Model](../frontend/php-fundamentals-visualizer.html) |
 | ⎈ **Kubernetes** | pods, deployments, services, config & secrets, Helm, Spring on K8s | [Kubernetes Fundamentals](../frontend/kubernetes-fundamentals-visualizer.html) |
 | 🗄️ **SQL & Databases** | SQL, indexes & query plans, transactions/ACID, CTEs, normalization, Postgres | [SQL Fundamentals](../frontend/sql-fundamentals-visualizer.html) |
 | ⌨️ **Shell & Scripting** | CLI basics, **Bash**, **PowerShell** objects, **CMD/Batch** — three shells side by side | [CLI Basics](../frontend/shell-cli-basics-visualizer.html) |
