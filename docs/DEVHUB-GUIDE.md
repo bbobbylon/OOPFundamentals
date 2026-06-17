@@ -48,11 +48,13 @@ Or jump straight to any file linked below.
 | 🧪 **Playgrounds** | six *live* sandboxes — real `tsc`, real CPython, a Bash/PowerShell/CMD shell, HTTP, JWT, Spring | [TypeScript Playground](../frontend/typescript-playground-visualizer.html) |
 | 🐍 **Python** | fundamentals, functions/scope, **decorators, generators, exceptions**, OOP, type hints, asyncio, FastAPI | [Python Fundamentals](../frontend/python-fundamentals-visualizer.html) |
 | ⚛️ **React** | JSX/Fiber, hooks, state management, Router v6, forms, performance | [React Fundamentals](../frontend/react-fundamentals-visualizer.html) |
+| 🟢 **Node.js & TypeScript Backend** | the single-threaded event loop & runtime, Express, **NestJS** (Spring-style DI), Fastify | [Node.js Runtime & the Event Loop](../frontend/node-fundamentals-visualizer.html) |
+| 🟣 **C# & .NET** | C# for Java devs, **ASP.NET Core** (pipeline + DI), async/await & Tasks, Entity Framework Core | [ASP.NET Core — Pipeline, DI & Endpoints](../frontend/aspnet-core-visualizer.html) |
 | 🐿️ **Go** | types, goroutines/channels, interfaces, errors, HTTP server, generics | [Go Fundamentals](../frontend/go-fundamentals-visualizer.html) |
 | ⎈ **Kubernetes** | pods, deployments, services, config & secrets, Helm, Spring on K8s | [Kubernetes Fundamentals](../frontend/kubernetes-fundamentals-visualizer.html) |
 | 🗄️ **SQL & Databases** | SQL, indexes & query plans, transactions/ACID, CTEs, normalization, Postgres | [SQL Fundamentals](../frontend/sql-fundamentals-visualizer.html) |
 | ⌨️ **Shell & Scripting** | CLI basics, **Bash**, **PowerShell** objects, **CMD/Batch** — three shells side by side | [CLI Basics](../frontend/shell-cli-basics-visualizer.html) |
-| 🎓 **Exam Prep — Practice Tests** | 6 timed/scored mock exams (203 Q), a **readiness dashboard**, **learning paths**, and **spaced-repetition flashcards** (118 cards) | [Readiness Dashboard](../frontend/exam-readiness.html) · [Learning Paths](../frontend/learning-paths.html) · [exams](../frontend/exam-aws-developer.html) |
+| 🎓 **Exam Prep — Practice Tests** | 14 timed/scored mock exams (398 Q), a **readiness dashboard**, **14 learning paths**, and **spaced-repetition flashcards** (11 decks / 312 cards) | [Readiness Dashboard](../frontend/exam-readiness.html) · [Learning Paths](../frontend/learning-paths.html) · [exams](../frontend/exam-aws-developer.html) |
 
 Pages are tagged **beginner → intermediate → advanced → expert**. The deepest
 ones are the **`*-deep`** / **`*-lab`** companion pages (34 of them) — each takes a
@@ -191,6 +193,8 @@ The track → body-class → accent map (defined once in `devhub.css`):
 | 🐛 Debugging | `track-debug` | orange |
 | 🐍 Python | `track-python` | Python blue + yellow |
 | ⚛️ React | `track-react` | React cyan → sky |
+| 🟢 Node.js & TS Backend | `track-nodejs` | Node green |
+| 🟣 C# & .NET | `track-csharp` | .NET purple |
 | 🐿️ Go | `track-go` | Go gopher blue |
 | ⎈ Kubernetes | `track-kubernetes` | K8s blue |
 | 🗄️ SQL & Databases | `track-sql` | SQL amber |
@@ -207,6 +211,19 @@ rather than a pile of pages.
 The DevHub isn't only *exposition* — the **🎓 Exam Prep** track adds **retrieval
 practice**, the part that actually makes knowledge stick and turns "I read it" into
 "I can pass the cert." It is one reusable engine plus per-exam data:
+
+**The catalog (14 exams · 398 Q):** *Cloud* — AWS Cloud Practitioner, Developer
+Associate, Solutions Architect Associate. *Languages & Frameworks* — Java SE 21
+(OCP), Spring Professional, [Angular v17+](../frontend/exam-angular.html),
+[TypeScript](../frontend/exam-typescript.html). *Identity & Security* —
+[OAuth 2.0 · OIDC · JWT](../frontend/exam-identity-access.html) (32 Q — the CIAM
+day-job exam: grant types, PKCE, ID-vs-access tokens, JWT validation, Ping/Entra).
+*Containers & DevOps* — [Docker](../frontend/exam-docker.html),
+[Kubernetes](../frontend/exam-kubernetes.html). *Data & APIs* —
+[SQL](../frontend/exam-sql.html),
+[HTTP & REST APIs](../frontend/exam-http-rest.html). *Developer Tools* —
+[Git](../frontend/exam-git.html). *Coding Interview* — Data Structures &
+Algorithms.
 
 - [`frontend/devhub-quiz.js`](../frontend/devhub-quiz.js) — a dependency-free engine.
   Call `DevHubQuiz.render(rootEl, bank)` and it paints the whole experience:
@@ -249,10 +266,12 @@ practice**, the part that actually makes knowledge stick and turns "I read it" i
   per-domain breakdown). New exams appear here automatically once they're in the
   manifest.
 - [`frontend/learning-paths.html`](../frontend/learning-paths.html) — **named
-  learning paths**. Each cert/goal is an *ordered* curriculum: a `PATHS` array of
-  steps (each `[file, title, tag]`) ending in a capstone exam. Click a step to
-  `dlh-navigate` to that visualizer; the capstone shows your best score. This is
-  what turns the 380-page library into a *course with a finish line*.
+  learning paths** (14 curricula, one per exam). Each cert/goal is an *ordered*
+  curriculum: a `PATHS` array of steps (each `[file, title, tag]`) ending in a
+  capstone exam. Click a step to `dlh-navigate` to that visualizer; the capstone
+  shows your best score (its pass mark lives in `passOf()`, kept in sync with the
+  exam). This is what turns the 380-page library into a *course with a finish
+  line*.
 - [`frontend/devhub-flashcards.js`](../frontend/devhub-flashcards.js) — the
   **spaced-repetition flashcard engine** (`DevHubFlash.render(rootEl, deck)`). A
   Leitner 5-box system: a card you know moves up a box (seen less); a card you miss
@@ -267,7 +286,7 @@ practice**, the part that actually makes knowledge stick and turns "I read it" i
 ---
 
 *This guide is updated as new tracks and deep-dives land. **Newest pass — Assessment layer launched (2026-06-16):**
-The DevHub now *tests* you, not just teaches you. A new **🎓 Exam Prep** track introduces a reusable practice-exam engine ([`devhub-quiz.js`](../frontend/devhub-quiz.js)) with Practice and timed Exam modes, per-domain score breakdowns, and saved attempt history — the retrieval-practice loop that's the difference between reading the material and passing the certification. The full set is now live: **6 exams / 203 questions** — [AWS Cloud Practitioner](../frontend/exam-aws-practitioner.html) (CLF-C02, 41 Q), [AWS Developer](../frontend/exam-aws-developer.html) (DVA-C02, 24 Q), [AWS Solutions Architect](../frontend/exam-aws-sa-associate.html) (SAA-C03, 37 Q), [Java OCP](../frontend/exam-java-ocp.html) (1Z0-830, 20 Q), [Spring Professional](../frontend/exam-spring-professional.html) (41 Q), and [Coding Interview / DSA](../frontend/exam-dsa-interview.html) (40 Q) — each question linked back to the visualizer that teaches it. Plus a **[readiness dashboard](../frontend/exam-readiness.html)** (one "am I ready?" scorecard), **[learning paths](../frontend/learning-paths.html)** (ordered curriculum → capstone exam, library→course), and **spaced-repetition [flashcards](../frontend/flashcards-aws.html)** (4 decks / 118 cards: AWS services, Big-O, HTTP codes, Spring annotations). Every bank passes an automated integrity check (answers in range, refs resolve, manifest in sync). See **"The assessment layer"** above for the formats.
+The DevHub now *tests* you, not just teaches you. A new **🎓 Exam Prep** track introduces a reusable practice-exam engine ([`devhub-quiz.js`](../frontend/devhub-quiz.js)) with Practice and timed Exam modes, per-domain score breakdowns, and saved attempt history — the retrieval-practice loop that's the difference between reading the material and passing the certification. The catalog now spans **14 exams / 398 questions** (it launched at 6 / 203) — the originals [AWS Cloud Practitioner](../frontend/exam-aws-practitioner.html) (CLF-C02, 41 Q), [AWS Developer](../frontend/exam-aws-developer.html) (DVA-C02, 24 Q), [AWS Solutions Architect](../frontend/exam-aws-sa-associate.html) (SAA-C03, 37 Q), [Java OCP](../frontend/exam-java-ocp.html) (1Z0-830, 20 Q), [Spring Professional](../frontend/exam-spring-professional.html) (41 Q), and [Coding Interview / DSA](../frontend/exam-dsa-interview.html) (40 Q), plus [Angular](../frontend/exam-angular.html), [TypeScript](../frontend/exam-typescript.html), [Identity & Access (OAuth/OIDC/JWT)](../frontend/exam-identity-access.html), [Git](../frontend/exam-git.html), [Docker](../frontend/exam-docker.html), [Kubernetes](../frontend/exam-kubernetes.html), [SQL](../frontend/exam-sql.html), and [HTTP & REST APIs](../frontend/exam-http-rest.html) — each question linked back to the visualizer that teaches it. Plus a **[readiness dashboard](../frontend/exam-readiness.html)** (one "am I ready?" scorecard), **14 [learning paths](../frontend/learning-paths.html)** (one ordered curriculum → capstone exam per exam, library→course), and **spaced-repetition [flashcards](../frontend/flashcards-aws.html)** (11 decks / 312 cards: AWS services, Big-O, HTTP codes, Spring annotations, OAuth/OIDC/JWT terms, TypeScript, Angular, SQL, Git, Docker, Kubernetes). Every bank passes an automated integrity check (answers in range, refs resolve, manifest in sync). See **"The assessment layer"** above for the formats.
 
 **Previous pass — Intro cards rolled out across all 344 pages (2026-06-14):**
 Every content page in the DevHub now opens with a rich **plain-English intro card** before the visualizer — a 150+ word paragraph explaining what the concept is and why it matters, three mini-cards with concrete code examples, and an amber **"In CIAM / Your Job"** callout bar tying the topic to real full-stack CIAM work (Ping + Entra + Spring Boot + Angular + Azure/AWS). This covers all 18 tracks:

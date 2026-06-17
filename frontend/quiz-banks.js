@@ -72,5 +72,85 @@ window.DEVHUB_EXAMS = [
     passPct: 70,
     count: 40,
     available: true
+  },
+  {
+    id: 'identity-access',
+    title: 'Identity & Access — OAuth 2.0 / OIDC / JWT',
+    cert: 'CIAM · identity foundations',
+    file: 'exam-identity-access.html',
+    track: 'Identity & Security',
+    passPct: 75,
+    count: 32,
+    available: true
+  },
+  {
+    id: 'angular',
+    title: 'Angular — Modern (v17+)',
+    cert: 'Angular',
+    file: 'exam-angular.html',
+    track: 'Web & Frameworks',
+    passPct: 72,
+    count: 27,
+    available: true
+  },
+  {
+    id: 'typescript',
+    title: 'TypeScript',
+    cert: 'TypeScript',
+    file: 'exam-typescript.html',
+    track: 'Web & Frameworks',
+    passPct: 70,
+    count: 25,
+    available: true
+  },
+  {
+    id: 'git',
+    title: 'Git',
+    cert: 'Git',
+    file: 'exam-git.html',
+    track: 'Developer Tools',
+    passPct: 70,
+    count: 24,
+    available: true
+  },
+  {
+    id: 'docker',
+    title: 'Docker',
+    cert: 'Docker',
+    file: 'exam-docker.html',
+    track: 'Containers & DevOps',
+    passPct: 70,
+    count: 21,
+    available: true
+  },
+  {
+    id: 'kubernetes',
+    title: 'Kubernetes',
+    cert: 'Kubernetes',
+    file: 'exam-kubernetes.html',
+    track: 'Containers & DevOps',
+    passPct: 72,
+    count: 21,
+    available: true
+  },
+  {
+    id: 'sql',
+    title: 'SQL',
+    cert: 'SQL',
+    file: 'exam-sql.html',
+    track: 'Databases',
+    passPct: 70,
+    count: 24,
+    available: true
+  },
+  {
+    id: 'http-rest',
+    title: 'HTTP & REST APIs',
+    cert: 'HTTP / REST',
+    file: 'exam-http-rest.html',
+    track: 'Web & Frameworks',
+    passPct: 70,
+    count: 21,
+    available: true
   }
 ];
