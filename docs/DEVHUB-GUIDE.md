@@ -1,11 +1,12 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 420 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 425 pages.** Pick a *path* below and follow it.
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **420 browser visualizers** across **25 tracks**, plus a
+DevHub is a learning hub: **425 browser visualizers** across **27 tracks** (grouped into
+categories in the sidebar — Frontend, Backend & APIs, Identity, DevOps & Cloud…), plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
 copy-paste **command-line runbook** (build/run, the auth round-trip via curl, and
@@ -55,6 +56,8 @@ Or jump straight to any file linked below.
 | 💎 **Ruby & Rails** | Ruby’s pure-object model (everything is a message, blocks, mixins, duck typing), then **Rails** — lifecycle, Active Record, MVC, strong params | [Ruby Fundamentals & the Object Model](../frontend/ruby-fundamentals-visualizer.html) |
 | 🦀 **Rust** | ownership, borrowing & the **borrow checker** (memory safety, no GC), then the **async web stack** — Tokio + Axum, type-driven extractors | [Ownership, Borrowing & the Borrow Checker](../frontend/rust-fundamentals-visualizer.html) |
 | 🏗️ **Full-Stack Stacks** | how the layers combine into real stacks — **SPA + REST** (Angular + Spring/CIAM), **MERN**, server-rendered **monoliths** (Rails/Laravel), **compiled API + SPA** (Go/Rust) | [Full-Stack Web Stacks Compared](../frontend/web-stacks-visualizer.html) |
+| 🔌 **MuleSoft** | enterprise integration with Anypoint — **Mule flows**, the Mule Event &amp; **DataWeave**, then **API-led connectivity** and the **Anypoint API Gateway** (JWT/rate-limit policies) | [Flows, the Mule Event &amp; DataWeave](../frontend/mulesoft-fundamentals-visualizer.html) |
+| ♾️ **DevOps & CI/CD** | **CI/CD pipelines** (GitHub Actions: jobs/steps/artifacts/gated environments) and **Infrastructure as Code** (Terraform plan/apply/state/drift) | [CI/CD Pipelines](../frontend/devops-cicd-pipeline-visualizer.html) |
 | ⎈ **Kubernetes** | pods, deployments, services, config & secrets, Helm, Spring on K8s | [Kubernetes Fundamentals](../frontend/kubernetes-fundamentals-visualizer.html) |
 | 🗄️ **SQL & Databases** | SQL, indexes & query plans, transactions/ACID, CTEs, normalization, Postgres | [SQL Fundamentals](../frontend/sql-fundamentals-visualizer.html) |
 | ⌨️ **Shell & Scripting** | CLI basics, **Bash**, **PowerShell** objects, **CMD/Batch** — three shells side by side | [CLI Basics](../frontend/shell-cli-basics-visualizer.html) |
