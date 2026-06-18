@@ -6,7 +6,7 @@
 > button, watch the concept animate. No build step, no account required.
 
 DevHub is a learning hub: **425 browser visualizers** across **27 tracks** (grouped into
-categories in the sidebar — Frontend, Backend & APIs, Identity, DevOps & Cloud…), plus a
+categories in the sidebar — Languages & Concepts, Frontend, Backend & APIs, DevOps/Cloud & Data, Practice & Prep), plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
 copy-paste **command-line runbook** (build/run, the auth round-trip via curl, and
