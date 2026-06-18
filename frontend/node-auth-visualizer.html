@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Node Auth — JWT, Sessions &amp; Middleware</title>
+  <style>
+    .who-REQ{background:#22d3ee;color:#062a30}
+    .who-MW{background:#a78bfa;color:#1a1030}
+    .who-JWT{background:#ffd43b;color:#3a2c00}
+    .who-GUARD{background:#f472b6;color:#3a0720}
+    .who-HDL{background:#4ade80;color:#04230f}
+    .who-RESP{background:#34d399;color:#04231a}
+    .who-WARN{background:#f87171;color:#2a0606}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
+    .code-block{background:#0b1426;border-left:3px solid var(--accent);border-radius:0 6px 6px 0;padding:12px 16px;font-family:ui-monospace,monospace;font-size:12.5px;line-height:1.6;overflow-x:auto;margin:10px 0;color:#e2e8f0}
+    .key-insight{background:rgba(131,205,41,0.07);border:1px solid rgba(131,205,41,0.3);border-radius:8px;padding:14px;margin:12px 0;font-size:13px}
+    .key-insight strong{color:#83cd29}
+    code{background:#0b1426;padding:1px 5px;border-radius:3px;font-family:ui-monospace,monospace;font-size:12px;color:#ffd43b}
+  </style>
+  <link rel="stylesheet" href="devhub.css" />
+</head>
+<body class="track-nodejs">
+<div class="container">
+  <a class="back" href="app.html">&larr; Dev Hub</a>
+  <h1>Node Auth — JWT, Sessions &amp; Middleware</h1>
+  <p class="sub">How a Node backend proves <em>who you are</em> and <em>what you may do</em>: a login route mints a signed <strong>JWT</strong>, an <strong>auth middleware</strong> verifies the <code>Authorization: Bearer</code> token on every protected request, and a <strong>guard</strong> checks scopes. Authentication (401) and authorization (403) are two distinct gates.</p>
+
+  <!-- ── INTRO ── -->
+  <div class="intro">
+    <div class="intro-head"><span class="ico">🔐</span> What is token auth in Node — and why is the JWT itself the session?</div>
+    <p class="intro-lead">
+      Auth answers two separate questions. <strong>Authentication</strong> — <em>who are you?</em> — happens once at <code>/login</code>: the server checks the password against a stored <strong>bcrypt</strong> hash, and on success mints a <strong>JWT</strong> (JSON Web Token) with <code>jwt.sign(claims, key)</code>. A JWT is three base64url parts — <code>header.payload.signature</code> — where the payload carries <em>claims</em> (<code>sub</code> = the user id, <code>scope</code>/roles, <code>exp</code> = expiry) and the signature proves the server issued it. The client stores the token and sends it on every later request as <code>Authorization: Bearer &lt;token&gt;</code>. The key idea: the token is <strong>self-contained</strong> — the signature lets any server verify it with just the key, so the backend keeps <em>no</em> session state (it is <strong>stateless</strong>). That contrasts with classic <strong>server sessions</strong>, where login creates a row in a session store and the browser holds only an opaque <code>connect.sid</code> cookie that the server looks up each request. On every protected route an <strong>auth middleware</strong> — an ordinary <code>(req, res, next)</code> function in Express, or a <code>CanActivate</code> guard in NestJS — pulls the Bearer token, runs <code>jwt.verify</code> (checking the signature <em>and</em> <code>exp</code>), and on success attaches the principal to <code>req.user</code> and calls <code>next()</code>. If the token is missing, tampered, or expired it short-circuits with <strong>401 Unauthorized</strong> and the handler never runs. <strong>Authorization</strong> — <em>are you allowed?</em> — is a second gate: even a perfectly valid token may lack the required scope, so a guard returns <strong>403 Forbidden</strong>.
+    </p>
+    <ul class="intro-gist">
+      <li><b>Login → sign</b> — verify the bcrypt hash, then <code>jwt.sign({sub,scope}, key, {expiresIn})</code> mints a signed token.</li>
+      <li><b>Bearer</b> — the client returns it as <code>Authorization: Bearer &lt;token&gt;</code> on each request.</li>
+      <li><b>Verify middleware</b> — <code>jwt.verify</code> checks signature + <code>exp</code>; sets <code>req.user</code>; bad token → 401.</li>
+      <li><b>401 vs 403</b> — authentication failure (who?) is 401; authorization failure (allowed?) is 403.</li>
+    </ul>
+    <div class="intro-cards">
+      <div class="intro-mini">
+        <h4>Issue a token at login</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code>app.<span style="color:#82aaff">post</span>(<span style="color:#c3e88d">'/login'</span>, <span style="color:#c792ea">async</span> (req, res) =&gt; { &#10;  <span style="color:#c792ea">const</span> u = <span style="color:#c792ea">await</span> users.<span style="color:#82aaff">find</span>(req.body.email); &#10;  <span style="color:#c792ea">if</span> (!u || !<span style="color:#c792ea">await</span> bcrypt.<span style="color:#82aaff">compare</span>(pw, u.hash)) &#10;    <span style="color:#c792ea">return</span> res.<span style="color:#82aaff">status</span>(401).<span style="color:#82aaff">json</span>({error}); &#10;  <span style="color:#c792ea">const</span> token = jwt.<span style="color:#82aaff">sign</span>( &#10;    { sub: u.id, scope: u.roles }, &#10;    SECRET, { expiresIn: <span style="color:#c3e88d">'15m'</span> }); &#10;  res.<span style="color:#82aaff">json</span>({ token }); &#10;});</code></p>
+      </div>
+      <div class="intro-mini">
+        <h4>Verify on every request</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code><span style="color:#c792ea">function</span> <span style="color:#82aaff">requireAuth</span>(req,res,next){ &#10;  <span style="color:#c792ea">const</span> t = req.headers.authorization &#10;    ?.<span style="color:#82aaff">replace</span>(<span style="color:#c3e88d">'Bearer '</span>,<span style="color:#c3e88d">''</span>); &#10;  <span style="color:#c792ea">if</span>(!t) <span style="color:#c792ea">return</span> res.<span style="color:#82aaff">sendStatus</span>(401); &#10;  <span style="color:#c792ea">try</span> { &#10;    req.user = jwt.<span style="color:#82aaff">verify</span>(t, SECRET); &#10;    <span style="color:#82aaff">next</span>(); <span style="color:#a78bfa">// hand off to handler</span> &#10;  } <span style="color:#c792ea">catch</span> { res.<span style="color:#82aaff">sendStatus</span>(401); } &#10;}</code></p>
+      </div>
+      <div class="intro-mini">
+        <h4>Spring Boot comparison</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7">The <strong>requireAuth middleware</strong> ≈ Spring Security's <code>BearerTokenAuthenticationFilter</code> in the filter chain. <code>jwt.verify</code> ≈ a <code>JwtDecoder</code> (validates signature + <code>exp</code>/<code>iss</code>). Setting <code>req.user</code> ≈ populating the <code>SecurityContext</code> with an <code>Authentication</code>. A NestJS <code>CanActivate</code> guard with a scope check ≈ <code>@PreAuthorize("hasAuthority('admin')")</code> / method security. 401 vs 403 map to Spring's <code>AuthenticationEntryPoint</code> vs <code>AccessDeniedHandler</code>.</p>
+      </div>
+    </div>
+    <div class="intro-ciam"><span class="tag">CIAM in production:</span> you rarely verify an HMAC secret you own. Instead the IdP (Microsoft Entra, Ping) signs tokens with <strong>RS256</strong> (asymmetric) and publishes its <em>public</em> keys at a <strong>JWKS</strong> endpoint. Your API fetches and caches those keys, then verifies the signature plus <code>iss</code> (issuer), <code>aud</code> (audience) and <code>exp</code> — never holding a shared secret. That is exactly what Spring's <code>NimbusJwtDecoder.withJwkSetUri(...)</code> does. In a <strong>BFF</strong> (backend-for-frontend) the browser holds only an <code>httpOnly</code> session cookie and the BFF keeps the tokens server-side, relaying them to downstream APIs — so the access token never touches JavaScript (no XSS token theft). See <code>spring-boot-security-filter-chain-deep</code> and <code>spring-boot-bff-token-relay-deep</code> for the same flow on the Java side.</div>
+  </div>
+
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="naSeg">
+        <button data-s="login" class="on">① Login: mint a JWT</button>
+        <button data-s="verify">② Verify a protected request</button>
+        <button data-s="expired">③ Expired / tampered → 401</button>
+        <button data-s="authorize">④ Scope check → 403</button>
+      </span>
+      <button class="rt-run" id="naRun">▶ Play</button>
+      <span class="rt-pill" id="naPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="naDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="naDir">▶ READY</span>
+        <div class="rt-cap" id="naCap">Pick a scenario and press ▶ Play</div>
+        <div class="rt-payload" id="naPay"></div>
+        <div class="rt-headers" id="naHdr"></div>
+        <div class="rt-result" id="naRes"></div>
+      </div>
+    </div>
+    <div class="who-row">
+      <span class="who-badge who-REQ">REQ — request</span>
+      <span class="who-badge who-MW">MW — auth middleware</span>
+      <span class="who-badge who-JWT">JWT — sign / verify</span>
+      <span class="who-badge who-GUARD">GUARD — scope check</span>
+      <span class="who-badge who-HDL">HDL — route handler</span>
+      <span class="who-badge who-RESP">RESP — response</span>
+      <span class="who-badge who-WARN">WARN — 401 / 403</span>
+    </div>
+  </div>
+
+  <section>
+    <h2>1. Login: verify the password, then sign a token</h2>
+    <div class="code-block"><span style="color:#c792ea">import</span> jwt <span style="color:#c792ea">from</span> <span style="color:#c3e88d">'jsonwebtoken'</span>;<br><span style="color:#c792ea">import</span> bcrypt <span style="color:#c792ea">from</span> <span style="color:#c3e88d">'bcrypt'</span>;<br><br>app.<span style="color:#82aaff">post</span>(<span style="color:#c3e88d">'/login'</span>, <span style="color:#c792ea">async</span> (req, res) =&gt; {<br>&nbsp;&nbsp;<span style="color:#c792ea">const</span> { email, password } = req.body;<br>&nbsp;&nbsp;<span style="color:#c792ea">const</span> user = <span style="color:#c792ea">await</span> users.<span style="color:#82aaff">findByEmail</span>(email);<br>&nbsp;&nbsp;<span style="color:#c792ea">if</span> (!user || !<span style="color:#c792ea">await</span> bcrypt.<span style="color:#82aaff">compare</span>(password, user.hash))<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#c792ea">return</span> res.<span style="color:#82aaff">status</span>(<span style="color:#f78c6c">401</span>).<span style="color:#82aaff">json</span>({ error: <span style="color:#c3e88d">'invalid credentials'</span> }); <span style="color:#a78bfa">// never say WHICH was wrong</span><br><br>&nbsp;&nbsp;<span style="color:#c792ea">const</span> token = jwt.<span style="color:#82aaff">sign</span>(<br>&nbsp;&nbsp;&nbsp;&nbsp;{ sub: user.id, scope: user.roles },          <span style="color:#a78bfa">// the claims (payload)</span><br>&nbsp;&nbsp;&nbsp;&nbsp;process.env.JWT_SECRET,                        <span style="color:#a78bfa">// HMAC secret (or an RS256 private key)</span><br>&nbsp;&nbsp;&nbsp;&nbsp;{ expiresIn: <span style="color:#c3e88d">'15m'</span>, issuer: <span style="color:#c3e88d">'auth.example.com'</span> });<br>&nbsp;&nbsp;res.<span style="color:#82aaff">json</span>({ token });<br>});</div>
+    <div class="key-insight"><strong>The signed token IS the session.</strong> Once minted, the JWT carries everything a later request needs — the user id and scopes — and the signature proves authenticity. The server stores nothing, so any instance (behind a load balancer) can verify it without a shared session store. The trade-off: you cannot instantly revoke a stateless token, which is why access tokens are short-lived (here 15&nbsp;min) and paired with a longer-lived refresh token. Note the deliberately vague <code>"invalid credentials"</code> — revealing whether the <em>email</em> existed would leak which accounts are real (user enumeration).</div>
+  </section>
+
+  <section>
+    <h2>2. The auth middleware: verify Bearer on every protected route</h2>
+    <div class="code-block"><span style="color:#c792ea">function</span> <span style="color:#82aaff">requireAuth</span>(req, res, next) {<br>&nbsp;&nbsp;<span style="color:#c792ea">const</span> header = req.headers.authorization || <span style="color:#c3e88d">''</span>;<br>&nbsp;&nbsp;<span style="color:#c792ea">const</span> token = header.<span style="color:#82aaff">startsWith</span>(<span style="color:#c3e88d">'Bearer '</span>) ? header.<span style="color:#82aaff">slice</span>(<span style="color:#f78c6c">7</span>) : <span style="color:#c792ea">null</span>;<br>&nbsp;&nbsp;<span style="color:#c792ea">if</span> (!token) <span style="color:#c792ea">return</span> res.<span style="color:#82aaff">status</span>(<span style="color:#f78c6c">401</span>).<span style="color:#82aaff">json</span>({ error: <span style="color:#c3e88d">'missing token'</span> });<br>&nbsp;&nbsp;<span style="color:#c792ea">try</span> {<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#c792ea">const</span> claims = jwt.<span style="color:#82aaff">verify</span>(token, process.env.JWT_SECRET); <span style="color:#a78bfa">// signature + exp</span><br>&nbsp;&nbsp;&nbsp;&nbsp;req.user = { id: claims.sub, scope: claims.scope };   <span style="color:#a78bfa">// attach the principal</span><br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#82aaff">next</span>();                                              <span style="color:#a78bfa">// pass control to the handler</span><br>&nbsp;&nbsp;} <span style="color:#c792ea">catch</span> (e) {<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#c792ea">return</span> res.<span style="color:#82aaff">status</span>(<span style="color:#f78c6c">401</span>).<span style="color:#82aaff">json</span>({ error: <span style="color:#c3e88d">'invalid or expired token'</span> });<br>&nbsp;&nbsp;}<br>}<br><br>app.<span style="color:#82aaff">get</span>(<span style="color:#c3e88d">'/me'</span>, requireAuth, (req, res) =&gt; res.<span style="color:#82aaff">json</span>(req.user));</div>
+    <div class="key-insight"><strong>One middleware guards many routes.</strong> Because Express runs middleware in order, listing <code>requireAuth</code> before the handler means an unauthenticated request is rejected with a 401 and <code>next()</code> is never called — the handler is unreachable. <code>jwt.verify</code> does the real work: it recomputes the signature with the key and rejects a tampered token, and it checks <code>exp</code> and throws <code>TokenExpiredError</code> for a stale one. Only on success does it attach <code>req.user</code>, the principal every downstream handler reads — the Node equivalent of Spring's <code>SecurityContextHolder</code>.</div>
+  </section>
+
+  <section>
+    <h2>3. Authorization: a guard checks scope (NestJS)</h2>
+    <div class="code-block"><span style="color:#c792ea">@Injectable</span>()<br><span style="color:#c792ea">export class</span> <span style="color:#4ec9b0">ScopesGuard</span> <span style="color:#c792ea">implements</span> <span style="color:#4ec9b0">CanActivate</span> {<br>&nbsp;&nbsp;<span style="color:#c792ea">constructor</span>(<span style="color:#c792ea">private</span> required: <span style="color:#4ec9b0">string</span>) {}<br>&nbsp;&nbsp;<span style="color:#82aaff">canActivate</span>(ctx: <span style="color:#4ec9b0">ExecutionContext</span>): <span style="color:#4ec9b0">boolean</span> {<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#c792ea">const</span> req = ctx.<span style="color:#82aaff">switchToHttp</span>().<span style="color:#82aaff">getRequest</span>();<br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#c792ea">const</span> scopes = req.user?.scope ?? [];          <span style="color:#a78bfa">// set by the JWT guard</span><br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#c792ea">if</span> (!scopes.<span style="color:#82aaff">includes</span>(<span style="color:#c792ea">this</span>.required))<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#c792ea">throw new</span> <span style="color:#4ec9b0">ForbiddenException</span>();                <span style="color:#a78bfa">// → 403, not 401</span><br>&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#c792ea">return</span> <span style="color:#f78c6c">true</span>;<br>&nbsp;&nbsp;}<br>}<br><span style="color:#a78bfa">// @UseGuards(JwtAuthGuard, new ScopesGuard('admin'))  — authn THEN authz</span></div>
+    <div class="key-insight"><strong>401 and 403 are different failures.</strong> <em>Authentication</em> asks "do I know who you are?" — a missing or invalid token is <code>401 Unauthorized</code>. <em>Authorization</em> asks "are you permitted to do this?" — a valid token whose <code>scope</code> lacks <code>admin</code> is <code>403 Forbidden</code>. The guards run in order: <code>JwtAuthGuard</code> establishes identity (populating <code>req.user</code>), then <code>ScopesGuard</code> reads that identity to decide access. Conflating the two is a classic API bug — a 403 should never be sent for an unauthenticated caller, and a 401 should never be sent for a known user who simply lacks a role.</div>
+  </section>
+</div>
+
+<!-- ── Code Walkthrough ── -->
+<div id="cw-na"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-na',{
+  id:'cw-na',
+  title:'The requireAuth middleware, line by line',
+  subtitle:'A complete Express auth middleware. It extracts the Bearer token, verifies it, attaches the principal, and either calls next() or short-circuits with a 401 — the gate every protected route passes through.',
+  steps:[
+    {lines:[1],note:'Express middleware is just a function of (req, res, next). Listed before a route handler, it runs first; calling next() passes control onward, while sending a response (without next) stops the chain. requireAuth is the gate for any route that lists it.',vars:{'(req, res, next)':'the middleware signature','next()':'continue to the next handler','no next()':'short-circuit — handler never runs'},tone:'start'},
+    {lines:[2,3],note:'Read the Authorization header and strip the "Bearer " prefix to get the raw token. The header looks like "Bearer eyJhbGci...". slice(7) drops the 7-character prefix; if the header is absent we default to an empty string so .startsWith never throws.',vars:{'req.headers.authorization':'"Bearer eyJ..."','startsWith("Bearer ")':'is this a bearer token?','header.slice(7)':'the raw JWT'},tone:'ok'},
+    {lines:[4],note:'No token at all is an authentication failure: respond 401 immediately and return. Returning here is critical — it stops execution so next() is never reached and the protected handler stays unreachable.',vars:{'!token':'no credential presented','res.status(401)':'Unauthorized','return':'stop — do NOT call next()'},tone:'ok'},
+    {lines:[5,6],note:'jwt.verify is the real check. It recomputes the HMAC signature with the secret and rejects any tampered token, and it validates the exp claim, throwing TokenExpiredError for a stale one. Only a token that is both authentic AND unexpired returns its decoded claims.',vars:{'jwt.verify(token, SECRET)':'signature + exp check','returns':'the decoded claims { sub, scope, exp }','throws':'on tampered OR expired token'},tone:'ok'},
+    {lines:[7,8],note:'On success, attach the principal to req.user so every downstream handler can read who is calling — this is the Node equivalent of Spring populating the SecurityContext. Then next() hands control to the route handler.',vars:{'req.user = {...}':'the authenticated principal','claims.sub':'the user id','next()':'proceed to the handler'},tone:'ok'},
+    {lines:[9,10,11],note:'Any verify failure lands here: an expired, tampered, or malformed token throws, and we answer 401 without calling next(). The handler body is never executed, so invalid callers can never reach your business logic.',vars:{'catch (e)':'verify threw','res.status(401)':'invalid or expired','handler':'never runs'},tone:'bad',callout:'CIAM: in production swap the HMAC secret for RS256 + JWKS — jwt.verify(token, getKey, {algorithms:["RS256"], issuer, audience}) fetches the IdP’s public key by the token’s kid and validates iss/aud/exp. That is precisely Spring Security’s BearerTokenAuthenticationFilter + NimbusJwtDecoder.withJwkSetUri(). Pair short-lived access tokens with refresh-token rotation, and in a BFF keep the tokens server-side so the browser only holds an httpOnly cookie.'}
+  ],
+  code:[
+    'function requireAuth(req, res, next) {',
+    '  const header = req.headers.authorization || "";',
+    '  const token = header.startsWith("Bearer ") ? header.slice(7) : null;',
+    '  if (!token) return res.status(401).json({ error: "missing token" });',
+    '  try {',
+    '    const claims = jwt.verify(token, process.env.JWT_SECRET);',
+    '    req.user = { id: claims.sub, scope: claims.scope };',
+    '    next();',
+    '  } catch (e) {',
+    '    return res.status(401).json({ error: "invalid or expired token" });',
+    '  }',
+    '}'
+  ]
+});
+</script>
+
+<script>
+(function(){
+  const P='na', $=id=>document.getElementById(id);
+  const SCEN={
+    login:{ req:'POST /login', intro:'Authentication happens once. The login route loads the user, compares the password to the stored bcrypt hash, and on success signs a JWT carrying the user id and scopes. The client keeps the token for later requests.',
+      nodes:[
+        {id:'creds',icon:'📨',nl:'POST /login {email, password}',ns:'credentials arrive',who:'REQ'},
+        {id:'lookup',icon:'🗄️',nl:'users.findByEmail(email)',ns:'load user + stored hash',who:'HDL'},
+        {id:'verifypw',icon:'🔑',nl:'bcrypt.compare(pw, hash)',ns:'password matches?',who:'HDL'},
+        {id:'sign',icon:'✍️',nl:'jwt.sign(claims, key)',ns:'mint a signed token',who:'JWT'},
+        {id:'issued',icon:'📤',nl:'200 { token }',ns:'client stores it',who:'RESP'},
+      ],
+      steps:[
+        {node:'creds',chip:'POST',cap:'Credentials arrive at the login route',pay:{method:'POST',path:'/login',body:{email:'ada@example.com',password:'••••••••'}},ins:'The only request where a raw password travels. It must be over TLS, and the password is never logged or stored — only compared.'},
+        {node:'lookup',chip:'find',tone:'ok',cap:'Load the user and their stored hash',pay:{found:true,user:{id:42,email:'ada@example.com',roles:['user','admin']},hash:'$2b$12$Kx9...'},ins:'The database stores a <strong>bcrypt hash</strong>, never the plaintext password. bcrypt is deliberately slow and salted, so a stolen database is expensive to crack.'},
+        {node:'verifypw',chip:'compare',tone:'ok',cap:'bcrypt compares password to the hash',pay:{call:'bcrypt.compare(password, user.hash)',result:true,note:'re-hashes the input with the stored salt and compares'},ins:'<code>bcrypt.compare</code> hashes the supplied password with the salt baked into the stored hash and checks for equality — a match means the password is correct, without the server ever knowing the plaintext.'},
+        {node:'sign',chip:'sign',tone:'ok',cap:'Sign a JWT with the user\'s claims',pay:{header:{alg:'HS256',typ:'JWT'},payload:{sub:42,scope:['user','admin'],exp:'+15m',iss:'auth.example.com'},signature:'HMAC(header.payload, SECRET)'},ins:'<code>jwt.sign</code> builds <code>header.payload.signature</code>. The payload holds the <strong>claims</strong>; the signature is an HMAC over the first two parts with the secret — anyone with the key can verify it, nobody can forge it.'},
+        {node:'issued',chip:'200',tone:'ok',cap:'The token is returned to the client',pay:{status:200,body:{token:'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOjQyLi4ufQ.s9_k2...'}},ins:'The client stores the token (memory, or an httpOnly cookie via a BFF) and attaches it to every later request. The server kept <strong>no</strong> session — the token is the proof.'},
+      ], result:{cls:'ok',text:'✅ Login: verify the bcrypt hash, then jwt.sign mints a self-contained signed token. The server stays stateless — the token carries the identity and scopes.'} },
+
+    verify:{ req:'GET /me (valid token)', intro:'On every protected request the auth middleware extracts the Bearer token, verifies its signature and expiry, attaches the principal to req.user, and calls next() so the handler runs.',
+      nodes:[
+        {id:'req',icon:'📨',nl:'GET /me  Authorization: Bearer …',ns:'token presented',who:'REQ'},
+        {id:'mw',icon:'🛡️',nl:'requireAuth: read Bearer',ns:'strip "Bearer " prefix',who:'MW'},
+        {id:'verify',icon:'🔏',nl:'jwt.verify(token, key)',ns:'signature + exp OK',who:'JWT'},
+        {id:'attach',icon:'👤',nl:'req.user = claims; next()',ns:'principal attached',who:'MW'},
+        {id:'hdl',icon:'🎯',nl:'handler returns 200',ns:'res.json(req.user)',who:'HDL'},
+      ],
+      steps:[
+        {node:'req',chip:'GET',cap:'A protected request carries the Bearer token',pay:{method:'GET',path:'/me',headers:{authorization:'Bearer eyJhbGci…',accept:'application/json'}},ins:'The client sends the token it got at login in the <code>Authorization</code> header. No password — just the signed proof of a prior login.'},
+        {node:'mw',chip:'Bearer',tone:'ok',cap:'Middleware extracts the raw token',pay:{header:'Bearer eyJhbGci…',startsWith:'"Bearer " → true',token:'eyJhbGci… (prefix stripped)'},ins:'<code>requireAuth</code> runs before the handler. It confirms the <code>Bearer </code> scheme and slices off the prefix to get the raw JWT. A missing header would stop here with a 401.'},
+        {node:'verify',chip:'verify',tone:'ok',cap:'jwt.verify checks signature and expiry',pay:{recompute:'HMAC(header.payload, SECRET) === signature ✓',exp:'1718900000 (in the future) ✓',decoded:{sub:42,scope:['user','admin']}},ins:'<code>jwt.verify</code> recomputes the signature and compares <code>exp</code> to now. Both pass, so it returns the decoded claims — the token is authentic and current.'},
+        {node:'attach',chip:'req.user',tone:'ok',cap:'Attach the principal, then next()',pay:{'req.user':{id:42,scope:['user','admin']},next:'called → control passes to the handler'},ins:'The decoded identity is attached to <code>req.user</code> so every handler downstream can read it — Node\'s <code>SecurityContext</code>. Then <code>next()</code> hands off to the route.'},
+        {node:'hdl',chip:'200',tone:'ok',cap:'The handler runs with a known user',pay:{handler:'(req,res) => res.json(req.user)',status:200,body:{id:42,scope:['user','admin']}},ins:'The handler executes only because the middleware called <code>next()</code>. It trusts <code>req.user</code> completely — authentication already happened at the gate.'},
+      ], result:{cls:'ok',text:'✅ Verify: middleware strips Bearer, jwt.verify confirms signature + exp, req.user is set, next() runs the handler. The protected route only ever sees authenticated callers.'} },
+
+    expired:{ req:'GET /me (expired token)', intro:'An expired or tampered token fails verification. jwt.verify throws, the catch block answers 401, and next() is never called — so the handler is completely unreachable.',
+      nodes:[
+        {id:'req',icon:'📨',nl:'GET /me  Bearer <stale>',ns:'old token presented',who:'REQ'},
+        {id:'mw',icon:'🛡️',nl:'requireAuth: read Bearer',ns:'token extracted',who:'MW'},
+        {id:'verify',icon:'🔏',nl:'jwt.verify throws',ns:'exp in the past',who:'JWT'},
+        {id:'reject',icon:'🚫',nl:'catch → 401',ns:'invalid or expired',who:'WARN'},
+        {id:'hdl',icon:'⛔',nl:'handler NEVER runs',ns:'next() not called',who:'HDL'},
+      ],
+      steps:[
+        {node:'req',chip:'GET',cap:'A request arrives with a stale token',pay:{method:'GET',path:'/me',headers:{authorization:'Bearer eyJhbGci… (issued 20m ago)'}},ins:'The token is well-formed but old — its <code>exp</code> was 15 minutes after issue, and that moment has passed.'},
+        {node:'mw',chip:'Bearer',tone:'ok',cap:'The token is extracted as usual',pay:{token:'eyJhbGci… present',note:'extraction succeeds — the problem is the contents, not the header'},ins:'Header parsing succeeds; nothing looks wrong yet. Validity is decided by <code>jwt.verify</code>, not by the presence of a token.'},
+        {node:'verify',chip:'throws',tone:'bad',cap:'jwt.verify rejects the token',pay:{check:'exp = 1718890000 < now',error:'TokenExpiredError: jwt expired',also_caught:'JsonWebTokenError (tampered signature)'},ins:'<code>jwt.verify</code> sees <code>exp</code> is in the past and <strong>throws</strong> <code>TokenExpiredError</code>. A token with a forged signature would throw <code>JsonWebTokenError</code> here just the same.'},
+        {node:'reject',chip:'401',tone:'bad',cap:'The catch block responds 401',pay:{status:401,body:{error:'invalid or expired token'},'next()':'NOT called'},ins:'The <code>catch</code> sends <code>401 Unauthorized</code> and returns. Because <code>next()</code> is never reached, control stops dead at the gate.'},
+        {node:'hdl',chip:'skip',tone:'bad',cap:'The handler is unreachable',pay:{handler:'/me',executed:false,reason:'middleware short-circuited'},ins:'The protected handler never runs. The correct client response is to use its <strong>refresh token</strong> to obtain a new access token, then retry.'},
+      ], result:{cls:'bad',text:'⛔ Expired/tampered: jwt.verify throws, the catch returns 401, next() is skipped, the handler never executes. Invalid tokens cannot reach your logic.'} },
+
+    authorize:{ req:'DELETE /users/9 (valid token, wrong scope)', intro:'Authorization is a second gate. The token is valid (authentication passes), but the action needs the admin scope and this user lacks it — so the guard returns 403 Forbidden, distinct from 401.',
+      nodes:[
+        {id:'req',icon:'📨',nl:'DELETE /users/9  Bearer <valid>',ns:'privileged action',who:'REQ'},
+        {id:'authn',icon:'🔏',nl:'JwtAuthGuard: token valid',ns:'authenticated ✓',who:'JWT'},
+        {id:'guard',icon:'🧮',nl:'ScopesGuard needs "admin"',ns:'check req.user.scope',who:'GUARD'},
+        {id:'deny',icon:'🚫',nl:'403 Forbidden',ns:'scope missing',who:'WARN'},
+        {id:'hdl',icon:'⛔',nl:'controller NEVER runs',ns:'guard returned false',who:'HDL'},
+      ],
+      steps:[
+        {node:'req',chip:'DELETE',cap:'A privileged request with a valid token',pay:{method:'DELETE',path:'/users/9',user_token:'valid — scope: ["user"]'},ins:'The caller is genuinely logged in; their token verifies cleanly. The question now is not <em>who</em> they are but <em>whether they may</em> delete a user.'},
+        {node:'authn',chip:'authn',tone:'ok',cap:'Authentication passes',pay:{'JwtAuthGuard':'jwt.verify ✓','req.user':{id:7,scope:['user']}},ins:'The first guard establishes identity exactly like scenario ②. <code>req.user</code> is populated — authentication is done, and it succeeded.'},
+        {node:'guard',chip:'scope',tone:'bad',cap:'The scope guard checks the requirement',pay:{required:'admin',has:['user'],includes:'["user"].includes("admin") → false'},ins:'<code>ScopesGuard("admin")</code> reads <code>req.user.scope</code> and looks for <code>admin</code>. It is absent — so authorization fails even though authentication succeeded.'},
+        {node:'deny',chip:'403',tone:'bad',cap:'Forbidden — not Unauthorized',pay:{status:403,body:{error:'Forbidden'},why:'known user, insufficient privilege'},ins:'The guard throws <code>ForbiddenException</code> → <strong>403</strong>. Using 403 (not 401) is deliberate: the caller is authenticated, they simply lack the role. A 401 here would wrongly tell them to log in again.'},
+        {node:'hdl',chip:'skip',tone:'bad',cap:'The controller never executes',pay:{controller:'deleteUser(9)',executed:false,guard_returned:false},ins:'Because <code>canActivate</code> returned false (threw), NestJS never invokes the controller. Authorization, like authentication, gates access <em>before</em> your business logic.'},
+      ], result:{cls:'bad',text:'⛔ Authorization: a valid token still fails when scope is insufficient → 403 Forbidden (not 401). Authentication (who?) and authorization (allowed?) are separate gates.'} },
+  };
+
+  let scen='login', running=false, timers=[];
+  function clearT(){timers.forEach(clearTimeout);timers=[];}
+  function nodeEl(id){return document.querySelector('#'+P+'Diagram .rt-node[data-node="'+id+'"]');}
+  function nodeCenter(id){const n=nodeEl(id);return n?n.offsetTop+n.offsetHeight/2:0;}
+  function renderNodes(k){
+    let h='<div class="rt-rail"></div><div class="rt-chip" id="'+P+'Chip">→</div>';
+    SCEN[k].nodes.forEach(n=>{ h+='<div class="rt-node" data-node="'+n.id+'"><span class="ic">'+n.icon+'</span><div style="flex:1;min-width:0"><div class="nl">'+n.nl+'</div><div class="ns">'+n.ns+'</div></div><span class="who who-'+n.who+'">'+n.who+'</span></div>'; });
+    $(P+'Diagram').innerHTML=h;
+  }
+  function reset(){
+    renderNodes(scen); const s=SCEN[scen];
+    const chip=$(P+'Chip'); chip.style.transition='none'; chip.style.top=nodeCenter(s.steps[0].node)+'px'; chip.style.opacity='0'; chip.classList.remove('ok','bad'); void chip.offsetWidth; chip.style.transition='';
+    $(P+'Res').className='rt-result';
+    $(P+'Dir').textContent='▶ READY'; $(P+'Dir').className='rt-dir';
+    $(P+'Cap').textContent=s.intro;
+    $(P+'Pay').textContent='';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>— the token, claims, middleware &amp; response appear here per step —';
+    $(P+'Pill').textContent=s.req;
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false;
+  }
+  function applyStep(steps,i){
+    const st=steps[i];
+    document.querySelectorAll('#'+P+'Diagram .rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
+    const n=nodeEl(st.node); n.classList.remove('vchk','vskip'); n.classList.add(st.tone==='bad'?'vskip':'vchk'); n.classList.add('cur'); if(st.tone==='bad')n.classList.add('curbad'); void n.offsetWidth; n.classList.add('rtpulse');
+    const chip=$(P+'Chip'); chip.textContent=st.chip||'→'; chip.classList.remove('ok','bad'); if(st.tone)chip.classList.add(st.tone==='bad'?'bad':'ok'); chip.style.opacity='1'; chip.style.top=nodeCenter(st.node)+'px';
+    $(P+'Dir').textContent=st.dir||('STEP '+(i+1)+' / '+steps.length); $(P+'Dir').className='rt-dir'+(st.tone==='bad'?' bad':'');
+    $(P+'Cap').textContent=st.cap;
+    $(P+'Pay').textContent=st.pay?JSON.stringify(st.pay,null,2):'';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>'+st.ins;
+  }
+  function run(){
+    if(running)return; running=true; clearT(); reset();
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=true); $(P+'Run').disabled=true;
+    $(P+'Pill').textContent='running…';
+    const s=SCEN[scen]; let i=0;
+    (function tick(){
+      if(i>=s.steps.length){ const r=$(P+'Res'); r.className='rt-result show '+(s.result.cls||'ok'); r.textContent=s.result.text; running=false; document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false; $(P+'Pill').textContent='done'; return; }
+      applyStep(s.steps,i); i++; timers.push(setTimeout(tick,2000));
+    })();
+  }
+  document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.onclick=()=>{ if(running)return; scen=b.dataset.s; document.querySelectorAll('#'+P+'Seg button').forEach(x=>x.classList.toggle('on',x===b)); reset(); });
+  $(P+'Run').onclick=run;
+  reset();
+})();
+</script>
+</body>
+</html>

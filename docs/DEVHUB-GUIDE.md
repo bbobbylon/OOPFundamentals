@@ -1,11 +1,11 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 344 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 420 pages.** Pick a *path* below and follow it.
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **344 browser visualizers** across **18 tracks**, plus a
+DevHub is a learning hub: **420 browser visualizers** across **25 tracks**, plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
 copy-paste **command-line runbook** (build/run, the auth round-trip via curl, and
@@ -48,7 +48,7 @@ Or jump straight to any file linked below.
 | 🧪 **Playgrounds** | six *live* sandboxes — real `tsc`, real CPython, a Bash/PowerShell/CMD shell, HTTP, JWT, Spring | [TypeScript Playground](../frontend/typescript-playground-visualizer.html) |
 | 🐍 **Python** | fundamentals, functions/scope, **decorators, generators, exceptions**, OOP, type hints, asyncio, **FastAPI · Django · Flask** | [Python Fundamentals](../frontend/python-fundamentals-visualizer.html) |
 | ⚛️ **React** | JSX/Fiber, hooks, state management, Router v6, forms, performance | [React Fundamentals](../frontend/react-fundamentals-visualizer.html) |
-| 🟢 **Node.js & TypeScript Backend** | the single-threaded event loop & runtime, Express, **NestJS** (Spring-style DI), Fastify | [Node.js Runtime & the Event Loop](../frontend/node-fundamentals-visualizer.html) |
+| 🟢 **Node.js & TypeScript Backend** | the single-threaded event loop & runtime, Express, **NestJS** (Spring-style DI), Fastify, **JWT/sessions auth** (401 vs 403) | [Node.js Runtime & the Event Loop](../frontend/node-fundamentals-visualizer.html) |
 | 🟣 **C# & .NET** | C# for Java devs, **ASP.NET Core** (pipeline + DI), async/await & Tasks, Entity Framework Core | [ASP.NET Core — Pipeline, DI & Endpoints](../frontend/aspnet-core-visualizer.html) |
 | 🐿️ **Go** | types, goroutines/channels, interfaces, errors, HTTP server, **web frameworks (Gin/Echo/Fiber)**, generics | [Go Fundamentals](../frontend/go-fundamentals-visualizer.html) |
 | 🐘 **PHP & Laravel** | PHP’s shared-nothing request model, then **Laravel** — lifecycle, routing, middleware, Eloquent ORM | [PHP Fundamentals & the Request Model](../frontend/php-fundamentals-visualizer.html) |
