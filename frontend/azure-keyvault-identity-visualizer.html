@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Azure Key Vault &amp; Managed Identities — Secrets Without Secrets</title>
+  <style>
+    .who-APP{background:#22d3ee;color:#062a30}
+    .who-IMDS{background:#c4b5fd;color:#1a1030}
+    .who-MI{background:#a78bfa;color:#1a1030}
+    .who-ENTRA{background:#f472b6;color:#3a0720}
+    .who-KV{background:#ffd43b;color:#3a2c00}
+    .who-CFG{background:#50e6ff;color:#00293d}
+    .who-RESP{background:#34d399;color:#04231a}
+    .who-WARN{background:#f87171;color:#2a0606}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
+    .code-block{background:#0b1426;border-left:3px solid var(--accent);border-radius:0 6px 6px 0;padding:12px 16px;font-family:ui-monospace,monospace;font-size:12.5px;line-height:1.6;overflow-x:auto;margin:10px 0;color:#e2e8f0}
+    .key-insight{background:rgba(0,120,212,0.08);border:1px solid rgba(80,230,255,0.3);border-radius:8px;padding:14px;margin:12px 0;font-size:13px}
+    .key-insight strong{color:#50e6ff}
+    code{background:#0b1426;padding:1px 5px;border-radius:3px;font-family:ui-monospace,monospace;font-size:12px;color:#ffd43b}
+    table.tiers{width:100%;border-collapse:collapse;font-size:12.5px;margin:10px 0}
+    table.tiers th,table.tiers td{border:1px solid rgba(80,230,255,.18);padding:7px 10px;text-align:left}
+    table.tiers th{background:rgba(0,120,212,.12);color:#50e6ff}
+  </style>
+  <link rel="stylesheet" href="devhub.css" />
+</head>
+<body class="track-azure">
+<div class="container">
+  <a class="back" href="app.html">&larr; Dev Hub</a>
+  <h1>Azure Key Vault &amp; Managed Identities — Secrets Without Secrets</h1>
+  <p class="sub">The bootstrap problem — "the app needs a credential to fetch its credentials" — is solved by <strong>managed identities</strong>: Azure itself vouches for your compute, Entra mints it tokens, and <strong>Key Vault</strong> (secrets, keys, certificates) plus <strong>App Configuration</strong> (settings, feature flags) become readable with no stored credential anywhere.</p>
+
+  <!-- ── INTRO ── -->
+  <div class="intro">
+    <div class="intro-head"><span class="ico">🔐</span> What are Key Vault and managed identities — and how do they end the "password in a config file" era?</div>
+    <p class="intro-lead">
+      Every app has secrets: database passwords, API keys, signing certificates. The naive fix — put them in <code>application.yml</code> or environment variables — just moves the leak. <strong>Azure Key Vault</strong> is the hardened home for them, holding three object types: <strong>secrets</strong> (arbitrary strings like connection strings, versioned, soft-deletable), <strong>keys</strong> (RSA/EC cryptographic keys that <em>never leave the vault</em> — you send data in, the vault signs/encrypts/unwraps and sends results out, optionally backed by HSMs), and <strong>certificates</strong> (managed TLS certs with auto-renewal). But a vault only relocates the bootstrap problem: <em>what credential does the app present to the vault?</em> The answer is a <strong>managed identity (MI)</strong> — a service principal that Azure creates and binds to your compute resource (App Service, Function, VM, Container App). No password or certificate exists for it <em>anywhere</em>; instead, code running on that resource asks a local, non-routable metadata endpoint (<strong>IMDS</strong>, <code>169.254.169.254</code>) for a token, and because only workloads on that VM/instance can reach that endpoint, Entra trusts the request and mints a token for the identity. <strong>System-assigned</strong> MIs live and die with one resource; <strong>user-assigned</strong> MIs are standalone resources you can share across several apps. Grant the MI a Key Vault RBAC role like <code>Key Vault Secrets User</code>, and the chain completes: compute proves itself to Entra, Entra vouches to the vault, the vault releases the secret — zero stored credentials end-to-end. <strong>Azure App Configuration</strong> rounds out the story for <em>non-secret</em> settings and <strong>feature flags</strong>, with Key Vault <em>references</em> so one config store presents both.
+    </p>
+    <ul class="intro-gist">
+      <li><b>Key Vault holds 3 types</b> — secrets (strings, versioned), keys (crypto ops in-vault, HSM option), certificates (auto-renewing TLS).</li>
+      <li><b>Managed identity = no credential at all</b> — Azure binds a service principal to compute; IMDS hands tokens only to code on that resource.</li>
+      <li><b>System-assigned vs user-assigned</b> — one-resource lifecycle vs standalone/shared. User-assigned survives resource deletion and pre-provisions RBAC.</li>
+      <li><b>Two authz models on the vault</b> — modern Azure RBAC roles (use this: <code>Key Vault Secrets User</code>) vs legacy access policies. Pick one per vault.</li>
+      <li><b>Protection rails</b> — soft delete (recoverable window, on by default) + purge protection (nothing can permanently destroy early); App Config for settings/flags with KV references for the secret ones.</li>
+    </ul>
+    <div class="intro-cards">
+      <div class="intro-mini">
+        <h4>The CLI happy path</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code><span style="color:#a78bfa"># vault + a secret</span> &#10;az keyvault <span style="color:#82aaff">create</span> -n kv-shop-prod \ &#10;  -g rg-shop-prod --enable-rbac-authorization &#10;az keyvault secret <span style="color:#82aaff">set</span> --vault-name kv-shop-prod \ &#10;  -n db-password --value 'S3cr3t!' &#10;<span style="color:#a78bfa"># give the app's MI read access</span> &#10;az webapp identity <span style="color:#82aaff">assign</span> -n shop-api -g rg-shop-prod &#10;az role assignment <span style="color:#82aaff">create</span> --role "Key Vault Secrets User" \ &#10;  --assignee &lt;mi-principal-id&gt; --scope &lt;vault-id&gt;</code></p>
+      </div>
+      <div class="intro-mini">
+        <h4>AWS comparison</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7">Key Vault ≈ <strong>Secrets Manager</strong> + <strong>KMS</strong> + <strong>ACM</strong> rolled into one resource. Managed identity ≈ an <strong>EC2 instance role / IRSA</strong> — same trick, the platform injects credentials via a metadata endpoint (AWS IMDS at the same 169.254.169.254 address!). App Configuration ≈ <strong>AppConfig / Parameter Store</strong>. Key Vault soft delete ≈ Secrets Manager's 7–30 day recovery window.</p>
+      </div>
+      <div class="intro-mini">
+        <h4>Spring Boot comparison</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7">With <code>spring-cloud-azure-starter-keyvault-secrets</code>, the vault becomes a <strong>PropertySource</strong>: secret <code>db-password</code> simply <em>is</em> <code>${db-password}</code> in your config, resolved at startup through the MI. Your <code>.env.example</code> + "config from environment variables" convention survives intact — the values just stop living on disk. Feature flags via App Config ≈ a hot-reloadable <code>@ConfigurationProperties</code> that someone else can flip in the portal.</p>
+      </div>
+    </div>
+    <div class="intro-ciam"><span class="tag">CIAM in production:</span> this page <em>is</em> your day job's trust fabric. The JWT signing keys your APIs validate against, the client secrets for Ping/Entra OAuth apps, the mTLS certs between services — all belong in Key Vault, fetched by managed identity. Better still: workloads that <em>sign</em> (issuing tokens, webhooks) should use Key Vault <strong>keys</strong> so the private key never exists in app memory — the vault signs on the app's behalf, and key rotation is a vault operation with zero deploys. Federated CI/CD (GitHub/ADO workload identity) is the same pattern one level up: even the pipeline holds no secret.</div>
+  </div>
+
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="kvSeg">
+        <button data-s="fetch" class="on">① MI fetches a secret</button>
+        <button data-s="rotate">② Secret rotation — zero deploys</button>
+        <button data-s="flag">③ App Config feature flag flip</button>
+        <button data-s="leak">④ Leaked connection string vs MI</button>
+      </span>
+      <button class="rt-run" id="kvRun">▶ Play</button>
+      <span class="rt-pill" id="kvPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="kvDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="kvDir">▶ READY</span>
+        <div class="rt-cap" id="kvCap">Pick a scenario and press ▶ Play</div>
+        <div class="rt-payload" id="kvPay"></div>
+        <div class="rt-headers" id="kvHdr"></div>
+        <div class="rt-result" id="kvRes"></div>
+      </div>
+    </div>
+    <div class="who-row">
+      <span class="who-badge who-APP">APP — your Spring API</span>
+      <span class="who-badge who-IMDS">IMDS — metadata endpoint</span>
+      <span class="who-badge who-MI">MI — managed identity</span>
+      <span class="who-badge who-ENTRA">ENTRA — token issuer</span>
+      <span class="who-badge who-KV">KV — Key Vault</span>
+      <span class="who-badge who-CFG">CFG — App Configuration</span>
+      <span class="who-badge who-RESP">RESP — response</span>
+      <span class="who-badge who-WARN">WARN — attacker / error</span>
+    </div>
+  </div>
+
+  <section>
+    <h2>1. The identity chain: how compute proves itself with no credential</h2>
+    <div class="code-block"><span style="color:#a78bfa"># what DefaultAzureCredential does inside an App Service — you never write this</span><br>GET http://<span style="color:#50e6ff">169.254.169.254</span>/metadata/identity/oauth2/token<br>&nbsp;&nbsp;?resource=https://vault.azure.net&amp;api-version=2019-08-01<br>Metadata: true<br><br><span style="color:#a78bfa"># IMDS answers with an Entra token for the resource's managed identity</span><br>{ <span style="color:#c3e88d">"access_token"</span>: <span style="color:#c3e88d">"eyJ0eXAi…"</span>, <span style="color:#c3e88d">"expires_in"</span>: <span style="color:#c3e88d">"86400"</span>,<br>&nbsp;&nbsp;<span style="color:#c3e88d">"resource"</span>: <span style="color:#c3e88d">"https://vault.azure.net"</span>, <span style="color:#c3e88d">"token_type"</span>: <span style="color:#c3e88d">"Bearer"</span> }</div>
+    <div class="key-insight"><strong>The trust anchor is network locality.</strong> <code>169.254.169.254</code> is a link-local address that only code running <em>on that compute instance</em> can reach — it never routes across the internet or even the VNet. Azure's fabric knows which resource the call came from, so no proof-of-possession secret is needed. That is the entire trick: possession of the runtime environment <em>is</em> the credential. It also defines the threat model — anything achieving code execution on the box (SSRF reaching IMDS, a malicious dependency) can mint tokens, which is why MIs still get <em>least-privilege</em> roles, not Owner.</div>
+  </section>
+
+  <section>
+    <h2>2. System-assigned vs user-assigned — pick by lifecycle</h2>
+    <table class="tiers">
+      <tr><th></th><th>System-assigned</th><th>User-assigned</th></tr>
+      <tr><td><b>Lifecycle</b></td><td>created/deleted with the resource</td><td>standalone ARM resource, independent life</td></tr>
+      <tr><td><b>Sharing</b></td><td>exactly one resource</td><td>attachable to many resources</td></tr>
+      <tr><td><b>RBAC prep</b></td><td>only after the resource exists</td><td>pre-provision roles before any compute exists</td></tr>
+      <tr><td><b>Blue/green &amp; scale-out fleets</b></td><td>every instance re-needs role grants</td><td>one identity, N apps — grants survive redeploys</td></tr>
+      <tr><td><b>Default choice</b></td><td>one app, simple case</td><td>IaC pipelines, app fleets, slot swaps</td></tr>
+    </table>
+    <div class="key-insight"><strong>Exam decoder:</strong> "identity must survive resource deletion / be shared across multiple apps / be granted permissions before deployment" → <em>user-assigned</em>. "Simplest option, tied to one resource" → <em>system-assigned</em>. Also know the two vault authorization models: <strong>Azure RBAC</strong> (recommended — normal role assignments like <code>Key Vault Secrets User</code>, <code>Key Vault Crypto User</code>, scoped as low as one vault) versus legacy <strong>access policies</strong> (per-vault ACLs granting get/list/set per object type). New vaults should use <code>--enable-rbac-authorization</code>.</div>
+  </section>
+
+  <section>
+    <h2>3. Soft delete, purge protection, and the day someone deletes prod's vault</h2>
+    <div class="code-block"><span style="color:#a78bfa"># soft delete is ON by default (90-day retention). Purge protection is opt-in — and one-way.</span><br>az keyvault update -n kv-shop-prod --enable-purge-protection true<br><br><span style="color:#a78bfa"># someone deletes a secret — it is recoverable, not gone</span><br>az keyvault secret delete --vault-name kv-shop-prod -n db-password<br>az keyvault secret <span style="color:#82aaff">recover</span> --vault-name kv-shop-prod -n db-password<br><br><span style="color:#a78bfa"># with purge protection: even 'purge' is refused until retention expires</span><br>az keyvault secret purge --vault-name kv-shop-prod -n db-password<br><span style="color:#f87171"># ERROR: Operation "purge" is not allowed (purge protection enabled)</span></div>
+    <div class="key-insight"><strong>Soft delete makes deletion a two-phase act:</strong> a deleted secret/key/vault enters a recoverable state for 7–90 days, and <em>purge</em> (permanent destruction) is a separate, separately-permissioned operation. <strong>Purge protection</strong> goes further: purge is flatly refused until retention lapses — and once enabled it <em>cannot be turned off</em>, which is exactly what you want against ransomware that deletes-then-purges the keys your backups are encrypted with. Enable it on every production vault; the exam flags any answer where encryption keys can be irrecoverably destroyed.</div>
+  </section>
+</div>
+
+<!-- ── Code Walkthrough ── -->
+<div id="cw-kv"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-kv',{
+  id:'cw-kv',
+  title:'Spring Boot reads its DB password from Key Vault, line by line',
+  subtitle:'The spring-cloud-azure Key Vault PropertySource: secrets become ordinary ${placeholders}, resolved through the managed identity at startup.',
+  steps:[
+    {lines:[1,2,3],note:'One starter turns Key Vault into a Spring PropertySource. At bootstrap, before beans are created, it lists the vault\'s secrets and merges them into the Environment — highest precedence, so a vault secret overrides application.yml.',vars:{'dependency':'spring-cloud-azure-starter-keyvault-secrets','when':'bootstrap phase (before beans)','precedence':'above application.yml'},tone:'start'},
+    {lines:[5,6,7],note:'application.yml names the vault endpoint — the ONLY Azure-specific config, and it is not a secret (it is just a URL). property-source-enabled wires the vault into the Environment.',vars:{'endpoint':'https://kv-shop-prod.vault.azure.net/','secrets in this file':'zero'},tone:'ok'},
+    {lines:[9,10,11],note:'The datasource password is a plain placeholder. Key Vault secret names use dashes (db-password); Spring relaxed binding matches them to properties. The value never appears in yml, env vars, or the container image — it exists only in vault + process memory.',vars:{'${db-password}':'resolved from Key Vault','on disk':'never','in image':'never'},tone:'ok'},
+    {lines:[13,14],note:'How the fetch authenticated: DefaultAzureCredential → IMDS → Entra token (aud=vault.azure.net) → GET /secrets/db-password. The MI holds Key Vault Secrets User on this vault. Locally, your az login identity needs the same role — same code, no profiles.',vars:{'role needed':'Key Vault Secrets User','audience':'https://vault.azure.net','local dev':'az login + same role'},tone:'ok'},
+    {lines:[16],note:'Rotation story: update the secret in the vault, then restart/refresh the app — no code change, no redeploy, no pipeline variable edits. Scenario ② animates this. For zero-restart rotation, pair with App Config refresh or re-read the secret on connection failures.',vars:{'rotate':'az keyvault secret set …','deploys needed':'0'},tone:'ok',callout:'CIAM: the same PropertySource pattern serves your OAuth client secrets (spring.security.oauth2.client.registration.*.client-secret) — the values your Ping/Entra integrations depend on stop living in ADO variable groups and start living in a vault with an audit log.'}
+  ],
+  code:[
+    '<!-- pom.xml -->',
+    '<dependency> <groupId>com.azure.spring</groupId>',
+    '  <artifactId>spring-cloud-azure-starter-keyvault-secrets</artifactId> </dependency>',
+    '',
+    '# application.yml',
+    'spring.cloud.azure.keyvault.secret.property-sources[0]:',
+    '  endpoint: https://kv-shop-prod.vault.azure.net/',
+    '',
+    'spring.datasource:',
+    '  url: jdbc:mysql://shop-db:3306/shop',
+    '  password: ${db-password}          # ← lives only in the vault',
+    '',
+    '# under the hood at startup:',
+    '# IMDS → Entra token → GET {vault}/secrets/db-password → Environment',
+    '',
+    '# rotate: az keyvault secret set -n db-password --value <new> ; restart'
+  ]
+});
+</script>
+
+<script>
+(function(){
+  const P='kv', $=id=>document.getElementById(id);
+  const SCEN={
+    fetch:{ req:'GET /secrets/db-password (MI)', intro:'The full zero-credential chain, end to end: app asks IMDS, IMDS vouches to Entra, Entra mints a vault-audience token, Key Vault checks RBAC and releases the secret. Nothing was stored anywhere.',
+      nodes:[
+        {id:'app',icon:'🌱',nl:'Spring bootstrap needs ${db-password}',ns:'Key Vault PropertySource resolves',who:'APP'},
+        {id:'imds',icon:'📡',nl:'GET 169.254.169.254/…/token',ns:'link-local — on-box only',who:'IMDS'},
+        {id:'entra',icon:'🎫',nl:'Entra mints MI token',ns:'aud = vault.azure.net',who:'ENTRA'},
+        {id:'kv',icon:'🔐',nl:'GET /secrets/db-password',ns:'vault data plane',who:'KV'},
+        {id:'rbac',icon:'🛡️',nl:'Key Vault Secrets User?',ns:'RBAC check at vault scope',who:'KV'},
+        {id:'done',icon:'📤',nl:'200 — secret value + version',ns:'into the Environment, memory only',who:'RESP'},
+      ],
+      steps:[
+        {node:'app',chip:'boot',cap:'Config resolution triggers the chain',pay:{placeholder:'${db-password}',source:'Key Vault PropertySource',files_containing_secret:'none'},ins:'The app <em>declared</em> a need, not a credential. Everything below is machinery the platform provides — your code is the one line of yml naming the vault.'},
+        {node:'imds',chip:'IMDS',tone:'ok',cap:'The metadata endpoint only answers locals',pay:{url:'http://169.254.169.254/metadata/identity/oauth2/token?resource=https://vault.azure.net',header:'Metadata: true',reachable_from:'this instance only'},ins:'Link-local, non-routable, and the fabric knows which resource is calling. The <code>Metadata: true</code> header is a CSRF-style guard so a browser can\'t be tricked into calling it. Possession of the runtime = the credential.'},
+        {node:'entra',chip:'token',tone:'ok',cap:'Entra issues a token for the app\'s identity',pay:{oid:'d3adb33f… (shop-api system-assigned MI)',aud:'https://vault.azure.net',exp:'24h — cached by the SDK',secret_used:'none'},ins:'The MI is a real service principal in your tenant — it shows up in Entra, can be audited, and its tokens look like any other. What it lacks, by design, is any credential a human could exfiltrate.'},
+        {node:'kv',chip:'GET',tone:'ok',cap:'The vault call itself',pay:{verb:'GET',url:'https://kv-shop-prod.vault.azure.net/secrets/db-password?api-version=7.4',auth:'Bearer (MI token)'},ins:'Note the vault has its own DNS name and data plane, separate from ARM — the same control/data split as storage. Firewall rules and private endpoints can lock this endpoint to your VNet.'},
+        {node:'rbac',chip:'authz',tone:'ok',cap:'RBAC evaluates at the vault (or even secret) scope',pay:{needed:'Microsoft.KeyVault/vaults/secrets/getSecret/action',assignment:'Key Vault Secrets User @ kv-shop-prod',verdict:'ALLOW'},ins:'Least privilege in action: <code>Secrets User</code> can read secrets, not set them, not touch keys or certs, not administer the vault. The rotation pipeline gets <code>Secrets Officer</code>; nobody gets more than their verb.'},
+        {node:'done',chip:'200',tone:'ok',cap:'The secret exists only in vault + process memory',pay:{status:200,value:'••••••••',version:'8f3c2b…',audit:'AuditEvent logged: who, what, when, from where'},ins:'Every vault access lands in the <strong>audit log</strong> — the compliance answer to "who read prod\'s DB password in June?" Compare that to a password in a yml file, which answers to no one.'},
+      ], result:{cls:'ok',text:'✅ Fetch: app → IMDS (locality proves identity) → Entra token → vault RBAC → secret in memory. No credential was stored at any hop, and the read is audited.'} },
+
+    rotate:{ req:'rotate db-password, zero deploys', intro:'The payoff scenario: security asks for a quarterly password rotation. With Key Vault as the source of truth, the rotation is a vault write plus a rolling restart — no code, no pipeline edits, no redeploy.',
+      nodes:[
+        {id:'ops',icon:'🔧',nl:'rotation job sets new secret',ns:'Secrets Officer role, audited',who:'KV'},
+        {id:'ver',icon:'🧾',nl:'new VERSION created',ns:'old version retained, disable-able',who:'KV'},
+        {id:'db',icon:'🗄️',nl:'DB password updated to match',ns:'ALTER USER … IDENTIFIED BY',who:'CFG'},
+        {id:'restart',icon:'🔁',nl:'rolling restart of shop-api',ns:'slot swap / instance-by-instance',who:'APP'},
+        {id:'fresh',icon:'🎫',nl:'bootstrap re-reads the vault',ns:'gets the NEW version',who:'ENTRA'},
+        {id:'done',icon:'📤',nl:'fleet on the new password',ns:'old version disabled',who:'RESP'},
+      ],
+      steps:[
+        {node:'ops',chip:'set',cap:'Rotation is a vault write, not a deploy',pay:{cmd:'az keyvault secret set --vault-name kv-shop-prod -n db-password --value <new>',who:'rotation pipeline MI (Key Vault Secrets Officer)',audit:'SecretSet event logged'},ins:'Notice who is <em>not</em> involved: no developer, no pull request, no pipeline variable edit, no image rebuild. The secret\'s home is the vault; everything else just reads it.'},
+        {node:'ver',chip:'v2',tone:'ok',cap:'Secrets are versioned, not overwritten',pay:{'db-password':{current:'v 9a4d…',previous:'v 8f3c… (still readable by version-pinned callers)'},rollback:'point back to v1 instantly'},ins:'Every <code>set</code> creates a new version; old ones remain until disabled or deleted. Rollback from a botched rotation is instant — re-enable the old version. Unversioned references (<code>/secrets/db-password</code>) always mean "latest".'},
+        {node:'db',chip:'sync',tone:'ok',cap:'The other side of the credential rotates too',pay:{db:"ALTER USER 'shop' IDENTIFIED BY '<new>'",window:'old + new briefly valid? MySQL: no — hence restart next',better:'dual users A/B for true zero-downtime'},ins:'Rotation is a <em>pair</em> of writes — vault and target system. The gold-standard pattern is two DB users (A/B): rotate the idle one, flip the app to it, then rotate the other. Key Vault\'s rotation events (Event Grid) can drive this automatically.'},
+        {node:'restart',chip:'roll',tone:'ok',cap:'Instances restart one by one',pay:{strategy:'rolling — N-1 instances always serving',each_instance:'re-runs bootstrap → re-reads vault',downtime:'none'},ins:'The restart is only needed because the secret was read at startup. Apps using App Config refresh (scenario ③) or re-fetch-on-auth-failure logic can even skip this step.'},
+        {node:'fresh',chip:'re-read',tone:'ok',cap:'Same chain as scenario ①, new value out',pay:{chain:'IMDS → Entra → vault',returns:'db-password v 9a4d… (latest)',code_changed:'none'},ins:'The machinery is identical to the first fetch — that is the elegance. Rotation changed <em>data</em>, not <em>configuration</em>, so nothing that is deployed had to change.'},
+        {node:'done',chip:'✓',tone:'ok',cap:'Rotation complete, old credential dead',pay:{fleet:'all instances on new password',old_version:'disabled',time_taken:'~minutes',deploys:0,audit_trail:'complete'},ins:'Quarterly rotation just became a scheduled job instead of a sprint ticket. This is the operational argument for vault-sourced config: secrets rotate at the speed of a write, not the speed of a release.'},
+      ], result:{cls:'ok',text:'✅ Rotation: vault write (new version) + DB update + rolling restart = fleet rotated with zero deploys and full audit. Versioning gives instant rollback; Event Grid can automate the whole loop.'} },
+
+    flag:{ req:'App Config: flip a feature flag', intro:'App Configuration is Key Vault\'s sibling for NON-secrets: settings and feature flags, centrally managed, hot-reloadable. Ops flips "checkout-v2" in the portal and the running fleet picks it up without a restart.',
+      nodes:[
+        {id:'cfg',icon:'🎛️',nl:'ops enables flag checkout-v2',ns:'App Configuration store',who:'CFG'},
+        {id:'sentinel',icon:'🏷️',nl:'sentinel key version bumps',ns:'the cheap "something changed" signal',who:'CFG'},
+        {id:'poll',icon:'🔁',nl:'app\'s refresh interval elapses',ns:'checks sentinel etag only',who:'APP'},
+        {id:'reload',icon:'📥',nl:'changed keys re-fetched',ns:'flags + settings, KV refs resolved',who:'CFG'},
+        {id:'route',icon:'🚦',nl:'FeatureManager routes traffic',ns:'if (feature on) → new code path',who:'APP'},
+        {id:'done',icon:'📤',nl:'v2 live — no restart, no deploy',ns:'flip back = same path in reverse',who:'RESP'},
+      ],
+      steps:[
+        {node:'cfg',chip:'flip',cap:'A flag is data, not code',pay:{store:'appcfg-shop',key:'.appconfig.featureflag/checkout-v2',value:{enabled:true,filters:'10% of users (percentage filter)'},who:'ops, in the portal — no engineer needed'},ins:'App Config stores key-values with labels (dev/prod) and <strong>feature flags</strong> with targeting filters — percentage rollouts, user groups, time windows. Secrets stay in Key Vault; App Config holds <em>references</em> to them so apps read one store.'},
+        {node:'sentinel',chip:'etag',tone:'ok',cap:'One sentinel key makes change detection cheap',pay:{pattern:'apps watch a single "sentinel" key',on_any_change:'ops bumps sentinel last',why:'1 etag check instead of N key reads per poll'},ins:'The recommended pattern: configure the client to refresh <em>everything</em> when one designated key changes. Polls become a single conditional GET (ETag) — near-zero cost, near-real-time flips.'},
+        {node:'poll',chip:'poll',tone:'ok',cap:'The running app checks in on its interval',pay:{interval:'30s',request:'GET /kv/sentinel (If-None-Match: "etag-41")',response:'200 — etag changed!'},ins:'No restart, no push infrastructure — just a cheap poll from the config client library. 304 Not Modified on the boring days; today it is a 200 and a reload is triggered.'},
+        {node:'reload',chip:'reload',tone:'ok',cap:'Changed configuration flows into the app',pay:{refetched:['feature flags','app settings','KV references → vault fetch via MI'],spring:'@RefreshScope beans rebind'},ins:'Key Vault references resolve through the same managed identity chain as scenario ① — App Config hands back a vault URI and the client fetches it. One store to read, two services behind it, zero secrets in either\'s client config.'},
+        {node:'route',chip:'10%',tone:'ok',cap:'Feature management does the routing',pay:{check:'featureManager.isEnabled("checkout-v2")',filter:'percentage: 10% of sessions',user:'bobby → bucket 07 → ENABLED'},ins:'Flags decouple <em>deploy</em> from <em>release</em>: v2\'s code shipped last week, dark. Today it lights up for 10%, tomorrow 50%, and a bad metric flips it off in seconds — no rollback deploy, no hotfix panic.'},
+        {node:'done',chip:'✓',tone:'ok',cap:'Progressive delivery, operationally boring',pay:{live:'checkout-v2 @ 10%',rollback:'set enabled=false (seconds)',deploys_involved:0,audit:'who flipped what, when'},ins:'The full config story: <strong>Key Vault</strong> = secrets (rotate, audit, HSM), <strong>App Config</strong> = settings + flags (label per env, hot reload, targeting). Both read by managed identity; neither puts a value in a yml file.'},
+      ], result:{cls:'ok',text:'✅ Feature flag: ops flips a value in App Config → sentinel etag change → running apps hot-reload → FeatureManager routes 10% to v2. Deploy and release are now separate events.'} },
+
+    leak:{ req:'leaked conn string vs leaked MI?', intro:'The security argument, dramatized. The same repo is accidentally made public twice: once in the connection-string era, once in the managed-identity era. Watch how differently the incident plays out.',
+      nodes:[
+        {id:'leak',icon:'📤',nl:'repo goes public by mistake',ns:'application.yml in history',who:'WARN'},
+        {id:'era1',icon:'🔓',nl:'ERA 1: yml holds the DB password',ns:'attacker copies it in seconds',who:'WARN'},
+        {id:'pwn',icon:'💥',nl:'attacker connects from anywhere',ns:'full data access until rotated',who:'WARN'},
+        {id:'era2',icon:'🪪',nl:'ERA 2: yml holds… a vault URL',ns:'nothing secret to steal',who:'MI'},
+        {id:'fail',icon:'🧱',nl:'attacker replays the pattern — fails',ns:'no IMDS off-box, RBAC says no',who:'KV'},
+        {id:'done',icon:'📊',nl:'incident report comparison',ns:'hours of panic vs a shrug',who:'RESP'},
+      ],
+      steps:[
+        {node:'leak',chip:'oops',tone:'bad',cap:'The same mistake, twice',pay:{event:'private repo flipped public / laptop stolen / log shipped to vendor',frequency:'this happens constantly — assume it will',git_history:'remembers everything ever committed'},ins:'Credential leakage is not an exotic threat — it is push-button routine: a fork, a gist, a CI log, a screenshot. The design question is never "will config leak?" but "what does the leak be worth?"'},
+        {node:'era1',chip:'era 1',tone:'bad',cap:'The yml is a treasure map',pay:{leaked:'spring.datasource.password: S3cr3t!',also:'storage connection string with account key',validity:'until someone notices and rotates'},ins:'A connection string is <strong>bearer authority with no identity</strong>: anyone holding it, anywhere on Earth, is indistinguishable from the app. There is no audit trail pointing at the thief — the logs just show "the app" connecting.'},
+        {node:'pwn',chip:'💥',tone:'bad',cap:'Full compromise, silent and portable',pay:{attacker:'connects from their own infra',access:'entire DB + storage account',detection:'hard — credentials are valid',blast_radius:'everything those credentials touch'},ins:'Cleanup is brutal: rotate every leaked credential, redeploy everything that embedded them, and audit months of access logs wondering which reads were theirs. This is the incident MIs were designed to delete.'},
+        {node:'era2',chip:'era 2',tone:'ok',cap:'The modern yml leaks nothing',pay:{leaked_file_contains:['vault URL (public knowledge anyway)','App Config endpoint','client-id of a user-assigned MI (not a secret)'],passwords:'none exist in any file'},ins:'Grep the modern repo for secrets and you find <em>names of places secrets live</em>. The MI has no password or cert to commit — there is literally no string whose theft equals the app\'s identity.'},
+        {node:'fail',chip:'403',tone:'ok',cap:'Every replay the attacker tries dies',pay:{try_1:'call IMDS from their machine → 169.254.169.254 is link-local, unreachable',try_2:'hit the vault with their own Entra user → 403, no role',try_3:'vault firewall / private endpoint → not even network reachable',needed_instead:'code execution ON the app\'s compute'},ins:'The attack has been upgraded from "read a file" to "achieve remote code execution on the workload" — a categorically harder crime, and one that lights up defender telemetry (Defender for Cloud flags anomalous IMDS/token use) instead of blending in.'},
+        {node:'done',chip:'report',tone:'ok',cap:'Two incident reports, one lesson',pay:{era1:{rotations:'all creds',redeploys:'every service',forensics:'weeks',customer_notice:'maybe'},era2:{action:'un-public the repo',rotations:0,forensics:'none needed — nothing was leaked'}},ins:'Managed identity does not make you unhackable — it removes an entire <em>class</em> of breach (credential theft from artifacts) and shrinks the rest behind RBAC scopes, vault firewalls, and audit logs. That is what "no secrets in config" actually buys.'},
+      ], result:{cls:'ok',text:'⚖️ Verdict: the connection-string leak = full silent compromise + weeks of cleanup. The MI-era leak = nothing to steal; the attacker now needs code execution on your compute. Zero stored credentials is a blast-radius decision, not a style preference.'} },
+  };
+
+  let scen='fetch', running=false, timers=[];
+  function clearT(){timers.forEach(clearTimeout);timers=[];}
+  function nodeEl(id){return document.querySelector('#'+P+'Diagram .rt-node[data-node="'+id+'"]');}
+  function nodeCenter(id){const n=nodeEl(id);return n?n.offsetTop+n.offsetHeight/2:0;}
+  function renderNodes(k){
+    let h='<div class="rt-rail"></div><div class="rt-chip" id="'+P+'Chip">→</div>';
+    SCEN[k].nodes.forEach(n=>{ h+='<div class="rt-node" data-node="'+n.id+'"><span class="ic">'+n.icon+'</span><div style="flex:1;min-width:0"><div class="nl">'+n.nl+'</div><div class="ns">'+n.ns+'</div></div><span class="who who-'+n.who+'">'+n.who+'</span></div>'; });
+    $(P+'Diagram').innerHTML=h;
+  }
+  function reset(){
+    renderNodes(scen); const s=SCEN[scen];
+    const chip=$(P+'Chip'); chip.style.transition='none'; chip.style.top=nodeCenter(s.steps[0].node)+'px'; chip.style.opacity='0'; chip.classList.remove('ok','bad'); void chip.offsetWidth; chip.style.transition='';
+    $(P+'Res').className='rt-result';
+    $(P+'Dir').textContent='▶ READY'; $(P+'Dir').className='rt-dir';
+    $(P+'Cap').textContent=s.intro;
+    $(P+'Pay').textContent='';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>— tokens, RBAC verdicts &amp; vault responses appear here per step —';
+    $(P+'Pill').textContent=s.req;
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false;
+  }
+  function applyStep(steps,i){
+    const st=steps[i];
+    document.querySelectorAll('#'+P+'Diagram .rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
+    const n=nodeEl(st.node); n.classList.remove('vchk','vskip'); n.classList.add(st.tone==='bad'?'vskip':'vchk'); n.classList.add('cur'); if(st.tone==='bad')n.classList.add('curbad'); void n.offsetWidth; n.classList.add('rtpulse');
+    const chip=$(P+'Chip'); chip.textContent=st.chip||'→'; chip.classList.remove('ok','bad'); if(st.tone)chip.classList.add(st.tone==='bad'?'bad':'ok'); chip.style.opacity='1'; chip.style.top=nodeCenter(st.node)+'px';
+    $(P+'Dir').textContent=st.dir||('STEP '+(i+1)+' / '+steps.length); $(P+'Dir').className='rt-dir'+(st.tone==='bad'?' bad':'');
+    $(P+'Cap').textContent=st.cap;
+    $(P+'Pay').textContent=st.pay?JSON.stringify(st.pay,null,2):'';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>'+st.ins;
+  }
+  function run(){
+    if(running)return; running=true; clearT(); reset();
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=true); $(P+'Run').disabled=true;
+    $(P+'Pill').textContent='running…';
+    const s=SCEN[scen]; let i=0;
+    (function tick(){
+      if(i>=s.steps.length){ const r=$(P+'Res'); r.className='rt-result show '+(s.result.cls||'ok'); r.textContent=s.result.text; running=false; document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false; $(P+'Pill').textContent='done'; return; }
+      applyStep(s.steps,i); i++; timers.push(setTimeout(tick,2000));
+    })();
+  }
+  document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.onclick=()=>{ if(running)return; scen=b.dataset.s; document.querySelectorAll('#'+P+'Seg button').forEach(x=>x.classList.toggle('on',x===b)); reset(); });
+  $(P+'Run').onclick=run;
+  reset();
+})();
+</script>
+</body>
+</html>

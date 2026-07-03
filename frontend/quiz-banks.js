@@ -54,6 +54,16 @@ window.DEVHUB_EXAMS = [
     available: true
   },
   {
+    id: 'azure-developer',
+    title: 'Azure Developer Associate',
+    cert: 'AZ-204',
+    file: 'exam-azure-developer.html',
+    track: 'Cloud — Azure',
+    passPct: 72,
+    count: 28,
+    available: true
+  },
+  {
     id: 'spring-professional',
     title: 'Spring Professional',
     cert: 'Spring Certified',
