@@ -204,6 +204,10 @@ app with user accounts and cross-device progress sync:
   (a working Bash/PowerShell/CMD mini-shell), the **API Playground** (every Send is an actual `fetch()`), the
   **JWT & Auth Playground** (decode/sign/verify with Web Crypto, test `@PreAuthorize`), and the
   **Spring Boot Playground** (simulate the security filter chain → 200/401/403/404, plus a Live tab against `:8081`).
+  The **🎓 Exam Prep** track's 15 mock exams (426 questions) are built to *teach*, not just score:
+  after each answer **every option explains itself** — ✓ why the correct choice is right, ✗ why each
+  distractor is wrong — and every bank passes an anti-guessing audit
+  (`frontend/tmp_examtell_audit.mjs`) so the right answer can never be spotted by length or position.
 - **`backend/`** — a Spring Boot 4 API (`devhub-backend`): registration, JWT
   login, and per-user topic progress, backed by H2 (local) or PostgreSQL (prod).
 

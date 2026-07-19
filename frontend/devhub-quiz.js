@@ -35,7 +35,13 @@
  *     answer: 1,                    // index of the correct choice
  *                                   //   …or [0,2] for a multi-select question
  *     multi: false,                 // true → checkboxes, partial credit not given
- *     explanation: 'Use a task role…',
+ *     explanation: 'Use a task role…',   // the big-picture teaching point
+ *     why: [                        // OPTIONAL but strongly encouraged: one line
+ *       'Wrong — instance roles…',  // per choice, same order as `choices`.
+ *       'Right — task roles are…',  // After answering (practice) and in the
+ *       'Wrong — env vars leak…',   // review screen, EVERY option shows its own
+ *       'Wrong — user keys are…'    // reason, not just the correct one.
+ *     ],
  *     ref: { label: 'IAM visualizer', file: 'aws-iam-visualizer.html' } // optional
  *   }
  * ========================================================================== */
@@ -89,6 +95,8 @@
   function prepare(q) {
     const order = shuffle(q.choices.map((_, i) => i));
     const choices = order.map(i => q.choices[i]);
+    // per-option "why" lines must follow their choice through the shuffle
+    const why = Array.isArray(q.why) ? order.map(i => q.why[i]) : null;
     let answer;
     if (q.multi) {
       const set = new Set(q.answer);
@@ -96,7 +104,7 @@
     } else {
       answer = order.indexOf(q.answer);
     }
-    return Object.assign({}, q, { choices, answer });
+    return Object.assign({}, q, { choices, answer, why });
   }
 
   /* ---- inject the engine's stylesheet once ----------------------------- */
@@ -156,6 +164,12 @@
 .dq-choice.sel .dq-key{background:var(--dq-accent);color:#0b1020;border-color:var(--dq-accent)}
 .dq-choice.correct .dq-key{background:var(--dq-good);color:#04231a;border-color:var(--dq-good)}
 .dq-choice.wrong .dq-key{background:var(--dq-bad);color:#2a0a0a;border-color:var(--dq-bad)}
+.dq-why{display:block;font-size:12px;line-height:1.55;margin-top:7px;padding-top:7px;
+    border-top:1px dashed var(--dq-border);color:var(--dq-muted)}
+.dq-why.good{color:#6ee7b7}
+.dq-why.bad{color:#fca5a5}
+.dq-rev-why{font-size:11.5px;color:var(--dq-muted);line-height:1.5;margin:2px 0 5px 20px;
+    padding-left:9px;border-left:2px solid var(--dq-border)}
 .dq-expl{border-left:3px solid var(--dq-accent);background:#0b1426;border-radius:0 8px 8px 0;
     padding:11px 15px;margin:14px 0 4px;font-size:13px;line-height:1.6;color:#cbd5e1}
 .dq-expl b{color:var(--dq-text)}
@@ -341,9 +355,10 @@
       // choices
       const keys = 'ABCDEFGH';
       const choiceEls = q.choices.map((text, i) => {
+        const body = h('span', { style: 'flex:1' }, text);
         const el = h('div', { class: 'dq-choice' },
           h('span', { class: 'dq-key' }, keys[i]),
-          h('span', null, text)
+          body
         );
         const selected = q.multi ? (Array.isArray(given) && given.includes(i)) : given === i;
         if (selected) el.classList.add('sel');
@@ -352,6 +367,10 @@
           const correct = q.multi ? q.answer.includes(i) : q.answer === i;
           if (correct) el.classList.add('correct');
           else if (selected) el.classList.add('wrong');
+          // per-option reasoning: every choice explains itself once revealed
+          if (q.why && q.why[i])
+            body.appendChild(h('span', { class: 'dq-why ' + (correct ? 'good' : 'bad') },
+              (correct ? '✓ ' : '✗ ') + q.why[i]));
         } else {
           el.addEventListener('click', () => choose(i));
         }
@@ -497,7 +516,10 @@
         if (correct) cls += ' c';
         else if (chosen) cls += ' x';
         const mark = correct ? '✓ ' : (chosen ? '✗ ' : '   ');
-        return h('div', { class: cls }, mark + keys[ci] + '. ' + text);
+        const row = h('div', { class: cls }, mark + keys[ci] + '. ' + text);
+        if (q.why && q.why[ci])
+          row.appendChild(h('div', { class: 'dq-rev-why' }, q.why[ci]));
+        return row;
       });
       return h('div', { class: 'dq-rev-q' },
         h('p', { class: 'qs' }, (ok ? '✓ ' : '✗ ') + (i + 1) + '. ' + q.stem),

@@ -238,11 +238,14 @@ Algorithms.
 
 - [`frontend/devhub-quiz.js`](../frontend/devhub-quiz.js) — a dependency-free engine.
   Call `DevHubQuiz.render(rootEl, bank)` and it paints the whole experience:
-  - **Practice mode** — untimed; each question reveals the answer, a full
+  - **Practice mode** — untimed; each question reveals the answer, **a one-line
+    "why" under *every* option** (✓ why the right one is right, ✗ why each wrong
+    one is wrong — from the bank's per-question `why` array), a big-picture
     explanation, and a **"Learn more →"** link that `postMessage`s the hub
     (`type:'dlh-navigate'`) to the matching visualizer page.
   - **Exam mode** — *N* random questions, a countdown timer, and a pass/fail
-    verdict at the cert's real pass mark.
+    verdict at the cert's real pass mark. The end-of-exam review shows the same
+    per-option reasoning on every question you got wrong (and right).
   - **Per-domain breakdown** on the results screen (red bars = study here), plus a
     **localStorage attempt history** (best score + recent attempts) so a learner can
     watch readiness climb over time.
@@ -256,6 +259,8 @@ Algorithms.
     stem:'Your ECS task needs to read a secret…',
     code:null,                                   // optional monospace block
     choices:['…','…','…','…'], answer:1,         // index — or [0,2] with multi:true
+    why:['…','…','…','…'],                       // one line PER OPTION, aligned to
+                                                 // choices: why right / why wrong
     explanation:'Use a task role — the SDK auto-discovers temp creds…',
     ref:{ label:'IAM visualizer', file:'aws-iam-visualizer.html' } }
   ```
@@ -264,6 +269,16 @@ Algorithms.
   bank (each question's `ref.file` should point at the page that teaches it), and
   register the page under the **Exam Prep** track in `TRACKS`. The bank is pure
   data — no engine changes needed.
+
+  **Question-quality standard (enforced):** the correct choice is a crisp fact
+  with no explanation tail; distractors are plausible, same-register statements
+  that encode a *real* misconception (length-bracketed so the correct answer is
+  never "the long one"); raw `answer` indexes are spread evenly across the bank;
+  and every question carries an aligned `why` array (≥ 20 chars per line). The
+  gate is [`frontend/tmp_examtell_audit.mjs`](../frontend/tmp_examtell_audit.mjs) —
+  `node tmp_examtell_audit.mjs [name-filter]` flags **length tells** (correct =
+  longest option), **position tells** (one raw index > 40 % of the bank), and
+  **missing why-coverage**, and exits non-zero. Run it after any bank edit.
 - [`frontend/quiz-banks.js`](../frontend/quiz-banks.js) — a **manifest** (metadata
   only: `id`, `title`, `cert`, `file`, `track`, `passPct`, `count`, `available`)
   listing every exam. Keep an exam's `id`/`passPct`/`count` in sync with its page.

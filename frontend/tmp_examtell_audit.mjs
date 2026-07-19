@@ -11,6 +11,13 @@
  *                      engine shuffles at render, but a skewed source is the
  *                      symptom of distractors written as an afterthought.
  *
+ * Plus one COVERAGE gate (learning quality, not guessability):
+ *
+ *   3. WHY COVERAGE  — every question must carry a `why` array aligned to
+ *                      `choices`: one substantive line per option explaining why
+ *                      it is right / wrong. The quiz engine shows these after
+ *                      answering, so a learner never sees a bare "correct: B".
+ *
  * Usage:  node tmp_examtell_audit.mjs            (audit every exam-*.html)
  *         node tmp_examtell_audit.mjs http-rest  (audit banks matching a name)
  *
@@ -32,6 +39,8 @@ const RANK_LO = 2.15, RANK_HI = 2.85; // mean length-rank of the correct option 
                                // near 2.5 (no bias); outside this band = skewed long/short
 const POS_SHARE_FLAG   = 0.40; // one answer index holds >40% of a bank → position tell
 const POS_MIN_QUESTIONS = 8;   // don't flag position on tiny banks
+const WHY_MIN_CHARS    = 20;   // a per-option "why" shorter than this is boilerplate
+                               // ("Wrong.") rather than an actual reason
 
 /* ---- pull the inlined question bank out of an exam-*.html file ----------- */
 function loadBank(file) {
@@ -63,8 +72,14 @@ function analyse(bank) {
   let singles = 0;
   let nLongest = 0, nShortest = 0;  // # questions where correct is the longest / shortest option
   let rankSum = 0, rankN = 0;       // for the mean length-rank of the correct option
+  const whyBad = [];                // questions with missing/misaligned/boilerplate `why`
 
   for (const q of bank.questions) {
+    // why coverage: aligned array, every entry a real reason
+    const whyOk = Array.isArray(q.why)
+      && q.why.length === q.choices.length
+      && q.why.every(w => typeof w === 'string' && w.trim().length >= WHY_MIN_CHARS);
+    if (!whyOk) whyBad.push(q.id);
     const multi = q.multi === true || Array.isArray(q.answer);
     const correctIdx = multi ? q.answer : [q.answer];
     const lens = q.choices.map(len);
@@ -120,7 +135,8 @@ function analyse(bank) {
     total: bank.questions.length, singles, flags,
     nLongest, nShortest, pctLongest, pctShortest, meanRank,
     extremeTell, rankTell, lengthTell,
-    posCount, posShare, posIdx, positionTell
+    posCount, posShare, posIdx, positionTell,
+    whyBad, whyTell: whyBad.length > 0
   };
 }
 
@@ -165,7 +181,7 @@ for (const f of files) {
   catch (e) { console.log(`\n✗ ${f}\n    PARSE ERROR: ${e.message}`); anyFail = true; continue; }
 
   totalQ += r.total; totalFlags += r.flags.length;
-  const ok = !r.lengthTell && !r.positionTell;
+  const ok = !r.lengthTell && !r.positionTell && !r.whyTell;
   if (!ok) anyFail = true;
 
   console.log(`\n${ok ? '✓' : '✗'} ${f}   (${r.total} questions)`);
@@ -187,6 +203,12 @@ for (const f of files) {
     console.log(`    POSITION TELL — ${(r.posShare * 100).toFixed(0)}% of answers are "${'ABCDEF'[r.posIdx]}" (raw index ${r.posIdx})   [${dist}]`);
   else
     console.log(`    position: ok — spread [${dist}]`);
+
+  // why coverage
+  if (r.whyTell)
+    console.log(`    WHY COVERAGE — ${r.whyBad.length}/${r.total} question(s) missing an aligned per-option why[] (≥${WHY_MIN_CHARS} chars each): ${r.whyBad.slice(0, 8).join(', ')}${r.whyBad.length > 8 ? ', …' : ''}`);
+  else
+    console.log(`    why coverage: ok — every option on every question explains itself`);
 }
 
 console.log(`\n${bar}`);
