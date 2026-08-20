@@ -139,7 +139,7 @@ double-click**, no server needed.
 
 | Visualizer | What it shows |
 |---|---|
-| [`app.html`](frontend/app.html) | The full Dev Hub — searchable, progress, **439 pages across 28 tracks grouped into categories** (incl. 🍳 *Common Recipes* — practical how-tos like API→form, batch upload, password complexity — and the new 🟦 *Cloud — Azure* track) (serve it; `index.html` redirects here) |
+| [`app.html`](frontend/app.html) | The full Dev Hub — searchable, progress, **443 pages across 29 tracks grouped into categories** (incl. 🍳 *Common Recipes* — practical how-tos like API→form, batch upload, password complexity — and the new 🤖 *AI-Assisted Development* track) (serve it; `index.html` redirects here) |
 | [`typescript-playground-visualizer.html`](frontend/typescript-playground-visualizer.html) | 🧪 **TypeScript Playground** — loads the **real** `typescript` compiler: type-checks your code (the same red errors as VS Code/`tsc`), shows the emitted JS, and runs it with live console capture; toggle `strict`/`target` and watch errors change |
 | [`python-playground-visualizer.html`](frontend/python-playground-visualizer.html) | 🧪 **Python Playground** — **real CPython** in the browser via Pyodide: `print()`, the stdlib (`json`, `dataclasses`, `itertools`…), real exceptions and full tracebacks — runnable, with presets |
 | [`shell-playground-visualizer.html`](frontend/shell-playground-visualizer.html) | 🧪 **Shell Playground** — a working mini-shell with an in-memory filesystem; flip between **Bash / PowerShell / CMD** modes and watch the prompt, command names, pipes, redirection, and variable syntax change with it |
@@ -170,8 +170,8 @@ in the support packages.
 Beyond the static visualizers, this repo ships a full **Dev Learning Hub** web
 app with user accounts and cross-device progress sync:
 
-- **`frontend/`** — the hub app (`app.html`): **430+ interactive visualizers** across
-  **28 tracks**, a searchable **two-level sidebar** (each track's pages are grouped into
+- **`frontend/`** — the hub app (`app.html`): **440+ interactive visualizers** across
+  **29 tracks**, a searchable **two-level sidebar** (each track's pages are grouped into
   **collapsible sub-sections**, so you're never faced with hundreds of links at once),
   progress tracking, streaks, and a sign-in/register modal.
   The flow / lifecycle pages default to an **animated step-walk with a live inspector** of
@@ -198,7 +198,10 @@ app with user accounts and cross-device progress sync:
   (the AZ-204 developer surface: ARM & RBAC, App Service slots & autoscale, Functions & Durable orchestrations,
   ACR/ACI/Container Apps with KEDA, Blob Storage SAS & tiers, Cosmos DB partitions/RUs/consistency, and the
   Key Vault + managed-identity zero-secret pattern — with a matching **AZ-204 practice exam**, **flashcard deck**, and **learning path**), **⎈ Kubernetes**, **🗄️ SQL & Databases**, and a **⌨️ Shell & Scripting** track
-  (CLI Basics, **Bash** scripting, **PowerShell**'s object pipeline, and **CMD/Batch**, shown side by side).
+  (CLI Basics, **Bash** scripting, **PowerShell**'s object pipeline, and **CMD/Batch**, shown side by side), plus a new
+  **🤖 AI-Assisted Development** track — the landscape of AI coding tools (inline vs chat vs agentic, by context and
+  autonomy), a **GitHub Copilot** deep dive (inline/chat/Agent mode/custom instructions), and a **Claude Code** deep
+  dive (the explore→edit→verify tool loop, Plan Mode, subagent delegation, and policy-enforcing hooks).
   The **🧪 Playgrounds** track now hosts six *live* sandboxes — a **TypeScript Playground** (the real `tsc`: type-checks,
   emits JS, runs it), a **Python Playground** (real CPython via Pyodide, with tracebacks), a **Shell Playground**
   (a working Bash/PowerShell/CMD mini-shell), the **API Playground** (every Send is an actual `fetch()`), the
@@ -212,7 +215,7 @@ app with user accounts and cross-device progress sync:
   login, and per-user topic progress, backed by H2 (local) or PostgreSQL (prod).
 
 > **📖 New to the hub? Start with the [DevHub Guided Tour](docs/DEVHUB-GUIDE.md).**
-> It maps the 28 tracks and hands you ready-made learning paths — including a featured
+> It maps the 29 tracks and hands you ready-made learning paths — including a featured
 > *"how a CIAM app works, end to end"* walkthrough (Angular OIDC login → tokens →
 > guards → Spring filter chain → method security) — so you're never staring at 340+
 > files wondering where to begin.

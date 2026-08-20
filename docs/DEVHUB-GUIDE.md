@@ -1,11 +1,11 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 439 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 443 pages.** Pick a *path* below and follow it.
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **439 browser visualizers** across **28 tracks** (grouped into
+DevHub is a learning hub: **443 browser visualizers** across **29 tracks** (grouped into
 categories in the sidebar — Languages & Concepts, Frontend, Backend & APIs, DevOps/Cloud & Data, Practice & Prep; several tracks also have a 🍳 **Common Recipes** section of practical how-tos — API→form, batch upload, password complexity), plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
@@ -63,6 +63,7 @@ Or jump straight to any file linked below.
 | 🗄️ **SQL & Databases** | SQL, indexes & query plans, transactions/ACID, CTEs, normalization, Postgres | [SQL Fundamentals](../frontend/sql-fundamentals-visualizer.html) |
 | ⌨️ **Shell & Scripting** | CLI basics, **Bash**, **PowerShell** objects, **CMD/Batch** — three shells side by side | [CLI Basics](../frontend/shell-cli-basics-visualizer.html) |
 | 🎓 **Exam Prep — Practice Tests** | 15 timed/scored mock exams (426 Q), a **readiness dashboard**, **15 learning paths**, and **spaced-repetition flashcards** (12 decks / 340 cards) | [Readiness Dashboard](../frontend/exam-readiness.html) · [Learning Paths](../frontend/learning-paths.html) · [exams](../frontend/exam-aws-developer.html) |
+| 🤖 **AI-Assisted Development** | the landscape of AI coding tools (inline vs chat vs agentic, by context & autonomy), **GitHub Copilot** mode by mode, and **Claude Code**'s explore→edit→verify tool loop, Plan Mode, subagents, and hooks | [AI Coding Assistants — The Landscape](../frontend/ai-assistants-overview-visualizer.html) |
 
 Pages are tagged **beginner → intermediate → advanced → expert**. The deepest
 ones are the **`*-deep`** / **`*-lab`** companion pages (34 of them) — each takes a
@@ -208,6 +209,7 @@ The track → body-class → accent map (defined once in `devhub.css`):
 | ⎈ Kubernetes | `track-kubernetes` | K8s blue |
 | 🗄️ SQL & Databases | `track-sql` | SQL amber |
 | ⌨️ Shell & Scripting | `track-shell` | terminal green → cyan |
+| 🤖 AI-Assisted Development | `track-ai-dev` | Anthropic clay → violet |
 
 To add one: create `frontend/<name>-deep-visualizer.html`, link `devhub.css` and set
 the right `track-*` body class, then register it in the `TRACKS` array in
