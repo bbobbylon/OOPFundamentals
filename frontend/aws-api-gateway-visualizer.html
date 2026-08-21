@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>API Gateway — AWS</title>
+  <style>
+    .who-CLIENT{background:#f87171;color:#2a0606}
+    .who-GATEWAY{background:#ff9900;color:#3a2400}
+    .who-AUTHORIZER{background:#a78bfa;color:#1a1030}
+    .who-LAMBDA{background:#fbbf24;color:#3a2c00}
+    .who-POLICY{background:#4ade80;color:#04230f}
+    .who-THROTTLE{background:#f472b6;color:#3a0720}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
+    code{background:#0b1426;padding:1px 5px;border-radius:3px;font-family:ui-monospace,monospace;font-size:12px;color:#ffd43b}
+    .axis-table{width:100%;border-collapse:collapse;margin:12px 0;font-size:12.5px}
+    .axis-table th,.axis-table td{border:1px solid var(--border);padding:8px 10px;text-align:left;vertical-align:top}
+    .axis-table th{background:var(--panel2);color:var(--accent2);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+    .axis-table td b{color:#eef4fb}
+  </style>
+  <link rel="stylesheet" href="devhub.css" />
+</head>
+<body class="track-cloud">
+<div class="container">
+  <a class="back" href="aws-index.html">← AWS</a>
+  <h1>API Gateway</h1>
+  <p class="sub">The front door for a serverless API: it terminates HTTPS, decides who's allowed in <strong>before</strong> your code ever runs, reshapes the request, and can throttle a caller into a 429 — all without a line of your application code executing.</p>
+
+  <div class="intro">
+    <div class="intro-head"><span class="ico">🚪</span> What does API Gateway actually sit in front of, and why does that order of operations matter?</div>
+    <p class="intro-lead">
+      API Gateway is a managed front door: it accepts HTTPS requests, and before your backend compute (usually Lambda) ever sees one, it can authenticate the caller, validate and transform the request, enforce a rate limit, and only then invoke your function. There are two API types: a <strong>REST API</strong> is the older, more feature-rich type — request/response mapping templates, API keys, usage plans, request validation, WAF integration; an <strong>HTTP API</strong> is newer, cheaper, and lower-latency, with a narrower feature set built for the common case (JWT authorizers, simple proxy integration). The most common backend pattern is <strong>Lambda proxy integration</strong>: instead of API Gateway parsing and reshaping the request into a custom shape, it hands your Lambda the entire raw HTTP request (headers, query string, body) as one JSON event, and expects a specific JSON shape back (statusCode, headers, body) — simple, but it means your function owns all the parsing. Authentication happens via an <strong>authorizer</strong>: a <strong>Lambda authorizer</strong> runs your own code (e.g. validate a JWT, check a claim) and returns an IAM policy document that API Gateway caches and enforces; a built-in <strong>JWT authorizer</strong> does the same for a standard OIDC/JWT issuer without you writing any code. Either way, a request that fails authorization never reaches your backend compute at all — the deny happens at the gateway.
+    </p>
+    <ul class="intro-gist"><li><b>REST API vs HTTP API</b> — REST API: mapping templates, API keys, WAF; HTTP API: cheaper, lower latency, built-in JWT authorizers, narrower feature set.</li><li><b>Lambda proxy integration</b> — the whole HTTP request becomes one JSON event; your function returns statusCode + headers + body, not a custom shape.</li><li><b>Authorizers gate BEFORE compute</b> — a Lambda or JWT authorizer runs first and returns allow/deny; a denied request never invokes your backend function at all.</li><li><b>Throttling is per-account and per-key</b> — usage plans + API keys let you rate-limit individual callers independently of your overall account-level burst/steady-state limits.</li></ul>
+    <div class="intro-cards">
+      <div class="intro-mini"><h4>The authorizer result is cached</h4><p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7">A Lambda authorizer's IAM policy is cached (by default 5 minutes, keyed on the token) — the SAME token won't re-invoke your authorizer function on every request, which matters for both cost and latency.</p></div>
+      <div class="intro-mini"><h4>REST API mapping templates transform, proxy doesn't</h4><p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7">Without Lambda proxy integration, a REST API's Velocity Template Language (VTL) mapping template reshapes the request before your function sees it — powerful, but a second place logic can silently diverge from your code.</p></div>
+      <div class="intro-mini"><h4>429 is a gateway decision, not a backend one</h4><p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7">When a usage-plan rate limit is exceeded, API Gateway returns 429 itself — your Lambda is never invoked, never billed, and never even aware the request happened.</p></div>
+    </div>
+    <div class="intro-ciam"><span class="tag">The CIAM parallel:</span> a Lambda authorizer that validates a Bearer JWT and returns an IAM policy is doing exactly what this codebase's own <code>CustomAuthFilter</code> does inside the Spring Boot security filter chain — parsing and verifying a signed JWT before a request reaches a controller. The difference is where it runs: <code>CustomAuthFilter</code> runs inside the same JVM as the app; a Lambda authorizer runs as a separate, independently-scaled function in front of API Gateway, so an auth failure never even spins up your backend compute.</p></div>
+  </div>
+
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="agSeg">
+        <button data-s="allow" class="on">① authorizer validates &amp; allows</button>
+        <button data-s="deny">② expired token → denied</button>
+        <button data-s="proxy">③ Lambda proxy integration</button>
+        <button data-s="throttle">④ burst hits the throttle limit</button>
+      </span>
+      <button class="rt-run" id="agRun">▶ Play</button>
+      <span class="rt-pill" id="agPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="agDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="agDir">▶ READY</span>
+        <div class="rt-cap" id="agCap">Pick a scenario and press ▶ Play</div>
+        <div class="rt-payload" id="agPay"></div>
+        <div class="rt-headers" id="agHdr"></div>
+        <div class="rt-result" id="agRes"></div>
+      </div>
+    </div>
+    <div class="who-row">
+      <span class="who-badge who-CLIENT">CLIENT — the caller sending the HTTPS request</span>
+      <span class="who-badge who-GATEWAY">GATEWAY — API Gateway itself</span>
+      <span class="who-badge who-AUTHORIZER">AUTHORIZER — the Lambda/JWT authorizer</span>
+      <span class="who-badge who-LAMBDA">LAMBDA — your backend function</span>
+      <span class="who-badge who-POLICY">POLICY — the IAM allow/deny document</span>
+      <span class="who-badge who-THROTTLE">THROTTLE — the usage-plan rate limiter</span>
+    </div>
+  </div>
+
+  <section>
+    <h2>REST API vs HTTP API</h2>
+    <table class="axis-table">
+      <tr><th>Feature</th><th>REST API</th><th>HTTP API</th></tr>
+      <tr><td><b>Cost / latency</b></td><td>higher cost, more overhead</td><td>up to ~70% cheaper, lower latency</td></tr>
+      <tr><td><b>Authorizers</b></td><td>Lambda, IAM, Cognito user pools</td><td>Lambda, JWT (native OIDC support)</td></tr>
+      <tr><td><b>Request transformation</b></td><td>full VTL mapping templates</td><td>simple parameter mapping only</td></tr>
+      <tr><td><b>API keys / usage plans</b></td><td>yes</td><td>no (use a Lambda authorizer for custom throttling logic)</td></tr>
+      <tr><td><b>WAF integration</b></td><td>yes</td><td>no</td></tr>
+      <tr><td><b>When to pick it</b></td><td>need mapping templates, API keys, or WAF</td><td>a straightforward JWT-gated proxy API — the common case</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>A few things worth knowing</h2>
+    <ul class="intro-gist">
+      <li><b>The authorizer's response shape matters</b> — a Lambda authorizer must return a well-formed IAM policy document (`Effect: Allow/Deny` on a specific `Resource` ARN); a malformed response is treated as an authorizer error (500), not a deny.</li>
+      <li><b>Throttling has two levels</b> — an account-level default (steady-state + burst, region-wide) and an optional per-API-key usage plan on top of it; a usage plan can be stricter than the account default but never looser.</li>
+      <li><b>Proxy integration pushes parsing into your code</b> — this is simpler to reason about than mapping templates, but it means path parameters, query strings, and headers all need to be parsed inside your Lambda handler rather than being pre-shaped for you.</li>
+    </ul>
+    <p>For the compute this Gateway sits in front of, see <a href="aws-lambda-visualizer.html">the Lambda visualizer</a> and <a href="aws-compute-decision-visualizer.html">the compute decision framework</a>; for the identity pieces (IAM roles, least privilege) an execution role needs, see <a href="aws-iam-visualizer.html">the IAM visualizer</a>.</p>
+  </section>
+</div>
+
+<!-- Code Walkthrough: a Lambda authorizer validating a JWT, line by line -->
+<div id="cw-ag"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-ag',{
+  id:'cw-ag',
+  title:'A Lambda authorizer, line by line — the API Gateway analogue of CustomAuthFilter',
+  subtitle:'This runs BEFORE API Gateway invokes your backend Lambda. It receives the raw Bearer token, validates it, and returns an IAM policy — allow or deny — that API Gateway caches and enforces.',
+  steps:[
+    {lines:[1,2,3],note:'The authorizer receives a TokenAuthorizerRequest — just the token and the ARN of the API method being called, not the full request. This is intentionally narrow: an authorizer\'s only job is allow/deny, not business logic.',vars:{'event.getAuthorizationToken()':'the raw "Bearer <jwt>" header value','event.getMethodArn()':'the exact API Gateway resource/method this decision applies to'},tone:'start'},
+    {lines:[4,5,6],note:'Stripping the "Bearer " prefix and verifying the JWT signature happens here — this is the same signature-verification step CustomAuthFilter performs inside the Spring Boot filter chain, just running as an isolated function instead of inline in the app.',vars:{'jwt.substring(7)':'strips the "Bearer " prefix from the raw header','Jwts.parserBuilder()...parseClaimsJws(jwt)':'verifies the signature and expiry; throws on failure'},tone:'ok'},
+    {lines:[7,8],note:'An expired or invalid signature throws — caught here and turned into an explicit Deny policy rather than letting the exception propagate as a 500. This distinction matters: a 401/403-shaped Deny is a normal auth outcome, an unhandled exception is an authorizer bug.',vars:{'catch (JwtException e)':'expired signature, malformed token, wrong issuer — all land here','generatePolicy(... "Deny" ...)':'an explicit deny, not an error'},tone:'bad',callout:'This catch block is the scenario ② path: an expired token never reaches your backend Lambda at all — the deny is decided and returned right here, before API Gateway even considers invoking the downstream function.'},
+    {lines:[9,10],note:'On success, claims are extracted (subject, roles) and attached to the returned policy\'s context — this is how a downstream Lambda reads "who is this user" without re-verifying the JWT itself: API Gateway forwards these context values as part of the proxy event.',vars:{'claims.getSubject()':'becomes the principalId on the returned policy','context map':'custom claims (roles, tenant) passed through to the backend Lambda via the proxy event'},tone:'ok'},
+    {lines:[11,12],note:'The Allow policy is scoped to the exact methodArn from the request — not a wildcard "allow everything" — so a cached decision for GET /users doesn\'t accidentally also allow DELETE /users if the cache is reused loosely.',vars:{'"Effect": "Allow"':'the policy API Gateway enforces and caches (default 5 min, keyed on the raw token)','Resource: methodArn':'scoped to this exact method, not a broad wildcard'},tone:'ok'}
+  ],
+  code:[
+    'public AuthorizerResponse handleRequest(TokenAuthorizerRequest event, Context ctx) {',
+    '  String methodArn = event.getMethodArn();',
+    '  try {',
+    '    String jwt = event.getAuthorizationToken().substring(7); // strip "Bearer "',
+    '    Claims claims = Jwts.parserBuilder().setSigningKey(PUBLIC_KEY)',
+    '        .build().parseClaimsJws(jwt).getBody();',
+    '',
+    '    return generatePolicy(claims.getSubject(), "Allow", methodArn, claims);',
+    '  } catch (JwtException e) {',
+    '    return generatePolicy("anonymous", "Deny", methodArn, null);',
+    '  }',
+    '}'
+  ]
+});
+</script>
+
+<script>
+(function(){
+  const P='ag', $=id=>document.getElementById(id);
+  const SCEN={
+    allow:{ req:'① authorizer validates & allows', intro:'A request arrives with a valid JWT. The Lambda authorizer verifies it, returns an Allow policy scoped to this exact method, and API Gateway caches that decision before invoking the backend.',
+      nodes:[
+        {id:'req',icon:'📨',nl:'GET /orders with Bearer <jwt>',ns:'HTTPS request arrives',who:'CLIENT'},
+        {id:'gw',icon:'🚪',nl:'API Gateway receives it',ns:'invokes the configured authorizer first',who:'GATEWAY'},
+        {id:'auth',icon:'🔐',nl:'authorizer verifies the JWT signature',ns:'valid, not expired',who:'AUTHORIZER'},
+        {id:'pol',icon:'📜',nl:'returns an Allow policy',ns:'scoped to this exact methodArn',who:'POLICY'},
+        {id:'cache',icon:'💾',nl:'API Gateway caches the decision',ns:'5 min default, keyed on the token',who:'GATEWAY'},
+        {id:'lam',icon:'⚡',nl:'request is invoked on the backend Lambda',ns:'claims passed through as context',who:'LAMBDA'},
+      ],
+      steps:[
+        {node:'req',chip:'request',cap:'A client calls a protected endpoint with a Bearer token',pay:{method:'GET',path:'/orders',header:'Authorization: Bearer eyJhbGciOi...'},ins:'The token travels as a normal Authorization header — API Gateway hasn\'t inspected it yet at this point.'},
+        {node:'gw',chip:'route',tone:'ok',cap:'API Gateway matches the route and checks for a configured authorizer',pay:{matchedResource:'/orders',authorizerConfigured:'lambda-jwt-authorizer'},ins:'Before ANY backend compute is considered, API Gateway checks whether this method requires authorization.'},
+        {node:'auth',chip:'verify',tone:'ok',cap:'The authorizer function verifies the JWT signature and expiry',pay:{signatureValid:true,expired:false,subject:'user-4471'},ins:'This is a completely separate Lambda invocation from your backend — its only job is to answer allow or deny.'},
+        {node:'pol',chip:'allow',tone:'ok',cap:'An Allow policy is returned, scoped to this exact method',pay:{effect:'Allow',resource:'arn:aws:execute-api:...:GET/orders',context:{sub:'user-4471',role:'customer'}}, ins:'The policy is scoped narrowly — it authorizes THIS method, not the whole API.'},
+        {node:'cache',chip:'cache',tone:'ok',cap:'API Gateway caches this decision for the token',pay:{ttlSeconds:300,cacheKey:'the raw token value'},ins:'The next request with the SAME token, within 5 minutes, skips the authorizer entirely and reuses this cached Allow.'},
+        {node:'lam',chip:'invoke',tone:'ok',cap:'The backend Lambda is finally invoked',pay:{event:'proxy event with claims.sub = user-4471 in requestContext.authorizer'},ins:'Your backend function trusts these claims without re-verifying the JWT itself — the authorizer already did that.'},
+      ], result:{cls:'ok',text:'✅ Allowed: the authorizer verified the token and your backend Lambda only runs after that check passes.'} },
+
+    deny:{ req:'② expired token → denied', intro:'The identical request, but the JWT expired five minutes ago. The authorizer catches the verification failure and returns an explicit Deny — the backend Lambda is never invoked at all.',
+      nodes:[
+        {id:'req',icon:'📨',nl:'GET /orders with an expired Bearer token',ns:'HTTPS request arrives',who:'CLIENT'},
+        {id:'gw',icon:'🚪',nl:'API Gateway invokes the authorizer',ns:'same as any other request',who:'GATEWAY'},
+        {id:'auth',icon:'🔐',nl:'authorizer attempts to verify the JWT',ns:'signature check throws',who:'AUTHORIZER'},
+        {id:'pol',icon:'🚫',nl:'returns an explicit Deny policy',ns:'not an exception, a decision',who:'POLICY'},
+        {id:'resp',icon:'📤',nl:'API Gateway returns 403 to the client',ns:'backend Lambda never invoked',who:'GATEWAY'},
+      ],
+      steps:[
+        {node:'req',chip:'request',cap:'The same request shape, but the token expired 5 minutes ago',pay:{method:'GET',path:'/orders',header:'Authorization: Bearer eyJhbGciOi...(expired)'},ins:'From the client\'s perspective, this looks identical to the allowed request — the difference is entirely inside the token\'s exp claim.'},
+        {node:'gw',chip:'route',tone:'ok',cap:'API Gateway routes to the same authorizer as always',pay:{matchedResource:'/orders',authorizerConfigured:'lambda-jwt-authorizer'},ins:'There is no separate "expired token" code path at the gateway level — every request goes through the same authorizer.'},
+        {node:'auth',chip:'verify',tone:'bad',cap:'JWT verification throws — the token\'s exp claim is in the past',pay:{exception:'io.jsonwebtoken.ExpiredJwtException',expiredAt:'2026-08-20T03:14:00Z'},ins:'This is caught inside the authorizer\'s own code (see the Code Walkthrough below) and converted into an explicit Deny rather than an unhandled error.'},
+        {node:'pol',chip:'deny',tone:'bad',cap:'An explicit Deny policy is returned',pay:{effect:'Deny',resource:'arn:aws:execute-api:...:GET/orders',principalId:'anonymous'},ins:'A well-formed Deny is a normal outcome API Gateway understands — this is different from the authorizer itself crashing, which would produce a 500.'},
+        {node:'resp',chip:'403',tone:'bad',cap:'The client receives a 403 without the backend ever running',pay:{statusCode:403,body:'{"message":"Forbidden"}',backendInvoked:false},ins:'Your backend Lambda\'s billed invocations, logs, and metrics show nothing for this request — it never happened from the backend\'s point of view.'},
+      ], result:{cls:'bad',text:'❌ Denied: the expired token is caught at the authorizer — the backend Lambda is never invoked, billed, or even aware the request occurred.'} },
+
+    proxy:{ req:'③ Lambda proxy integration', intro:'A valid, already-authorized request reaches the integration step. With Lambda proxy integration, API Gateway does NOT reshape the request — it hands your function the entire raw HTTP event and expects a specific JSON shape back.',
+      nodes:[
+        {id:'allow',icon:'✅',nl:'request already authorized',ns:'(scenario ① already happened)',who:'POLICY'},
+        {id:'raw',icon:'📦',nl:'the FULL raw HTTP request is packaged',ns:'headers, query string, body — untouched',who:'GATEWAY'},
+        {id:'lam',icon:'⚡',nl:'Lambda receives one JSON event',ns:'must parse path/query/body itself',who:'LAMBDA'},
+        {id:'handle',icon:'🧩',nl:'your handler processes it',ns:'business logic runs here',who:'LAMBDA'},
+        {id:'shape',icon:'📤',nl:'handler returns the required shape',ns:'statusCode + headers + body',who:'LAMBDA'},
+        {id:'resp',icon:'📨',nl:'API Gateway forwards it verbatim',ns:'no further transformation',who:'GATEWAY'},
+      ],
+      steps:[
+        {node:'allow',chip:'authorized',cap:'This request already passed the authorizer (scenario ①)',pay:{note:'proxy integration happens AFTER authorization, not instead of it'},ins:'Proxy integration is about how the request reaches your code, not whether it\'s allowed to.'},
+        {node:'raw',chip:'package',tone:'ok',cap:'API Gateway packages the ENTIRE request as one JSON event',pay:{event:{httpMethod:'POST',path:'/orders',queryStringParameters:{status:'pending'},headers:'{...}',body:'{"item":"widget","qty":3}'}},ins:'Nothing is reshaped or filtered — every header, every query param, the raw body string, all arrive exactly as sent.'},
+        {node:'lam',chip:'receive',tone:'ok',cap:'Your Lambda receives this as its single input parameter',pay:{handlerSignature:'handleRequest(APIGatewayProxyRequestEvent event, Context ctx)'},ins:'This is why proxy integration is simpler to configure than mapping templates — but it pushes ALL parsing responsibility into your function code.'},
+        {node:'handle',chip:'process',tone:'ok',cap:'The handler parses the body and runs business logic',pay:{parsed:{item:'widget',qty:3},action:'create order for user-4471'},ins:'The claims from scenario ①\'s authorizer are available here too, via event.getRequestContext().getAuthorizer().'},
+        {node:'shape',chip:'respond',tone:'ok',cap:'The handler must return this exact shape, or API Gateway errors',pay:{required:['statusCode','headers','body (a STRING, not an object)']},ins:'A common bug: returning a raw Java object instead of a JSON-encoded string for body — proxy integration expects body to already be serialized.'},
+        {node:'resp',chip:'forward',tone:'ok',cap:'API Gateway forwards the response to the client unchanged',pay:{statusCode:201,body:'{"orderId":"ord_9931","status":"created"}'},ins:'No mapping template runs on the way out either — proxy integration is symmetric: raw in, raw out.'},
+      ], result:{cls:'ok',text:'✅ Proxy: the whole request in, the whole response out — simple wiring, but all parsing lives in your function.'} },
+
+    throttle:{ req:'④ burst hits the throttle limit', intro:'A single API key sends far more requests than its usage plan allows in a short window. API Gateway enforces the limit itself and returns 429 — the backend Lambda is never invoked for the throttled requests.',
+      nodes:[
+        {id:'burst',icon:'💥',nl:'50 requests in 1 second from one API key',ns:'usage plan allows 10 req/sec',who:'CLIENT'},
+        {id:'check',icon:'📊',nl:'API Gateway checks the usage plan',ns:'per-key rate limit + burst allowance',who:'THROTTLE'},
+        {id:'pass',icon:'✅',nl:'first ~10 requests pass through',ns:'within the steady-state limit',who:'GATEWAY'},
+        {id:'block',icon:'🛑',nl:'the rest are throttled',ns:'rejected before reaching Lambda',who:'THROTTLE'},
+        {id:'resp429',icon:'📤',nl:'429 Too Many Requests returned',ns:'to the throttled requests only',who:'GATEWAY'},
+      ],
+      steps:[
+        {node:'burst',chip:'burst',cap:'A single API key fires a burst far beyond its plan',pay:{requestsSent:50,windowSeconds:1,usagePlanLimit:'10 req/sec, burst 20'},ins:'This could be a legitimate traffic spike or a misbehaving client — API Gateway doesn\'t distinguish, it just enforces the configured limit.'},
+        {node:'check',chip:'evaluate',tone:'ok',cap:'API Gateway evaluates each request against the token-bucket limit',pay:{steadyStateRate:10,burstCapacity:20,algorithm:'token bucket per API key'},ins:'The burst capacity absorbs short spikes above the steady-state rate — this is why the first ~20 requests can pass even though the steady rate is only 10/sec.'},
+        {node:'pass',chip:'allow',tone:'ok',cap:'Requests within the bucket\'s capacity are allowed through',pay:{allowedSoFar:20,remainingBucket:0},ins:'These requests proceed exactly like scenario ① — authorizer, proxy integration, backend invocation, all unaffected.'},
+        {node:'block',chip:'throttle',tone:'bad',cap:'Once the bucket is empty, further requests are rejected',pay:{throttled:30,reason:'token bucket exhausted for this API key'},ins:'This is enforced entirely at the gateway — your backend Lambda has no idea these 30 requests were ever sent.'},
+        {node:'resp429',chip:'429',tone:'bad',cap:'The throttled requests receive 429 Too Many Requests',pay:{statusCode:429,body:'{"message":"Too Many Requests"}',backendInvokedForThese:false},ins:'The client is expected to back off and retry — this is a deliberate protection for both your backend and every OTHER API key sharing the account-level limit.'},
+      ], result:{cls:'warn',text:'⚠️ Throttled: 20 requests get through, 30 are rejected at the gateway — your Lambda\'s bill and logs only reflect the 20 that passed.'} },
+  };
+
+  let scen='allow', running=false, timers=[];
+  function clearT(){timers.forEach(clearTimeout);timers=[];}
+  function nodeEl(id){return document.querySelector('#'+P+'Diagram .rt-node[data-node="'+id+'"]');}
+  function nodeCenter(id){const n=nodeEl(id);return n?n.offsetTop+n.offsetHeight/2:0;}
+  function renderNodes(k){
+    let h='<div class="rt-rail"></div><div class="rt-chip" id="'+P+'Chip">→</div>';
+    SCEN[k].nodes.forEach(n=>{ h+='<div class="rt-node" data-node="'+n.id+'"><span class="ic">'+n.icon+'</span><div style="flex:1;min-width:0"><div class="nl">'+n.nl+'</div><div class="ns">'+n.ns+'</div></div><span class="who who-'+n.who+'">'+n.who+'</span></div>'; });
+    $(P+'Diagram').innerHTML=h;
+  }
+  function reset(){
+    renderNodes(scen); const s=SCEN[scen];
+    const chip=$(P+'Chip'); chip.style.transition='none'; chip.style.top=nodeCenter(s.steps[0].node)+'px'; chip.style.opacity='0'; chip.classList.remove('ok','bad'); void chip.offsetWidth; chip.style.transition='';
+    $(P+'Res').className='rt-result';
+    $(P+'Dir').textContent='▶ READY'; $(P+'Dir').className='rt-dir';
+    $(P+'Cap').textContent=s.intro; $(P+'Pay').textContent='';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>— details appear here per step —';
+    $(P+'Pill').textContent=s.req;
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false;
+  }
+  function applyStep(steps,i){
+    const st=steps[i];
+    document.querySelectorAll('#'+P+'Diagram .rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
+    const n=nodeEl(st.node); n.classList.remove('vchk','vskip'); n.classList.add(st.tone==='bad'?'vskip':'vchk'); n.classList.add('cur'); if(st.tone==='bad')n.classList.add('curbad'); void n.offsetWidth; n.classList.add('rtpulse');
+    const chip=$(P+'Chip'); chip.textContent=st.chip||'→'; chip.classList.remove('ok','bad'); if(st.tone)chip.classList.add(st.tone==='bad'?'bad':'ok'); chip.style.opacity='1'; chip.style.top=nodeCenter(st.node)+'px';
+    $(P+'Dir').textContent=st.dir||('STEP '+(i+1)+' / '+steps.length); $(P+'Dir').className='rt-dir'+(st.tone==='bad'?' bad':'');
+    $(P+'Cap').textContent=st.cap; $(P+'Pay').textContent=st.pay?JSON.stringify(st.pay,null,2):'';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>'+st.ins;
+  }
+  function run(){
+    if(running)return; running=true; clearT(); reset();
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=true); $(P+'Run').disabled=true;
+    $(P+'Pill').textContent='running…';
+    const s=SCEN[scen]; let i=0;
+    (function tick(){
+      if(i>=s.steps.length){ const r=$(P+'Res'); r.className='rt-result show '+(s.result.cls||'ok'); r.textContent=s.result.text; running=false; document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false; $(P+'Pill').textContent='done'; return; }
+      applyStep(s.steps,i); i++; timers.push(setTimeout(tick,2000));
+    })();
+  }
+  document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.onclick=()=>{ if(running)return; scen=b.dataset.s; document.querySelectorAll('#'+P+'Seg button').forEach(x=>x.classList.toggle('on',x===b)); reset(); });
+  $(P+'Run').onclick=run;
+  reset();
+})();
+</script>
+</body>
+</html>

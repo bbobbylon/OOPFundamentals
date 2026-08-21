@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Replication &amp; High Availability — DevHub</title>
+<style>
+.who-APP{background:rgba(204,102,0,.22);color:#fcd34d}
+.who-PRIM{background:rgba(74,222,128,.18);color:#86efac}
+.who-WAL{background:rgba(84,195,241,.18);color:#7dd3fc}
+.who-REPL{background:rgba(167,139,250,.18);color:#c4b5fd}
+.who-ROUTE{background:rgba(248,113,113,.18);color:#fca5a5}
+</style>
+<link rel="stylesheet" href="devhub.css"/>
+</head>
+<body class="track-sql">
+<div class="page">
+<a class="back" href="javascript:history.back()">← Back</a>
+<h1>Replication &amp; High Availability</h1>
+<p class="subtitle">WAL streaming, sync vs async replicas, read-routing lag, and what actually happens when the primary dies.</p>
+
+  <!-- ── INTRO ── -->
+  <div class="intro">
+    <div class="intro-head"><span class="ico">🔁</span> What does "replicated" actually guarantee — and what does it quietly not?</div>
+    <p class="intro-lead">
+      PostgreSQL replication works by streaming the <strong>WAL (Write-Ahead Log)</strong> — the same durability log used for crash recovery — from a primary to one or more standby servers, which continuously replay it. <strong>Asynchronous replication</strong> (the default) lets the primary commit and acknowledge the client the instant its own WAL write is durable, without waiting for any replica — fast, but a replica can lag behind by anywhere from milliseconds to seconds, and a read routed to a lagging replica can return data that's already stale on the primary. <strong>Synchronous replication</strong> flips that trade: the primary blocks the COMMIT until at least one named replica confirms it has received (and optionally flushed) the WAL — zero data loss if the primary dies a moment later, at the cost of every write now paying a network round-trip to the replica. <strong>Failover</strong> — promoting a replica to primary when the original dies — is where the two modes diverge hardest: an async replica can be promoted while still missing the last few WAL bytes the old primary generated (silent data loss), while a synchronous replica is guaranteed current as of the last acknowledged commit.
+    </p>
+    <ul class="intro-gist">
+      <li><b>WAL streaming</b> — the crash-recovery log doubles as the replication stream; a replica is "just" a server that never stops replaying WAL.</li>
+      <li><b>Async (default)</b> — primary doesn't wait for replicas; fast writes, but replicas (and reads routed to them) can be stale.</li>
+      <li><b>Sync</b> — primary blocks COMMIT until a named replica acks; zero data loss on failover, higher write latency.</li>
+      <li><b>Failover risk is asymmetric</b> — promoting an async replica can lose the last few committed transactions; a sync replica can't.</li>
+    </ul>
+    <div class="intro-cards">
+      <div class="intro-mini">
+        <h4>Setting up streaming replication</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code># primary: postgresql.conf &#10;wal_level = replica &#10;max_wal_senders = 10 &#10;wal_keep_size = 1GB &#10;&#10;# primary: pg_hba.conf — allow the replica to connect &#10;host replication repl_user 10.0.2.0/24 scram-sha-256 &#10;&#10;# on the replica, after a base backup: &#10;# postgresql.conf &#10;hot_standby = on &#10;primary_conninfo = 'host=10.0.1.5 port=5432 user=repl_user' &#10;&#10;-- check replication status on the primary: &#10;SELECT client_addr, state, sent_lsn, replay_lsn, &#10;       write_lag, flush_lag, replay_lag &#10;FROM pg_stat_replication;</code></p>
+      </div>
+      <div class="intro-mini">
+        <h4>Synchronous replication</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code># primary: postgresql.conf &#10;synchronous_standby_names = 'replica-1' &#10;synchronous_commit = on &#10;&#10;-- primary now blocks COMMIT until replica-1 &#10;-- confirms it received (and by default flushed) &#10;-- the WAL for that transaction &#10;&#10;-- per-transaction override (Spring can set this &#10;-- via a native query for critical writes only): &#10;SET LOCAL synchronous_commit = remote_apply; &#10;&#10;-- levels, cheapest to strictest: &#10;-- off < local < remote_write < on < remote_apply</code></p>
+      </div>
+      <div class="intro-mini">
+        <h4>Read-replica routing in Spring Boot</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code>// two DataSources: primary (writes) + replica (reads) &#10;@Transactional(readOnly = true) &#10;public List&lt;Order&gt; listOrders() { &#10;    // routed to the replica DataSource &#10;    return orderRepo.findAll(); &#10;} &#10;&#10;@Transactional &#10;public Order placeOrder(Order o) { &#10;    // routed to the primary DataSource &#10;    return orderRepo.save(o); &#10;} &#10;&#10;// AbstractRoutingDataSource picks primary vs replica &#10;// based on TransactionSynchronizationManager &#10;// .isCurrentTransactionReadOnly()</code></p>
+      </div>
+    </div>
+    <div class="intro-ciam"><span class="tag">Replication in a CIAM stack:</span> route the admin user-search UI's reads to a replica (it's read-heavy and tolerates a second of staleness), but route "read your own write" paths — a user updating their own profile and immediately re-fetching it — straight to the primary, or the app will render its own stale write back to the user. Refresh-token validation and login-event writes should never go to a replica at all. If you run synchronous replication for <code>refresh_tokens</code>, promoting a replica during an outage guarantees you don't silently resurrect an already-rotated token.</div>
+  </div>
+
+<div class="rt-ctlbar">
+  <span class="lbl">scenario:</span>
+  <span class="userseg" id="rpScen">
+    <button data-s="async" class="on">async write</button>
+    <button data-s="stale">stale replica read</button>
+    <button data-s="sync">synchronous commit</button>
+    <button data-s="failover">failover</button>
+  </span>
+  <button class="rt-run" id="rpRun">▶ Play</button>
+  <span class="rt-pill" id="rpPill">write → WAL stream → replica applies</span>
+</div>
+<div class="rt-stage">
+  <div class="rt-diagram" id="rpDiagram"></div>
+  <div class="rt-inspect">
+    <div class="rt-dir" id="rpDir">▶ READY</div>
+    <div class="rt-cap" id="rpCap">Choose a scenario and press ▶</div>
+    <pre class="rt-payload" id="rpPay"></pre>
+    <pre class="rt-headers" id="rpHdr"></pre>
+    <div class="rt-result" id="rpRes"></div>
+  </div>
+</div>
+<div class="rt-legend">
+  <span>App → Primary → WAL → Replica → Router</span>
+  <span><span style="color:#fca5a5">red = stale / lost data risk</span> · <span style="color:#86efac">green = confirmed durable</span></span>
+</div>
+
+<section>
+<h2>1 — Async vs Sync, at a Glance</h2>
+<div class="card">
+<table>
+<tr><th>Mode</th><th>Primary waits for replica?</th><th>Write latency</th><th>Data loss on failover</th></tr>
+<tr><td>Async (default)</td><td>No</td><td>Lowest</td><td>Possible — last few committed txns may not have shipped</td></tr>
+<tr><td>Sync (<code>remote_write</code>)</td><td>Until replica has the WAL bytes</td><td>+1 network round trip</td><td>Very unlikely (replica has bytes, may not have flushed)</td></tr>
+<tr><td>Sync (<code>remote_apply</code>)</td><td>Until replica has replayed it</td><td>Highest</td><td>None — replica is queryable-current</td></tr>
+</table>
+</div>
+</section>
+
+<section>
+<h2>2 — Read-Replica Lag Is Not a Bug, It's the Trade</h2>
+<div class="card card-red">
+<p>A replica isn't "eventually consistent" by accident — it's the whole point of async replication. <code>replay_lag</code> in <code>pg_stat_replication</code> tells you how far behind, in real time, the replica currently is.</p>
+<pre><code><span class="cm">-- on the primary: how far behind is each replica right now?</span>
+<span class="kw">SELECT</span> client_addr, replay_lag, sync_state
+<span class="kw">FROM</span> pg_stat_replication;
+
+<span class="cm">--  client_addr | replay_lag | sync_state</span>
+<span class="cm">--  10.0.2.11   | 00:00:00.04 | async     -- 40ms behind, normal</span>
+<span class="cm">--  10.0.2.12   | 00:00:04.80 | async     -- 4.8s behind — investigate!</span>
+
+<span class="cm">-- app-side guard: don't trust a replica that's fallen too far behind</span>
+<span class="kw">SELECT</span> extract(epoch <span class="kw">FROM</span> now() - pg_last_xact_replay_timestamp());</code></pre>
+</div>
+</section>
+
+<section>
+<h2>3 — Failover: Promoting a Standby</h2>
+<div class="card card-purple">
+<pre><code><span class="cm">-- manual promotion (or automated via Patroni / pg_auto_failover)</span>
+$ pg_ctl promote -D /var/lib/postgresql/data
+
+<span class="cm">-- what promotion actually does:</span>
+<span class="cm">-- 1. replica stops replaying WAL from the old primary</span>
+<span class="cm">-- 2. replica starts accepting writes as the new primary</span>
+<span class="cm">-- 3. any WAL the old primary generated but never shipped is GONE</span>
+<span class="cm">--    (unless synchronous_commit guaranteed it was already there)</span></code></pre>
+<p class="note">This is why "we have a replica" is not the same claim as "we have zero-data-loss failover" — the second claim depends entirely on which <code>synchronous_commit</code> level was in effect for the transactions that mattered.</p>
+</div>
+</section>
+
+<section>
+<h2>4 — Spring Boot: Routing Reads to a Replica</h2>
+<div class="card card-green">
+<pre><code><span class="dec">@Configuration</span>
+<span class="kw">public class</span> RoutingDataSourceConfig {
+  <span class="dec">@Bean</span>
+  <span class="kw">public</span> DataSource routingDataSource(
+      DataSource primaryDs, DataSource replicaDs) {
+    <span class="kw">var</span> routing = <span class="kw">new</span> AbstractRoutingDataSource() {
+      <span class="dec">@Override</span>
+      <span class="kw">protected</span> Object determineCurrentLookupKey() {
+        <span class="kw">boolean</span> readOnly = TransactionSynchronizationManager
+            .isCurrentTransactionReadOnly();
+        <span class="kw">return</span> readOnly ? <span class="str">"replica"</span> : <span class="str">"primary"</span>;
+      }
+    };
+    routing.setTargetDataSources(Map.of(
+        <span class="str">"primary"</span>, primaryDs, <span class="str">"replica"</span>, replicaDs));
+    routing.setDefaultTargetDataSource(primaryDs);
+    <span class="kw">return</span> routing;
+  }
+}</code></pre>
+</div>
+</section>
+</div>
+
+<!-- ── Code Walkthrough: Replication config ── -->
+<div id="cw-sqlrepl"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-sqlrepl',{
+  id:'cw-sqlrepl',
+  title:'postgresql.conf — the settings that turn a lone server into a replicated pair',
+  subtitle:'Every line here changes a specific guarantee: how much WAL history is retained, how the primary treats a slow or disconnected replica, and whether a COMMIT is allowed to return before a replica has the data. Reading them in order tells the whole replication story.',
+  steps:[
+    {lines:[1,2],note:'wal_level=replica is the minimum level that includes enough information in the WAL for a standby to replay it (the default, "replica", already supports this — "minimal" does not and breaks replication entirely). max_wal_senders caps how many concurrent replication connections (streaming replicas, pg_basebackup, logical replication slots) the primary will serve at once — each one holds a connection slot and some shared memory.',vars:{'wal_level = replica':'the floor for standbys to exist at all; minimal is not enough','max_wal_senders = 10':'hard cap on concurrent replicas + backup connections; too low and a new replica cannot even connect'},tone:'start'},
+    {lines:[3],note:'wal_keep_size reserves this much WAL on the primary regardless of whether any replica has consumed it yet — a safety margin so a replica that hiccups for a minute (network blip, GC pause) doesn\'t fall so far behind that the primary has already recycled the WAL it needs, which would force a full re-sync from scratch.',vars:{'wal_keep_size = 1GB':'a buffer against a replica falling out of sync entirely, not a performance knob'},tone:'ok'},
+    {lines:[5,6],note:'pg_hba.conf is the primary\'s access-control list — this line is what actually lets a replica\'s IP range authenticate as the replication role. Forgetting this line is the single most common reason "streaming replication" silently never starts: the replica tries to connect and is rejected before WAL ever streams.',vars:{'host replication repl_user 10.0.2.0/24':'without this exact grant, the replica cannot open a replication connection at all — no error on the primary, just a retrying replica'},tone:'ok'},
+    {lines:[8,9],note:'hot_standby=on is what makes a replica queryable at all — without it, a standby only replays WAL and cannot serve SELECTs, which defeats the entire point of using one for read scaling. primary_conninfo is how the replica finds its way back to the primary if the connection drops and needs to reconnect.',vars:{'hot_standby = on':'the difference between "a replica" and "a queryable read-replica"','primary_conninfo':'the replica\'s own reconnection instructions, used on every restart'},tone:'ok'},
+    {lines:[11,12],note:'This is the line that converts the whole setup from async to synchronous for one named replica. Once set, every COMMIT on the primary blocks until replica-1 specifically has acknowledged the WAL — not just "some replica," a named one, which matters when you have several replicas at different trust levels.',vars:{'synchronous_standby_names = \'replica-1\'':'names exactly which replica the primary will wait on; other replicas stay fully async','synchronous_commit = on':'the primary now trades write latency for a durability guarantee tied to replica-1 specifically'},tone:'bad',callout:'Every one of these settings is a trade the application layer inherits silently: wal_keep_size trades disk space for resync safety, synchronous_standby_names trades write latency for failover safety, and hot_standby trades nothing — it just turns on the read-scaling this whole page exists to explain. Get the last one right (route reads deliberately, per §4) and the first two are the only real decisions left to make.'}
+  ],
+  code:[
+    'wal_level = replica',
+    'max_wal_senders = 10',
+    'wal_keep_size = 1GB',
+    '',
+    '# pg_hba.conf on the primary',
+    'host replication repl_user 10.0.2.0/24 scram-sha-256',
+    '',
+    '# on the replica',
+    'hot_standby = on',
+    "primary_conninfo = 'host=10.0.1.5 port=5432 user=repl_user'",
+    '',
+    "synchronous_standby_names = 'replica-1'",
+    'synchronous_commit = on'
+  ]
+});
+</script>
+
+<script>
+(function(){
+const pfx='rp';
+const NODES=['APP','PRIM','WAL','REPL','ROUTE'];
+function posOf(n){return 10+NODES.indexOf(n)*18;}
+const SCEN={
+  async:{
+    pill:'INSERT → primary commits (no wait) → WAL streams → replica applies',
+    steps:[
+      {node:'APP',hdr:'App sends INSERT INTO orders(...) to the primary',pay:{sql:'INSERT INTO orders(customer_id, total) VALUES ($1,$2)',target:'primary (10.0.1.5:5432)'},ins:'Writes always go to the primary — replicas never accept writes directly',tone:null},
+      {node:'PRIM',hdr:'Primary writes WAL locally and commits — does NOT wait for any replica',pay:{synchronous_commit:'on (default meaning)',synchronous_standby_names:'(empty — fully async)',commitLatency:'1.2ms'},ins:'Async is the PostgreSQL default: the client gets COMMIT success the instant the primary\'s own WAL write is durable',tone:null},
+      {node:'WAL',hdr:'WAL record streams to the replica in the background',pay:{lsn:'0/1A2B3C4D',bytesStreamed:412,replicaConnection:'walsender process, one per replica'},ins:'Streaming is continuous and asynchronous to the client — it happens after the COMMIT has already returned',tone:null},
+      {node:'REPL',hdr:'Replica replays the WAL and becomes consistent',pay:{replay_lag:'48ms',state:'streaming',dataVisible:'now identical to primary as of this transaction'},ins:'48ms is a typical same-region lag — the replica is briefly behind, then catches up continuously',tone:'ok'}
+    ],
+    result:'✓ Async replication: primary never waited — replica caught up ~48ms later'
+  },
+  stale:{
+    pill:'write commits → read immediately routed to a lagging replica → stale result',
+    steps:[
+      {node:'APP',hdr:'User updates their profile — write hits the primary and commits',pay:{sql:'UPDATE users SET display_name=$1 WHERE id=$2',committed:true,primaryValue:'Bobby O.'},ins:'The write itself succeeds correctly — the problem is about to happen on the very next read',tone:null},
+      {node:'ROUTE',hdr:'The page immediately re-fetches the profile — routed to a replica for read scaling',pay:{routingRule:'@Transactional(readOnly=true) → replica DataSource',target:'replica-2 (10.0.2.12)'},ins:'This routing decision is reasonable in general — it just collides badly with "read your own write"',tone:null},
+      {node:'REPL',hdr:'That replica has not applied the update yet — replay_lag: 340ms',pay:{replay_lag:'340ms',replicaValue:'Bobby (old value)',reason:'ordinary async replication lag, nothing has failed'},ins:'Nothing is broken here — this is exactly what "eventually consistent replica" means in practice',tone:'bad'},
+      {node:'APP',hdr:'The UI renders the OLD name back to the user who just changed it',pay:{userSees:'Bobby',userExpected:'Bobby O.',userReaction:'"did my save not work?!"'},ins:'The write was never lost — the read just landed on a replica that hadn\'t caught up yet',tone:'bad'}
+    ],
+    result:'✗ Stale read: fix by routing read-your-own-write paths to the primary, not a replica'
+  },
+  sync:{
+    pill:'synchronous_commit=on: primary blocks COMMIT until replica-1 confirms',
+    steps:[
+      {node:'APP',hdr:'App writes a refresh-token rotation — a case worth the extra latency',pay:{sql:'DELETE old token; INSERT new token;',config:'synchronous_standby_names = \'replica-1\''},ins:'This config applies to every transaction on the primary, not just this one — choose it per-database, or override with SET LOCAL for specific critical paths',tone:null},
+      {node:'PRIM',hdr:'Primary writes its own WAL — but does NOT return COMMIT success yet',pay:{localWalWritten:true,waitingOn:'replica-1 acknowledgment',clientBlocked:true},ins:'This is the defining difference from async: the client is left waiting past the point where the primary itself is done',tone:null},
+      {node:'WAL',hdr:'WAL for this transaction is sent to replica-1 specifically',pay:{target:'replica-1 (the named synchronous standby)',otherReplicas:'still fully async, not waited on'},ins:'Only the named replica(s) in synchronous_standby_names participate in this wait — others stream async as usual',tone:null},
+      {node:'REPL',hdr:'replica-1 confirms it has received (and flushed) the WAL',pay:{ackLatency:'6.4ms (same-AZ network round trip)',guarantee:'this transaction now exists durably on 2 servers'},ins:'The 6.4ms here is pure added latency versus the async scenario — the cost of the durability guarantee',tone:null},
+      {node:'PRIM',hdr:'Only now does the primary return COMMIT success to the app',pay:{totalCommitLatency:'7.9ms (vs 1.2ms async)',guarantee:'if the primary dies right now, replica-1 already has this transaction'},ins:'This is the trade the whole scenario is about: ~6x the write latency, in exchange for failover with zero loss on this specific write',tone:'ok'}
+    ],
+    result:'✓ Synchronous commit: 7.9ms instead of 1.2ms — but replica-1 is guaranteed current'
+  },
+  failover:{
+    pill:'primary dies → standby promoted → check what WAL actually made it across',
+    steps:[
+      {node:'PRIM',hdr:'The primary crashes — health checks stop getting a heartbeat',pay:{lastHeartbeat:'3.2s ago',mode:'this transaction stream was async (no synchronous_standby_names set)'},ins:'This scenario deliberately uses the async config from scenario ① — watch what that costs at failover time',tone:'bad'},
+      {node:'ROUTE',hdr:'A failover manager (Patroni / pg_auto_failover) detects the outage and elects a standby',pay:{detectionTime:'~10s (configurable failure-detection timeout)',candidate:'replica-1 (most caught-up standby)'},ins:'Automatic failover tooling exists precisely because manual promotion during an incident is slow and error-prone',tone:null},
+      {node:'REPL',hdr:'replica-1 is promoted: pg_ctl promote — it stops following and starts accepting writes',pay:{promoted:true,newRole:'primary',lastReplayedLsn:'0/1A2B3A00'},ins:'Promotion is a one-way door — the old primary, if it comes back, is no longer authoritative and must be re-synced as a new replica',tone:null},
+      {node:'WAL',hdr:'The transactions the old primary committed after 0/1A2B3A00 never made it across',pay:{oldPrimaryLastCommittedLsn:'0/1A2B3C4D',replicaHadUpTo:'0/1A2B3A00',gap:'a handful of committed transactions, now unrecoverable'},ins:'This is exactly the risk called out in the intro: async replication cannot guarantee the promoted replica has everything the old primary acknowledged to clients',tone:'bad'},
+      {node:'ROUTE',hdr:'Application connection strings/DNS repoint to the new primary',pay:{action:'update primary endpoint (or virtual IP / DNS failover)',appImpact:'brief write unavailability during detection + promotion, small data-loss window from the gap above'},ins:'The fix for the data-loss window above is scenario ③\'s synchronous_commit — applied to whichever tables can\'t tolerate this gap',tone:'ok'}
+    ],
+    result:'✗ Failover completed, but a few async-committed transactions were lost in the gap'
+  }
+};
+let cur='async',T=[];
+const $=id=>document.getElementById(pfx+id);
+function renderNodes(){$('Diagram').innerHTML=NODES.map(n=>`<div class="rt-node who-${n}" id="${pfx}N${n}" style="left:${posOf(n)}%">${n}</div>`).join('');}
+function chip(){let c=document.getElementById(pfx+'chip');if(!c){c=document.createElement('div');c.id=pfx+'chip';c.className='rt-chip';$('Diagram').appendChild(c);}return c;}
+function clearT(){T.forEach(clearTimeout);T=[];}
+function reset(){clearT();renderNodes();chip().style.left=posOf(NODES[0])+'%';chip().className='rt-chip';$('Dir').textContent='▶ READY';$('Cap').textContent='Choose a scenario and press ▶';$('Pay').textContent='';$('Hdr').textContent='';$('Res').textContent='';$('Run').disabled=false;document.querySelectorAll('#'+pfx+'Diagram .rt-node').forEach(n=>n.className=n.className.replace(/ ?(vchk|vskip|curbad|rt-cur)/g,''));}
+function applyStep(s){document.querySelectorAll('#'+pfx+'Diagram .rt-node').forEach(n=>n.classList.remove('rt-cur','vchk','vskip','curbad'));const nd=document.getElementById(pfx+'N'+s.node);if(nd){nd.classList.add('rt-cur');if(s.tone==='ok')nd.classList.add('vchk');if(s.tone==='bad')nd.classList.add('vskip','curbad');chip().style.left=posOf(s.node)+'%';chip().className='rt-chip'+(s.tone==='ok'?' ok':s.tone==='bad'?' bad':'');}$('Dir').textContent=s.hdr;$('Cap').textContent=s.ins;$('Pay').textContent=JSON.stringify(s.pay,null,2);$('Hdr').textContent='';}
+function run(){const sc=SCEN[cur];reset();$('Run').disabled=true;$('Pill').textContent=sc.pill;document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.disabled=true);sc.steps.forEach((s,i)=>T.push(setTimeout(()=>{applyStep(s);if(i===sc.steps.length-1)T.push(setTimeout(()=>{$('Res').textContent=sc.result;$('Run').disabled=false;document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.disabled=false);},2000));},300+i*2000)));}
+document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.addEventListener('click',function(){document.querySelectorAll('#'+pfx+'Scen button').forEach(x=>x.classList.remove('on'));this.classList.add('on');cur=this.dataset.s;reset();$('Pill').textContent=SCEN[cur].pill;}));
+$('Run').addEventListener('click',run);renderNodes();chip();
+})();
+</script>
+</body>
+</html>

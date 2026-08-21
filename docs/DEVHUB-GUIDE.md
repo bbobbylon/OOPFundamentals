@@ -1,18 +1,19 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 443 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 453 pages.** Pick a *path* below and follow it.
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **443 browser visualizers** across **29 tracks** (grouped into
+DevHub is a learning hub: **453 browser visualizers** across **29 tracks** (grouped into
 categories in the sidebar — Languages & Concepts, Frontend, Backend & APIs, DevOps/Cloud & Data, Practice & Prep; several tracks also have a 🍳 **Common Recipes** section of practical how-tos — API→form, batch upload, password complexity), plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
 copy-paste **command-line runbook** (build/run, the auth round-trip via curl, and
 deployment troubleshooting), see [HELP.md](../HELP.md#command-line-runbook). For the
 **architecture, data flows, and diagrams** (C4 + a sequence diagram per use case), see
-[ARCHITECTURE.md](ARCHITECTURE.md).
+[ARCHITECTURE.md](ARCHITECTURE.md). For **what's planned but not built yet** — new pages,
+content gaps found by audits, polish passes — see [ROADMAP.md](ROADMAP.md).
 
 **Quick-start options** (all from the project root):
 

@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>AWS Load Balancing & Auto Scaling</title>
+  <style>
+    .who-CLIENT{background:#f87171;color:#2a0606}
+    .who-ALB{background:#ff9900;color:#3a2600}
+    .who-TG{background:#22d3ee;color:#062a30}
+    .who-EC2{background:#4ade80;color:#04230f}
+    .who-HEALTH{background:#a78bfa;color:#1a1030}
+    .who-ASG{background:#34d399;color:#04231a}
+    .who-CW{background:#ffd43b;color:#3a2c00}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
+    .code-block{background:#0b1426;border-left:3px solid var(--accent);border-radius:0 6px 6px 0;padding:12px 16px;font-family:ui-monospace,monospace;font-size:12.5px;line-height:1.6;overflow-x:auto;margin:10px 0;color:#e2e8f0}
+    .key-insight{background:rgba(255,153,0,0.08);border:1px solid rgba(255,153,0,0.32);border-radius:8px;padding:14px;margin:12px 0;font-size:13px}
+    .key-insight strong{color:#ffb84d}
+    code{background:#0b1426;padding:1px 5px;border-radius:3px;font-family:ui-monospace,monospace;font-size:12px;color:#ffd43b}
+    .cmp-table{width:100%;border-collapse:collapse;margin:12px 0;font-size:12.5px}
+    .cmp-table th,.cmp-table td{border:1px solid var(--border);padding:8px 10px;text-align:left;vertical-align:top}
+    .cmp-table th{background:var(--panel2);color:var(--accent2);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+    .cmp-table td b{color:#eef4fb}
+  </style>
+  <link rel="stylesheet" href="devhub.css" />
+</head>
+<body class="track-cloud">
+<div class="container">
+  <a class="back" href="app.html">&larr; Dev Hub</a>
+  <h1>AWS Load Balancing & Auto Scaling</h1>
+  <p class="sub">Two AWS services that only make sense as a pair: a <strong>load balancer</strong> decides which healthy instance gets each request, and an <strong>Auto Scaling Group</strong> decides how many instances exist in the first place — each one feeding the other a signal.</p>
+
+  <div class="intro">
+    <div class="intro-head"><span class="ico">⚖️</span> How do a load balancer and Auto Scaling actually cooperate?</div>
+    <p class="intro-lead">
+      An <strong>Application Load Balancer (ALB)</strong> operates at <strong>layer 7</strong> (HTTP/HTTPS) — it can route by path (<code>/api/*</code> to one target group, <code>/admin/*</code> to another), by hostname, and it terminates TLS. A <strong>Network Load Balancer (NLB)</strong> operates at <strong>layer 4</strong> (raw TCP/UDP) — it doesn't look inside the request at all, which makes it faster and able to handle millions of requests per second, but it can't do path-based routing; use it for non-HTTP protocols or when you need a static IP per AZ. Both route traffic to a <strong>target group</strong> — a named pool of registered targets (EC2 instances, IPs, or Lambda functions) that the load balancer continuously <strong>health-checks</strong> on a schedule (e.g. GET <code>/actuator/health</code> every 30s). A target that fails enough consecutive checks is marked <strong>unhealthy</strong> and the load balancer simply stops sending it traffic — no restart, no scaling event, just removal from rotation until it recovers. <strong>Auto Scaling Groups (ASGs)</strong> are the other half: they watch a metric (usually CPUUtilization via CloudWatch) against a <strong>scaling policy</strong> — target tracking ("keep average CPU near 50%"), step scaling (bigger jumps for bigger breaches), or scheduled (before a known traffic spike) — and launch or terminate instances from a <strong>launch template</strong> to match. The two systems are wired together by one detail worth internalizing: when an ASG launches a new instance, it doesn't send it traffic immediately — it waits for the ALB's target group to report the instance as <strong>healthy</strong> first. Scaling and load balancing are two independent control loops that only work together because health checks are the signal connecting them.
+    </p>
+    <ul class="intro-gist"><li><b>ALB vs NLB</b> — ALB routes on HTTP content (path/host, layer 7); NLB moves raw TCP/UDP (layer 4) at much higher throughput with no content awareness.</li><li><b>Target group + health check</b> — a named pool of targets; failed health checks silently remove a target from rotation, no restart or scaling triggered by that alone.</li><li><b>Scaling policies</b> — target tracking (hold a metric near a setpoint), step scaling (tiered response to breach size), scheduled (pre-provision for known spikes).</li><li><b>The handoff</b> — a newly launched instance only receives traffic once it passes the target group's own health check — launching and being "in service" are two different moments.</li></ul>
+    <div class="intro-cards">
+      <div class="intro-mini"><h4>ALB vs NLB, when to pick which</h4><p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7">Default to ALB for a Spring Boot REST API — path-based routing and TLS termination are usually worth more than NLB's raw throughput. Reach for NLB only for non-HTTP TCP services or when you need a fixed IP per AZ that some client can't work around.</p></div>
+      <div class="intro-mini"><h4>Health checks are silent</h4><p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7">An unhealthy target isn't restarted or replaced by the load balancer itself — it's just excluded from routing. Replacing it is the ASG's job, driven by a separate EC2-status or ELB-health check of its own.</p></div>
+      <div class="intro-mini"><h4>Scale-out is not instant</h4><p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7">Launch → boot → user-data script → app startup → pass health check is a real pipeline with real latency (often 1-3 minutes for a JVM app) — target tracking has to account for that lag or it will over-scale while waiting.</p></div>
+    </div>
+    <div class="intro-ciam"><span class="tag">CIAM / production shape:</span> a Spring Boot CIAM API sits in a target group behind an ALB, health-checked on <code>/actuator/health</code> (which should itself check the DB connection pool, not just "the JVM is up"). The ASG's target-tracking policy on CPU keeps capacity matched to OAuth/token-validation load; because JWT validation is CPU-bound (signature verification) rather than I/O-bound, CPU-based scaling tracks real load well here — a service that was mostly waiting on a slow downstream call would need a different metric (e.g. request count per target) instead.</div>
+  </div>
+
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="lbSeg">
+        <button data-s="route" class="on">① request routed to a healthy target</button>
+        <button data-s="unhealthy">② a target fails its health check</button>
+        <button data-s="scaleout">③ CPU breach triggers scale-out</button>
+        <button data-s="rejoin">④ new instance passes health check, rejoins</button>
+      </span>
+      <button class="rt-run" id="lbRun">▶ Play</button>
+      <span class="rt-pill" id="lbPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="lbDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="lbDir">▶ READY</span>
+        <div class="rt-cap" id="lbCap">Pick a scenario and press ▶ Play</div>
+        <div class="rt-payload" id="lbPay"></div>
+        <div class="rt-headers" id="lbHdr"></div>
+        <div class="rt-result" id="lbRes"></div>
+      </div>
+    </div>
+    <div class="who-row">
+      <span class="who-badge who-CLIENT">CLIENT — the incoming request</span>
+      <span class="who-badge who-ALB">ALB — the load balancer's routing decision</span>
+      <span class="who-badge who-TG">TG — the target group</span>
+      <span class="who-badge who-EC2">EC2 — an instance behind the target group</span>
+      <span class="who-badge who-HEALTH">HEALTH — a health-check result</span>
+      <span class="who-badge who-ASG">ASG — the Auto Scaling Group's decision</span>
+      <span class="who-badge who-CW">CW — a CloudWatch metric/alarm</span>
+    </div>
+  </div>
+
+  <section>
+    <h2>ALB vs NLB at a glance</h2>
+    <table class="cmp-table">
+      <tr><th>Layer</th><th>ALB (Application Load Balancer)</th><th>NLB (Network Load Balancer)</th></tr>
+      <tr><td><b>OSI layer</b></td><td>7 — HTTP/HTTPS</td><td>4 — TCP/UDP</td></tr>
+      <tr><td><b>Routing</b></td><td>Path, host, header, query-string rules to different target groups</td><td>None — forwards the connection as-is</td></tr>
+      <tr><td><b>TLS</b></td><td>Terminates TLS at the load balancer (offloads the cert from your app)</td><td>Can pass through or terminate; typically pass-through</td></tr>
+      <tr><td><b>Throughput</b></td><td>Millions of req/s, but content inspection adds latency</td><td>Extremely high throughput/low latency — no content inspection</td></tr>
+      <tr><td><b>Use for</b></td><td>REST APIs, web apps — almost always the default for Spring Boot</td><td>Non-HTTP TCP protocols, extreme throughput, static-IP requirements</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>A few things worth knowing</h2>
+    <ul class="intro-gist">
+      <li><b>Health check ≠ liveness check</b> — a well-designed <code>/actuator/health</code> endpoint should reflect whether the instance can actually serve traffic (DB reachable, downstream deps OK), not just "the process is running." A JVM that's up but can't reach its database should fail the check.</li>
+      <li><b>Deregistration delay</b> — when a target is removed (scale-in or manual), the ALB keeps draining in-flight requests to it for a configurable window (default 300s) before fully cutting it off, so scale-in doesn't drop active requests.</li>
+      <li><b>Scaling policies compose</b> — it's common to run a target-tracking policy for steady-state plus a scheduled policy to pre-scale before a known traffic pattern (e.g. a batch job that hits the API every morning at 6am).</li>
+    </ul>
+    <p>For the compute layer these instances actually run on, see <a href="aws-ec2-visualizer.html">the EC2 visualizer</a>; for how to choose between EC2, Lambda, ECS, and EKS in the first place, see <a href="aws-compute-decision-visualizer.html">the compute decision framework</a>.</p>
+  </section>
+</div>
+
+<!-- Code Walkthrough: a target group + ASG scaling policy, line by line -->
+<div id="cw-lb"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-lb',{
+  id:'cw-lb',
+  title:'A target group health check & scaling policy, line by line',
+  subtitle:'The two config blocks that make the ALB and the ASG cooperate: how a target is judged healthy, and what triggers the ASG to add capacity.',
+  steps:[
+    {lines:[1,2],note:'The health check path and protocol. AWS recommends a dedicated health endpoint rather than reusing a real application route — /actuator/health (Spring Boot Actuator) is exactly this: a purpose-built endpoint that can report DB/dependency status without doing real work.',vars:{'HealthCheckPath':'/actuator/health — reports real readiness, not just process liveness','HealthCheckProtocol':'HTTP — the ALB makes a real GET request, not just a TCP connect'},tone:'start'},
+    {lines:[3,4],note:'Interval and timeout control how fast a bad instance is detected versus how much noise a single slow response causes. A 30s interval with a 5s timeout means the ALB won\'t falsely flag an instance just because one response was briefly slow.',vars:{'HealthCheckIntervalSeconds':'30 — how often the check runs','HealthCheckTimeoutSeconds':'5 — how long the ALB waits before counting the request as failed'},tone:'ok'},
+    {lines:[5,6],note:'The threshold pair prevents flapping: a single failed check doesn\'t pull a target out (UnhealthyThresholdCount requires 2 consecutive failures), and a single success doesn\'t immediately restore it either (HealthyThresholdCount requires 2 consecutive passes) — this hysteresis keeps a target from bouncing in and out of rotation on transient blips.',vars:{'UnhealthyThresholdCount':'2 — consecutive failures before removal from rotation','HealthyThresholdCount':'2 — consecutive passes before rejoining rotation'},tone:'ok'},
+    {lines:[8,9],note:'The scaling policy type. TargetTrackingScaling is the simplest and most common: you name a metric and a target value, and AWS manages the actual scale-in/scale-out math (like a thermostat), instead of you writing explicit CloudWatch alarms and step adjustments yourself.',vars:{'PolicyType':'TargetTrackingScaling — declare a setpoint, AWS handles the math','PredefinedMetricType':'ASGAverageCPUUtilization — the built-in CPU-per-instance metric'},tone:'ok'},
+    {lines:[10,11],note:'The target value and cooldown. TargetValue: 50 means the ASG works to keep average CPU near 50% across all instances — add capacity above it, remove capacity below it. The cooldown period stops the ASG from launching a second wave of instances before the first wave has had time to actually start taking load and lower the average.',vars:{'TargetValue':'50 — the CPU% the ASG tries to hold steady','Cooldown (implicit)':'gives newly launched instances time to register and absorb load before scaling again'},tone:'bad',callout:'This cooldown is exactly why scale-out lags a real traffic spike by a minute or more — the ASG deliberately waits to see the effect of its last action before taking another one. For a JVM app with a multi-second cold-start, pairing target tracking with a lower CPU target (scale earlier, before you\'re already saturated) is usually safer than reacting to load already at the edge.'}
+  ],
+  code:[
+    'HealthCheckPath: /actuator/health',
+    'HealthCheckProtocol: HTTP',
+    'HealthCheckIntervalSeconds: 30',
+    'HealthCheckTimeoutSeconds: 5',
+    'UnhealthyThresholdCount: 2',
+    'HealthyThresholdCount: 2',
+    '',
+    'PolicyType: TargetTrackingScaling',
+    'PredefinedMetricType: ASGAverageCPUUtilization',
+    'TargetValue: 50',
+    '# ASG waits for new instances to pass health checks before counting them toward the average'
+  ]
+});
+</script>
+
+<script>
+(function(){
+  const P='lb', $=id=>document.getElementById(id);
+  const SCEN={
+    route:{ req:'① request routed to a healthy target', intro:'A client request arrives at the ALB. The ALB evaluates its listener rules (path/host), picks the matching target group, and forwards to one healthy target inside it — never an unhealthy one.',
+      nodes:[
+        {id:'req',icon:'🌐',nl:'GET /api/users/42',ns:'client request arrives',who:'CLIENT'},
+        {id:'rule',icon:'🧭',nl:'ALB evaluates listener rules',ns:'path /api/* → users-tg',who:'ALB'},
+        {id:'select',icon:'🎯',nl:'target group has 3 healthy targets',ns:'round-robin / least-outstanding-requests',who:'TG'},
+        {id:'forward',icon:'➡️',nl:'forwarded to EC2 instance #2',ns:'currently healthy',who:'EC2'},
+        {id:'resp',icon:'✅',nl:'response returned to client',ns:'200 OK',who:'CLIENT'},
+      ],
+      steps:[
+        {node:'req',chip:'request',cap:'A request for /api/users/42 hits the ALB',pay:{method:'GET',path:'/api/users/42',source:'client'},ins:'The ALB is the single entry point — clients never talk to EC2 instances directly.'},
+        {node:'rule',chip:'route',tone:'ok',cap:'The ALB matches a listener rule on path',pay:{rule:'path-pattern /api/* → forward to users-tg',ruleType:'layer-7 content routing'},ins:'This is the defining ALB capability an NLB doesn\'t have: routing decided by the CONTENT of the request, not just its destination port.'},
+        {node:'select',chip:'targets',tone:'ok',cap:'The target group has three registered, healthy targets',pay:{targetGroup:'users-tg',targets:[{id:'i-01',status:'healthy'},{id:'i-02',status:'healthy'},{id:'i-03',status:'healthy'}]},ins:'Only targets currently marked healthy are eligible for selection — this list is maintained continuously by the health-check loop, independent of this request.'},
+        {node:'forward',chip:'forward',tone:'ok',cap:'The ALB forwards to instance #2',pay:{selected:'i-02',algorithm:'round robin (or least outstanding requests)'},ins:'The client never knows or cares which instance handled it — that indirection is the entire point of a load balancer.'},
+        {node:'resp',chip:'response',tone:'ok',cap:'The response is returned through the ALB',pay:{status:200,body:'{ "id": 42, "email": "..." }'},ins:'The response path mirrors the request path — the ALB proxies both directions.'},
+      ], result:{cls:'ok',text:'✅ Routed: layer-7 rule match → healthy target selection → forward. This is the steady-state path for every normal request.'} },
+
+    unhealthy:{ req:'② a target fails its health check', intro:'Independent of any live request, the ALB polls each target\'s health-check endpoint on a schedule. When one fails enough consecutive checks, it is silently removed from rotation — no restart, no scaling event, just exclusion.',
+      nodes:[
+        {id:'poll',icon:'🩺',nl:'ALB polls /actuator/health every 30s',ns:'independent of real traffic',who:'ALB'},
+        {id:'fail1',icon:'⚠️',nl:'instance #2: check fails (DB unreachable)',ns:'1st consecutive failure',who:'HEALTH'},
+        {id:'fail2',icon:'⚠️',nl:'2nd consecutive failure',ns:'meets UnhealthyThresholdCount',who:'HEALTH'},
+        {id:'remove',icon:'🚫',nl:'instance #2 marked unhealthy',ns:'removed from target group rotation',who:'TG'},
+        {id:'unaffected',icon:'✅',nl:'new requests go to #1 and #3 only',ns:'no restart attempted by the ALB',who:'EC2'},
+      ],
+      steps:[
+        {node:'poll',chip:'poll',cap:'The ALB\'s health-check loop runs on its own schedule',pay:{path:'/actuator/health',intervalSeconds:30,independentOf:'real client traffic'},ins:'This loop runs continuously whether or not any client is making requests right now — it\'s a separate control loop from request routing.'},
+        {node:'fail1',chip:'fail 1/2',tone:'bad',cap:'Instance #2 fails a check — its DB connection pool is exhausted',pay:{target:'i-02',reason:'DB pool exhausted, /actuator/health returns 503',consecutiveFailures:1},ins:'A well-designed health endpoint catches exactly this: the JVM process is alive, but the instance genuinely cannot serve a real request correctly.'},
+        {node:'fail2',chip:'fail 2/2',tone:'bad',cap:'A second consecutive failure crosses the threshold',pay:{consecutiveFailures:2,threshold:2},ins:'The threshold (not a single failure) exists to avoid pulling a target for one transient blip — two in a row is a much stronger signal.'},
+        {node:'remove',chip:'remove',tone:'bad',cap:'Instance #2 is marked unhealthy and excluded',pay:{target:'i-02',status:'unhealthy',action:'removed from routing, NOT restarted or terminated'},ins:'This is the key distinction: the ALB\'s only action is to stop sending traffic. It has no power to restart or replace the instance — that\'s a different system\'s job.'},
+        {node:'unaffected',chip:'continue',tone:'ok',cap:'The other two targets keep serving normally',pay:{targetGroup:'users-tg',healthyTargets:['i-01','i-03'],requestsToI02:0},ins:'From the client\'s perspective nothing changed — capacity just quietly dropped by one instance, invisibly absorbed by the remaining healthy targets.'},
+      ], result:{cls:'warn',text:'⚠️ Unhealthy: two consecutive failed checks silently remove a target from rotation — the ALB never restarts anything, it only stops routing to it.'} },
+
+    scaleout:{ req:'③ CPU breach triggers scale-out', intro:'Sustained load pushes average CPU above the ASG\'s target-tracking setpoint. CloudWatch\'s metric crosses the threshold, the ASG\'s scaling policy fires, and a new instance is launched from the launch template — independent of the load balancer.',
+      nodes:[
+        {id:'load',icon:'📈',nl:'sustained traffic increase',ns:'JWT validation load rising',who:'CLIENT'},
+        {id:'metric',icon:'📊',nl:'CloudWatch: ASGAverageCPUUtilization = 68%',ns:'above TargetValue of 50',who:'CW'},
+        {id:'policy',icon:'🌡️',nl:'target-tracking policy evaluates',ns:'"keep CPU near 50%"',who:'ASG'},
+        {id:'launch',icon:'🚀',nl:'ASG launches instance #4',ns:'from the launch template',who:'ASG'},
+        {id:'boot',icon:'⏳',nl:'instance boots — not yet in target group',ns:'not receiving traffic yet',who:'EC2'},
+      ],
+      steps:[
+        {node:'load',chip:'load',cap:'Real traffic sustained above the current capacity\'s comfort zone',pay:{trigger:'token-validation-heavy request pattern',duration:'sustained, not a brief spike'},ins:'A brief spike wouldn\'t trigger this — target tracking reacts to a sustained metric trend, not a single noisy data point.'},
+        {node:'metric',chip:'metric',tone:'ok',cap:'CloudWatch reports average CPU crossing 68%',pay:{metric:'ASGAverageCPUUtilization',value:'68%',targetValue:'50%'},ins:'This is a CloudWatch metric the ASG is subscribed to — the scaling decision is driven entirely by this number, computed across all current instances.'},
+        {node:'policy',chip:'evaluate',tone:'ok',cap:'The target-tracking policy computes the needed capacity',pay:{policyType:'TargetTrackingScaling',currentCapacity:3,neededCapacity:'~4 (to bring average back near 50%)'},ins:'You never wrote the actual scale-out math — target tracking is AWS computing "how many instances would bring the average back to my target" and acting on it.'},
+        {node:'launch',chip:'launch',tone:'ok',cap:'A new instance is launched from the launch template',pay:{action:'RunInstances',template:'spring-boot-api-lt v3',newInstance:'i-04'},ins:'The launch template is the same config EC2 always needs (AMI, instance type, user data) — the ASG just automates calling it.'},
+        {node:'boot',chip:'booting',tone:'ok',cap:'Instance #4 is running but not yet serving traffic',pay:{state:'booting → user-data script → JVM startup',inTargetGroup:false,servingRequests:false},ins:'This is the gap that matters: "launched" and "helping with load" are different moments — the instance isn\'t contributing to the fix yet.'},
+      ], result:{cls:'ok',text:'✅ Scale-out: CloudWatch metric crosses the target-tracking setpoint → ASG launches a new instance — but it isn\'t serving traffic yet.'} },
+
+    rejoin:{ req:'④ new instance passes health check, rejoins', intro:'The newly launched instance finishes booting, the ALB starts polling its health endpoint, and only after enough consecutive passes does the target group mark it healthy and start routing real traffic to it.',
+      nodes:[
+        {id:'ready',icon:'✅',nl:'JVM finished starting, app is up',ns:'instance is technically ready',who:'EC2'},
+        {id:'register',icon:'📋',nl:'ASG registers instance #4 with the target group',ns:'not yet marked healthy',who:'TG'},
+        {id:'check1',icon:'🩺',nl:'first health check: 200 OK',ns:'1st consecutive pass',who:'HEALTH'},
+        {id:'check2',icon:'🩺',nl:'second health check: 200 OK',ns:'meets HealthyThresholdCount',who:'HEALTH'},
+        {id:'live',icon:'🟢',nl:'instance #4 now receives real traffic',ns:'capacity increase is now real',who:'CLIENT'},
+      ],
+      steps:[
+        {node:'ready',chip:'ready',cap:'The application has finished starting up',pay:{instance:'i-04',jvmStartupTime:'~40s',appState:'listening on 8080'},ins:'"The process is running" and "registered as healthy" are still two separate facts at this point — nothing routes to it yet.'},
+        {node:'register',chip:'register',tone:'ok',cap:'The ASG registers the instance with the target group',pay:{target:'i-04',targetGroup:'users-tg',initialStatus:'initial (not yet healthy)'},ins:'Registration just adds it to the pool the ALB is watching — it does not make it eligible for traffic by itself.'},
+        {node:'check1',chip:'check 1/2',tone:'ok',cap:'The first health check against the new instance passes',pay:{target:'i-04',check:'GET /actuator/health',result:200,consecutivePasses:1},ins:'One pass alone still isn\'t enough — the same hysteresis that protects against false removals also delays fully trusting a brand-new instance.'},
+        {node:'check2',chip:'check 2/2',tone:'ok',cap:'A second consecutive pass crosses HealthyThresholdCount',pay:{consecutivePasses:2,threshold:2},ins:'Only now does the target group\'s bookkeeping flip this instance\'s status to healthy.'},
+        {node:'live',chip:'in service',tone:'ok',cap:'The instance starts receiving real client traffic',pay:{target:'i-04',status:'healthy',servingRequests:true,totalHealthyTargets:4},ins:'This is the moment the scale-out from scenario ③ actually pays off — everything before this step was capacity that existed but couldn\'t help yet.'},
+      ], result:{cls:'ok',text:'✅ Rejoin: launch and boot were necessary but not sufficient — only two consecutive passing health checks make a target actually eligible for traffic.'} },
+  };
+
+  let scen='route', running=false, timers=[];
+  function clearT(){timers.forEach(clearTimeout);timers=[];}
+  function nodeEl(id){return document.querySelector('#'+P+'Diagram .rt-node[data-node="'+id+'"]');}
+  function nodeCenter(id){const n=nodeEl(id);return n?n.offsetTop+n.offsetHeight/2:0;}
+  function renderNodes(k){
+    let h='<div class="rt-rail"></div><div class="rt-chip" id="'+P+'Chip">→</div>';
+    SCEN[k].nodes.forEach(n=>{ h+='<div class="rt-node" data-node="'+n.id+'"><span class="ic">'+n.icon+'</span><div style="flex:1;min-width:0"><div class="nl">'+n.nl+'</div><div class="ns">'+n.ns+'</div></div><span class="who who-'+n.who+'">'+n.who+'</span></div>'; });
+    $(P+'Diagram').innerHTML=h;
+  }
+  function reset(){
+    renderNodes(scen); const s=SCEN[scen];
+    const chip=$(P+'Chip'); chip.style.transition='none'; chip.style.top=nodeCenter(s.steps[0].node)+'px'; chip.style.opacity='0'; chip.classList.remove('ok','bad'); void chip.offsetWidth; chip.style.transition='';
+    $(P+'Res').className='rt-result';
+    $(P+'Dir').textContent='▶ READY'; $(P+'Dir').className='rt-dir';
+    $(P+'Cap').textContent=s.intro; $(P+'Pay').textContent='';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>— details appear here per step —';
+    $(P+'Pill').textContent=s.req;
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false;
+  }
+  function applyStep(steps,i){
+    const st=steps[i];
+    document.querySelectorAll('#'+P+'Diagram .rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
+    const n=nodeEl(st.node); n.classList.remove('vchk','vskip'); n.classList.add(st.tone==='bad'?'vskip':'vchk'); n.classList.add('cur'); if(st.tone==='bad')n.classList.add('curbad'); void n.offsetWidth; n.classList.add('rtpulse');
+    const chip=$(P+'Chip'); chip.textContent=st.chip||'→'; chip.classList.remove('ok','bad'); if(st.tone)chip.classList.add(st.tone==='bad'?'bad':'ok'); chip.style.opacity='1'; chip.style.top=nodeCenter(st.node)+'px';
+    $(P+'Dir').textContent=st.dir||('STEP '+(i+1)+' / '+steps.length); $(P+'Dir').className='rt-dir'+(st.tone==='bad'?' bad':'');
+    $(P+'Cap').textContent=st.cap; $(P+'Pay').textContent=st.pay?JSON.stringify(st.pay,null,2):'';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>'+st.ins;
+  }
+  function run(){
+    if(running)return; running=true; clearT(); reset();
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=true); $(P+'Run').disabled=true;
+    $(P+'Pill').textContent='running…';
+    const s=SCEN[scen]; let i=0;
+    (function tick(){
+      if(i>=s.steps.length){ const r=$(P+'Res'); r.className='rt-result show '+(s.result.cls||'ok'); r.textContent=s.result.text; running=false; document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false; $(P+'Pill').textContent='done'; return; }
+      applyStep(s.steps,i); i++; timers.push(setTimeout(tick,2000));
+    })();
+  }
+  document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.onclick=()=>{ if(running)return; scen=b.dataset.s; document.querySelectorAll('#'+P+'Seg button').forEach(x=>x.classList.toggle('on',x===b)); reset(); });
+  $(P+'Run').onclick=run;
+  reset();
+})();
+</script>
+</body>
+</html>

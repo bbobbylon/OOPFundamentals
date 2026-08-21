@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Partitioning &amp; Sharding — DevHub</title>
+<style>
+.who-QUERY{background:rgba(204,102,0,.22);color:#fcd34d}
+.who-PLNR{background:rgba(84,195,241,.18);color:#7dd3fc}
+.who-PART{background:rgba(74,222,128,.18);color:#86efac}
+.who-ROUTER{background:rgba(167,139,250,.18);color:#c4b5fd}
+.who-SHARD{background:rgba(248,113,113,.18);color:#fca5a5}
+</style>
+<link rel="stylesheet" href="devhub.css"/>
+</head>
+<body class="track-sql">
+<div class="page">
+<a class="back" href="javascript:history.back()">← Back</a>
+<h1>Partitioning &amp; Sharding</h1>
+<p class="subtitle">Splitting one giant table into manageable pieces — and the point where "pieces of one table" becomes "pieces on different machines."</p>
+
+  <!-- ── INTRO ── -->
+  <div class="intro">
+    <div class="intro-head"><span class="ico">🧩</span> Same table, split how — and split across what?</div>
+    <p class="intro-lead">
+      <strong>Partitioning</strong> splits one logical table into multiple physical storage units (partitions) that still live on the same database server and are queried through the same parent table name — Postgres' planner decides which partitions a given query actually needs to touch, a step called <strong>partition pruning</strong>. Split by a range (dates, IDs) and a query with a matching filter can skip nearly every partition it doesn't need; split by a hash of some column and rows spread evenly, but pruning only works if the query filters on that exact hash key — filter on anything else and every partition gets scanned, which is strictly worse than not partitioning at all. Partitioning solves an <em>I/O and maintenance</em> problem on a single box (smaller indexes, cheap bulk-drop old partitions, targeted vacuum); it does nothing for a table that has simply outgrown what one machine's CPU, RAM, or disk throughput can serve. <strong>Sharding</strong> is the answer to that: the same "split by a key" idea, but the pieces live on entirely separate database instances, with a routing layer deciding which shard owns a given row. The two combine in practice — each shard is usually partitioned internally too — but sharding introduces a cost partitioning never has: a query that can't be answered from a single shard has to fan out to all of them and merge results in the application, which is exactly the trade you're making when you pick a shard key.
+    </p>
+    <ul class="intro-gist">
+      <li><b>Partitioning</b> — one table, many physical pieces, still one server; the planner prunes irrelevant pieces automatically <em>if</em> the query filters on the partition key.</li>
+      <li><b>Partition pruning</b> — the whole performance win; lose the partition-key filter and you're scanning every partition, worse than an unpartitioned table.</li>
+      <li><b>Sharding</b> — the same idea across servers, not just files; solves capacity, not just I/O.</li>
+      <li><b>Cross-shard queries</b> — anything that can't be answered by one shard requires a scatter-gather fan-out; the shard key you choose decides how often that happens.</li>
+    </ul>
+    <div class="intro-cards">
+      <div class="intro-mini">
+        <h4>Declarative range partitioning</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code>CREATE TABLE orders ( &#10;  id bigint, customer_id bigint, &#10;  created_at date, total numeric &#10;) PARTITION BY RANGE (created_at); &#10;&#10;CREATE TABLE orders_2026_01 &#10;  PARTITION OF orders &#10;  FOR VALUES FROM ('2026-01-01') &#10;             TO   ('2026-02-01'); &#10;&#10;CREATE TABLE orders_2026_02 &#10;  PARTITION OF orders &#10;  FOR VALUES FROM ('2026-02-01') &#10;             TO   ('2026-03-01'); &#10;&#10;-- old data ages out in O(1):&#10;DROP TABLE orders_2024_01;</code></p>
+      </div>
+      <div class="intro-mini">
+        <h4>Hash partitioning</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code>CREATE TABLE events ( &#10;  id bigint, customer_id bigint, &#10;  payload jsonb &#10;) PARTITION BY HASH (customer_id); &#10;&#10;CREATE TABLE events_p0 PARTITION OF events &#10;  FOR VALUES WITH (MODULUS 4, REMAINDER 0); &#10;CREATE TABLE events_p1 PARTITION OF events &#10;  FOR VALUES WITH (MODULUS 4, REMAINDER 1); &#10;-- ...p2, p3 &#10;&#10;-- pruned (filters the hash key):&#10;SELECT * FROM events WHERE customer_id = 88; &#10;-- NOT pruned (no hash-key filter):&#10;SELECT * FROM events WHERE payload->>'type'='login';</code></p>
+      </div>
+      <div class="intro-mini">
+        <h4>Shard routing (application layer)</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code>int shardCount = 8; &#10;&#10;int shardFor(long customerId) { &#10;  return (int) Math.floorMod( &#10;      Long.hashCode(customerId), shardCount); &#10;} &#10;&#10;DataSource ds = shardDataSources &#10;    .get(shardFor(customerId)); &#10;&#10;// a query keyed on customer_id hits ONE &#10;// shard; a query NOT keyed on it (e.g. &#10;// "top orders this week, all customers") &#10;// must fan out to all 8 and merge</code></p>
+      </div>
+    </div>
+    <div class="intro-ciam"><span class="tag">Partitioning in a CIAM stack:</span> a <code>login_events</code> or <code>audit_log</code> table is the textbook range-partitioning case — partition by month, keep 90 days queryable, and <code>DROP</code> (not <code>DELETE</code>) the partitions older than your retention policy in O(1) instead of a table-locking bulk delete. If you ever shard <code>users</code> across tenants, shard by <code>tenant_id</code>, not by <code>user_id</code> — nearly every CIAM query (login, session list, permission check) is scoped to one tenant, so tenant_id as the shard key keeps almost everything single-shard; user_id as the shard key would force cross-shard fan-out on routine tenant-wide admin queries.</div>
+  </div>
+
+<div class="rt-ctlbar">
+  <span class="lbl">scenario:</span>
+  <span class="userseg" id="ptScen">
+    <button data-s="prune" class="on">range + pruning</button>
+    <button data-s="noprune">hash without key</button>
+    <button data-s="escalate">ceiling → shard</button>
+    <button data-s="crossshard">cross-shard query</button>
+  </span>
+  <button class="rt-run" id="ptRun">▶ Play</button>
+  <span class="rt-pill" id="ptPill">query → planner → partition pruning</span>
+</div>
+<div class="rt-stage">
+  <div class="rt-diagram" id="ptDiagram"></div>
+  <div class="rt-inspect">
+    <div class="rt-dir" id="ptDir">▶ READY</div>
+    <div class="rt-cap" id="ptCap">Choose a scenario and press ▶</div>
+    <pre class="rt-payload" id="ptPay"></pre>
+    <pre class="rt-headers" id="ptHdr"></pre>
+    <div class="rt-result" id="ptRes"></div>
+  </div>
+</div>
+<div class="rt-legend">
+  <span>Query → Planner → Partition → Router → Shard</span>
+  <span><span style="color:#fca5a5">red = full scan / cross-shard fan-out</span> · <span style="color:#86efac">green = pruned / single-shard</span></span>
+</div>
+
+<section>
+<h2>1 — Partitioning vs Sharding</h2>
+<div class="card">
+<table>
+<tr><th></th><th>Partitioning</th><th>Sharding</th></tr>
+<tr><td>Physical location</td><td>Same server, separate files</td><td>Separate servers</td></tr>
+<tr><td>Solves</td><td>I/O size, maintenance, targeted vacuum/index</td><td>Total capacity beyond one machine</td></tr>
+<tr><td>Query routing</td><td>Automatic (planner does pruning)</td><td>Manual/application-layer or a proxy</td></tr>
+<tr><td>Cost of the wrong key</td><td>Full-partition scan (still 1 server)</td><td>Cross-shard scatter-gather (network fan-out)</td></tr>
+</table>
+</div>
+</section>
+
+<section>
+<h2>2 — Checking That Pruning Actually Happened</h2>
+<div class="card card-blue">
+<pre><code><span class="kw">EXPLAIN</span> <span class="kw">SELECT</span> * <span class="kw">FROM</span> orders
+<span class="kw">WHERE</span> created_at >= <span class="str">'2026-01-01'</span> <span class="kw">AND</span> created_at &lt; <span class="str">'2026-02-01'</span>;
+
+<span class="cm">--                    QUERY PLAN</span>
+<span class="cm">-- Append</span>
+<span class="cm">--   ->  Seq Scan on orders_2026_01 orders</span>
+<span class="cm">--         Filter: (created_at >= ... AND created_at &lt; ...)</span>
+<span class="cm">-- (1 partition touched out of 24 — the other 23 never opened)</span></code></pre>
+<p class="note">If <code>EXPLAIN</code> shows every partition listed under <code>Append</code>, pruning did not happen — the filter doesn't match the partition key, or is wrapped in a function/cast the planner can't reason about at plan time.</p>
+</div>
+</section>
+
+<section>
+<h2>3 — Sharding: the Router Owns the Decision</h2>
+<div class="card card-purple">
+<pre><code><span class="cm">-- logical view: one "orders" table</span>
+<span class="cm">-- physical reality: 8 independent Postgres instances</span>
+
+shard 0: customers where hash(customer_id) % 8 == 0
+shard 1: customers where hash(customer_id) % 8 == 1
+<span class="cm">-- ... shard 7</span>
+
+<span class="cm">-- a query WITH the shard key: 1 shard, fast</span>
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> orders <span class="kw">WHERE</span> customer_id = 42;
+
+<span class="cm">-- a query WITHOUT it: fan out to all 8, merge in the app</span>
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> orders <span class="kw">WHERE</span> total > 1000
+<span class="kw">ORDER BY</span> created_at <span class="kw">DESC LIMIT</span> 10;</code></pre>
+</div>
+</section>
+
+<section>
+<h2>4 — Spring Boot: Range-Partitioned Retention Job</h2>
+<div class="card card-green">
+<pre><code><span class="dec">@Scheduled</span>(cron = <span class="str">"0 0 3 1 * *"</span>) <span class="cm">// monthly, 3am</span>
+<span class="kw">public void</span> dropExpiredAuditPartitions() {
+  LocalDate cutoff = LocalDate.now().minusMonths(<span class="dec">RETENTION_MONTHS</span>);
+  String partition = <span class="str">"audit_log_"</span> + cutoff.format(<span class="dec">YYYYMM</span>);
+  jdbcTemplate.execute(
+      <span class="str">"DROP TABLE IF EXISTS "</span> + partition);
+  <span class="cm">// O(1) metadata operation — NOT a row-by-row DELETE,</span>
+  <span class="cm">// no table bloat, no long-held locks on the live table</span>
+}</code></pre>
+</div>
+</section>
+</div>
+
+<!-- ── Code Walkthrough: Declarative partitioning DDL ── -->
+<div id="cw-sqlpart"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-sqlpart',{
+  id:'cw-sqlpart',
+  title:'Declarative partitioning DDL — from one CREATE TABLE to a pruning-eligible query plan',
+  subtitle:'Postgres partitioning is declared, not simulated with views and triggers like the old inheritance-based approach. Each line below is a decision that either enables pruning later or silently disables it.',
+  steps:[
+    {lines:[1,2,3],note:'The parent table declares its columns exactly like a normal table, but PARTITION BY RANGE(created_at) makes it a partitioned table with no storage of its own — every row must live in a child partition, never directly in orders itself.',vars:{'PARTITION BY RANGE (created_at)':'chooses BOTH the partition strategy and the exact column the planner will later look for in WHERE clauses to prune on'},tone:'start'},
+    {lines:[5,6,7],note:'Each partition declares its own bounds as a half-open range: FROM is inclusive, TO is exclusive. A row with created_at = 2026-02-01 lands in orders_2026_02, not orders_2026_01 — an off-by-one here silently misfiles rows into the neighboring partition.',vars:{"FOR VALUES FROM ('2026-01-01') TO ('2026-02-01')":'this exact boundary is what the planner compares your WHERE clause against to decide which partitions to open'},tone:'ok'},
+    {lines:[9,10,11],note:'A second partition, same pattern. Notice there is no UNION, no trigger, no manual routing function — Postgres itself decides, per INSERT, which partition a row belongs to based on the range it falls in.',vars:{'orders_2026_02':'the planner will skip this partition entirely for any query whose WHERE clause is provably outside [2026-02-01, 2026-03-01)'},tone:'ok'},
+    {lines:[13,14],note:'Dropping an entire month of history is a metadata-only operation — no row-by-row DELETE, no WAL bloat proportional to row count, no long lock on the live table. This is the maintenance win partitioning gives you independent of any query-speed benefit.',vars:{'DROP TABLE orders_2024_01':'removes an entire partition\'s worth of rows in roughly constant time, regardless of how many rows it held'},tone:'ok',callout:'The entire value of this DDL depends on one discipline downstream: every query that can be scoped by created_at must actually include that filter, in a form the planner can evaluate at plan time (a literal or a simple comparison — not created_at::text or a function call wrapping the column). Scenario ② on this page is what happens the moment that discipline slips.'}
+  ],
+  code:[
+    'CREATE TABLE orders (',
+    '  id bigint, customer_id bigint,',
+    '  created_at date, total numeric',
+    ') PARTITION BY RANGE (created_at);',
+    '',
+    "CREATE TABLE orders_2026_01",
+    "  PARTITION OF orders",
+    "  FOR VALUES FROM ('2026-01-01') TO ('2026-02-01');",
+    '',
+    "CREATE TABLE orders_2026_02",
+    "  PARTITION OF orders",
+    "  FOR VALUES FROM ('2026-02-01') TO ('2026-03-01');",
+    '',
+    '-- old data ages out in O(1):',
+    'DROP TABLE orders_2024_01;'
+  ]
+});
+</script>
+
+<script>
+(function(){
+const pfx='pt';
+const NODES=['QUERY','PLNR','PART','ROUTER','SHARD'];
+function posOf(n){return 10+NODES.indexOf(n)*18;}
+const SCEN={
+  prune:{
+    pill:'range-partitioned + a filter on the partition key = pruning',
+    steps:[
+      {node:'QUERY',hdr:'App runs a date-scoped query against the parent "orders" table',pay:{sql:"SELECT * FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-02-01'"},ins:'From the app\'s point of view this is one ordinary table — the partitioning is invisible at the SQL layer',tone:null},
+      {node:'PLNR',hdr:'Planner evaluates the WHERE clause against each partition\'s declared bounds',pay:{strategy:'range',partitionKey:'created_at',totalPartitions:24},ins:'This check happens at plan time, before any data is read — it\'s pure metadata comparison',tone:null},
+      {node:'PART',hdr:'23 of 24 monthly partitions are excluded outright — bounds don\'t overlap the filter',pay:{excluded:23,candidate:'orders_2026_01 only'},ins:'Partition pruning: the planner never even opens the excluded partitions\' files',tone:null},
+      {node:'PART',hdr:'orders_2026_01 is scanned — the only partition that could contain matching rows',pay:{rowsScanned:'~40,000 (one month)',rowsIfUnpartitioned:'~950,000 (2 years)',ioReduction:'~96%'},ins:'This is the entire performance case for range partitioning on a time-series-shaped table',tone:'ok'}
+    ],
+    result:'✓ Pruned to 1 of 24 partitions — ~96% less I/O than scanning the whole table'
+  },
+  noprune:{
+    pill:'hash-partitioned by customer_id, but the query filters on email instead',
+    steps:[
+      {node:'QUERY',hdr:'App looks up a customer by email — a reasonable, common query shape',pay:{sql:"SELECT * FROM orders WHERE customer_email = 'bob@example.com'"},ins:'Nothing looks wrong about this query on its own — the problem is only visible against the partitioning scheme',tone:null},
+      {node:'PLNR',hdr:'Table is HASH partitioned on customer_id — but this filter never mentions customer_id',pay:{strategy:'hash',partitionKey:'customer_id',filterColumn:'customer_email'},ins:'The planner can only prune when it can prove which hash bucket(s) a row could be in — it can\'t do that from an unrelated column',tone:null},
+      {node:'PART',hdr:'All 4 hash partitions must be opened — none can be ruled out',pay:{excluded:0,scanned:'all 4 partitions',reason:'no relationship between customer_email and the hash(customer_id) partition key'},ins:'This is strictly worse than an unpartitioned table with an index on customer_email would have been',tone:'bad'},
+      {node:'PART',hdr:'Fix: add an index on customer_email, or also filter by customer_id if it\'s available',pay:{recommendation:'CREATE INDEX ON orders (customer_email); -- per-partition, or add customer_id to the WHERE clause'},ins:'Partitioning is not a substitute for indexing — the partition key and the query patterns have to be chosen together',tone:'bad'}
+    ],
+    result:'✗ No pruning possible — every partition scanned because the filter misses the partition key'
+  },
+  escalate:{
+    pill:'a single partitioned instance hits its ceiling — introduce sharding',
+    steps:[
+      {node:'PART',hdr:'orders is well-partitioned by month, but total data has grown to 40TB',pay:{singleInstanceDiskLimit:'~64TB usable',writeThroughputNeeded:'12,000 tx/sec at peak',singleInstanceCeiling:'~9,000 tx/sec sustained'},ins:'Partitioning already solved the I/O-per-query problem — this is a different problem: raw capacity of one machine',tone:null},
+      {node:'ROUTER',hdr:'A shard router is introduced: hash(customer_id) % 8 decides which of 8 DB instances owns a row',pay:{shardKeyChosen:'customer_id',shardCount:8,rationale:'nearly every query is already scoped to one customer'},ins:'The shard key decision made here determines almost everything about query performance from this point forward',tone:null},
+      {node:'SHARD',hdr:'A write for customer_id=42 routes to shard hash(42)%8 = shard 2',pay:{targetShard:'shard-2 (10.0.3.12)',writeThroughputPerShard:'~1,500 tx/sec, well within one instance\'s ceiling'},ins:'Same idea as partitioning — split by a key — just applied across machines instead of across files on one machine',tone:null},
+      {node:'SHARD',hdr:'Each shard is still internally range-partitioned by month, same as before',pay:{shard2Partitions:'orders_2026_01 ... orders_2026_12, all local to shard-2',combinedStrategy:'sharded by customer_id, partitioned within each shard by created_at'},ins:'Sharding and partitioning aren\'t alternatives — production systems at this scale typically use both, layered',tone:'ok'}
+    ],
+    result:'✓ Capacity ceiling solved by adding shards — each shard keeps its own internal partitioning'
+  },
+  crossshard:{
+    pill:'sharded by the wrong key — a per-customer query becomes an 8-way fan-out',
+    steps:[
+      {node:'QUERY',hdr:'"Show me every order this customer has ever placed" — a routine per-customer lookup',pay:{sql:'SELECT * FROM orders WHERE customer_id = 42',shardKeyInUse:'order_id (NOT customer_id)'},ins:'The query itself is completely ordinary — the problem is entirely in how the data was sharded',tone:null},
+      {node:'ROUTER',hdr:'Router can\'t determine a single shard — orders were sharded by order_id, not customer_id',pay:{shardKey:'hash(order_id) % 8',problem:'a given customer\'s orders are scattered across all 8 shards, in no predictable pattern'},ins:'The shard key was presumably chosen to spread write load evenly — it did that, at the cost of every customer-scoped read',tone:null},
+      {node:'SHARD',hdr:'Query must fan out to all 8 shards — no way to know in advance which ones have this customer\'s data',pay:{shardsQueried:8,shardsThatActuallyHadMatchingRows:'unpredictable, often all 8'},ins:'A single logical query has become 8 physical queries plus a merge step — 8x the round trips, worst-case',tone:'bad'},
+      {node:'SHARD',hdr:'Results merged in the application/router layer, sorted and returned',pay:{latency:'bounded by the SLOWEST of the 8 shard responses, not the fastest',costUnderLoad:'this pattern multiplies with concurrent users — 100 concurrent customer lookups = 800 shard queries'},ins:'This is the direct cost of the shard-key decision in the previous scenario — customer_id would have made this a single-shard query',tone:'bad'}
+    ],
+    result:'✗ Scatter-gather across all 8 shards — the cost of sharding by the wrong key for this access pattern'
+  }
+};
+let cur='prune',T=[];
+const $=id=>document.getElementById(pfx+id);
+function renderNodes(){$('Diagram').innerHTML=NODES.map(n=>`<div class="rt-node who-${n}" id="${pfx}N${n}" style="left:${posOf(n)}%">${n}</div>`).join('');}
+function chip(){let c=document.getElementById(pfx+'chip');if(!c){c=document.createElement('div');c.id=pfx+'chip';c.className='rt-chip';$('Diagram').appendChild(c);}return c;}
+function clearT(){T.forEach(clearTimeout);T=[];}
+function reset(){clearT();renderNodes();chip().style.left=posOf(NODES[0])+'%';chip().className='rt-chip';$('Dir').textContent='▶ READY';$('Cap').textContent='Choose a scenario and press ▶';$('Pay').textContent='';$('Hdr').textContent='';$('Res').textContent='';$('Run').disabled=false;document.querySelectorAll('#'+pfx+'Diagram .rt-node').forEach(n=>n.className=n.className.replace(/ ?(vchk|vskip|curbad|rt-cur)/g,''));}
+function applyStep(s){document.querySelectorAll('#'+pfx+'Diagram .rt-node').forEach(n=>n.classList.remove('rt-cur','vchk','vskip','curbad'));const nd=document.getElementById(pfx+'N'+s.node);if(nd){nd.classList.add('rt-cur');if(s.tone==='ok')nd.classList.add('vchk');if(s.tone==='bad')nd.classList.add('vskip','curbad');chip().style.left=posOf(s.node)+'%';chip().className='rt-chip'+(s.tone==='ok'?' ok':s.tone==='bad'?' bad':'');}$('Dir').textContent=s.hdr;$('Cap').textContent=s.ins;$('Pay').textContent=JSON.stringify(s.pay,null,2);$('Hdr').textContent='';}
+function run(){const sc=SCEN[cur];reset();$('Run').disabled=true;$('Pill').textContent=sc.pill;document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.disabled=true);sc.steps.forEach((s,i)=>T.push(setTimeout(()=>{applyStep(s);if(i===sc.steps.length-1)T.push(setTimeout(()=>{$('Res').textContent=sc.result;$('Run').disabled=false;document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.disabled=false);},2000));},300+i*2000)));}
+document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.addEventListener('click',function(){document.querySelectorAll('#'+pfx+'Scen button').forEach(x=>x.classList.remove('on'));this.classList.add('on');cur=this.dataset.s;reset();$('Pill').textContent=SCEN[cur].pill;}));
+$('Run').addEventListener('click',run);renderNodes();chip();
+})();
+</script>
+</body>
+</html>

@@ -139,7 +139,7 @@ double-click**, no server needed.
 
 | Visualizer | What it shows |
 |---|---|
-| [`app.html`](frontend/app.html) | The full Dev Hub — searchable, progress, **443 pages across 29 tracks grouped into categories** (incl. 🍳 *Common Recipes* — practical how-tos like API→form, batch upload, password complexity — and the new 🤖 *AI-Assisted Development* track) (serve it; `index.html` redirects here) |
+| [`app.html`](frontend/app.html) | The full Dev Hub — searchable, progress, **453 pages across 29 tracks grouped into categories** (incl. 🍳 *Common Recipes* — practical how-tos like API→form, batch upload, password complexity — and the new 🤖 *AI-Assisted Development* track) (serve it; `index.html` redirects here) |
 | [`typescript-playground-visualizer.html`](frontend/typescript-playground-visualizer.html) | 🧪 **TypeScript Playground** — loads the **real** `typescript` compiler: type-checks your code (the same red errors as VS Code/`tsc`), shows the emitted JS, and runs it with live console capture; toggle `strict`/`target` and watch errors change |
 | [`python-playground-visualizer.html`](frontend/python-playground-visualizer.html) | 🧪 **Python Playground** — **real CPython** in the browser via Pyodide: `print()`, the stdlib (`json`, `dataclasses`, `itertools`…), real exceptions and full tracebacks — runnable, with presets |
 | [`shell-playground-visualizer.html`](frontend/shell-playground-visualizer.html) | 🧪 **Shell Playground** — a working mini-shell with an in-memory filesystem; flip between **Bash / PowerShell / CMD** modes and watch the prompt, command names, pipes, redirection, and variable syntax change with it |
@@ -170,7 +170,7 @@ in the support packages.
 Beyond the static visualizers, this repo ships a full **Dev Learning Hub** web
 app with user accounts and cross-device progress sync:
 
-- **`frontend/`** — the hub app (`app.html`): **440+ interactive visualizers** across
+- **`frontend/`** — the hub app (`app.html`): **450+ interactive visualizers** across
   **29 tracks**, a searchable **two-level sidebar** (each track's pages are grouped into
   **collapsible sub-sections**, so you're never faced with hundreds of links at once),
   progress tracking, streaks, and a sign-in/register modal.
