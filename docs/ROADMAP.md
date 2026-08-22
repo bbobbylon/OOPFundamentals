@@ -28,7 +28,8 @@ gaps; all 10 pages below are now built, registered in `TRACKS`, and counted in `
   `recursion-visualizer.html`).
 
 **Lower-priority backlog from the same audit** (content is fine, this is a polish/consistency
-pass, not a content gap):
+pass, not a content gap; scope expanded 2026-08-21 after the sitewide depth spot-check below
+found this reaches well past AWS and DS&A):
 - Retrofit the animated `rt-ctlbar`/`rt-stage` scenario-walk + live-inspector pattern onto the
   9 existing AWS pages (all have intro cards + code walkthroughs already, just predate the
   newer interaction pattern). `aws-vpc-visualizer.html` is the worst offender — zero
@@ -37,6 +38,16 @@ pass, not a content gap):
   SVG/canvas-driven interaction style — highest-traffic first: `graph-visualizer.html`,
   `bst-visualizer.html`, `sorting-visualizer.html` (has partial `rt-*` markup already, finish
   it), `ds-dynamic-programming-visualizer.html`.
+- **Sitewide `rt-ctlbar` coverage by track prefix** (of pages with `intro-head`, i.e. excluding
+  quiz/flashcard pages): Java **0/18**, Interview/DSA-prep **0/14**, Config **0/11**,
+  Docker **0/7**, Git **0/6**, Maven **0/6**, DS&A **2/12**, AWS **6/16**, TypeScript **10/32**,
+  Spring Boot **28/53**, vs. Angular/React/Go/Kubernetes/Head-First-Patterns at ~100%. All the
+  0%-coverage tracks use an older tab-based or step-button interaction style instead (not blank
+  pages) — see the "Done — spot-check" entry above for what that looks like on
+  `java-records-sealed-visualizer.html` and the `interview-*` pages. If/when this retrofit work
+  is picked up, do Java and Interview/DSA-prep next (biggest 0%-coverage tracks by page count
+  after AWS/DS&A), then Config/Docker/Git/Maven, then backfill the partial TypeScript and
+  Spring Boot pages.
 - `exam-sql.html` (24 Q) doesn't test anything from `sql-postgres-visualizer.html` (JSONB,
   connection pooling, VACUUM) — add a domain once the replication/partitioning pages above are
   registered.
@@ -83,18 +94,33 @@ future edits to an exam bank's `choices`/`answer`/`why` fields to confirm it sta
 
 ---
 
-## Planned — spot-check "every concept needs 10x more depth" beyond Angular
+## Done — spot-check "every concept needs 10x more depth" beyond Angular (completed 2026-08-21)
 
-**Spot-checked for Angular specifically already; looks resolved there.**
-The Angular track is not "one page" — it's 47 pages across 7 sections (Fundamentals, Routing,
-Forms, State & Reactivity, HTTP & Performance, Auth & Identity, Templates & UI). Spot-checked
-`angular-signals-visualizer.html`, `angular-directives-visualizer.html`,
-`angular-pipes-visualizer.html`: each is ~970–990 lines, has 8 intro-card elements, a
-`DevHubCodeWalk` line-by-line walkthrough, and the full `rt-ctlbar`/`rt-stage` animated
-scenario-walk system — the current sitewide "extreme visualization" standard, not a thin
-one-pager. This complaint was likely accurate when Bobby originally raised it in an earlier
-session, before the depth-building rounds logged in [[project_next_build_plan]] and
-[[project_visualizer_state]] landed. **Before closing this out, spot-check 2-3 pages each in a
-couple of other tracks** (not just Angular) the same way, since Bobby's ask was "EVERY concept,"
-not Angular-specific — but on current evidence this sub-item may already be done, not a new build
-task.
+**Verdict: resolved sitewide, not just Angular — closing this out.** Followed up the earlier
+Angular-only spot-check (`angular-signals-visualizer.html`,
+`angular-directives-visualizer.html`, `angular-pipes-visualizer.html`) with a sitewide grep audit
+(intro-card + `DevHubCodeWalk` + `rt-ctlbar` presence per track prefix, ~424 pages) plus a full
+read of one page each in Python, Java, and DSA-interview, tracks Bobby never named specifically.
+
+- **Content depth (intro card: lead paragraph + gist bullets + 3 code-example mini-cards + a
+  CIAM/job-relevance callout, and a `DevHubCodeWalk` line-by-line walkthrough) is present on
+  essentially every conceptual page sitewide** — 90–100% coverage in every track checked
+  (Spring Boot, Python, AWS, Docker, Kubernetes, SQL, Go, TypeScript, React, Java, Git, Node,
+  Interview/DSA, Config, Maven; only the `exam-*`/`flashcards-*` quiz/drill pages lack them,
+  which is correct — they're drills, not concept pages). Read in full:
+  `python-fundamentals-visualizer.html` (374 lines — CPython bytecode pipeline, LEGB, refcounting,
+  a 5-step `DevHubCodeWalk` with a CIAM callout on JWT-parsing gotchas) and
+  `java-records-sealed-visualizer.html` (871 lines — 8 tabs: records, compact constructors,
+  sealed hierarchies, exhaustive pattern matching, a click-through hierarchy explorer). Neither
+  reads as a thin one-pager; the earlier "10x more depth" complaint doesn't hold sitewide either.
+- **What genuinely isn't sitewide is the newer `rt-ctlbar`/`rt-stage` animated scenario-walk +
+  live-inspector engine** (the pattern used on Angular and on the new
+  `debugging-pro-toolbox-visualizer.html`). Coverage by track: Java 0/18, Interview 0/14,
+  Config 0/11, Docker 0/7, Git 0/6, Maven 0/6, DS&A 2/12, AWS 6/16, TypeScript 10/32, Spring Boot
+  28/53 — vs. Angular, React, Go, Kubernetes, and Head First Patterns at ~100%. **This is not a
+  content gap** — the pages missing it use an older-but-still-real interaction style instead
+  (`java-records-sealed-visualizer.html`'s 8-tab click-through demos; `interview-*`'s per-technique
+  step-button state machines for two-pointer/sliding-window/prefix-sum/hashmap). It's the same
+  "predates the newer interaction pattern" situation already logged for AWS and DS&A below — this
+  audit just found it's far more widespread than those two tracks. Folded into that backlog item
+  rather than opening a separate one.
