@@ -54,6 +54,13 @@
       cursor:pointer;font-weight:700;font-size:13px;margin:4px}
     .result{margin-top:10px;padding:10px 14px;background:#090e1a;border-radius:8px;
       font-family:monospace;font-size:12px;color:var(--good);min-height:24px;white-space:pre-wrap;line-height:1.8}
+    .who-SRC{background:#3776ab;color:#fff}
+    .who-POOL{background:#ffd43b;color:#3a2c00}
+    .who-THREAD{background:#a78bfa;color:#1a1030}
+    .who-SHARE{background:#22d3ee;color:#04231a}
+    .who-OUT{background:#4ade80;color:#04231a}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
   </style>
   <link rel="stylesheet" href="devhub.css" />
 </head>
@@ -90,6 +97,45 @@
       </div>
     </div>
     <div class="intro-ciam"><span class="tag">CIAM / Spring Boot:</span> Build a profile page by fetching user, roles, and audit in parallel — three <code>supplyAsync(...)</code> futures joined with <code>allOf(...).join()</code> so total time is the slowest call, not the sum. With <code>@Async CompletableFuture&lt;Void&gt; sendWelcomeEmail(user)</code> the call is fire-and-forget: the pool queues it and the caller returns immediately.</div>
+  </div>
+
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">Scenario</span>
+      <span class="userseg" id="jcSeg">
+        <button class="on" data-s="race">① count++ across threads loses an update</button>
+        <button data-s="secctx">② @Async loses the SecurityContext ThreadLocal</button>
+        <button data-s="deadlock">③ unlock() outside finally hangs the pool forever</button>
+        <button data-s="fanout">④ CompletableFuture.allOf() fans out in parallel</button>
+      </span>
+      <button class="rt-run" id="jcRun">▶ Run</button>
+      <span class="rt-pill" id="jcPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="jcDiag">
+        <div class="rt-rail"></div>
+        <div class="rt-chip" id="jcChip">→</div>
+        <div class="rt-node" data-n="SRC"><div class="who-badge who-SRC">SRC</div><div>Call site</div></div>
+        <div class="rt-node" data-n="POOL"><div class="who-badge who-POOL">POOL</div><div>Executor dispatch</div></div>
+        <div class="rt-node" data-n="THREAD"><div class="who-badge who-THREAD">THREAD</div><div>Worker thread</div></div>
+        <div class="rt-node" data-n="SHARE"><div class="who-badge who-SHARE">SHARE</div><div>Shared/ThreadLocal state</div></div>
+        <div class="rt-node" data-n="OUT"><div class="who-badge who-OUT">OUT</div><div>Observed result</div></div>
+      </div>
+      <div class="rt-inspect" id="jcInspect">
+        <div class="rt-dir" id="jcDir">STEP 0 / 5</div>
+        <div class="rt-cap" id="jcCap">Pick a scenario and press ▶ Run</div>
+        <div class="rt-payload" id="jcPayload"></div>
+        <div class="rt-headers" id="jcHeaders"><span class="ht">INSPECTOR</span>(waiting)</div>
+      </div>
+    </div>
+    <div class="rt-result" id="jcResult"></div>
+    <div class="who-row">
+      <span class="who-badge who-SRC">SRC — the code that kicks off concurrent work</span>
+      <span class="who-badge who-POOL">POOL — the executor/pool that dispatches it</span>
+      <span class="who-badge who-THREAD">THREAD — the worker thread actually running</span>
+      <span class="who-badge who-SHARE">SHARE — shared mutable state or ThreadLocal it touches</span>
+      <span class="who-badge who-OUT">OUT — what the caller ends up observing</span>
+    </div>
   </div>
 
   <div class="tabs">
@@ -565,6 +611,113 @@ function submitToThread(thread,id){
   },1200+Math.random()*1200);
 }
 function submitBatch(){for(let i=0;i<5;i++)setTimeout(submitTask,i*150);}
+</script>
+
+<script>
+(function(){
+  const pfx='jc';
+  const SCEN={
+    race:{label:'count++ across threads loses an update',steps:[
+      {node:'SRC',hdr:'Source: int count = 0; two threads each call count++ once',pay:{source:'int count = 0;\npool.execute(() -> count++);\npool.execute(() -> count++);'},ins:'count++ LOOKS like one operation, but it is actually three: read count, add 1, write count back. Nothing here is synchronized.'},
+      {node:'POOL',hdr:'ExecutorService dispatches both Runnables to two idle pool threads at nearly the same instant',pay:{dispatched:['Thread-1 ← count++','Thread-2 ← count++'],timing:'near-simultaneous, no ordering guarantee'},ins:'The pool does not serialize these — that is the whole point of a thread pool. Both tasks are free to run truly in parallel on separate cores.'},
+      {node:'THREAD',hdr:'Both threads read count BEFORE either has written back',pay:{'Thread-1 reads':'count = 0','Thread-2 reads':'count = 0 (also!)'},tone:'bad',ins:'This is the exact race window: both threads see the same stale value of 0, because neither has written its increment yet.'},
+      {node:'SHARE',hdr:'Both threads compute 0 + 1 = 1 and write it back to the SAME shared variable',pay:{'Thread-1 writes':'count = 1','Thread-2 writes':'count = 1 (overwrites, not 2)'},tone:'bad',ins:'count is unsynchronized shared mutable state — there is no happens-before relationship forcing one write to be visible before the other reads.'},
+      {node:'OUT',hdr:'Final count == 1, not 2 — one increment is silently lost',pay:{result:'count == 1 (expected 2)',fix:'use AtomicInteger.incrementAndGet(), or synchronize the read-modify-write as one atomic unit'},tone:'bad',ins:'No exception, no warning — the program just silently under-counts. This is why plain int/long counters are unsafe across threads.'},
+    ],result:{tone:'bad',text:'⚠️ Final count is 1, not 2 — count++ is a non-atomic read-modify-write; two threads raced and one increment was lost. Use AtomicInteger.'}},
+
+    secctx:{label:'@Async loses the SecurityContext ThreadLocal',steps:[
+      {node:'SRC',hdr:'Source: authenticated request thread calls @Async CompletableFuture<Void> sendWelcomeEmail(user)',pay:{source:'// running on the request thread, fully authenticated\nemailService.sendWelcomeEmail(user); // @Async method'},ins:'The caller thread has a populated SecurityContext — Spring Security put it there when the request was authenticated.'},
+      {node:'POOL',hdr:"Spring's @Async proxy submits the method body to a TaskExecutor pool thread",pay:{call:'taskExecutor.submit(() -> emailService.sendWelcomeEmailImpl(user))',callerThread:'returns immediately — does not wait'},ins:'@Async works by having Spring hand your method body to a completely different thread from the pool — the calling thread moves on right away.'},
+      {node:'THREAD',hdr:'A pool thread (e.g. task-executor-3) picks up the submitted work',pay:{runningOn:'task-executor-3 (a reused pool thread, NOT the request thread)'},ins:'This pool thread may have run dozens of unrelated tasks before this one — it has never been touched by Spring Security\'s login filter.'},
+      {node:'SHARE',hdr:'SecurityContextHolder.getContext() is backed by a ThreadLocal — scoped per-thread',pay:{onRequestThread:'SecurityContextHolder.getContext().getAuthentication() = "alice" (populated)','onPoolThread(task-executor-3)':'SecurityContextHolder.getContext().getAuthentication() = null'},tone:'bad',ins:'ThreadLocal storage does not follow work across threads — it is quite literally local to the thread. The pool thread never received a copy.'},
+      {node:'OUT',hdr:'Inside sendWelcomeEmail, any call needing the current user throws or silently treats the request as unauthenticated',pay:{result:'NullPointerException on getAuthentication().getName(), or "anonymous" if code checks for null first',fix:'capture SecurityContext before submitting and set it on the pool thread, or use DelegatingSecurityContextExecutorService'},tone:'bad',ins:'This bug only shows up in @Async/pool code paths — the exact same code works fine when called synchronously on the request thread.'},
+    ],result:{tone:'bad',text:'⚠️ SecurityContextHolder.getContext() is empty on the pool thread — ThreadLocal state never crosses to @Async workers. Propagate it explicitly.'}},
+
+    deadlock:{label:'unlock() outside finally hangs the pool forever',steps:[
+      {node:'SRC',hdr:'Source: lock.lock(); criticalSection(); lock.unlock();  — NOT wrapped in try/finally',pay:{source:'lock.lock();\ncriticalSection(); // throws!\nlock.unlock();  // ← never reached'},ins:'This looks fine in the happy path. The bug only appears the first time criticalSection() throws.'},
+      {node:'POOL',hdr:'Thread-7 acquires the lock and enters criticalSection(), which throws a RuntimeException',pay:{acquiredBy:'Thread-7',exception:'RuntimeException: unexpected null in criticalSection()'},ins:'Nothing about lock.lock() or the exception is unusual on its own — the danger is entirely in what happens next.'},
+      {node:'THREAD',hdr:'The exception unwinds the stack, skipping every line after it — including lock.unlock()',pay:{skipped:'lock.unlock() on the next line',stackUnwind:'propagates up to the caller, still holding the lock'},tone:'bad',ins:'Java exceptions jump straight past subsequent statements to the nearest catch/finally — and there is no finally block here to catch this.'},
+      {node:'SHARE',hdr:'The ReentrantLock object itself is now permanently held by Thread-7',pay:{lockOwner:'Thread-7 (forever — Thread-7 already moved on, exception was caught higher up)',lockState:'locked, held count 1, no code path left to call unlock()'},tone:'bad',ins:'A ReentrantLock does not auto-release on exception like a language-level construct might — it stays exactly as locked as you left it.'},
+      {node:'OUT',hdr:'Every other thread that calls lock.lock() blocks forever — the service silently hangs',pay:{result:'Thread-1, Thread-2, ... all park indefinitely on lock.lock()',symptom:'no exception, no crash — just requests that never complete',fix:'lock.lock(); try { criticalSection(); } finally { lock.unlock(); }'},tone:'bad',ins:'This is the textbook reason lock/unlock must be in try/finally — an exception between them is a silent, permanent deadlock.'},
+    ],result:{tone:'bad',text:'⚠️ Thread-7 never releases the lock after its exception — every future lock.lock() call blocks forever. Always unlock() in a finally block.'}},
+
+    fanout:{label:'CompletableFuture.allOf() fans out in parallel',steps:[
+      {node:'SRC',hdr:'Source: three supplyAsync calls (user ~120ms, roles ~80ms, audit ~200ms) combined with allOf().join()',pay:{source:'var userCF  = CompletableFuture.supplyAsync(() -> fetchUser(id));   // ~120ms\nvar rolesCF = CompletableFuture.supplyAsync(() -> fetchRoles(id));  // ~80ms\nvar auditCF = CompletableFuture.supplyAsync(() -> fetchAudit(id));  // ~200ms\nCompletableFuture.allOf(userCF, rolesCF, auditCF).join();'},ins:'Three independent, unrelated calls — nothing here needs to happen in sequence, which is exactly what makes this a good fan-out candidate.'},
+      {node:'POOL',hdr:'All three supplyAsync calls are submitted to the pool within the same instant',pay:{dispatched:['userCF → Thread-A','rolesCF → Thread-B','auditCF → Thread-C'],submittedAt:'t=0ms for all three'},ins:'Unlike the serial alternative (call, wait, call, wait, call, wait), submission happens back-to-back with no blocking between calls.'},
+      {node:'THREAD',hdr:'Three threads execute concurrently, each independently blocking only on its own I/O',pay:{'Thread-A':'fetchUser — completes at t=120ms','Thread-B':'fetchRoles — completes at t=80ms','Thread-C':'fetchAudit — completes at t=200ms'},ins:'None of these three threads wait on each other — they run genuinely in parallel, limited only by however many cores/pool threads are available.'},
+      {node:'SHARE',hdr:'No shared mutable state between the three tasks — each writes only to its own CompletableFuture',pay:{sharedState:'none — userCF, rolesCF, auditCF are independent objects',synchronizationNeeded:false},tone:'ok',ins:'This is why fan-out with independent futures is safe by construction: there is nothing to race on, unlike the count++ scenario.'},
+      {node:'OUT',hdr:'allOf(...).join() returns once the SLOWEST of the three completes — t≈200ms, not 120+80+200=400ms',pay:{result:'total wall time ≈ 200ms (max of the three), not the 400ms serial sum',speedup:'~2x faster than doing them one after another'},tone:'ok',ins:'This is the entire value proposition of fanning out with CompletableFuture: total latency collapses to the slowest call instead of the sum of all calls.'},
+    ],result:{tone:'ok',text:'✅ allOf(...).join() completes at ≈200ms (the slowest call) instead of 400ms (the serial sum) — independent async work with no shared state to race on.'}},
+  };
+
+  const nodes=['SRC','POOL','THREAD','SHARE','OUT'];
+  function posOf(n){const i=nodes.indexOf(n);return i<0?50:10+i*20;}
+  let cur='race',timers2=[],running2=false;
+
+  function reset2(){
+    timers2.forEach(clearTimeout);timers2=[];running2=false;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='ready';
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(el)el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+    });
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left='5%';chip.textContent='→';}
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP 0 / '+SCEN[cur].steps.length;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent='Pick a scenario and press ▶ Run';
+    const pay=document.getElementById(pfx+'Payload');if(pay)pay.textContent='';
+    const hdr=document.getElementById(pfx+'Headers');if(hdr)hdr.innerHTML='<span class="ht">INSPECTOR<\/span>(waiting)';
+    const res=document.getElementById(pfx+'Result');if(res){res.textContent='';res.className='rt-result';}
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=false;
+  }
+
+  function applyStep2(s,idx,total){
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left=posOf(s.node)+'%';chip.textContent='→';}
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(!el)return;
+      el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+      if(n===s.node){
+        if(s.tone==='ok')el.className+=' vchk cur';
+        else if(s.tone==='bad')el.className+=' vskip curbad';
+        else el.className+=' cur';
+      }
+    });
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP '+idx+' / '+total;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent=s.hdr;
+    const pay=document.getElementById(pfx+'Payload');
+    if(pay)pay.textContent=JSON.stringify(s.pay,null,2);
+    const hdrEl=document.getElementById(pfx+'Headers');
+    if(hdrEl)hdrEl.innerHTML='<span class="ht">INSPECTOR<\/span>'+s.ins;
+  }
+
+  function run2(){
+    reset2();running2=true;
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=true;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='running…';
+    const steps=SCEN[cur].steps;
+    steps.forEach((s,i)=>timers2.push(setTimeout(()=>applyStep2(s,i+1,steps.length),(i+1)*2000)));
+    timers2.push(setTimeout(()=>{
+      const r=SCEN[cur].result;
+      const res=document.getElementById(pfx+'Result');
+      if(res){res.textContent=r.text;res.className='rt-result show '+(r.tone==='ok'?'ok':'bad');}
+      if(pill)pill.textContent='done';
+      running2=false;const btn2=document.getElementById(pfx+'Run');if(btn2)btn2.disabled=false;
+    },(steps.length+1)*2000));
+  }
+
+  document.getElementById(pfx+'Run').onclick=run2;
+  document.querySelectorAll('#'+pfx+'Seg button').forEach(b=>{
+    b.onclick=()=>{
+      if(running2)return;
+      cur=b.dataset.s;
+      document.querySelectorAll('#'+pfx+'Seg button').forEach(x=>x.classList.toggle('on',x===b));
+      reset2();
+    };
+  });
+  reset2();
+})();
 </script>
 </body>
 </html>

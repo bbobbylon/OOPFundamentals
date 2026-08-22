@@ -85,6 +85,13 @@
     .pitfall p{color:var(--muted);font-size:12px;margin:0 0 8px;line-height:1.6;}
 
     @media(max-width:680px){.acid-grid{grid-template-columns:1fr 1fr;}.two-col{grid-template-columns:1fr;}}
+    .who-CALL{background:#3776ab;color:#fff}
+    .who-PROXY{background:#ffd43b;color:#3a2c00}
+    .who-BEGIN{background:#a78bfa;color:#1a1030}
+    .who-EXEC{background:#22d3ee;color:#04231a}
+    .who-END{background:#4ade80;color:#04231a}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
   </style>
   <link rel="stylesheet" href="devhub.css" />
 </head>
@@ -121,6 +128,46 @@
       </div>
     </div>
     <div class="intro-ciam"><span class="tag">CIAM:</span> <code>@Transactional</code> on <code>createUser(...)</code> inserts the user, the default role assignment, and an audit log entry as one unit — if the role insert violates a constraint, the user insert rolls back too (no orphans). <code>@Transactional(readOnly=true)</code> on <code>searchUsers(criteria, pageable)</code>. Rule: transactions live on the service layer.</div>
+  </div>
+
+  <!-- ── EXTREME-VIZ HERO ── -->
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">Scenario</span>
+      <span class="userseg" id="txSeg">
+        <button class="on" data-s="required">① REQUIRED — proxy opens one shared transaction</button>
+        <button data-s="reqnew">② REQUIRES_NEW — audit log survives a rollback</button>
+        <button data-s="optlock">③ @Version optimistic lock conflict → retry</button>
+        <button data-s="selfcall">④ Self-invocation silently skips the proxy</button>
+      </span>
+      <button class="rt-run" id="txRun">▶ Run</button>
+      <span class="rt-pill" id="txPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="txDiag">
+        <div class="rt-rail"></div>
+        <div class="rt-chip" id="txChip">→</div>
+        <div class="rt-node" data-n="CALL"><span class="ic">📞</span><div><div class="nl">Call</div><div class="ns">who invokes the method</div></div><span class="who who-badge who-CALL">CALL</span></div>
+        <div class="rt-node" data-n="PROXY"><span class="ic">🛡️</span><div><div class="nl">Proxy</div><div class="ns">CGLIB interceptor check</div></div><span class="who who-badge who-PROXY">PROXY</span></div>
+        <div class="rt-node" data-n="BEGIN"><span class="ic">🔓</span><div><div class="nl">Begin</div><div class="ns">tx manager opens/joins tx</div></div><span class="who who-badge who-BEGIN">BEGIN</span></div>
+        <div class="rt-node" data-n="EXEC"><span class="ic">⚙️</span><div><div class="nl">Execute</div><div class="ns">your method body + SQL</div></div><span class="who who-badge who-EXEC">EXEC</span></div>
+        <div class="rt-node" data-n="END"><span class="ic">✅</span><div><div class="nl">End</div><div class="ns">commit or rollback</div></div><span class="who who-badge who-END">END</span></div>
+      </div>
+      <div class="rt-inspect" id="txInspect">
+        <div class="rt-dir" id="txDir">STEP 0 / 5</div>
+        <div class="rt-cap" id="txCap">Pick a scenario and press ▶ Run</div>
+        <div class="rt-payload" id="txPayload"></div>
+        <div class="rt-headers" id="txHeaders"><span class="ht">INSPECTOR</span>(waiting)</div>
+      </div>
+    </div>
+    <div class="rt-result" id="txResult"></div>
+  </div>
+  <div class="who-row">
+    <span class="who-badge who-CALL">CALL — who invokes the method</span>
+    <span class="who-badge who-PROXY">PROXY — CGLIB interceptor check</span>
+    <span class="who-badge who-BEGIN">BEGIN — tx manager opens/joins</span>
+    <span class="who-badge who-EXEC">EXEC — your body + SQL runs</span>
+    <span class="who-badge who-END">END — commit or rollback</span>
   </div>
 
   <!-- SECTION 1: ACID -->
@@ -523,6 +570,113 @@ function resetDemo(){
 }
 
 initProps(); initIso();
+</script>
+
+<script>
+(function(){
+  const pfx='tx';
+  const SCEN={
+    required:{label:'REQUIRED — proxy opens one shared transaction',steps:[
+      {node:'CALL',hdr:'External call: AccountController → accountService.transfer(aliceId, bobId, 200)',pay:{caller:'AccountController.transfer()',target:'AccountService.transfer(Long,Long,BigDecimal)',declaredAnnotation:'@Transactional (class-level, propagation=REQUIRED)'},ins:'Spring never hands the controller the raw AccountService — it injects the proxy bean. That distinction is what makes everything downstream possible.'},
+      {node:'PROXY',hdr:'CGLIB subclass proxy intercepts the public call before your code runs',pay:{proxyClass:'AccountService$$SpringCGLIB$0',interceptor:'TransactionInterceptor',threadLocalTxBound:false},ins:'The proxy is generated at startup because at least one public method carries @Transactional. It only intercepts calls that arrive from OUTSIDE the bean.'},
+      {node:'BEGIN',hdr:'TransactionInterceptor asks the PlatformTransactionManager to open a new tx',pay:{propagation:'REQUIRED',decision:'no tx on this thread yet → create one',connection:'bound to ThreadLocal for this request',isolation:'READ_COMMITTED (Postgres default)'},ins:'REQUIRED is "join if present, else create" — since nothing was bound to this thread, a brand-new transaction and connection are opened.'},
+      {node:'EXEC',hdr:'Your real transfer() body runs — both repo calls share the SAME connection',pay:{sql:['UPDATE account SET balance=800 WHERE id=1','UPDATE account SET balance=700 WHERE id=2'],sameConnection:true,sameTxId:'tx-77'},ins:'Because both statements ride the one bound connection, the database treats them as one atomic unit even though your Java code just called two separate repository methods.'},
+      {node:'END',hdr:'Method returns normally → interceptor commits',pay:{result:'COMMIT',rowsAffected:2,durability:'WAL flushed — survives a crash the instant after'},tone:'ok',ins:'Commit only happens after the proxy sees a clean return. Any RuntimeException here would flip this to a rollback instead.'},
+    ],result:{tone:'ok',text:'✅ Both UPDATEs commit together as one atomic transaction — exactly what the proxy + REQUIRED propagation are for.'}},
+
+    reqnew:{label:'REQUIRES_NEW — audit log survives a rollback',steps:[
+      {node:'CALL',hdr:'UserService.createUser() (REQUIRED) calls auditService.logEvent(...) mid-method',pay:{outerBean:'UserServiceImpl',outerTx:'tx-101 (REQUIRED, already open)',calledBean:'AuditServiceImpl (a DIFFERENT Spring bean)'},ins:'Because auditService is injected as its own bean — not "this" — the call goes out through UserService and back in through AuditService\'s own proxy. This is NOT self-invocation.'},
+      {node:'PROXY',hdr:'auditService\'s own CGLIB proxy intercepts the call',pay:{proxyClass:'AuditServiceImpl$$SpringCGLIB$0',interceptor:'TransactionInterceptor',declaredPropagation:'REQUIRES_NEW'},ins:'A separate bean means a separate proxy. The interceptor sees REQUIRES_NEW on logEvent(), which changes what BEGIN does next.'},
+      {node:'BEGIN',hdr:'Sees propagation=REQUIRES_NEW → suspends tx-101, opens a brand-new tx-102',pay:{suspended:'tx-101 (UserService\'s transaction, paused, connection parked)',opened:'tx-102 (new connection from the pool)'},ins:'REQUIRES_NEW physically detaches from the caller\'s transaction. tx-102 has its own connection and its own commit/rollback fate, entirely independent of tx-101.'},
+      {node:'EXEC',hdr:'auditRepo.save(new AuditEvent(...)) runs inside tx-102',pay:{sql:'INSERT INTO audit_log (user_id, action, ts) VALUES (?,?,?)',txId:'tx-102'},ins:'This INSERT is scoped only to tx-102 — it has zero knowledge of whatever the outer UserService method is still doing.'},
+      {node:'END',hdr:'tx-102 commits immediately; control returns to UserService, which later throws and rolls back tx-101',pay:{tx102:'COMMITTED (permanent)',tx101:'later ROLLED BACK (role insert violated a constraint)',auditRecordSurvives:true},tone:'ok',ins:'This is the entire point of REQUIRES_NEW for audit trails: the compliance record must survive even when the business operation it describes ultimately fails.'},
+    ],result:{tone:'ok',text:'✅ The audit row is permanently committed even though the outer user-creation transaction rolled back — REQUIRES_NEW gave it an independent commit boundary.'}},
+
+    optlock:{label:'@Version optimistic lock conflict → retry',steps:[
+      {node:'CALL',hdr:'Two concurrent requests both call refreshTokenService.rotate(tokenId) near-simultaneously',pay:{requestA:'thread A → rotate(tokenId=55)',requestB:'thread B → rotate(tokenId=55)',currentVersion:3},ins:'Concurrent refresh-token rotation is a classic CIAM race: two requests racing to rotate the same token must not both succeed and hand out two "current" tokens.'},
+      {node:'PROXY',hdr:'Both calls go through the proxy; each opens its own REQUIRED transaction',pay:{txA:'tx-A begins',txB:'tx-B begins',sharedLockYet:false},ins:'Nothing coordinates A and B yet — optimistic locking deliberately avoids taking a DB lock up front, betting that conflicts are rare.'},
+      {node:'BEGIN',hdr:'Both transactions SELECT the same row and both see version=3',pay:{txA_read:'version=3',txB_read:'version=3',isolation:'READ_COMMITTED'},ins:'Under READ_COMMITTED both reads are legal and see the same committed snapshot — the conflict is only detected later, at UPDATE time.'},
+      {node:'EXEC',hdr:'tx-A\'s UPDATE ... WHERE id=55 AND version=3 commits first; tx-B\'s identical UPDATE now matches 0 rows',pay:{txA_update:'rows=1 → version becomes 4 → COMMIT',txB_update:'rows=0 — version column no longer equals 3'},ins:'Hibernate appends "AND version=?" to every UPDATE for a @Version entity. Zero rows affected is Hibernate\'s signal that someone else won the race.'},
+      {node:'END',hdr:'Hibernate throws OptimisticLockException for tx-B; @Retryable retries the whole method and succeeds on attempt 2',pay:{exception:'OptimisticLockException on thread B',retryAttempt:2,reReadVersion:4,finalResult:'COMMIT, version=5'},tone:'ok',ins:'spring-retry\'s @Retryable re-runs the entire @Transactional method with a fresh read, so the retry sees the up-to-date version instead of repeating the same doomed UPDATE.'},
+    ],result:{tone:'ok',text:'✅ The losing request fails fast with OptimisticLockException instead of silently overwriting — @Retryable transparently retries and both rotations end up correctly serialized.'}},
+
+    selfcall:{label:'Self-invocation silently skips the proxy',steps:[
+      {node:'CALL',hdr:'doWork() calls this.saveAudit() — an internal call within the SAME class',pay:{callerMethod:'UserService.doWork()',internalCallTarget:'this.saveAudit()',declaredAnnotation:'@Transactional on saveAudit()'},ins:'"this" inside a bean always refers to the raw target object that Spring wrapped — never the CGLIB proxy sitting in front of it.'},
+      {node:'PROXY',hdr:'No proxy involved — the call resolves directly against the target instance',pay:{proxyBypassed:true,reason:'internal method calls never go through the Spring-managed bean reference'},tone:'bad',ins:'Only calls arriving from OUTSIDE the bean (another bean, a controller) pass through the AOP proxy. A call from inside the same object skips it entirely — with no warning of any kind.'},
+      {node:'BEGIN',hdr:'TransactionInterceptor never runs → PlatformTransactionManager is never invoked',pay:{transactionOpened:false,connection:'whatever connection (if any) the caller already had, or none'},tone:'bad',ins:'Because the interceptor is bytecode woven around the PROXY, not the class itself, bypassing the proxy means the entire transactional machinery is simply absent for this call.'},
+      {node:'EXEC',hdr:'saveAudit() body still executes — it just runs with NO transactional wrapper',pay:{sql:'INSERT INTO audit_log (user_id, action, ts) VALUES (?,?,?)',autoCommitMode:true},tone:'bad',ins:'The SQL still runs and still succeeds — that\'s what makes this bug so hard to spot in testing. It only matters once you need atomicity with a later failing statement.'},
+      {node:'END',hdr:'The row auto-commits per-statement immediately; @Transactional on saveAudit() had zero effect',pay:{result:'row persisted outside any tx boundary',symptom:'if a LATER statement in doWork() fails, this row is NOT rolled back with it',fix:'inject the service into itself (self.saveAudit()) or extract saveAudit() to a separate @Service bean'},tone:'bad',ins:'The fix works because either option makes the call arrive from OUTSIDE the raw object — through a real bean reference — so it passes through the proxy like any other external call.'},
+    ],result:{tone:'bad',text:'⚠️ @Transactional silently did nothing — self-invocation bypassed the proxy. Fix: call through a self-injected proxy reference or move the method to a separate bean.'}},
+  };
+
+  const nodes=['CALL','PROXY','BEGIN','EXEC','END'];
+  function posOf(n){const i=nodes.indexOf(n);return i<0?50:10+i*20;}
+  let cur='required',timers2=[],running2=false;
+
+  function reset2(){
+    timers2.forEach(clearTimeout);timers2=[];running2=false;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='ready';
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(el)el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+    });
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left='5%';chip.textContent='→';}
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP 0 / '+SCEN[cur].steps.length;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent='Pick a scenario and press ▶ Run';
+    const pay=document.getElementById(pfx+'Payload');if(pay)pay.textContent='';
+    const hdr=document.getElementById(pfx+'Headers');if(hdr)hdr.innerHTML='<span class="ht">INSPECTOR<\/span>(waiting)';
+    const res=document.getElementById(pfx+'Result');if(res){res.textContent='';res.className='rt-result';}
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=false;
+  }
+
+  function applyStep2(s,idx,total){
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left=posOf(s.node)+'%';chip.textContent='→';}
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(!el)return;
+      el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+      if(n===s.node){
+        if(s.tone==='ok')el.className+=' vchk cur';
+        else if(s.tone==='bad')el.className+=' vskip curbad';
+        else el.className+=' cur';
+      }
+    });
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP '+idx+' / '+total;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent=s.hdr;
+    const pay=document.getElementById(pfx+'Payload');
+    if(pay)pay.textContent=JSON.stringify(s.pay,null,2);
+    const hdrEl=document.getElementById(pfx+'Headers');
+    if(hdrEl)hdrEl.innerHTML='<span class="ht">INSPECTOR<\/span>'+s.ins;
+  }
+
+  function run2(){
+    reset2();running2=true;
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=true;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='running…';
+    const steps=SCEN[cur].steps;
+    steps.forEach((s,i)=>timers2.push(setTimeout(()=>applyStep2(s,i+1,steps.length),(i+1)*2000)));
+    timers2.push(setTimeout(()=>{
+      const r=SCEN[cur].result;
+      const res=document.getElementById(pfx+'Result');
+      if(res){res.textContent=r.text;res.className='rt-result show '+(r.tone==='ok'?'ok':'bad');}
+      if(pill)pill.textContent='done';
+      running2=false;const btn2=document.getElementById(pfx+'Run');if(btn2)btn2.disabled=false;
+    },(steps.length+1)*2000));
+  }
+
+  document.getElementById(pfx+'Run').onclick=run2;
+  document.querySelectorAll('#'+pfx+'Seg button').forEach(b=>{
+    b.onclick=()=>{
+      if(running2)return;
+      cur=b.dataset.s;
+      document.querySelectorAll('#'+pfx+'Seg button').forEach(x=>x.classList.toggle('on',x===b));
+      reset2();
+    };
+  });
+  reset2();
+})();
 </script>
 </body>
 </html>

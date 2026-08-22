@@ -83,6 +83,46 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> <code>POST /api/auth/login</code> limited by IP (5/min) and username (10/hour); log each failure with IP, masked username, and timestamp. If one username gets &gt;10 failures in 5 min from different IPs, that's a stuffing pattern — notify the user "someone is trying to access your account." Also throttle <code>POST /api/auth/password-reset</code> (3/hour per email) to stop email flooding.</div>
   </div>
 
+  <!-- ── EXTREME-VIZ HERO ── -->
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">Scenario</span>
+      <span class="userseg" id="qtSeg">
+        <button class="on" data-s="normal">① normal login — token + credentials both check out</button>
+        <button data-s="burst">② burst from one IP — 429 before auth even runs</button>
+        <button data-s="stuffing">③ slow distributed stuffing — caught by lockout, not rate limit</button>
+        <button data-s="weaponized">④ username-only lockout weaponized against the real user</button>
+      </span>
+      <button class="rt-run" id="qtRun">▶ Run</button>
+      <span class="rt-pill" id="qtPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="qtDiag">
+        <div class="rt-rail"></div>
+        <div class="rt-chip" id="qtChip">→</div>
+        <div class="rt-node" data-n="REQ"><span class="ic">📱</span><div><div class="nl">Request</div><div class="ns">POST /auth/login arrives</div></div><span class="who who-badge who-REQ">REQ</span></div>
+        <div class="rt-node" data-n="BKT"><span class="ic">🪣</span><div><div class="nl">Bucket</div><div class="ns">IP-keyed token check</div></div><span class="who who-badge who-BKT">BKT</span></div>
+        <div class="rt-node" data-n="LOCK"><span class="ic">🔒</span><div><div class="nl">Lockout</div><div class="ns">username-keyed failure count</div></div><span class="who who-badge who-LOCK">LOCK</span></div>
+        <div class="rt-node" data-n="AUTH"><span class="ic">🔑</span><div><div class="nl">Auth</div><div class="ns">credential validation</div></div><span class="who who-badge who-AUTH">AUTH</span></div>
+        <div class="rt-node" data-n="RESP"><span class="ic">📨</span><div><div class="nl">Response</div><div class="ns">200 / 429 / 423</div></div><span class="who who-badge who-RESP">RESP</span></div>
+      </div>
+      <div class="rt-inspect" id="qtInspect">
+        <div class="rt-dir" id="qtDir">STEP 0 / 5</div>
+        <div class="rt-cap" id="qtCap">Pick a scenario and press ▶ Run</div>
+        <div class="rt-payload" id="qtPayload"></div>
+        <div class="rt-headers" id="qtHeaders"><span class="ht">INSPECTOR</span>(waiting)</div>
+      </div>
+    </div>
+    <div class="rt-result" id="qtResult"></div>
+  </div>
+  <div class="who-row">
+    <span class="who-badge who-REQ">REQ — POST /auth/login arrives</span>
+    <span class="who-badge who-BKT">BKT — IP-keyed token check</span>
+    <span class="who-badge who-LOCK">LOCK — username-keyed failure count</span>
+    <span class="who-badge who-AUTH">AUTH — credential validation</span>
+    <span class="who-badge who-RESP">RESP — 200 / 429 / 423</span>
+  </div>
+
   <!-- rate-limiting animated hero -->
   <section style="margin-bottom:28px">
     <h2 style="margin-bottom:8px">▶ Request through the rate-limit filter — step by step</h2>
@@ -126,6 +166,13 @@
       .rl-res.show{display:block}.rl-res.ok{background:#052e16;color:#86efac;border:1px solid #134d28}
       .rl-res.bad{background:#3b0a0a;color:#fca5a5;border:1px solid #5b1717}
       .rl-res.warn{background:#3a2a06;color:#fcd34d;border:1px solid #5b4410}
+      .who-REQ{background:#3776ab;color:#fff}
+      .who-BKT{background:#ffd43b;color:#3a2c00}
+      .who-LOCK{background:#a78bfa;color:#1a1030}
+      .who-AUTH{background:#22d3ee;color:#04231a}
+      .who-RESP{background:#4ade80;color:#04231a}
+      .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
+      .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
     </style>
     <div class="rl-bar">
       <span style="font-size:11.5px;color:var(--muted);font-weight:700">scenario:</span>
@@ -420,6 +467,113 @@ document.getElementById('attempt').onclick=doAttempt;
 document.getElementById('adv').onclick=advance;
 document.getElementById('reset').onclick=reset;
 reset();
+</script>
+
+<script>
+(function(){
+  const pfx='qt';
+  const SCEN={
+    normal:{label:'normal login — token + credentials both check out',steps:[
+      {node:'REQ',hdr:'Client sends POST /auth/login with correct credentials',pay:{ip:'203.0.113.5',username:'alice'},ins:'Every request starts identically — the filter chain has no idea yet whether this is a legitimate login or an attack.'},
+      {node:'BKT',hdr:'Token bucket for this IP has tokens available',pay:{bucket:'capacity=10, tokens=9 after this request',consumed:true},ins:'Bucket4j\'s tryConsume() is atomic and O(1) — checking the rate limit costs almost nothing compared to a DB round trip.'},
+      {node:'LOCK',hdr:'Lockout counter for alice is at 0 — no prior failures',pay:{key:'lockout:alice',failures:0},ins:'The lockout counter is a completely separate piece of state from the rate-limit bucket, keyed by username instead of IP.'},
+      {node:'AUTH',hdr:'Credentials validated — password matches',pay:{result:'BCrypt match',failureCounterChange:'none'},tone:'ok',ins:'A successful login never increments the failure counter, so it never contributes toward a future lockout.'},
+      {node:'RESP',hdr:'200 OK — JWT issued',pay:{status:200,body:'{"accessToken":"eyJ…"}',rateLimitRemaining:9},tone:'ok',ins:'Both defenses ran and both passed — this is the fully unremarkable, expected path for the overwhelming majority of real logins.'},
+    ],result:{tone:'ok',text:'✅ 200 OK — a token was available and the credentials were correct. Neither defense had a reason to engage.'}},
+
+    burst:{label:'burst from one IP — 429 before auth even runs',steps:[
+      {node:'REQ',hdr:'11th request in 60 seconds, same IP',pay:{ip:'203.0.113.5',requestNumber:11,windowSeconds:60},ins:'The previous 10 requests already consumed the bucket\'s full capacity — this 11th one arrives to an empty bucket.'},
+      {node:'BKT',hdr:'tryConsume() returns false — bucket is empty',pay:{bucket:'capacity=10, tokens=0',consumed:false,retryAfterSec:47},tone:'ok',ins:'The filter short-circuits right here — this is the entire point of putting rate limiting in a filter, ahead of everything downstream.'},
+      {node:'LOCK',hdr:'Lockout counter is never touched',pay:{key:'lockout:alice',touched:false},tone:'ok',ins:'Rate-limit rejection is not a failed login attempt, so it must not be conflated with — or counted toward — account lockout.'},
+      {node:'AUTH',hdr:'AuthenticationService is never invoked',pay:{invoked:false,dbQuery:'never issued'},tone:'ok',ins:'This is exactly why the filter runs before Spring Security\'s authentication machinery — the DB and password hasher are spared the load entirely.'},
+      {node:'RESP',hdr:'429 Too Many Requests',pay:{status:429,headers:{'Retry-After':'47'}},tone:'ok',ins:'A well-behaved client reads Retry-After and backs off; the header is required by RFC 6585 and is what turns a hard block into a cooperative one.'},
+    ],result:{tone:'ok',text:'✅ 429 stopped the burst before a single password was checked — the DB and AuthService were never touched.'}},
+
+    stuffing:{label:'slow distributed stuffing — caught by lockout, not rate limit',steps:[
+      {node:'REQ',hdr:'Attacker sends 1 login attempt/minute against alice, deliberately under the rate limit',pay:{ip:'198.51.100.9',rate:'1 request/min',passwords:'dictionary guesses'},ins:'A patient attacker who paces requests can stay under almost any per-IP threshold indefinitely.'},
+      {node:'BKT',hdr:'Token bucket never trips — one request a minute never exhausts it',pay:{bucket:'tokens always ≥ 1 at this pace'},tone:'ok',ins:'Rate limiting alone is blind to this attack — it only sees request volume, not the pattern of who is being targeted.'},
+      {node:'LOCK',hdr:'Lockout counter for alice climbs by one on every wrong guess',pay:{key:'lockout:alice',failures:'1 → 2 → 3 → 4 → 5',threshold:5},tone:'ok',ins:'The lockout counter is what actually catches this — it tracks failures against ONE account regardless of which IP they come from.'},
+      {node:'AUTH',hdr:'5th consecutive failure trips AccountLockedException',pay:{failures:5,action:'redis.expire("lockout:alice", 900)'},tone:'ok',ins:'The threshold check happens inside the same authentication path that validates the password — a failed match increments, then checks against the limit.'},
+      {node:'RESP',hdr:'423 Locked — the slow, rate-limit-evading attack is stopped here instead',pay:{status:423,body:'{"error":"Account temporarily locked"}'},tone:'ok',ins:'Two independent controls, two different attack shapes: rate limiting catches volume, lockout catches targeting — you need both.'},
+    ],result:{tone:'ok',text:'✅ Rate limiting alone would have missed this slow attacker — a separate username-keyed lockout counter is what catches distributed, patient credential stuffing.'}},
+
+    weaponized:{label:'username-only lockout weaponized against the real user',steps:[
+      {node:'REQ',hdr:'Attacker deliberately sends 5 wrong passwords for the VICTIM\'s username, from 5 different IPs',pay:{username:'alice',attempts:5,intent:'lock alice out, not log in as her'},ins:'The attacker doesn\'t even want to break in — the goal is pure denial of service against a specific account.'},
+      {node:'BKT',hdr:'Each attempt comes from a different IP, so no single per-IP bucket ever empties',pay:{perIpBucket:'tokens ≥ 1 on every IP — nothing trips'},tone:'bad',ins:'Spreading attempts across IPs is a trivial way to stay invisible to any purely IP-keyed defense.'},
+      {node:'LOCK',hdr:'Lockout is keyed ONLY by username — it doesn\'t care who\'s asking',pay:{key:'lockout:alice',failures:5,threshold:5},tone:'bad',ins:'A username-only key means the counter has no concept of "the same attacker" versus "five unrelated failed attempts" — it just counts.'},
+      {node:'AUTH',hdr:'The REAL alice now tries to log in with her correct password',pay:{username:'alice',passwordCorrect:true,outcome:'refused anyway — account already locked'},tone:'bad',ins:'This is the crux of the trap: the lockout doesn\'t care that the next request has the right password, because the account itself is already frozen.'},
+      {node:'RESP',hdr:'423 Locked — served to the real alice, not the attacker',pay:{status:423,victim:'alice (legitimate user)',attacker:'unaffected, free to move on to another username'},tone:'bad',ins:'The attacker spent five throwaway requests to take a real customer out of their own account for 15 minutes — a devastatingly cheap denial-of-service.'},
+    ],result:{tone:'bad',text:'⚠️ Username-only lockout is a denial-of-service vector — an attacker who doesn\'t even want in can lock any account by deliberately failing 5 times. Prefer throttling + exponential backoff + CAPTCHA over a hard username-only lock.'}},
+  };
+
+  const nodes=['REQ','BKT','LOCK','AUTH','RESP'];
+  function posOf(n){const i=nodes.indexOf(n);return i<0?50:10+i*20;}
+  let cur='normal',timers2=[],running2=false;
+
+  function reset2(){
+    timers2.forEach(clearTimeout);timers2=[];running2=false;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='ready';
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(el)el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+    });
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left='5%';chip.textContent='→';}
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP 0 / '+SCEN[cur].steps.length;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent='Pick a scenario and press ▶ Run';
+    const pay=document.getElementById(pfx+'Payload');if(pay)pay.textContent='';
+    const hdr=document.getElementById(pfx+'Headers');if(hdr)hdr.innerHTML='<span class="ht">INSPECTOR<\/span>(waiting)';
+    const res=document.getElementById(pfx+'Result');if(res){res.textContent='';res.className='rt-result';}
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=false;
+  }
+
+  function applyStep2(s,idx,total){
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left=posOf(s.node)+'%';chip.textContent='→';}
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(!el)return;
+      el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+      if(n===s.node){
+        if(s.tone==='ok')el.className+=' vchk cur';
+        else if(s.tone==='bad')el.className+=' vskip curbad';
+        else el.className+=' cur';
+      }
+    });
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP '+idx+' / '+total;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent=s.hdr;
+    const pay=document.getElementById(pfx+'Payload');
+    if(pay)pay.textContent=JSON.stringify(s.pay,null,2);
+    const hdrEl=document.getElementById(pfx+'Headers');
+    if(hdrEl)hdrEl.innerHTML='<span class="ht">INSPECTOR<\/span>'+s.ins;
+  }
+
+  function run2(){
+    reset2();running2=true;
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=true;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='running…';
+    const steps=SCEN[cur].steps;
+    steps.forEach((s,i)=>timers2.push(setTimeout(()=>applyStep2(s,i+1,steps.length),(i+1)*2000)));
+    timers2.push(setTimeout(()=>{
+      const r=SCEN[cur].result;
+      const res=document.getElementById(pfx+'Result');
+      if(res){res.textContent=r.text;res.className='rt-result show '+(r.tone==='ok'?'ok':'bad');}
+      if(pill)pill.textContent='done';
+      running2=false;const btn2=document.getElementById(pfx+'Run');if(btn2)btn2.disabled=false;
+    },(steps.length+1)*2000));
+  }
+
+  document.getElementById(pfx+'Run').onclick=run2;
+  document.querySelectorAll('#'+pfx+'Seg button').forEach(b=>{
+    b.onclick=()=>{
+      if(running2)return;
+      cur=b.dataset.s;
+      document.querySelectorAll('#'+pfx+'Seg button').forEach(x=>x.classList.toggle('on',x===b));
+      reset2();
+    };
+  });
+  reset2();
+})();
 </script>
 </body>
 </html>
