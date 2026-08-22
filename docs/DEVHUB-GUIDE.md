@@ -1,11 +1,11 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 453 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 454 pages.** Pick a *path* below and follow it.
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **453 browser visualizers** across **29 tracks** (grouped into
+DevHub is a learning hub: **454 browser visualizers** across **29 tracks** (grouped into
 categories in the sidebar — Languages & Concepts, Frontend, Backend & APIs, DevOps/Cloud & Data, Practice & Prep; several tracks also have a 🍳 **Common Recipes** section of practical how-tos — API→form, batch upload, password complexity), plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
@@ -146,7 +146,9 @@ accounts are seeded in dev: **`demo` / `demo12345`** (USER) and **`admin` / `adm
   · [Browser & Angular DevTools](../frontend/angular-debugging-devtools-deep-visualizer.html).
   Technique: [Reading Stack Traces](../frontend/debugging-stack-traces-visualizer.html)
   · [The Debugging Method](../frontend/debugging-method-visualizer.html) (reproduce → bisect)
-  · [Log vs Debugger](../frontend/debugging-logging-vs-stepping-visualizer.html).
+  · [Log vs Debugger](../frontend/debugging-logging-vs-stepping-visualizer.html)
+  · [Debug Like a Pro: The Toolbox](../frontend/debugging-pro-toolbox-visualizer.html) (git bisect,
+  conditional breakpoints, logpoints, correlation IDs, thread/heap dumps).
 - **"Hardening the auth backend"** → 🍃 [Rate Limiting & Lockout](../frontend/spring-boot-rate-limiting-deep-visualizer.html)
   · [Refresh Token Rotation](../frontend/spring-boot-refresh-token-rotation-deep-visualizer.html)
   (reuse detection) · [CSRF Protection](../frontend/spring-boot-csrf-deep-visualizer.html)
