@@ -34,20 +34,11 @@ found this reaches well past AWS and DS&A):
   9 existing AWS pages (all have intro cards + code walkthroughs already, just predate the
   newer interaction pattern). `aws-vpc-visualizer.html` is the worst offender — zero
   interactivity today. Priority order: VPC → IAM → Lambda → EC2/ECS/RDS/S3/CloudWatch → Overview.
-- Same retrofit for the 17 (of 18) Data Structures & Algorithms pages still on the older
-  SVG/canvas-driven interaction style — highest-traffic first: `graph-visualizer.html`,
-  `bst-visualizer.html`, `sorting-visualizer.html` (has partial `rt-*` markup already, finish
-  it), `ds-dynamic-programming-visualizer.html`.
-- **Sitewide `rt-ctlbar` coverage by track prefix** (of pages with `intro-head`, i.e. excluding
-  quiz/flashcard pages): Java **0/18**, Interview/DSA-prep **0/14**, Config **0/11**,
-  Docker **0/7**, Git **0/6**, Maven **0/6**, DS&A **2/12**, AWS **6/16**, TypeScript **10/32**,
-  Spring Boot **28/53**, vs. Angular/React/Go/Kubernetes/Head-First-Patterns at ~100%. All the
-  0%-coverage tracks use an older tab-based or step-button interaction style instead (not blank
-  pages) — see the "Done — spot-check" entry above for what that looks like on
-  `java-records-sealed-visualizer.html` and the `interview-*` pages. If/when this retrofit work
-  is picked up, do Java and Interview/DSA-prep next (biggest 0%-coverage tracks by page count
-  after AWS/DS&A), then Config/Docker/Git/Maven, then backfill the partial TypeScript and
-  Spring Boot pages.
+  Current coverage: **6/15**.
+- Same retrofit for the Data Structures & Algorithms pages still on the older SVG/canvas-driven
+  interaction style — highest-traffic first: `graph-visualizer.html`, `bst-visualizer.html`,
+  `sorting-visualizer.html` (has partial `rt-*` markup already, finish it),
+  `ds-dynamic-programming-visualizer.html`. Current coverage: **2/11**.
 - `exam-sql.html` (24 Q) doesn't test anything from `sql-postgres-visualizer.html` (JSONB,
   connection pooling, VACUUM) — add a domain once the replication/partitioning pages above are
   registered.
@@ -57,6 +48,33 @@ found this reaches well past AWS and DS&A):
   two AWS banks' 37–41.
 - `flashcards-bigo.html` has no cards for two-pointer/sliding-window or backtracking once those
   pages exist.
+
+---
+
+## Done — sitewide `rt-ctlbar` retrofit: Java/Interview/Config/Docker/Git/Maven/TypeScript/Spring Boot (completed 2026-08-22)
+
+Closed out the "sitewide `rt-ctlbar` coverage by track prefix" backlog item from the depth-pass
+audit below. Every track it flagged as 0% or partial is now at full `rt-ctlbar`/`rt-stage`
+scenario-walk + live-inspector coverage (of pages with `intro-head`, i.e. excluding
+quiz/flashcard/index pages): Java **18/18**, Interview/DSA-prep **13/13**, Config **11/11**,
+Docker **6/6**, Git **5/5** (`git-index.html` correctly excluded, it's a track-landing page not a
+concept page), Maven **5/5**, TypeScript **30/30**, Spring Boot **51/51**.
+
+Also fixed a duplicate-DOM-id bug class introduced while retrofitting pages that already had an
+older, bespoke, hand-built animated widget predating the `rt-ctlbar` convention: the new hero
+markup and the legacy widget used the same short id prefix, so `getElementById` silently bound to
+whichever came first in the DOM and broke the other. Fixed by giving the new hero an `x`-suffixed
+prefix (`rt`→`rtx`, `dc`→`dcx`, `fn`→`fnx`, `ms`→`msx`, `tg`→`tgx`) on
+`spring-boot-refresh-token-rotation-deep-visualizer.html`,
+`typescript-decorators-visualizer.html`, `typescript-functions-visualizer.html`,
+`typescript-maps-sets-visualizer.html`, and `typescript-type-guards-visualizer.html`, leaving each
+page's pre-existing widget untouched. Verified sitewide with a full duplicate-id sweep (no `id="…"`
+value repeats anywhere in the diff) and a JS-syntax sweep (every inline `<script>` block parses
+clean via `new Function()`) before committing.
+
+AWS (6/15) and Data Structures & Algorithms (2/11) retrofits remain open — see the backlog item
+above; they were always tracked separately since they're a bigger lift (older SVG/canvas-driven
+pages, not just a missing hero widget).
 
 ---
 

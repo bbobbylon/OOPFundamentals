@@ -61,6 +61,13 @@
     .flow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:8px 0;font-size:11px}
     .flow-node{background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:7px 11px;font-weight:600}
     .flow-arrow{color:var(--muted)}
+    .who-CALL{background:#3776ab;color:#fff}
+    .who-PROXY{background:#ffd43b;color:#3a2c00}
+    .who-KEY{background:#a78bfa;color:#1a1030}
+    .who-STORE{background:#22d3ee;color:#04231a}
+    .who-RESULT{background:#4ade80;color:#04231a}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
   </style>
   <link rel="stylesheet" href="devhub.css" />
 </head>
@@ -97,6 +104,46 @@
       </div>
     </div>
     <div class="intro-ciam"><span class="tag">CIAM:</span> <code>@Cacheable(value="user-roles", key="#userId")</code> on <code>getUserRoles(userId)</code> (frequent, cheap to cache) paired with <code>@CacheEvict(value="user-roles", key="#userId")</code> on <code>updateUserRoles(...)</code>. Cache the JWKS with a 10-min TTL so token validation doesn't hammer Ping/Entra. Watch self-invocation: if <code>updateRoles()</code> calls <code>getRoles()</code> inside the same class, the evict + re-fetch bypass the proxy.</div>
+  </div>
+
+  <!-- ── EXTREME-VIZ HERO ── -->
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">Scenario</span>
+      <span class="userseg" id="ciSeg">
+        <button class="on" data-s="hit">① Cache HIT — proxy skips the method entirely</button>
+        <button data-s="miss">② Cache MISS — key computed, method runs, result stored</button>
+        <button data-s="staleevict">③ Forgotten @CacheEvict serves deleted data</button>
+        <button data-s="selfcall">④ Self-invocation never touches the cache</button>
+      </span>
+      <button class="rt-run" id="ciRun">▶ Run</button>
+      <span class="rt-pill" id="ciPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="ciDiag">
+        <div class="rt-rail"></div>
+        <div class="rt-chip" id="ciChip">→</div>
+        <div class="rt-node" data-n="CALL"><span class="ic">📞</span><div><div class="nl">Call</div><div class="ns">who invokes the @Cacheable method</div></div><span class="who who-badge who-CALL">CALL</span></div>
+        <div class="rt-node" data-n="PROXY"><span class="ic">🛡️</span><div><div class="nl">Proxy</div><div class="ns">cache-interceptor check</div></div><span class="who who-badge who-PROXY">PROXY</span></div>
+        <div class="rt-node" data-n="KEY"><span class="ic">🔑</span><div><div class="nl">Key</div><div class="ns">generate the cache key</div></div><span class="who who-badge who-KEY">KEY</span></div>
+        <div class="rt-node" data-n="STORE"><span class="ic">🗃️</span><div><div class="nl">Store</div><div class="ns">lookup / write in the cache</div></div><span class="who who-badge who-STORE">STORE</span></div>
+        <div class="rt-node" data-n="RESULT"><span class="ic">✅</span><div><div class="nl">Result</div><div class="ns">what the caller gets back</div></div><span class="who who-badge who-RESULT">RESULT</span></div>
+      </div>
+      <div class="rt-inspect" id="ciInspect">
+        <div class="rt-dir" id="ciDir">STEP 0 / 5</div>
+        <div class="rt-cap" id="ciCap">Pick a scenario and press ▶ Run</div>
+        <div class="rt-payload" id="ciPayload"></div>
+        <div class="rt-headers" id="ciHeaders"><span class="ht">INSPECTOR</span>(waiting)</div>
+      </div>
+    </div>
+    <div class="rt-result" id="ciResult"></div>
+  </div>
+  <div class="who-row">
+    <span class="who-badge who-CALL">CALL — who invokes the @Cacheable method</span>
+    <span class="who-badge who-PROXY">PROXY — cache-interceptor check</span>
+    <span class="who-badge who-KEY">KEY — the generated cache key</span>
+    <span class="who-badge who-STORE">STORE — lookup/write in the cache</span>
+    <span class="who-badge who-RESULT">RESULT — what the caller gets back</span>
   </div>
 
   <!-- 1 -->
@@ -373,6 +420,113 @@ document.getElementById('btns').addEventListener('click', e=>{
   else if(act==='reset') reset();
 });
 renderStore(); renderStats();
+</script>
+
+<script>
+(function(){
+  const pfx='ci';
+  const SCEN={
+    hit:{label:'Cache HIT — proxy skips the method entirely',steps:[
+      {node:'CALL',hdr:'External call: OrderController → userService.getUser(42) — second call this minute',pay:{caller:'OrderController.showOrder()',target:'UserService.getUser(Long)',declaredAnnotation:'@Cacheable("users")'},ins:'The controller holds a reference to the CGLIB proxy, not the raw UserService — same pattern as @Transactional/@Async. This is what lets the cache check happen before your method body runs at all.'},
+      {node:'PROXY',hdr:'CacheInterceptor intercepts the call before getUser()\'s body executes',pay:{proxyClass:'UserService$$SpringCGLIB$0',interceptor:'CacheInterceptor',cacheName:'users'},ins:'The interceptor runs BEFORE the target method — that\'s the entire mechanism that lets a hit skip your code completely, not just skip re-storing the result.'},
+      {node:'KEY',hdr:'Default key generator builds the key from the single argument: 42',pay:{keyExpression:'(default) SimpleKeyGenerator',generatedKey:'42',note:'single non-null argument → key is that argument itself, not wrapped in SimpleKey[]'},ins:'With exactly one parameter, Spring\'s default key generator uses the raw argument as the key. Two or more parameters would wrap them in a SimpleKey[a,b] composite instead.'},
+      {node:'STORE',hdr:'cache.get(42) finds an existing entry from 30 seconds ago — a HIT',pay:{cache:'users',key:42,found:true,cachedValue:'User(id=42, email=alice@example.com, ...)'},tone:'ok',ins:'The interceptor returns this cached value directly — getUser()\'s actual body (the DB query) never executes for this call.'},
+      {node:'RESULT',hdr:'Caller receives the cached User object — zero database round-trips this call',pay:{result:'User(id=42, ...)',dbQueriesThisCall:0,latency:'~0.3ms (in-memory lookup) vs ~15ms for a real query'},tone:'ok',ins:'This is the entire payoff of caching: repeated reads of unchanging (or slow-changing) data skip the expensive path completely.'},
+    ],result:{tone:'ok',text:'✅ Cache hit on key 42 — the interceptor returned the stored value and getUser()\'s method body never ran.'}},
+
+    miss:{label:'Cache MISS — key computed, method runs, result stored',steps:[
+      {node:'CALL',hdr:'First-ever call: userService.getUser(77) — nothing cached for this id yet',pay:{caller:'AdminController.viewUser()',target:'UserService.getUser(Long)',declaredAnnotation:'@Cacheable("users")'},ins:'Same proxy path as the hit scenario — the difference happens two steps from now, at the store lookup.'},
+      {node:'PROXY',hdr:'CacheInterceptor intercepts identically — it doesn\'t know yet whether this will hit or miss',pay:{proxyClass:'UserService$$SpringCGLIB$0',interceptor:'CacheInterceptor'},ins:'Hit vs miss is decided by what\'s actually in the store, not by anything the proxy can determine up front — so the interception step looks the same either way.'},
+      {node:'KEY',hdr:'Key generated: 77 (same SimpleKeyGenerator rule as before)',pay:{generatedKey:77},ins:'Key generation is completely independent of whether the entry exists — the interceptor always computes it first, then uses it to probe the store.'},
+      {node:'STORE',hdr:'cache.get(77) finds nothing — a MISS, so the real method body now runs',pay:{cache:'users',key:77,found:false,action:'invoke getUser(77) for real → SELECT * FROM app_user WHERE id=77',thenStore:'cache.put(77, result)'},ins:'This is the "aside" in cache-aside: on a miss, the proxy steps out of the way, lets your method run against the real data source, then writes the result back into the store before returning.'},
+      {node:'RESULT',hdr:'Caller gets the freshly-loaded User; entry is now cached under key 77 for next time',pay:{result:'User(id=77, ...)',dbQueriesThisCall:1,cacheNowContains:'{42: User(...), 77: User(...)}'},tone:'ok',ins:'The NEXT call to getUser(77) will follow the HIT path from scenario ① — this is the one-time cost that every subsequent read avoids.'},
+    ],result:{tone:'ok',text:'✅ Miss on key 77 → real method ran once, result stored — every future getUser(77) call now hits the cache instead.'}},
+
+    staleevict:{label:'Forgotten @CacheEvict serves deleted data',steps:[
+      {node:'CALL',hdr:'adminService.deleteUser(42) runs — the user is removed from the database',pay:{caller:'AdminController.deleteUser()',target:'UserService.deleteUser(Long)',annotation:'⚠️ NO @CacheEvict on this method'},ins:'This is the entire bug in one line: a write/delete path exists with no corresponding eviction of the "users" cache entry for this id.'},
+      {node:'PROXY',hdr:'No caching annotation on deleteUser() at all — the cache interceptor has nothing to intercept here',pay:{cacheAnnotationPresent:false},tone:'bad',ins:'Because there\'s no @CacheEvict, the CacheInterceptor doesn\'t even get involved in this call — the delete happens purely at the database layer, completely invisible to the cache.'},
+      {node:'KEY',hdr:'No key is computed, because no cache operation is being performed',pay:{keyComputed:false},tone:'bad',ins:'Nothing here is wrong in isolation — the bug is an absence, not an incorrect present piece.'},
+      {node:'STORE',hdr:'The "users" cache entry for key 42 is left completely untouched — still holding the deleted user',pay:{cache:'users',key:42,stillCached:'User(id=42, email=alice@example.com, ...)',dbState:'row deleted'},tone:'bad',ins:'The database and the cache have now diverged: the source of truth says the user is gone, but the cache disagrees and has no idea anything changed.'},
+      {node:'RESULT',hdr:'A subsequent getUser(42) call returns the DELETED user straight from the cache — no error, just wrong data',pay:{result:'User(id=42, ...) — a user that no longer exists',fix:'add @CacheEvict(value="users", key="#id") on deleteUser(Long id)'},tone:'bad',ins:'This fails silently — no exception, no log line, just a response that looks completely valid and is completely wrong. Every mutation method needs a matching @CacheEvict or @CachePut, no exceptions.'},
+    ],result:{tone:'bad',text:'⚠️ deleteUser() never evicted the cache — getUser(42) keeps returning the deleted user until the entry\'s TTL (if any) eventually expires.'}},
+
+    selfcall:{label:'Self-invocation never touches the cache',steps:[
+      {node:'CALL',hdr:'refreshDashboard() calls this.getUser(42) — an internal call within the SAME class',pay:{callerMethod:'UserService.refreshDashboard()',internalCallTarget:'this.getUser(42)',declaredAnnotation:'@Cacheable("users") on getUser()'},ins:'"this" inside a Spring bean always refers to the raw target object — never the CGLIB proxy that wraps it. Identical root cause to the @Transactional and @Async self-invocation gotchas.'},
+      {node:'PROXY',hdr:'No proxy involved — the JVM resolves this.getUser(42) directly against the raw instance',pay:{proxyBypassed:true,reason:'internal method calls never route through the Spring-managed bean reference'},tone:'bad',ins:'Only calls arriving from OUTSIDE the bean pass through CacheInterceptor. A call from inside the same object skips the entire caching machinery with no warning.'},
+      {node:'KEY',hdr:'No key generation happens — there is no interceptor present to generate one',pay:{keyComputed:false},tone:'bad',ins:'This is exactly the same failure shape as the forgotten-evict scenario, but the cause is structural (proxy bypass) rather than a missing annotation.'},
+      {node:'STORE',hdr:'The cache is never consulted, and getUser(42)\'s body runs a fresh DB query EVERY time refreshDashboard() calls it',pay:{cacheConsulted:false,dbQueriesPerCall:1,expectedIfCached:0},tone:'bad',ins:'The SQL still runs correctly and returns the right data — which is exactly why this is hard to catch in testing. It only shows up as "why is getUser so slow from THIS code path but fast everywhere else."'},
+      {node:'RESULT',hdr:'refreshDashboard() pays a full DB round-trip on every single call, with @Cacheable silently doing nothing',pay:{symptom:'getUser() cache hit-rate metric never moves for calls originating inside UserService',fix:'inject the service into itself (self.getUser()) or move refreshDashboard() to a separate @Service bean'},tone:'bad',ins:'The fix works because either option makes the call arrive from OUTSIDE the raw object — through a real bean reference — so it passes through the proxy like any other external call.'},
+    ],result:{tone:'bad',text:'⚠️ @Cacheable silently did nothing — self-invocation bypassed the proxy, so every call recomputes instead of hitting the cache.'}},
+  };
+
+  const nodes=['CALL','PROXY','KEY','STORE','RESULT'];
+  function posOf(n){const i=nodes.indexOf(n);return i<0?50:10+i*20;}
+  let cur='hit',timers2=[],running2=false;
+
+  function reset2(){
+    timers2.forEach(clearTimeout);timers2=[];running2=false;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='ready';
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(el)el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+    });
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left='5%';chip.textContent='→';}
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP 0 / '+SCEN[cur].steps.length;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent='Pick a scenario and press ▶ Run';
+    const pay=document.getElementById(pfx+'Payload');if(pay)pay.textContent='';
+    const hdr=document.getElementById(pfx+'Headers');if(hdr)hdr.innerHTML='<span class="ht">INSPECTOR<\/span>(waiting)';
+    const res=document.getElementById(pfx+'Result');if(res){res.textContent='';res.className='rt-result';}
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=false;
+  }
+
+  function applyStep2(s,idx,total){
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left=posOf(s.node)+'%';chip.textContent='→';}
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(!el)return;
+      el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+      if(n===s.node){
+        if(s.tone==='ok')el.className+=' vchk cur';
+        else if(s.tone==='bad')el.className+=' vskip curbad';
+        else el.className+=' cur';
+      }
+    });
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP '+idx+' / '+total;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent=s.hdr;
+    const pay=document.getElementById(pfx+'Payload');
+    if(pay)pay.textContent=JSON.stringify(s.pay,null,2);
+    const hdrEl=document.getElementById(pfx+'Headers');
+    if(hdrEl)hdrEl.innerHTML='<span class="ht">INSPECTOR<\/span>'+s.ins;
+  }
+
+  function run2(){
+    reset2();running2=true;
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=true;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='running…';
+    const steps=SCEN[cur].steps;
+    steps.forEach((s,i)=>timers2.push(setTimeout(()=>applyStep2(s,i+1,steps.length),(i+1)*2000)));
+    timers2.push(setTimeout(()=>{
+      const r=SCEN[cur].result;
+      const res=document.getElementById(pfx+'Result');
+      if(res){res.textContent=r.text;res.className='rt-result show '+(r.tone==='ok'?'ok':'bad');}
+      if(pill)pill.textContent='done';
+      running2=false;const btn2=document.getElementById(pfx+'Run');if(btn2)btn2.disabled=false;
+    },(steps.length+1)*2000));
+  }
+
+  document.getElementById(pfx+'Run').onclick=run2;
+  document.querySelectorAll('#'+pfx+'Seg button').forEach(b=>{
+    b.onclick=()=>{
+      if(running2)return;
+      cur=b.dataset.s;
+      document.querySelectorAll('#'+pfx+'Seg button').forEach(x=>x.classList.toggle('on',x===b));
+      reset2();
+    };
+  });
+  reset2();
+})();
 </script>
 </body>
 </html>

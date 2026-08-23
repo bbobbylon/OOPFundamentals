@@ -69,6 +69,13 @@
     .flow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:8px 0;font-size:11px}
     .flow-node{background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:7px 11px;font-weight:600}
     .flow-arrow{color:var(--muted)}
+    .who-CALL{background:#3776ab;color:#fff}
+    .who-PROXY{background:#ffd43b;color:#3a2c00}
+    .who-POOL{background:#a78bfa;color:#1a1030}
+    .who-EXEC{background:#22d3ee;color:#04231a}
+    .who-RESULT{background:#4ade80;color:#04231a}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
   </style>
   <link rel="stylesheet" href="devhub.css" />
 </head>
@@ -105,6 +112,46 @@
       </div>
     </div>
     <div class="intro-ciam"><span class="tag">CIAM:</span> The ThreadLocal bug is real — an <code>@Async sendAuditEvent()</code> that reads <code>SecurityContextHolder.getContext().getAuthentication().getName()</code> NPEs in prod. Capture the principal <em>before</em> dispatching: <code>String actor = authentication.getName(); executor.execute(() -&gt; auditService.record(actor, …))</code> — pass the value in, don't read ThreadLocal on the new thread.</div>
+  </div>
+
+  <!-- ── EXTREME-VIZ HERO ── -->
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">Scenario</span>
+      <span class="userseg" id="atSeg">
+        <button class="on" data-s="external">① External call → proxy dispatches to the pool</button>
+        <button data-s="selfcall">② Self-invocation silently skips the proxy</button>
+        <button data-s="poolfill">③ Queue fills before the pool grows past core</button>
+        <button data-s="secctx">④ SecurityContext is empty on the async thread</button>
+      </span>
+      <button class="rt-run" id="atRun">▶ Run</button>
+      <span class="rt-pill" id="atPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="atDiag">
+        <div class="rt-rail"></div>
+        <div class="rt-chip" id="atChip">→</div>
+        <div class="rt-node" data-n="CALL"><span class="ic">📞</span><div><div class="nl">Call</div><div class="ns">who invokes the @Async method</div></div><span class="who who-badge who-CALL">CALL</span></div>
+        <div class="rt-node" data-n="PROXY"><span class="ic">🛡️</span><div><div class="nl">Proxy</div><div class="ns">AOP interceptor check</div></div><span class="who who-badge who-PROXY">PROXY</span></div>
+        <div class="rt-node" data-n="POOL"><span class="ic">🧵</span><div><div class="nl">Pool</div><div class="ns">core / queue / max decision</div></div><span class="who who-badge who-POOL">POOL</span></div>
+        <div class="rt-node" data-n="EXEC"><span class="ic">⚙️</span><div><div class="nl">Execute</div><div class="ns">task runs on a worker thread</div></div><span class="who who-badge who-EXEC">EXEC</span></div>
+        <div class="rt-node" data-n="RESULT"><span class="ic">✅</span><div><div class="nl">Result</div><div class="ns">what the caller/system sees</div></div><span class="who who-badge who-RESULT">RESULT</span></div>
+      </div>
+      <div class="rt-inspect" id="atInspect">
+        <div class="rt-dir" id="atDir">STEP 0 / 5</div>
+        <div class="rt-cap" id="atCap">Pick a scenario and press ▶ Run</div>
+        <div class="rt-payload" id="atPayload"></div>
+        <div class="rt-headers" id="atHeaders"><span class="ht">INSPECTOR</span>(waiting)</div>
+      </div>
+    </div>
+    <div class="rt-result" id="atResult"></div>
+  </div>
+  <div class="who-row">
+    <span class="who-badge who-CALL">CALL — who invokes the @Async method</span>
+    <span class="who-badge who-PROXY">PROXY — AOP interceptor check</span>
+    <span class="who-badge who-POOL">POOL — core/queue/max decision</span>
+    <span class="who-badge who-EXEC">EXEC — task runs on a worker thread</span>
+    <span class="who-badge who-RESULT">RESULT — what the caller/system sees</span>
   </div>
 
   <!-- 1 -->
@@ -420,6 +467,113 @@ document.querySelectorAll('.seg button').forEach(b=>b.onclick=()=>{
   handler=b.dataset.h; document.querySelectorAll('.seg button').forEach(x=>x.classList.toggle('on',x===b)); renderHint();
 });
 renderAll();
+</script>
+
+<script>
+(function(){
+  const pfx='at';
+  const SCEN={
+    external:{label:'External call → proxy dispatches to the pool',steps:[
+      {node:'CALL',hdr:'External call: OrderController → userService.sendWelcomeEmail(userId)',pay:{caller:'OrderController.placeOrder()',target:'UserService.sendWelcomeEmail(Long)',declaredAnnotation:'@Async on sendWelcomeEmail()'},ins:'Just like @Transactional, Spring injects the CGLIB proxy into the controller — not the raw UserService. The controller never even knows async dispatch is about to happen.'},
+      {node:'PROXY',hdr:'AOP proxy intercepts the call before the real method runs',pay:{proxyClass:'UserService$$SpringCGLIB$0',interceptor:'AsyncExecutionInterceptor'},ins:'Interception only happens for calls arriving from OUTSIDE the bean — a controller injecting UserService counts, which is exactly the case here.'},
+      {node:'POOL',hdr:'Interceptor wraps the call as a Runnable and submits it to the configured ThreadPoolTaskExecutor',pay:{executor:'applicationTaskExecutor',corePoolSize:5,currentActive:2,decision:'thread available → run immediately'},ins:'The calling thread (handling the HTTP request) does not wait — submit() returns instantly and the controller moves on to build its response.'},
+      {node:'EXEC',hdr:'Worker thread "task-3" runs sendWelcomeEmail() independently of the request thread',pay:{workerThread:'task-3',requestThread:'http-nio-8080-exec-7 (already free to serve the next request)'},tone:'ok',ins:'This is the entire point of @Async: the slow part (SMTP round-trip) happens off the thread the user is waiting on.'},
+      {node:'RESULT',hdr:'HTTP response returns immediately; the email sends a few hundred ms later on its own thread',pay:{httpResponseTime:'12ms',emailSendTime:'340ms (happens after the response was already sent)'},tone:'ok',ins:'The controller\'s method returned long before sendWelcomeEmail() finished — that\'s "fire-and-forget" working as designed.'},
+    ],result:{tone:'ok',text:'✅ The call arrived from outside the bean, so the proxy intercepted it and dispatched the work to a pool thread — the request thread never waited.'}},
+
+    selfcall:{label:'Self-invocation silently skips the proxy',steps:[
+      {node:'CALL',hdr:'placeOrder() calls this.sendWelcomeEmail() — an internal call within the SAME class',pay:{callerMethod:'OrderService.placeOrder()',internalCallTarget:'this.sendWelcomeEmail(userId)',declaredAnnotation:'@Async on sendWelcomeEmail()'},ins:'"this" inside a bean is always the raw target object, never the CGLIB proxy Spring wrapped around it — identical root cause to the @Transactional self-invocation gotcha.'},
+      {node:'PROXY',hdr:'No proxy involved — the JVM resolves this.sendWelcomeEmail() directly against the target instance',pay:{proxyBypassed:true,reason:'internal calls never go through the Spring-managed bean reference'},tone:'bad',ins:'Only calls from OUTSIDE the bean pass through the AOP proxy. This call never leaves OrderService\'s own bytecode, so AsyncExecutionInterceptor never runs.'},
+      {node:'POOL',hdr:'No task is submitted anywhere — there is no pool involved at all',pay:{executorInvoked:false,taskSubmitted:false},tone:'bad',ins:'Because the interceptor is woven around the proxy and the proxy was never reached, the entire async dispatch machinery is simply absent for this call.'},
+      {node:'EXEC',hdr:'sendWelcomeEmail() runs synchronously, on the SAME thread as placeOrder()',pay:{runningThread:'http-nio-8080-exec-7 (the request thread itself)',blockingCall:'SMTP send — 340ms'},tone:'bad',ins:'The method body still runs correctly — that\'s what makes this so easy to miss in testing. It only becomes visible under load, when 340ms of blocking email I/O sits directly on the request thread.'},
+      {node:'RESULT',hdr:'placeOrder() takes 340ms longer than expected; the HTTP response waits for the email to finish',pay:{expectedResponseTime:'~15ms',actualResponseTime:'~355ms',symptom:'response latency spikes exactly matching SMTP round-trip time',fix:'inject the service into itself (self.sendWelcomeEmail()) or extract the method to a separate @Service bean'},tone:'bad',ins:'The fix works for the same reason it works with @Transactional: either option makes the call arrive from OUTSIDE the raw object, through a real bean reference, so it passes through the proxy.'},
+    ],result:{tone:'bad',text:'⚠️ @Async silently did nothing — self-invocation bypassed the proxy and the email send blocked the request thread. Fix: call through a self-injected proxy reference or a separate bean.'}},
+
+    poolfill:{label:'Queue fills before the pool grows past core',steps:[
+      {node:'CALL',hdr:'A batch job submits 90 @Async report-generation tasks in a tight loop',pay:{executor:'reportTaskExecutor',config:'corePoolSize=5, maxPoolSize=20, queueCapacity=100',tasksSubmitted:90},ins:'The three knobs interact in a specific, non-obvious order — this scenario walks through exactly how ThreadPoolTaskExecutor decides where task #6 through #90 go.'},
+      {node:'PROXY',hdr:'Each of the 90 calls passes through the proxy identically — no surprises here',pay:{proxyInvocations:90,allExternalCalls:true},ins:'Proxy dispatch is uniform for all 90 — the interesting decision-making happens one layer deeper, inside the executor itself.'},
+      {node:'POOL',hdr:'Tasks 1-5 start 5 core threads; tasks 6-90 go straight into the 100-slot QUEUE — no new threads spawn',pay:{coreThreadsStarted:5,tasksQueued:85,queueCapacity:100,newThreadsSpawned:0,commonMisconception:'"more tasks than core threads should spawn more threads" — false until the queue is FULL'},tone:'bad',ins:'ThreadPoolExecutor\'s real rule: grow the pool past corePoolSize ONLY when a new task arrives and the queue is already full AND the pool is below maxPoolSize. With 90 ≤ 5+100=105, the queue absorbs everything — the pool never grows at all.'},
+      {node:'EXEC',hdr:'5 worker threads process the queue one at a time; 85 tasks wait their turn',pay:{activeWorkers:5,waitingInQueue:85,throughput:'5 concurrent report generations, no more, no less'},tone:'bad',ins:'This is usually the surprising part in production: adding more submitted work does NOT add more concurrency until the queue itself is exhausted — a huge queueCapacity can mask a pool that\'s badly undersized for the load.'},
+      {node:'RESULT',hdr:'All 90 reports eventually complete, but strictly 5-at-a-time — no burst capacity was ever used',pay:{maxConcurrencyObserved:5,poolNeverExceeded:'corePoolSize (5), even though maxPoolSize allows 20',fix:'lower queueCapacity (forces earlier growth to maxPoolSize) or size core closer to expected steady-state load'},tone:'bad',ins:'If burst capacity (up to maxPoolSize=20) was actually wanted here, the fix is a SMALLER queueCapacity — a large queue is what prevented the pool from ever needing to grow.'},
+    ],result:{tone:'bad',text:'⚠️ 90 tasks never used more than 5 threads — the 100-slot queue absorbed everything before the pool would grow toward its max of 20. Queue capacity governs growth, not task volume.'}},
+
+    secctx:{label:'SecurityContext is empty on the async thread',steps:[
+      {node:'CALL',hdr:'Inside an authenticated request, controller calls auditService.recordLoginAsync()',pay:{caller:'AuthController.login()',authenticatedUser:'alice@example.com (SecurityContextHolder, bound to THIS thread)'},ins:'SecurityContextHolder stores the authenticated principal in a ThreadLocal by default — it is attached to the exact thread handling this HTTP request, and to no other thread.'},
+      {node:'PROXY',hdr:'AsyncExecutionInterceptor intercepts the call and submits it to the pool as a plain Runnable',pay:{wrapping:'standard Runnable — no SecurityContext propagation by default',executor:'applicationTaskExecutor (plain ThreadPoolTaskExecutor)'},tone:'bad',ins:'Spring does NOT automatically copy ThreadLocal state into the Runnable it submits — @Async and SecurityContext propagation are two independent features that don\'t talk to each other unless configured to.'},
+      {node:'POOL',hdr:'A worker thread ("task-2") picks up the Runnable — it has its OWN, separate ThreadLocal storage',pay:{workerThread:'task-2',workerThreadSecurityContext:'EMPTY — ThreadLocal is per-thread by definition'},tone:'bad',ins:'This is not a bug in Spring Security — ThreadLocal working exactly as designed is precisely the problem. The principal simply never traveled with the task.'},
+      {node:'EXEC',hdr:'recordLoginAsync() calls SecurityContextHolder.getContext().getAuthentication().getName()',pay:{call:'getContext().getAuthentication()',result:'null',nextCall:'.getName() on null'},tone:'bad',ins:'This throws immediately — a NullPointerException on a line that looks completely correct and works fine everywhere else in the synchronous codebase.'},
+      {node:'RESULT',hdr:'NullPointerException in the async task; the audit record never gets written',pay:{exception:'NullPointerException: Cannot invoke "Authentication.getName()" because the return value of "getContext()" is null',fix:'capture authentication.getName() on the CALLING thread before dispatch, pass it as a parameter — or configure SecurityContextHolder.setStrategyName(MODE_INHERITABLETHREADLOCAL) / wrap the executor with DelegatingSecurityContextExecutor'},tone:'bad',ins:'The safest fix is usually the simplest one: read the value you need from SecurityContext BEFORE calling the @Async method, and pass it in as a plain method argument.'},
+    ],result:{tone:'bad',text:'⚠️ NullPointerException — SecurityContext lives in ThreadLocal and never crosses onto the pool\'s worker thread. Capture the value before dispatch instead of reading it inside the async method.'}},
+  };
+
+  const nodes=['CALL','PROXY','POOL','EXEC','RESULT'];
+  function posOf(n){const i=nodes.indexOf(n);return i<0?50:10+i*20;}
+  let cur='external',timers2=[],running2=false;
+
+  function reset2(){
+    timers2.forEach(clearTimeout);timers2=[];running2=false;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='ready';
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(el)el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+    });
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left='5%';chip.textContent='→';}
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP 0 / '+SCEN[cur].steps.length;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent='Pick a scenario and press ▶ Run';
+    const pay=document.getElementById(pfx+'Payload');if(pay)pay.textContent='';
+    const hdr=document.getElementById(pfx+'Headers');if(hdr)hdr.innerHTML='<span class="ht">INSPECTOR<\/span>(waiting)';
+    const res=document.getElementById(pfx+'Result');if(res){res.textContent='';res.className='rt-result';}
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=false;
+  }
+
+  function applyStep2(s,idx,total){
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left=posOf(s.node)+'%';chip.textContent='→';}
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(!el)return;
+      el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+      if(n===s.node){
+        if(s.tone==='ok')el.className+=' vchk cur';
+        else if(s.tone==='bad')el.className+=' vskip curbad';
+        else el.className+=' cur';
+      }
+    });
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP '+idx+' / '+total;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent=s.hdr;
+    const pay=document.getElementById(pfx+'Payload');
+    if(pay)pay.textContent=JSON.stringify(s.pay,null,2);
+    const hdrEl=document.getElementById(pfx+'Headers');
+    if(hdrEl)hdrEl.innerHTML='<span class="ht">INSPECTOR<\/span>'+s.ins;
+  }
+
+  function run2(){
+    reset2();running2=true;
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=true;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='running…';
+    const steps=SCEN[cur].steps;
+    steps.forEach((s,i)=>timers2.push(setTimeout(()=>applyStep2(s,i+1,steps.length),(i+1)*2000)));
+    timers2.push(setTimeout(()=>{
+      const r=SCEN[cur].result;
+      const res=document.getElementById(pfx+'Result');
+      if(res){res.textContent=r.text;res.className='rt-result show '+(r.tone==='ok'?'ok':'bad');}
+      if(pill)pill.textContent='done';
+      running2=false;const btn2=document.getElementById(pfx+'Run');if(btn2)btn2.disabled=false;
+    },(steps.length+1)*2000));
+  }
+
+  document.getElementById(pfx+'Run').onclick=run2;
+  document.querySelectorAll('#'+pfx+'Seg button').forEach(b=>{
+    b.onclick=()=>{
+      if(running2)return;
+      cur=b.dataset.s;
+      document.querySelectorAll('#'+pfx+'Seg button').forEach(x=>x.classList.toggle('on',x===b));
+      reset2();
+    };
+  });
+  reset2();
+})();
 </script>
 </body>
 </html>

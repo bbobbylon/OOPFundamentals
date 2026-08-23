@@ -42,6 +42,13 @@
     .comparison-table td{padding:8px 10px;border-bottom:1px solid var(--border)}
     .comparison-table tr:last-child td{border-bottom:none}
     .comparison-table code{color:var(--accent);font-size:11px}
+    .who-OPEN{background:#3776ab;color:#fff}
+    .who-MODE{background:#ffd43b;color:#3a2c00}
+    .who-XFER{background:#a78bfa;color:#1a1030}
+    .who-CLOSE{background:#22d3ee;color:#04231a}
+    .who-OUT{background:#4ade80;color:#04231a}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
   </style>
   <link rel="stylesheet" href="devhub.css" />
 </head>
@@ -78,6 +85,46 @@
       </div>
     </div>
     <div class="intro-ciam"><span class="tag">CIAM / Spring Boot:</span> A CSV import uses Spring Batch's <code>FlatFileItemReader</code> (efficient, with per-line skip/retry); uploads land in a temp file via <code>Files.createTempFile("import-", ".csv")</code> + <code>file.transferTo(...)</code>; config is read through Spring's <code>ResourceLoader</code> (rarely raw I/O); and an export streams a <code>ByteArrayResource</code> with a <code>Content-Disposition: attachment</code> header.</div>
+  </div>
+
+  <!-- ── EXTREME-VIZ HERO ── -->
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">Scenario</span>
+      <span class="userseg" id="jioSeg">
+        <button class="on" data-s="tryWithResources">① try-with-resources auto-closes, even on exception</button>
+        <button data-s="buffered">② BufferedInputStream cuts syscalls dramatically</button>
+        <button data-s="channelBuffer">③ NIO Channel + ByteBuffer flip()/clear() cycle</button>
+        <button data-s="watchService">④ WatchService polls filesystem change events</button>
+      </span>
+      <button class="rt-run" id="jioRun">▶ Run</button>
+      <span class="rt-pill" id="jioPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="jioDiag">
+        <div class="rt-rail"></div>
+        <div class="rt-chip" id="jioChip">→</div>
+        <div class="rt-node" data-n="OPEN"><span class="ic">📂</span><div><div class="nl">Open</div><div class="ns">resource acquired</div></div><span class="who who-badge who-OPEN">OPEN</span></div>
+        <div class="rt-node" data-n="MODE"><span class="ic">🔀</span><div><div class="nl">Mode</div><div class="ns">how it's read/written</div></div><span class="who who-badge who-MODE">MODE</span></div>
+        <div class="rt-node" data-n="XFER"><span class="ic">📤</span><div><div class="nl">Transfer</div><div class="ns">bytes actually move</div></div><span class="who who-badge who-XFER">XFER</span></div>
+        <div class="rt-node" data-n="CLOSE"><span class="ic">🔒</span><div><div class="nl">Close</div><div class="ns">resource lifecycle ends</div></div><span class="who who-badge who-CLOSE">CLOSE</span></div>
+        <div class="rt-node" data-n="OUT"><span class="ic">✅</span><div><div class="nl">Result</div><div class="ns">what the caller actually sees</div></div><span class="who who-badge who-OUT">OUT</span></div>
+      </div>
+      <div class="rt-inspect" id="jioInspect">
+        <div class="rt-dir" id="jioDir">STEP 0 / 5</div>
+        <div class="rt-cap" id="jioCap">Pick a scenario and press ▶ Run</div>
+        <div class="rt-payload" id="jioPayload"></div>
+        <div class="rt-headers" id="jioHeaders"><span class="ht">INSPECTOR</span>(waiting)</div>
+      </div>
+    </div>
+    <div class="rt-result" id="jioResult"></div>
+  </div>
+  <div class="who-row">
+    <span class="who-badge who-OPEN">OPEN — resource acquired</span>
+    <span class="who-badge who-MODE">MODE — how it's read/written</span>
+    <span class="who-badge who-XFER">XFER — bytes actually move</span>
+    <span class="who-badge who-CLOSE">CLOSE — resource lifecycle ends</span>
+    <span class="who-badge who-OUT">OUT — what the caller actually sees</span>
   </div>
 
   <!-- file-read animated hero: legacy vs NIO.2 vs try-with-resources -->
@@ -649,6 +696,113 @@ function show(id,el){
   document.getElementById(id).classList.add('active');
   el.classList.add('active');
 }
+</script>
+
+<script>
+(function(){
+  const pfx='jio';
+  const SCEN={
+    tryWithResources:{label:'try-with-resources auto-closes, even on exception',steps:[
+      {node:'OPEN',hdr:'try (BufferedReader r = Files.newBufferedReader(path)) { ... } — the resource is declared IN the try() parentheses',pay:{code:'try (BufferedReader r = Files.newBufferedReader(path)) {\n  return r.readLine();\n}'},ins:'Any object implementing AutoCloseable (which includes Closeable) can go inside try(...) — the compiler generates the close() call for you.'},
+      {node:'MODE',hdr:'readLine() throws an IOException halfway through — the file is malformed mid-stream',pay:{exceptionThrown:'java.io.IOException: Stream closed unexpectedly',whenItHappens:'during r.readLine(), before the try block finishes normally'},tone:'bad',ins:'This is exactly the failure case that makes manual resource management so error-prone — a hand-written finally block is easy to get wrong (or forget) when the exception happens mid-operation.'},
+      {node:'XFER',hdr:'Before the exception propagates out of the try block, the JVM automatically calls r.close() FIRST',pay:{order:['IOException thrown inside try body','r.close() called automatically, BEFORE the exception leaves the try block','original IOException then propagates to the caller']},tone:'ok',ins:'This ordering is the entire point of try-with-resources: close() is guaranteed to run on the way out, whether the try block finishes normally OR exits via an exception.'},
+      {node:'CLOSE',hdr:'If close() ITSELF also throws (e.g. a flush failure), that second exception is SUPPRESSED, not thrown instead of the original',pay:{primaryException:'IOException: Stream closed unexpectedly (from readLine)',suppressedException:'IOException: flush failed (from close) — attached via addSuppressed(), not replacing the primary'},ins:'Without try-with-resources, a naive finally { r.close(); } would let the close()-exception silently REPLACE the original, more useful exception — suppression exists specifically to preserve both.'},
+      {node:'OUT',hdr:'The caller catches ONE exception (the original IOException) and can inspect e.getSuppressed() to see the close()-time failure too',pay:{catchBlock:'catch (IOException e) {\n  log.error("read failed", e);\n  for (Throwable s : e.getSuppressed()) log.error("also: ", s);\n}'},tone:'ok',ins:'This is a genuine correctness improvement over pre-Java-7 manual finally blocks, not just a syntax convenience — it changes which exception you actually see and preserves diagnostic information that used to be silently lost.'},
+    ],result:{tone:'ok',text:'✅ try-with-resources guarantees close() runs even when the try block throws — and if close() itself throws too, that second exception is attached as "suppressed" rather than replacing the original one.'}},
+
+    buffered:{label:'BufferedInputStream cuts syscalls dramatically',steps:[
+      {node:'OPEN',hdr:'FileInputStream fis = new FileInputStream(path) — a RAW, unbuffered stream directly over the OS file descriptor',pay:{stream:'new FileInputStream("large-export.csv")',size:'50 MB file'},ins:'A raw FileInputStream has no internal buffer of its own — every single read() call you make becomes its own system call into the OS.'},
+      {node:'MODE',hdr:'Reading one byte at a time: while ((b = fis.read()) != -1) { ... }',pay:{loopStyle:'byte-at-a-time read()',fileSizeBytes:52428800},tone:'bad',ins:'This is the classic performance trap — a syscall costs orders of magnitude more time than the trivial work of examining one byte, so this loop is dominated entirely by kernel-transition overhead.'},
+      {node:'XFER',hdr:'Without buffering: ~52,428,800 individual read() syscalls to consume the whole file',pay:{unbufferedSyscalls:52428800,estimatedTime:'several seconds to tens of seconds, dominated by syscall overhead, not actual disk I/O'},tone:'bad',ins:'The OS itself buffers at the filesystem-cache level too, but that doesn\'t eliminate the cost of crossing the user-space/kernel-space boundary once per byte from the Java side.'},
+      {node:'CLOSE',hdr:'Wrapping the same stream: BufferedInputStream bis = new BufferedInputStream(fis) — internally reads in 8KB chunks, then serves individual read() calls from that in-memory buffer',pay:{wrapped:'new BufferedInputStream(new FileInputStream(path))',internalBufferSize:'8192 bytes by default',bufferedSyscalls:Math.ceil(52428800/8192)},tone:'ok',ins:'BufferedInputStream is a classic Decorator — it wraps any InputStream and transparently adds a buffer, without the calling code needing to change its read() usage pattern at all.'},
+      {node:'OUT',hdr:'Same byte-at-a-time loop, ~6,400 real syscalls instead of 52 million — a roughly 8,000x reduction',pay:{before:'52,428,800 syscalls',after:'~6,400 syscalls (one per 8KB chunk)',speedup:'dramatic — often the difference between seconds and milliseconds for large files'},tone:'ok',ins:'This is why "always wrap raw streams in a Buffered* variant" is close to a universal rule in Java I/O code — the calling code doesn\'t change, but the performance characteristics change enormously.'},
+    ],result:{tone:'ok',text:'✅ A raw FileInputStream makes one syscall per read() call; wrapping it in BufferedInputStream batches reads into internal 8KB chunks, cutting syscall count (and wall-clock time) by orders of magnitude for byte-at-a-time or small-read loops.'}},
+
+    channelBuffer:{label:'NIO Channel + ByteBuffer flip()/clear() cycle',steps:[
+      {node:'OPEN',hdr:'FileChannel ch = FileChannel.open(path); ByteBuffer buf = ByteBuffer.allocate(1024) — NIO reads into a reusable buffer, not a stream of bytes',pay:{channel:'FileChannel.open(path, StandardOpenOption.READ)',buffer:'ByteBuffer.allocate(1024)  — position=0, limit=1024, capacity=1024'},ins:'NIO\'s core model is fundamentally different from classic IO: instead of a stream you pull bytes FROM, a Channel reads data INTO a Buffer you control directly.'},
+      {node:'MODE',hdr:'ch.read(buf) fills the buffer in WRITE mode: bytes go in at position, moving position forward toward limit',pay:{beforeRead:'position=0, limit=1024',afterRead:'position=340 (340 bytes actually read), limit=1024 (unchanged)'},ins:'A ByteBuffer is always in one of two conceptual modes — writing (filling it up) or reading (draining it) — and mixing them up without calling flip()/clear() is the single most common NIO bug.'},
+      {node:'XFER',hdr:'buf.flip() switches the buffer from write-mode to read-mode: limit becomes the old position, position resets to 0',pay:{beforeFlip:'position=340, limit=1024',afterFlip:'position=0, limit=340  — now correctly bounded to exactly the 340 bytes that were actually read'},tone:'ok',ins:'Forgetting flip() is the classic beginner NIO bug — without it, code that tries to "read" from the buffer would process up to limit=1024, including 684 bytes of stale/garbage data never actually written this round.'},
+      {node:'CLOSE',hdr:'Application code drains the buffer for processing (e.g. writing it to another channel), consuming bytes 0 through 339',pay:{drainOperation:'while (buf.hasRemaining()) { processedByte = buf.get(); }',afterDraining:'position=340 (== limit) — buffer is now fully consumed'},ins:'hasRemaining() (position < limit) is the idiomatic NIO loop condition — it works correctly in BOTH read-mode and write-mode because "remaining" always means "how much space is left before limit".'},
+      {node:'OUT',hdr:'buf.clear() resets the buffer for the NEXT read: position=0, limit=capacity (1024) — ready to be filled again',pay:{afterClear:'position=0, limit=1024, capacity=1024 — identical to the very first OPEN state',nextIteration:'ch.read(buf) can now be called again, reusing this SAME buffer object'},tone:'ok',ins:'This allocate-once, flip/drain/clear-repeatedly cycle is exactly why NIO can outperform stream-based IO for high-throughput code — no new buffer object is allocated per read, unlike a naive byte[] read() loop.'},
+    ],result:{tone:'ok',text:'✅ ByteBuffer alternates between write-mode (filling via channel.read()) and read-mode (draining via get()) — flip() switches modes after a read, clear() resets for the next one; skipping either is the classic NIO bug.'}},
+
+    watchService:{label:'WatchService polls filesystem change events',steps:[
+      {node:'OPEN',hdr:'WatchService ws = FileSystems.getDefault().newWatchService(); dir.register(ws, ENTRY_CREATE, ENTRY_MODIFY, ENTRY_DELETE)',pay:{watchedDir:'/data/incoming-imports',registeredKinds:['ENTRY_CREATE','ENTRY_MODIFY','ENTRY_DELETE']},ins:'A WatchService is registered against a specific directory (not recursively — subdirectories need their own explicit registration) and specific event kinds you actually care about.'},
+      {node:'MODE',hdr:'WatchKey key = ws.take() — a BLOCKING call that parks the thread until the OS reports a filesystem event',pay:{callStyle:'blocking (take()) vs non-blocking (poll())',behaviorWhileWaiting:'thread is parked, consuming no CPU, until an event arrives or the service is closed'},ins:'ws.poll() is the non-blocking alternative — returns immediately with null if nothing happened yet, useful when you need to interleave watching with other periodic work on the same thread.'},
+      {node:'XFER',hdr:'A new file lands: import-2024-08-22.csv is created in the watched directory — the OS notifies the WatchService',pay:{event:{kind:'ENTRY_CREATE',context:'import-2024-08-22.csv'},osNotification:'inotify (Linux) / ReadDirectoryChangesW (Windows) — WatchService is a thin cross-platform wrapper over OS-native file-watching APIs'},ins:'WatchService doesn\'t poll the filesystem in a loop under the hood on most platforms — it uses the OS\'s native event-notification mechanism, which is why take() can block efficiently without spinning.'},
+      {node:'CLOSE',hdr:'for (WatchEvent<?> event : key.pollEvents()) { ... } — drain every event that arrived, since multiple can batch together',pay:{eventsInBatch:1,eventKind:'ENTRY_CREATE',eventContext:'import-2024-08-22.csv (a Path, relative to the watched directory)'},ins:'Rapid successive changes to the same file (e.g. a large copy operation) commonly generate several ENTRY_MODIFY events in one batch — always loop over pollEvents(), never assume exactly one event per take().'},
+      {node:'OUT',hdr:'key.reset() MUST be called to re-arm the key for future events — forgetting it means this directory silently stops being watched after the first batch',pay:{criticalStep:'boolean valid = key.reset();',commonBug:'omitting reset() → the watch loop appears to work once, then silently goes dead for that directory forever'},tone:'bad',ins:'This is the #1 WatchService gotcha — key.reset() is easy to forget because the code compiles and runs fine for the FIRST event; the bug only shows up as "why did file watching stop working" later.'},
+    ],result:{tone:'bad',text:'⚠️ WatchService.take() blocks efficiently using the OS\'s native file-event API, and events arrive in batches via pollEvents() — but forgetting key.reset() after processing a batch silently stops future watching on that directory.'}},
+  };
+
+  const nodes=['OPEN','MODE','XFER','CLOSE','OUT'];
+  function posOf(n){const i=nodes.indexOf(n);return i<0?50:10+i*20;}
+  let cur='tryWithResources',timers2=[],running2=false;
+
+  function reset2(){
+    timers2.forEach(clearTimeout);timers2=[];running2=false;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='ready';
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(el)el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+    });
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left='5%';chip.textContent='→';}
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP 0 / '+SCEN[cur].steps.length;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent='Pick a scenario and press ▶ Run';
+    const pay=document.getElementById(pfx+'Payload');if(pay)pay.textContent='';
+    const hdr=document.getElementById(pfx+'Headers');if(hdr)hdr.innerHTML='<span class="ht">INSPECTOR<\/span>(waiting)';
+    const res=document.getElementById(pfx+'Result');if(res){res.textContent='';res.className='rt-result';}
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=false;
+  }
+
+  function applyStep2(s,idx,total){
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left=posOf(s.node)+'%';chip.textContent='→';}
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(!el)return;
+      el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+      if(n===s.node){
+        if(s.tone==='ok')el.className+=' vchk cur';
+        else if(s.tone==='bad')el.className+=' vskip curbad';
+        else el.className+=' cur';
+      }
+    });
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP '+idx+' / '+total;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent=s.hdr;
+    const pay=document.getElementById(pfx+'Payload');
+    if(pay)pay.textContent=JSON.stringify(s.pay,null,2);
+    const hdrEl=document.getElementById(pfx+'Headers');
+    if(hdrEl)hdrEl.innerHTML='<span class="ht">INSPECTOR<\/span>'+s.ins;
+  }
+
+  function run2(){
+    reset2();running2=true;
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=true;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='running…';
+    const steps=SCEN[cur].steps;
+    steps.forEach((s,i)=>timers2.push(setTimeout(()=>applyStep2(s,i+1,steps.length),(i+1)*2000)));
+    timers2.push(setTimeout(()=>{
+      const r=SCEN[cur].result;
+      const res=document.getElementById(pfx+'Result');
+      if(res){res.textContent=r.text;res.className='rt-result show '+(r.tone==='ok'?'ok':'bad');}
+      if(pill)pill.textContent='done';
+      running2=false;const btn2=document.getElementById(pfx+'Run');if(btn2)btn2.disabled=false;
+    },(steps.length+1)*2000));
+  }
+
+  document.getElementById(pfx+'Run').onclick=run2;
+  document.querySelectorAll('#'+pfx+'Seg button').forEach(b=>{
+    b.onclick=()=>{
+      if(running2)return;
+      cur=b.dataset.s;
+      document.querySelectorAll('#'+pfx+'Seg button').forEach(x=>x.classList.toggle('on',x===b));
+      reset2();
+    };
+  });
+  reset2();
+})();
 </script>
 </body>
 </html>

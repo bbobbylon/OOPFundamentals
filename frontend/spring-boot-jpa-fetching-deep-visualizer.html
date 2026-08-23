@@ -417,5 +417,112 @@ document.getElementById('nslider').addEventListener('input',e=>{
 });
 renderStrats(); build();
 </script>
+
+<script>
+(function(){
+  const pfx='jf';
+  const SCEN={
+    eager:{label:'EAGER @ManyToOne join × collection = row blowup',steps:[
+      {node:'QUERY',hdr:'orderRepo.findAll() — Order.customer is @ManyToOne (default EAGER)',pay:{repoMethod:'OrderRepository.findAll()',assoc:'Order.customer',declaredFetch:'FetchType.EAGER (the @ManyToOne default)'},ins:'@ManyToOne and @OneToOne default to EAGER in JPA — the opposite default from @OneToMany/@ManyToMany. Most teams override this to LAZY explicitly for exactly the reason this scenario shows.'},
+      {node:'FETCH',hdr:'Hibernate emits a JOIN on every findAll() call, whether you need the customer or not',pay:{sql:'SELECT o.*, c.* FROM order o JOIN customer c ON o.customer_id = c.id'},ins:'EAGER is baked into the mapping, not the query — every single findAll()/findById() on Order pays this join, even a background job that only reads order totals.'},
+      {node:'HYDRATE',hdr:'1000 orders × 3 line_items each, and line_items is also EAGER',pay:{orders:1000,lineItemsPerOrder:3,secondJoin:'order JOIN line_item — also EAGER'},ins:'Two EAGER collections on the same root multiply: the join with customer is 1:1 (fine), but stacking a second EAGER @OneToMany produces a full cartesian product between the two collections per order.'},
+      {node:'PROXY',hdr:'Hibernate returns 1000 × 3 = 3000 duplicate result rows to de-duplicate in memory',pay:{rawRowsReturned:3000,distinctOrdersAfterDedup:1000,memoryNote:'the whole result set materializes before dedup — no early exit'},tone:'bad',ins:'This is the classic "MultipleBagFetchException risk" territory — two EAGER @OneToMany collections joined together produce rows = count(A) × count(B) per parent, and Hibernate has to collapse the duplicates client-side.'},
+      {node:'RESULT',hdr:'One query, but it moved 3000 bloated rows over the wire to return 1000 orders',pay:{queryCount:1,rowsTransferred:3000,latency:'420ms for a call that should be ~15ms',fix:'switch both associations to LAZY and fetch only what a given use case needs'},tone:'bad',ins:'"Fewer queries" is not the same as "fast." EAGER on the wrong association trades N+1\'s query-count problem for a single query moving far more data than the request needs.'},
+    ],result:{tone:'bad',text:'⚠️ EAGER didn\'t remove the cost — it hid it in one bloated join. Two stacked EAGER collections silently multiply into a row-count explosion.'}},
+
+    lazy:{label:'LAZY + loop → N+1 hidden queries',steps:[
+      {node:'QUERY',hdr:'authorRepo.findAll() — Author.books is @OneToMany (default LAZY)',pay:{repoMethod:'AuthorRepository.findAll()',assoc:'Author.books',declaredFetch:'FetchType.LAZY (the @OneToMany default)'},ins:'LAZY means "don\'t load this collection yet" — Hibernate loads only the Author rows and leaves books as an uninitialized proxy collection.'},
+      {node:'FETCH',hdr:'One query returns 100 Author rows; books is NOT in this SQL at all',pay:{sql:'SELECT * FROM author',rowsReturned:100},ins:'This step looks completely fine on its own — 1 query for 100 authors. The problem only appears once code touches the lazy collection.'},
+      {node:'HYDRATE',hdr:'Each Author gets a PersistentBag proxy for books — empty, unfetched',pay:{proxyType:'org.hibernate.collection.internal.PersistentBag',initialized:false},ins:'The proxy looks like a normal List from the outside — .size()/.get()/a for-each all work syntactically. That\'s exactly what makes the next step invisible in code review.'},
+      {node:'PROXY',hdr:'for(Author a : authors) total += a.getBooks().size(); — fires 100 separate SELECTs',pay:{loopIterations:100,queryPerIteration:'SELECT * FROM book WHERE author_id = ?',totalExtraQueries:100},tone:'bad',ins:'Each getBooks() call sees an uninitialized proxy and transparently issues its own round-trip to the database — the method signature gives zero indication this happens.'},
+      {node:'RESULT',hdr:'101 total queries (1 + 100) to render one page of 100 authors',pay:{queryCount:101,expectedQueryCount:1,fix:'JOIN FETCH, @EntityGraph, or @BatchSize'},tone:'bad',ins:'This is the textbook N+1: the query count scales linearly with the parent result set, so it\'s invisible in dev with 5 test rows and catastrophic in prod with 50,000.'},
+    ],result:{tone:'bad',text:'⚠️ 101 queries to load 100 authors — the loop\'s innocent-looking getBooks() call fires one hidden SELECT per author.'}},
+
+    graph:{label:'@EntityGraph collapses N+1 to one query',steps:[
+      {node:'QUERY',hdr:'@EntityGraph(attributePaths="books") List<Author> findAll(); — same method signature, one annotation added',pay:{repoMethod:'AuthorRepository.findAll()',annotation:'@EntityGraph(attributePaths = "books")',underlyingAssoc:'still declared LAZY on the entity'},ins:'@EntityGraph doesn\'t change the entity mapping — it overrides the fetch plan for THIS specific query only, without touching the LAZY default everywhere else in the app.'},
+      {node:'FETCH',hdr:'Spring Data translates the entity graph into a single LEFT JOIN FETCH',pay:{sql:'SELECT DISTINCT a.*, b.* FROM author a LEFT JOIN book b ON b.author_id = a.id'},tone:'ok',ins:'Under the hood this generates the exact same SQL you\'d hand-write with JPQL JOIN FETCH — @EntityGraph is a declarative, composable way to get there without a custom @Query.'},
+      {node:'HYDRATE',hdr:'Hibernate builds 100 fully-populated Author entities in one pass, books already attached',pay:{authorsBuilt:100,booksAlreadyLoaded:true,rawRowsFromJoin:'~300 (duplicated per book, collapsed by DISTINCT)'},tone:'ok',ins:'Because books arrives already attached, the collection proxy is never in the "uninitialized" state at all — there\'s nothing left for a later getBooks() call to lazily trigger.'},
+      {node:'PROXY',hdr:'for(Author a : authors) total += a.getBooks().size(); — zero additional queries this time',pay:{loopIterations:100,queryPerIteration:0},tone:'ok',ins:'Identical Java loop to the LAZY scenario, completely different SQL cost — this is why fixing N+1 is a query-time/mapping decision, not a change to how the calling code is written.'},
+      {node:'RESULT',hdr:'1 total query to load 100 authors with their books',pay:{queryCount:1,previousQueryCount:101,latencyImprovement:'~40x fewer round-trips'},tone:'ok',ins:'@EntityGraph is the cleanest default fix for "load this entity with its children" — reusable across derived query methods without writing JPQL by hand.'},
+    ],result:{tone:'ok',text:'✅ 1 query instead of 101 — @EntityGraph turns the LAZY association into a single JOIN for this query only, with zero change to the calling code.'}},
+
+    lazyinit:{label:'Session closed → LazyInitializationException',steps:[
+      {node:'QUERY',hdr:'@Transactional service method: userRepo.findById(id) — Session S1 is open',pay:{method:'UserService.getUser(Long id)',transactionBoundary:'@Transactional (readOnly=true)',sessionId:'S1 (bound to this transaction)'},ins:'The Hibernate Session lives exactly as long as the surrounding transaction. As soon as the @Transactional method returns, S1 closes and its connection is released.'},
+      {node:'FETCH',hdr:'SELECT * FROM app_user WHERE id = ? loads the User; roles collection stays LAZY/unfetched',pay:{sql:'SELECT * FROM app_user WHERE id = ?',rolesLoaded:false},ins:'Nothing wrong yet — the service correctly returns just the User entity, expecting the caller not to need lazy associations after this point.'},
+      {node:'HYDRATE',hdr:'User entity returned to the controller — Session S1 closes the instant the method returns',pay:{returnedEntity:'User(id=42, email=..., roles=<uninitialized proxy>)',sessionState:'S1 CLOSED'},ins:'The entity object itself survives after the session closes (it\'s a plain object in memory) — but its lazy proxies lose their only way to fetch data: the now-dead session\'s connection.'},
+      {node:'PROXY',hdr:'Controller (outside any transaction) calls user.getRoles().forEach(...) to build the JSON response',pay:{caller:'UserController.getUser() — no @Transactional here',call:'user.getRoles()'},tone:'bad',ins:'This is the single most common way LazyInitializationException reaches production: a service correctly scopes its transaction, but a serializer or controller downstream touches a lazy field after that transaction already ended.'},
+      {node:'RESULT',hdr:'org.hibernate.LazyInitializationException: could not initialize proxy — no Session',pay:{exception:'LazyInitializationException',message:'failed to lazily initialize a collection of role: User.roles, could not initialize proxy - no Session',fix:'map to a DTO inside the @Transactional method (before it returns) OR add @EntityGraph/JOIN FETCH to load roles eagerly for this query'},tone:'bad',ins:'This is a GOOD failure, not a bug to silence — enabling Open-Session-In-View to "fix" it just moves N+1 queries into the view layer instead. Map to a DTO inside the transaction instead.'},
+    ],result:{tone:'bad',text:'⚠️ LazyInitializationException — the Session closed with the transaction before roles was ever touched. Fix: map to a DTO while the transaction (and Session) is still open.'}},
+  };
+
+  const nodes=['QUERY','FETCH','HYDRATE','PROXY','RESULT'];
+  function posOf(n){const i=nodes.indexOf(n);return i<0?50:10+i*20;}
+  let cur='eager',timers2=[],running2=false;
+
+  function reset2(){
+    timers2.forEach(clearTimeout);timers2=[];running2=false;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='ready';
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(el)el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+    });
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left='5%';chip.textContent='→';}
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP 0 / '+SCEN[cur].steps.length;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent='Pick a scenario and press ▶ Run';
+    const pay=document.getElementById(pfx+'Payload');if(pay)pay.textContent='';
+    const hdr=document.getElementById(pfx+'Headers');if(hdr)hdr.innerHTML='<span class="ht">INSPECTOR<\/span>(waiting)';
+    const res=document.getElementById(pfx+'Result');if(res){res.textContent='';res.className='rt-result';}
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=false;
+  }
+
+  function applyStep2(s,idx,total){
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left=posOf(s.node)+'%';chip.textContent='→';}
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(!el)return;
+      el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+      if(n===s.node){
+        if(s.tone==='ok')el.className+=' vchk cur';
+        else if(s.tone==='bad')el.className+=' vskip curbad';
+        else el.className+=' cur';
+      }
+    });
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP '+idx+' / '+total;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent=s.hdr;
+    const pay=document.getElementById(pfx+'Payload');
+    if(pay)pay.textContent=JSON.stringify(s.pay,null,2);
+    const hdrEl=document.getElementById(pfx+'Headers');
+    if(hdrEl)hdrEl.innerHTML='<span class="ht">INSPECTOR<\/span>'+s.ins;
+  }
+
+  function run2(){
+    reset2();running2=true;
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=true;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='running…';
+    const steps=SCEN[cur].steps;
+    steps.forEach((s,i)=>timers2.push(setTimeout(()=>applyStep2(s,i+1,steps.length),(i+1)*2000)));
+    timers2.push(setTimeout(()=>{
+      const r=SCEN[cur].result;
+      const res=document.getElementById(pfx+'Result');
+      if(res){res.textContent=r.text;res.className='rt-result show '+(r.tone==='ok'?'ok':'bad');}
+      if(pill)pill.textContent='done';
+      running2=false;const btn2=document.getElementById(pfx+'Run');if(btn2)btn2.disabled=false;
+    },(steps.length+1)*2000));
+  }
+
+  document.getElementById(pfx+'Run').onclick=run2;
+  document.querySelectorAll('#'+pfx+'Seg button').forEach(b=>{
+    b.onclick=()=>{
+      if(running2)return;
+      cur=b.dataset.s;
+      document.querySelectorAll('#'+pfx+'Seg button').forEach(x=>x.classList.toggle('on',x===b));
+      reset2();
+    };
+  });
+  reset2();
+})();
+</script>
 </body>
 </html>

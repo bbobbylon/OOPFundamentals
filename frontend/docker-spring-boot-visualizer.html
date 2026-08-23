@@ -60,6 +60,13 @@
     .table td { padding: 6px 10px; border-bottom: 1px solid #1e2d40; vertical-align: top; }
     .table tr:hover td { background: #1a2840; }
     .table td:first-child { font-family: monospace; color: var(--accent); white-space: nowrap; }
+    .who-BUILD{background:#3776ab;color:#fff}
+    .who-HEAP{background:#ffd43b;color:#3a2c00}
+    .who-LIMIT{background:#a78bfa;color:#1a1030}
+    .who-OOM{background:#22d3ee;color:#04231a}
+    .who-RES{background:#4ade80;color:#04231a}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
   </style>
   <link rel="stylesheet" href="devhub.css" />
 </head>
@@ -96,6 +103,46 @@
       </div>
     </div>
     <div class="intro-ciam"><span class="tag">CIAM Spring Boot + Docker production:</span> ADO pipeline: compile → test → <code>docker build -t …azurecr.io/ciam-auth:$(Build.BuildId)</code> → push → Helm upgrade — the BuildId tag gives exact traceability. <code>-XX:MaxRAMPercentage=75</code> with a 1Gi limit gives a ~768MB heap, and <code>-XX:+ExitOnOutOfMemoryError</code> exits cleanly so K8s restarts the pod (faster than a hung JVM). Use JSON logging (LogstashEncoder) for Azure Monitor, and a custom <code>PingHealthIndicator</code> so readiness fails when Ping is down and traffic routes to healthy pods.</div>
+  </div>
+
+  <!-- ── EXTREME-VIZ HERO ── -->
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">Scenario</span>
+      <span class="userseg" id="sbSeg">
+        <button class="on" data-s="nolimit">① No -XX:MaxRAMPercentage → JVM ignores the container's memory limit</button>
+        <button data-s="rampct">② -XX:MaxRAMPercentage=75 sizes the heap to the cgroup limit</button>
+        <button data-s="oomexit">③ ExitOnOutOfMemoryError — crash-fast beats a hung JVM</button>
+        <button data-s="buildpacks">④ Buildpacks — a production image with no Dockerfile at all</button>
+      </span>
+      <button class="rt-run" id="sbRun">▶ Run</button>
+      <span class="rt-pill" id="sbPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="sbDiag">
+        <div class="rt-rail"></div>
+        <div class="rt-chip" id="sbChip">→</div>
+        <div class="rt-node" data-n="BUILD"><span class="ic">🏗️</span><div><div class="nl">Build</div><div class="ns">image assembled</div></div><span class="who who-badge who-BUILD">BUILD</span></div>
+        <div class="rt-node" data-n="HEAP"><span class="ic">🧠</span><div><div class="nl">Heap</div><div class="ns">JVM heap sizing decision</div></div><span class="who who-badge who-HEAP">HEAP</span></div>
+        <div class="rt-node" data-n="LIMIT"><span class="ic">📏</span><div><div class="nl">Limit</div><div class="ns">the container's cgroup memory limit</div></div><span class="who who-badge who-LIMIT">LIMIT</span></div>
+        <div class="rt-node" data-n="OOM"><span class="ic">💥</span><div><div class="nl">OOM</div><div class="ns">what happens under memory pressure</div></div><span class="who who-badge who-OOM">OOM</span></div>
+        <div class="rt-node" data-n="RES"><span class="ic">✅</span><div><div class="nl">Result</div><div class="ns">pod outcome</div></div><span class="who who-badge who-RES">RES</span></div>
+      </div>
+      <div class="rt-inspect" id="sbInspect">
+        <div class="rt-dir" id="sbDir">STEP 0 / 5</div>
+        <div class="rt-cap" id="sbCap">Pick a scenario and press ▶ Run</div>
+        <div class="rt-payload" id="sbPayload"></div>
+        <div class="rt-headers" id="sbHeaders"><span class="ht">INSPECTOR</span>(waiting)</div>
+      </div>
+    </div>
+    <div class="rt-result" id="sbResult"></div>
+  </div>
+  <div class="who-row">
+    <span class="who-badge who-BUILD">BUILD — image assembled (Dockerfile or buildpacks)</span>
+    <span class="who-badge who-HEAP">HEAP — JVM heap sizing decision at startup</span>
+    <span class="who-badge who-LIMIT">LIMIT — the container's cgroup memory limit</span>
+    <span class="who-badge who-OOM">OOM — what happens under memory pressure</span>
+    <span class="who-badge who-RES">RES — the pod's actual outcome</span>
   </div>
 
   <!-- SECTION 1: Annotated Dockerfile -->
@@ -356,6 +403,113 @@ function updatePipe() {
   });
   document.getElementById('pipe-info').innerHTML = pipeInfos[pipeStep];
 }
+</script>
+
+<script>
+(function(){
+  const pfx='sb';
+  const SCEN={
+    nolimit:{label:'No -XX:MaxRAMPercentage → JVM ignores the container\'s memory limit',steps:[
+      {node:'BUILD',hdr:'Container started: docker run -m 512m myapp:1.0 — a hard 512MB cgroup memory limit',pay:{containerMemoryLimit:'512Mi',jvmFlags:'java -jar app.jar  (no memory flags at all)'},ins:'This looks fine — the app just runs java -jar like it would anywhere else — but the JVM has no idea a 512MB ceiling even exists yet.'},
+      {node:'HEAP',hdr:'Without explicit heap flags, an old/misconfigured JVM sizes its heap off the HOST\'s total memory, not the container\'s',pay:{hostTotalMemory:'32GB (the underlying node)',jvmDefaultHeapCalc:'~25% of host RAM = ~8GB heap target'},tone:'bad',ins:'Pre-container-aware JVM defaults look at /proc/meminfo on the host, completely blind to the cgroup limit the container is actually confined to.'},
+      {node:'LIMIT',hdr:'The cgroup enforces 512MB no matter what the JVM thinks its budget is',pay:{cgroupLimit:'512Mi',jvmBelievesItHas:'~8GB'},tone:'bad',ins:'The JVM will happily allocate toward its self-calculated 8GB target — the kernel cgroup controller is what actually enforces the real ceiling, and it does not negotiate.'},
+      {node:'OOM',hdr:'As heap usage climbs past 512MB, the Linux kernel OOM-killer terminates the container process — no Java exception, no stack trace',pay:{event:'kernel cgroup OOM kill, SIGKILL',javaLogs:'nothing — the process is killed at the OS level, mid-instruction',podStatus:'OOMKilled (exit code 137)'},tone:'bad',ins:'This is what makes container OOM kills so much harder to debug than a normal OutOfMemoryError — there is no Java-level stack trace at all, because the JVM never got a chance to catch anything.'},
+      {node:'RES',hdr:'Kubernetes restarts the pod, it runs fine for a while, then gets OOMKilled again under load — a mysterious recurring crash loop',pay:{symptom:'periodic OOMKilled restarts under load',rootCause:'JVM heap sizing blind to the container memory limit'},tone:'bad',ins:'Modern JVMs (Java 10+) actually ARE container-aware by default and read cgroup limits automatically — this specific bug mostly hits older JVMs or containers with an unusually low limit relative to defaults, which is exactly why explicit MaxRAMPercentage is still recommended.'},
+    ],result:{tone:'bad',text:'⚠️ A JVM heap that ignores the container\'s real memory ceiling gets silently OOM-killed by the kernel — no exception, no stack trace, just SIGKILL.'}},
+
+    rampct:{label:'-XX:MaxRAMPercentage=75 sizes the heap to the cgroup limit',steps:[
+      {node:'BUILD',hdr:'ENTRYPOINT ["java","-XX:MaxRAMPercentage=75","-XX:+UseContainerSupport","-jar","app.jar"]',pay:{flags:['-XX:MaxRAMPercentage=75','-XX:+UseContainerSupport (default ON since Java 10)']},ins:'MaxRAMPercentage tells the JVM to size its heap as a PERCENTAGE of whatever memory limit it detects — not a fixed number, so the same image behaves correctly at any pod memory size.'},
+      {node:'HEAP',hdr:'At container start, the JVM reads the cgroup memory limit directly (via UseContainerSupport)',pay:{cgroupLimitRead:'1Gi (from the Kubernetes pod spec\'s resources.limits.memory)',calculatedMaxHeap:'~768MB (75% of 1Gi)'},tone:'ok',ins:'This is the mechanism from the intro card\'s CIAM example: a 1Gi pod limit reliably produces a ~768MB heap, leaving the remaining 25% for thread stacks, metaspace, and native memory overhead.'},
+      {node:'LIMIT',hdr:'The heap ceiling (768MB) now sits safely BELOW the cgroup kill threshold (1024MB)',pay:{jvmHeapCeiling:'768Mi',cgroupKillThreshold:'1024Mi',safetyMargin:'256Mi for non-heap JVM memory'},tone:'ok',ins:'That margin matters — a JVM process uses meaningfully more real memory than just its heap (thread stacks, JIT code cache, metaspace), so heap alone should never equal the full container limit.'},
+      {node:'OOM',hdr:'Under sustained load, the JVM hits its OWN heap ceiling first and throws a normal java.lang.OutOfMemoryError',pay:{event:'java.lang.OutOfMemoryError: Java heap space',stackTraceAvailable:true,caughtBy:'Spring Boot\'s uncaught exception handling / your own monitoring'},tone:'ok',ins:'This is the entire point: failing INSIDE the JVM\'s own managed heap produces a normal, catchable, loggable Java exception — instead of an invisible kernel-level SIGKILL.'},
+      {node:'RES',hdr:'Ops sees a real stack trace in the logs and can diagnose a genuine memory leak or undersized pod — not a mystery crash',pay:{diagnosability:'high — normal Java OOM tooling (heap dumps, GC logs) all work'},tone:'ok',ins:'The combined effect of scenarios ② and ③ is that memory problems become debuggable Java problems instead of invisible infrastructure problems.'},
+    ],result:{tone:'ok',text:'✅ MaxRAMPercentage sizes the heap as a fraction of the real container limit, leaving headroom for non-heap memory — failures become catchable Java OOMEs instead of silent kernel kills.'}},
+
+    oomexit:{label:'ExitOnOutOfMemoryError — crash-fast beats a hung JVM',steps:[
+      {node:'BUILD',hdr:'Without -XX:+ExitOnOutOfMemoryError, a JVM that hits OutOfMemoryError does NOT necessarily terminate',pay:{flag:'(absent in this scenario)',defaultBehavior:'the JVM attempts to keep running after throwing OutOfMemoryError'},ins:'By default, an OutOfMemoryError is just a thrown exception like any other — if nothing catches it fatally, individual threads can die while the JVM process limps on in a corrupted, unpredictable state.'},
+      {node:'HEAP',hdr:'The request-handling thread that hit OOM dies; other threads (health check endpoint, admin thread) may keep running',pay:{deadThread:'http-nio-8080-exec-3',stillRunning:['health check servlet','background schedulers'],state:'degraded but not fully down'},tone:'bad',ins:'This is the dangerous middle state: the pod LOOKS alive to Kubernetes (its liveness probe on /actuator/health may still respond) while actually being unable to serve real traffic.'},
+      {node:'LIMIT',hdr:'Kubernetes\' liveness probe keeps passing because /actuator/health is served by a still-alive thread',pay:{livenessProbe:'HTTP GET /actuator/health → 200 OK',podRestarted:false},tone:'bad',ins:'A liveness probe checking a single lightweight endpoint has no idea that the threads actually serving business traffic are dead — this is exactly the gap ExitOnOutOfMemoryError closes.'},
+      {node:'OOM',hdr:'-XX:+ExitOnOutOfMemoryError changes the policy: ANY OutOfMemoryError immediately terminates the entire JVM process',pay:{flag:'-XX:+ExitOnOutOfMemoryError',behaviorOnOOM:'System.exit() called immediately, whole process dies'},tone:'ok',ins:'This deliberately gives up "try to keep serving traffic in a degraded state" in exchange for "fail completely and immediately, in a way Kubernetes can detect and react to".'},
+      {node:'RES',hdr:'The pod exits, Kubernetes\' restart policy immediately starts a fresh, healthy replacement pod',pay:{podExitCode:'1 (JVM process exit, not a kernel OOM kill)',k8sAction:'restartPolicy: Always → new pod scheduled within seconds'},tone:'ok',ins:'A fast, clean death that Kubernetes can immediately recover from beats a slow, invisible zombie state that silently serves errors while looking healthy — this flag trades resilience-by-limping for resilience-by-restarting.'},
+    ],result:{tone:'ok',text:'✅ ExitOnOutOfMemoryError turns a silent, half-alive zombie JVM into an immediate, clean process exit that Kubernetes can detect and restart from.'}},
+
+    buildpacks:{label:'Buildpacks — a production image with no Dockerfile at all',steps:[
+      {node:'BUILD',hdr:'mvn spring-boot:build-image — no Dockerfile anywhere in the project',pay:{command:'mvn spring-boot:build-image',dockerfilePresent:false,mechanism:'Cloud Native Buildpacks (Paketo) via the spring-boot-maven-plugin'},ins:'The build-image goal delegates to a buildpack builder image that inspects your project and constructs an OCI image without you writing a single Dockerfile instruction.'},
+      {node:'HEAP',hdr:'Buildpacks auto-detect it\'s a Java/Maven project, pick a JRE, and configure container-aware JVM memory settings automatically',pay:{detectedType:'Java (pom.xml present)',jreSelected:'Paketo\'s Bellsoft Liberica JRE',autoConfiguredMemory:'MaxRAMPercentage-equivalent settings applied out of the box'},tone:'ok',ins:'This is a genuine advantage over a hand-written Dockerfile: the memory-tuning best practices from scenario ② are baked into the buildpack itself, so you get them without having to know to add the flags.'},
+      {node:'LIMIT',hdr:'The build produces MULTIPLE separate OCI layers, split by change-frequency (base OS / JRE / dependencies / your app classes)',pay:{layers:['base OS (rarely changes)','JRE (rarely changes)','dependencies (changes on pom.xml edits)','your compiled classes (changes every commit)']},tone:'ok',ins:'This layer split is smarter than a typical hand-written multi-stage Dockerfile for the common case: only your actual code layer changes on a normal commit, so rebuilds AND registry pushes are both faster.'},
+      {node:'OOM',hdr:'(memory behavior at runtime is identical to a hand-tuned Dockerfile — buildpacks just automate getting there)',pay:{note:'this scenario is about the build mechanism, not runtime memory pressure'},ins:'Buildpacks aren\'t magic at runtime — they just remove the manual Dockerfile-authoring step and encode known best practices as defaults.'},
+      {node:'RES',hdr:'Result: a production-grade, security-patched, correctly-tuned image with zero Dockerfile maintenance burden',pay:{tradeoff:'less control over exact base image / OS packages, in exchange for automatic best-practice defaults and easier upgrades'},tone:'ok',ins:'The right call depends on the team: buildpacks suit teams that want "just build my Spring Boot app correctly" with minimal ceremony; a hand-written Dockerfile suits teams needing fine-grained control over the base image.'},
+    ],result:{tone:'ok',text:'✅ Buildpacks build an OCI image straight from source with no Dockerfile — auto-detecting the runtime, applying container-aware JVM defaults, and splitting layers by change-frequency automatically.'}},
+  };
+
+  const nodes=['BUILD','HEAP','LIMIT','OOM','RES'];
+  function posOf(n){const i=nodes.indexOf(n);return i<0?50:10+i*20;}
+  let cur='nolimit',timers2=[],running2=false;
+
+  function reset2(){
+    timers2.forEach(clearTimeout);timers2=[];running2=false;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='ready';
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(el)el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+    });
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left='5%';chip.textContent='→';}
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP 0 / '+SCEN[cur].steps.length;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent='Pick a scenario and press ▶ Run';
+    const pay=document.getElementById(pfx+'Payload');if(pay)pay.textContent='';
+    const hdr=document.getElementById(pfx+'Headers');if(hdr)hdr.innerHTML='<span class="ht">INSPECTOR<\/span>(waiting)';
+    const res=document.getElementById(pfx+'Result');if(res){res.textContent='';res.className='rt-result';}
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=false;
+  }
+
+  function applyStep2(s,idx,total){
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left=posOf(s.node)+'%';chip.textContent='→';}
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(!el)return;
+      el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+      if(n===s.node){
+        if(s.tone==='ok')el.className+=' vchk cur';
+        else if(s.tone==='bad')el.className+=' vskip curbad';
+        else el.className+=' cur';
+      }
+    });
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP '+idx+' / '+total;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent=s.hdr;
+    const pay=document.getElementById(pfx+'Payload');
+    if(pay)pay.textContent=JSON.stringify(s.pay,null,2);
+    const hdrEl=document.getElementById(pfx+'Headers');
+    if(hdrEl)hdrEl.innerHTML='<span class="ht">INSPECTOR<\/span>'+s.ins;
+  }
+
+  function run2(){
+    reset2();running2=true;
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=true;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='running…';
+    const steps=SCEN[cur].steps;
+    steps.forEach((s,i)=>timers2.push(setTimeout(()=>applyStep2(s,i+1,steps.length),(i+1)*2000)));
+    timers2.push(setTimeout(()=>{
+      const r=SCEN[cur].result;
+      const res=document.getElementById(pfx+'Result');
+      if(res){res.textContent=r.text;res.className='rt-result show '+(r.tone==='ok'?'ok':'bad');}
+      if(pill)pill.textContent='done';
+      running2=false;const btn2=document.getElementById(pfx+'Run');if(btn2)btn2.disabled=false;
+    },(steps.length+1)*2000));
+  }
+
+  document.getElementById(pfx+'Run').onclick=run2;
+  document.querySelectorAll('#'+pfx+'Seg button').forEach(b=>{
+    b.onclick=()=>{
+      if(running2)return;
+      cur=b.dataset.s;
+      document.querySelectorAll('#'+pfx+'Seg button').forEach(x=>x.classList.toggle('on',x===b));
+      reset2();
+    };
+  });
+  reset2();
+})();
 </script>
 </body>
 </html>
