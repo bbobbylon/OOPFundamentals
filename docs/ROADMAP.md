@@ -10,6 +10,83 @@ page/track counts in `README.md` and `DEVHUB-GUIDE.md`, then delete the item fro
 
 ---
 
+## NEXT UP — Personal Notebook feature (requested 2026-08-22)
+
+Bobby wants a **personal notebook** users can build as they go: a "quick add" action on any
+concept or lesson section that saves it into the user's own notebook, so they can curate a
+focused study set (knowledge hardening, exam prep, whatever they want to drill). The notebook
+should be **pre-sectioned to mirror the site's own lesson/track navigation** — same tracks,
+same sections — so finding your saved notes feels exactly like finding the original lesson, just
+filtered to what you picked. This is new scope, not started yet.
+
+Open design questions to resolve before building (not yet discussed with Bobby):
+- Storage: localStorage (matches the quiz/flashcard history pattern already in
+  `devhub-quiz.js`/`devhub-flashcards.js`) vs. something backend-backed if a real user-accounts
+  system ever exists. Given this app is currently pure static frontend, localStorage is the
+  obvious first cut.
+- What "quick add" actually captures per concept/section — a link back to the page+anchor, a
+  snapshot of the text, or both.
+- Where the "add to notebook" affordance lives on each page (per code-walkthrough step? per
+  section heading? both?) — needs to be sitewide/consistent like the `rt-ctlbar` pattern was.
+- A dedicated `notebook.html` (or similar) as the navigable, track-sectioned view of what's saved.
+
+**Also requested (2026-08-22): build evidence-based study science into the notebook, not just
+storage.** The notebook shouldn't just hold what a user quick-added — it should actively teach
+and apply **proven** study/memory techniques on top of that saved content: the kind of thing
+backed by cognitive-science research (graduate/doctoral-level, published studies), not folk
+wisdom. Flashcards generated from notebook entries are the first piece (reuse/extend the existing
+Leitner spaced-repetition engine in `devhub-flashcards.js` rather than building a second one).
+Beyond flashcards, research and apply techniques with real evidence behind them before adding
+anything — candidates to investigate (not yet vetted, just the categories Bobby named):
+- **Spacing effect / spaced repetition** — review intervals that expand over time beat massed
+  cramming (already partially covered by the Leitner system; extend it to notebook content).
+- **Retrieval practice / testing effect** — actively recalling a fact (quiz-style) beats
+  re-reading it; the existing `devhub-quiz.js` engine is this in practice already.
+- **Interleaving** — mixing topics/problem types in a study session beats blocking one topic at
+  a time, especially for exam and coding-interview prep.
+- **Dual coding** — pairing text with a diagram/visual for the same concept aids recall (this
+  app's whole visualizer format already leans this way; worth confirming the notebook preserves
+  it rather than reducing saved items to plain text).
+- **Desirable difficulty** — study conditions that feel harder in the moment (varied
+  practice, self-testing) produce better long-term retention than easier-feeling methods
+  (highlighting, re-reading), even though they feel less effective while studying.
+- Optimal session length / distributed practice research, and any evidence on presentation
+  variables Bobby specifically flagged (color, text size/emphasis) aiding memory encoding — needs
+  real research before any UI decisions are made off it, not assumed.
+
+The bar here is **PROVEN** — cite real research before building a technique into the UI, don't
+just implement something because it sounds plausible.
+
+---
+
+## NEXT UP — Sitewide depth audit against "zero to hired" goal (requested 2026-08-22)
+
+**The stated end goal of this entire app:** someone with zero software development knowledge
+should be able to come here and become an expert in whatever stack they're learning, deep enough
+to get hired. That means covering **every aspect of software development that's taught at elite
+CS programs** — not just language/framework syntax. Explicitly named as current gaps to audit
+for and fill: API handling, testing (unit/integration/e2e), building REST APIs end-to-end, the
+full DevOps lifecycle, deployment, cloud, databases — i.e. the entire full-stack development
+lifecycle, not just the "learn the language" slice. Bobby's framing: this should be
+**CourseCareers, but 100x better** — a genuine one-stop shop for learning a stack well enough to
+get a job in it.
+
+**Longer-term expansion (not immediate, but the direction this is heading):** grow beyond
+software development into every IT field — AI, Data Science, Software Dev, DevOps, and whatever
+else. Also add practice exams/study guides for certificates — scoped deliberately to
+**entry-level certs only** (e.g. AWS, Claude Code, Angular) since the full universe of available
+certifications is too large to chase; entry-level is where a learner coming from zero actually
+needs the on-ramp. **Mid- and senior-level certs are explicitly a later phase** — get entry-level
+solid and running first, then expand upward once that's proven out.
+
+Next action when this is picked up: run a depth/coverage audit (similar shape to the "spot-check"
+audits already logged in the Done sections below) specifically against the full-stack-lifecycle
+checklist above — API design/testing/REST, DevOps/deployment/cloud/databases — and report gaps
+before building anything, since this is a much bigger scope than a single-page or single-track
+fix.
+
+---
+
 ## Done — Database/AWS/DSA depth pass (started 2026-08-20, completed 2026-08-21)
 
 Bobby asked to "solidify the concepts for database and aws/infrastructure... and make sure
