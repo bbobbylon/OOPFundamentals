@@ -239,16 +239,17 @@ found this reaches well past AWS and DS&A):
   `aws-compute-decision-visualizer.html`, `aws-storage-deep-visualizer.html`,
   `aws-iac-visualizer.html`, `aws-cost-visualizer.html`). Every AWS page now has the full
   scenario-walk + live-inspector treatment — nothing left to retrofit in this track.
-- Same retrofit for the Data Structures & Algorithms pages still on the older SVG/canvas-driven
-  interaction style. Done this pass (2026-08-27): `graph-visualizer.html`,
+- ~~Same retrofit for the Data Structures & Algorithms pages still on the older SVG/canvas-driven
+  interaction style~~ — **DONE, 20/20 (2026-08-27).** `graph-visualizer.html`,
   `linked-list-visualizer.html`, `big-o-visualizer.html` (plus `sorting-visualizer.html`,
   `ds-two-pointer-sliding-window-visualizer.html`, `ds-backtracking-visualizer.html` already had
-  it). Current coverage: **6/20**. Remaining, highest-traffic first: `bst-visualizer.html`,
+  it) finished the earlier pass; this pass added `bst-visualizer.html`,
   `stack-queue-visualizer.html`, `hashmap-visualizer.html`, `searching-visualizer.html`,
-  `recursion-visualizer.html`, `ds-dynamic-programming-visualizer.html`, plus
+  `recursion-visualizer.html`, `ds-dynamic-programming-visualizer.html`,
   `ds-arrays-visualizer.html`, `ds-linked-lists-visualizer.html`, `ds-trees-visualizer.html`,
   `ds-hash-tables-visualizer.html`, `ds-heaps-visualizer.html`, `ds-tries-visualizer.html`,
-  `ds-graphs-advanced-visualizer.html`, `ds-disjoint-sets-visualizer.html`.
+  `ds-graphs-advanced-visualizer.html`, and `ds-disjoint-sets-visualizer.html`. Every DS&A page now
+  has the full scenario-walk + live-inspector treatment — nothing left to retrofit in this track.
 - `exam-sql.html` (24 Q) doesn't test anything from `sql-postgres-visualizer.html` (JSONB,
   connection pooling, VACUUM) — add a domain once the replication/partitioning pages above are
   registered.
@@ -282,9 +283,9 @@ page's pre-existing widget untouched. Verified sitewide with a full duplicate-id
 value repeats anywhere in the diff) and a JS-syntax sweep (every inline `<script>` block parses
 clean via `new Function()`) before committing.
 
-AWS (6/15) and Data Structures & Algorithms (2/11) retrofits remain open — see the backlog item
-above; they were always tracked separately since they're a bigger lift (older SVG/canvas-driven
-pages, not just a missing hero widget).
+AWS (15/15, done 2026-08-27) and Data Structures & Algorithms (20/20, done 2026-08-27) retrofits
+have since closed out — see the backlog item above; they were always tracked separately since
+they're a bigger lift (older SVG/canvas-driven pages, not just a missing hero widget).
 
 ---
 
@@ -351,4 +352,5 @@ read of one page each in Python, Java, and DSA-interview, tracks Bobby never nam
   step-button state machines for two-pointer/sliding-window/prefix-sum/hashmap). It's the same
   "predates the newer interaction pattern" situation already logged for AWS and DS&A below — this
   audit just found it's far more widespread than those two tracks. Folded into that backlog item
-  rather than opening a separate one.
+  rather than opening a separate one. (Historical snapshot as of 2026-08-21 — AWS and DS&A have
+  since both closed to 100%, see the "Done — sitewide `rt-ctlbar` retrofit" entries above.)
