@@ -123,6 +123,14 @@
     pre .cm { color: #64748b; font-style: italic; }
     pre .fn { color: #22d3ee; }
 
+    .who-HASH{background:#38bdf8;color:#04222a}
+    .who-BUCKET{background:#facc15;color:#422006}
+    .who-CHAIN{background:#a78bfa;color:#1a1030}
+    .who-RESIZE{background:#fb923c;color:#431407}
+    .who-RES{background:#4ade80;color:#04231a}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
+
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); }
     th { color: var(--accent); font-weight: 600; font-size: 12px; text-transform: uppercase; }
@@ -163,6 +171,46 @@
         <span class="tag">In CIAM / Context:</span>
         <span>HashMaps are ubiquitous in CIAM: in-memory token caches (HashMap&lt;String, TokenInfo&gt; keyed by token hash), user session stores (HashMap&lt;String, Session&gt; keyed by sessionId), OAuth client registrations (HashMap&lt;String, ClientDetails&gt; keyed by clientId), and JWT claim extraction (the decoded JWT payload IS a Map&lt;String, Object&gt;). The LinkedHashMap LRU pattern is standard for a bounded in-memory token validation cache — add tokens as they arrive, auto-evict the oldest when the cache exceeds N entries, preventing unbounded memory growth between Redis refreshes. Always override equals() + hashCode() when using composite keys (tenantId + userId) — failing to do so causes silent cache misses that are notoriously hard to debug in production.</span>
       </div>
+    </div>
+
+    <!-- ── EXTREME-VIZ HERO ── -->
+    <div style="margin:0 0 28px">
+      <div class="rt-ctlbar">
+        <span class="lbl">Scenario</span>
+        <span class="userseg" id="hmSeg">
+          <button class="on" data-s="freshput">① put() into an empty bucket — the O(1) fast path</button>
+          <button data-s="collision">② put() collides — a second key lands in the same bucket</button>
+          <button data-s="resize">③ Load factor hits 0.75 — the array doubles and rehashes</button>
+          <button data-s="badhash">④ Broken hashCode() — get() silently returns null</button>
+        </span>
+        <button class="rt-run" id="hmRun">▶ Run</button>
+        <span class="rt-pill" id="hmPill">ready</span>
+      </div>
+      <div class="rt-stage">
+        <div class="rt-diagram" id="hmDiag">
+          <div class="rt-rail"></div>
+          <div class="rt-chip" id="hmChip">→</div>
+          <div class="rt-node" data-n="HASH"><span class="ic">#️⃣</span><div><div class="nl">Hash</div><div class="ns">key.hashCode() is computed</div></div><span class="who who-badge who-HASH">HASH</span></div>
+          <div class="rt-node" data-n="BUCKET"><span class="ic">🪣</span><div><div class="nl">Bucket</div><div class="ns">hash % capacity picks a slot</div></div><span class="who who-badge who-BUCKET">BUCKET</span></div>
+          <div class="rt-node" data-n="CHAIN"><span class="ic">🔗</span><div><div class="nl">Chain</div><div class="ns">walk entries at that bucket via equals()</div></div><span class="who who-badge who-CHAIN">CHAIN</span></div>
+          <div class="rt-node" data-n="RESIZE"><span class="ic">📐</span><div><div class="nl">Resize?</div><div class="ns">load factor checked against 0.75</div></div><span class="who who-badge who-RESIZE">RESIZE</span></div>
+          <div class="rt-node" data-n="RES"><span class="ic">✅</span><div><div class="nl">Result</div><div class="ns">outcome</div></div><span class="who who-badge who-RES">RES</span></div>
+        </div>
+        <div class="rt-inspect" id="hmInspect">
+          <div class="rt-dir" id="hmDir">STEP 0 / 5</div>
+          <div class="rt-cap" id="hmCap">Pick a scenario and press ▶ Run</div>
+          <div class="rt-payload" id="hmPayload"></div>
+          <div class="rt-headers" id="hmHeaders"><span class="ht">INSPECTOR</span>(waiting)</div>
+        </div>
+      </div>
+      <div class="rt-result" id="hmResult"></div>
+    </div>
+    <div class="who-row">
+      <span class="who-badge who-HASH">HASH — key.hashCode() turns the key into an integer</span>
+      <span class="who-badge who-BUCKET">BUCKET — hash & 0x7FFFFFFF % capacity picks the array slot</span>
+      <span class="who-badge who-CHAIN">CHAIN — entries at that bucket are compared via .equals()</span>
+      <span class="who-badge who-RESIZE">RESIZE — size/capacity vs the 0.75 load factor decides whether to double</span>
+      <span class="who-badge who-RES">RES — the final outcome</span>
     </div>
 
     <div class="panel">
@@ -626,5 +674,112 @@ DevHubCodeWalk.mount('#cw-hashmap',{
 
     reset();
   </script>
+
+<script>
+(function(){
+  const pfx='hm';
+  const SCEN={
+    freshput:{label:'put() into an empty bucket — the O(1) fast path',steps:[
+      {node:'HASH',hdr:'put("Frank", 29) is called. "Frank".hashCode() runs Java\'s h = 31*h + char formula across all 5 characters',pay:{key:'Frank',operation:'put',hashCode:69019660},ins:'hashCode() is deterministic — the same string always produces the same integer, which is the entire foundation the bucket lookup relies on.'},
+      {node:'BUCKET',hdr:'(hash & 0x7FFFFFFF) % 8 = bucket 4 — the sign bit is masked off first so the result is never negative',pay:{rawHash:69019660,capacity:8,bucketIndex:4},ins:'Masking off the sign bit matters because hashCode() can legally return a negative int — a raw "%" on a negative number in Java can itself be negative, which would be an invalid array index.'},
+      {node:'CHAIN',hdr:'Bucket 4 is currently empty — the chain-walk loop runs zero iterations, nothing to compare against',pay:{bucket:4,existingChain:[],comparisons:0},ins:'This is the O(1) best case: no collision means no equals() calls at all, just a single array write.'},
+      {node:'RESIZE',hdr:'After inserting, size becomes 6 out of 8 buckets — 6/8 = 0.75, exactly at the threshold, which DOES trigger a resize',pay:{sizeAfterInsert:6,capacity:8,loadFactor:0.75,threshold:0.75,triggers:true},ins:'The check is ">= 0.75" in this simulation (Java\'s real HashMap resizes once the count STRICTLY exceeds threshold) — either way, hitting the boundary exactly is worth noticing here.'},
+      {node:'RES',tone:'ok',hdr:'"Frank"=29 is placed directly in bucket 4 with a single write — no chain to walk, no collision to resolve',pay:{placed:'Frank=29 → bucket 4',totalComparisons:0,cost:'O(1)'},ins:'This fast, empty-bucket case is what makes HashMap\'s AVERAGE O(1) claim true — it only holds when the load factor is kept low enough that empty-or-short buckets are the common case.'},
+    ],result:{tone:'ok',text:'✅ Inserting into an empty bucket costs exactly one hash computation and one array write — no chain walk needed. This is the O(1) fast path every HashMap operation aims for.'}},
+
+    collision:{label:'put() collides — a second key lands in the same bucket',steps:[
+      {node:'HASH',hdr:'Bucket 4 already holds "Frank"=29. Now put("Grace", 31) is called — "Grace".hashCode() is computed independently',pay:{existingKey:'Frank',incomingKey:'Grace',incomingHash:69329780},ins:'Two completely different strings can legally hash to the same bucket — this is the pigeonhole principle: infinite possible keys, finite buckets, collisions are mathematically guaranteed eventually.'},
+      {node:'BUCKET',hdr:'(hash("Grace") & 0x7FFFFFFF) % 8 also lands on bucket 4 — same slot as "Frank", purely by coincidence of the modulo math',pay:{bucketIndex:4,collidesWith:'Frank'},ins:'Notice this ISN\'T a bug or a bad hashCode — even a perfectly correct hashCode() produces collisions once you mod down to a small bucket count.'},
+      {node:'CHAIN',hdr:'The chain-walk compares "Grace" against the 1 existing entry ("Frank") via .equals() — they don\'t match, so it\'s a genuine new entry, not an update',pay:{chainBefore:['Frank=29'],comparisons:1,matchFound:false},ins:'Every comparison in the chain costs one .equals() call — this is exactly why a long chain degrades performance: what should be O(1) becomes O(chain length).'},
+      {node:'RESIZE',hdr:'"Grace" is appended AFTER "Frank" in bucket 4\'s chain (now length 2). Size/capacity is still under 0.75, so no resize fires yet',pay:{bucket4Chain:['Frank=29','Grace=31'],loadFactor:'below threshold',triggers:false},ins:'Java prepends new entries at the head in older versions, or appends at the tail since Java 8 — either way, the chain now needs to be walked for future lookups of either key.'},
+      {node:'RES',tone:'bad',hdr:'get("Grace") now costs 2 comparisons instead of 1 — the collision made this bucket\'s cost O(2) instead of O(1)',pay:{bucket:4,chainLength:2,worstCaseComparisons:2},ins:'One collision alone is harmless — the real danger is many collisions piling into the same bucket, which is exactly what the RESIZE mechanism (scenario ③) exists to prevent.'},
+    ],result:{tone:'bad',text:'⚠️ A collision means the bucket now holds a chain of 2+ entries — every future get()/put() on that bucket costs one .equals() comparison per chain entry, degrading from strict O(1).'}},
+
+    resize:{label:'Load factor hits 0.75 — the array doubles and rehashes',steps:[
+      {node:'HASH',hdr:'The map has capacity 8 and already holds 5 entries. A 6th key, "Ivan", is put() — its hashCode() is computed as usual',pay:{currentSize:5,capacity:8,incomingKey:'Ivan'},ins:'The hash computation itself never changes based on how full the map is — resize is a separate, later concern triggered only after the entry is placed.'},
+      {node:'BUCKET',hdr:'"Ivan" lands in some bucket via the normal hash % 8 computation — placement proceeds exactly as any other put() would',pay:{bucketIndex:2,capacity:8},ins:'This step is identical to scenarios ① and ② — resize doesn\'t change HOW an individual insert works, only what happens right after.'},
+      {node:'CHAIN',hdr:'"Ivan" is appended to its bucket\'s chain, and size becomes 6',pay:{sizeAfterInsert:6,capacity:8},ins:'The chain-walk / insert itself completes normally before the load factor is even checked — resize is a post-insert cleanup step.'},
+      {node:'RESIZE',tone:'bad',hdr:'6 / 8 = 0.75 — the load factor has now hit the threshold. The map allocates a NEW array of 16 buckets and re-hashes ALL 6 existing entries into it',pay:{oldCapacity:8,newCapacity:16,entriesRehashed:6,cost:'O(n)'},ins:'Every single entry gets a brand-new bucket index computed against the new capacity — an entry\'s old bucket index is meaningless once capacity changes, because the modulo math changed.'},
+      {node:'RES',tone:'ok',hdr:'Resize completes: capacity is now 16, load factor drops back to 6/16 = 0.375, and average chain length across all buckets goes back down',pay:{newLoadFactor:0.375,newCapacity:16,size:6},ins:'This O(n) rehash is expensive, but it happens rarely — over the next several inserts before the NEXT resize, its cost is amortized down to O(1) per operation on average, which is the real meaning of "amortized O(1)."'},
+    ],result:{tone:'ok',text:'✅ Hitting the 0.75 load factor triggers a full O(n) rehash into a doubled array — expensive per-occurrence, but rare enough that put()\'s average cost stays O(1) amortized over time.'}},
+
+    badhash:{label:'Broken hashCode() — get() silently returns null',steps:[
+      {node:'HASH',hdr:'A custom UserId key overrides equals() (compares tenant+userId fields) but FORGOT to override hashCode() — it still uses Object\'s default identity-based hash',pay:{keyClass:'UserId',equalsOverridden:true,hashCodeOverridden:false,bug:'contract violation'},ins:'This is one of the most common silent Java bugs — the compiler never warns you, and unit tests that only check equals() will pass while the HashMap usage quietly breaks.'},
+      {node:'BUCKET',hdr:'put(id1, user) is called — id1\'s default identity hashCode() sends it to, say, bucket 3',pay:{key:'id1',hashCode:'identity hash (e.g. 847291)',bucketIndex:3},ins:'The entry IS stored successfully — put() has no way to detect that hashCode() is "wrong," it just does what the method returns.'},
+      {node:'CHAIN',hdr:'Later, get(id2) is called — id2.equals(id1) would return TRUE (same tenant+userId fields), but id2\'s default identity hashCode() is a DIFFERENT number from id1\'s',pay:{key:'id2',equalsId1:true,hashCodeMatches:false},ins:'This is the exact contract HashMap depends on: "if a.equals(b), then a.hashCode() MUST equal b.hashCode()" — id1 and id2 satisfy the first half but violate the second.'},
+      {node:'RESIZE',hdr:'id2\'s broken hash sends the lookup to a DIFFERENT bucket than bucket 3 — say bucket 7, where id1 was never stored',pay:{lookupBucket:7,actualStorageBucket:3,mismatch:true},ins:'No resize actually happens here — this row exists to show WHERE the search goes wrong: not in equals(), but in the bucket-selection step that never even gets a chance to run equals() against the right entry.'},
+      {node:'RES',tone:'bad',hdr:'get(id2) scans bucket 7\'s chain, finds nothing matching, and returns null — even though a logically "equal" entry sits in bucket 3',pay:{result:null,expectedResult:'the user stored under id1',bucketSearched:7,bucketWhereEntryActuallyLives:3},ins:'This is exactly the production bug the CIAM intro card above warns about: a composite-key cache silently missing on lookups that should hit — always generate equals() and hashCode() together from the SAME fields.'},
+    ],result:{tone:'bad',text:'⚠️ Overriding equals() without hashCode() breaks the HashMap contract — a logically "equal" key can hash to a different bucket, so get() searches the wrong slot and silently returns null instead of the stored value.'}},
+  };
+
+  const nodes=['HASH','BUCKET','CHAIN','RESIZE','RES'];
+  function posOf(n){const i=nodes.indexOf(n);return i<0?50:10+i*20;}
+  let cur='freshput',timers=[],running=false;
+
+  function resetHero(){
+    timers.forEach(clearTimeout);timers=[];running=false;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='ready';
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(el)el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+    });
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left='5%';chip.textContent='→';}
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP 0 / '+SCEN[cur].steps.length;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent='Pick a scenario and press ▶ Run';
+    const pay=document.getElementById(pfx+'Payload');if(pay)pay.textContent='';
+    const hdr=document.getElementById(pfx+'Headers');if(hdr)hdr.innerHTML='<span class="ht">INSPECTOR<\/span>(waiting)';
+    const res=document.getElementById(pfx+'Result');if(res){res.textContent='';res.className='rt-result';}
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=false;
+  }
+
+  function applyStepHero(s,idx,total){
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left=posOf(s.node)+'%';chip.textContent='→';}
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(!el)return;
+      el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+      if(n===s.node){
+        if(s.tone==='ok')el.className+=' vchk cur';
+        else if(s.tone==='bad')el.className+=' vskip curbad';
+        else el.className+=' cur';
+      }
+    });
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP '+idx+' / '+total;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent=s.hdr;
+    const pay=document.getElementById(pfx+'Payload');
+    if(pay)pay.textContent=JSON.stringify(s.pay,null,2);
+    const hdrEl=document.getElementById(pfx+'Headers');
+    if(hdrEl)hdrEl.innerHTML='<span class="ht">INSPECTOR<\/span>'+s.ins;
+  }
+
+  function runHero(){
+    resetHero();running=true;
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=true;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='running…';
+    const steps=SCEN[cur].steps;
+    steps.forEach((s,i)=>timers.push(setTimeout(()=>applyStepHero(s,i+1,steps.length),(i+1)*2000)));
+    timers.push(setTimeout(()=>{
+      const r=SCEN[cur].result;
+      const res=document.getElementById(pfx+'Result');
+      if(res){res.textContent=r.text;res.className='rt-result show '+(r.tone==='ok'?'ok':'bad');}
+      if(pill)pill.textContent='done';
+      running=false;const btn2=document.getElementById(pfx+'Run');if(btn2)btn2.disabled=false;
+    },(steps.length+1)*2000));
+  }
+
+  document.getElementById(pfx+'Run').onclick=runHero;
+  document.querySelectorAll('#'+pfx+'Seg button').forEach(b=>{
+    b.onclick=()=>{
+      if(running)return;
+      cur=b.dataset.s;
+      document.querySelectorAll('#'+pfx+'Seg button').forEach(x=>x.classList.toggle('on',x===b));
+      resetHero();
+    };
+  });
+  resetHero();
+})();
+</script>
 </body>
 </html>
