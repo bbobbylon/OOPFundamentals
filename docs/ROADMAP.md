@@ -229,17 +229,16 @@ gaps; all 10 pages below are now built, registered in `TRACKS`, and counted in `
 **Lower-priority backlog from the same audit** (content is fine, this is a polish/consistency
 pass, not a content gap; scope expanded 2026-08-21 after the sitewide depth spot-check below
 found this reaches well past AWS and DS&A):
-- Retrofit the animated `rt-ctlbar`/`rt-stage` scenario-walk + live-inspector pattern onto the
-  existing AWS pages (all have intro cards + code walkthroughs already, just predate the
-  newer interaction pattern). Done this pass (2026-08-27): `aws-vpc-visualizer.html` (was the
-  worst offender — zero interactivity before this), `aws-ec2-visualizer.html`,
-  `aws-ecs-visualizer.html`, `aws-s3-visualizer.html`. Current coverage: **10/15**
+- ~~Retrofit the animated `rt-ctlbar`/`rt-stage` scenario-walk + live-inspector pattern onto the
+  AWS pages~~ — **DONE, 15/15 (2026-08-27).** `aws-vpc-visualizer.html` (was the worst offender —
+  zero interactivity before this), `aws-ec2-visualizer.html`, `aws-ecs-visualizer.html`,
+  `aws-s3-visualizer.html`, `aws-iam-visualizer.html`, `aws-lambda-visualizer.html`,
+  `aws-rds-visualizer.html`, `aws-cloudwatch-visualizer.html`, `aws-overview-visualizer.html` all
+  finished this pass, joining the 6 pages the earlier depth pass already covered
   (`aws-api-gateway-visualizer.html`, `aws-load-balancing-visualizer.html`,
   `aws-compute-decision-visualizer.html`, `aws-storage-deep-visualizer.html`,
-  `aws-iac-visualizer.html`, `aws-cost-visualizer.html` already had it from the depth pass
-  above). Remaining, in priority order: IAM → Lambda → RDS → CloudWatch → Overview
-  (`aws-iam-visualizer.html`, `aws-lambda-visualizer.html`, `aws-rds-visualizer.html`,
-  `aws-cloudwatch-visualizer.html`, `aws-overview-visualizer.html`).
+  `aws-iac-visualizer.html`, `aws-cost-visualizer.html`). Every AWS page now has the full
+  scenario-walk + live-inspector treatment — nothing left to retrofit in this track.
 - Same retrofit for the Data Structures & Algorithms pages still on the older SVG/canvas-driven
   interaction style. Done this pass (2026-08-27): `graph-visualizer.html`,
   `linked-list-visualizer.html`, `big-o-visualizer.html` (plus `sorting-visualizer.html`,

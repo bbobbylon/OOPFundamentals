@@ -57,6 +57,14 @@
 
     .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     @media(max-width:680px) { .two-col { grid-template-columns: 1fr; } }
+
+    .who-TRIGGER{background:#ff9900;color:#2a1600}
+    .who-INIT{background:#f87171;color:#2a0a0a}
+    .who-HANDLER{background:#4ade80;color:#04231a}
+    .who-SCALE{background:#a78bfa;color:#1a1030}
+    .who-RES{background:#22d3ee;color:#04232a}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
   </style>
   <link rel="stylesheet" href="devhub.css" />
 </head>
@@ -93,6 +101,46 @@
       </div>
     </div>
     <div class="intro-ciam"><span class="tag">In CIAM / Context:</span> The core auth API (login, token exchange, userinfo) runs on ECS Fargate — always-on, fast, Spring Boot. Lambda handles async/batch jobs: nightly user export, bulk provisioning from CSV, welcome emails, scheduled Ping client-secret rotation. These fit Lambda because they're infrequent, short and cost-sensitive — and the 15-minute timeout is plenty for a 10,000-user CSV import.</div>
+  </div>
+
+  <!-- ── EXTREME-VIZ HERO ── -->
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">Scenario</span>
+      <span class="userseg" id="lamSeg">
+        <button class="on" data-s="cold">① Cold start — no warm container, JVM + Spring init pays the tax</button>
+        <button data-s="warm">② Warm start — same container reused, init entirely skipped</button>
+        <button data-s="burst">③ Burst of 500 events — Lambda scales out, mixing cold and warm</button>
+        <button data-s="timeout">④ Hung downstream call — the configured timeout kills mid-execution</button>
+      </span>
+      <button class="rt-run" id="lamRun">▶ Run</button>
+      <span class="rt-pill" id="lamPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="lamDiag">
+        <div class="rt-rail"></div>
+        <div class="rt-chip" id="lamChip">→</div>
+        <div class="rt-node" data-n="TRIGGER"><span class="ic">⚡</span><div><div class="nl">Trigger</div><div class="ns">event source invokes the function</div></div><span class="who who-badge who-TRIGGER">TRIGGER</span></div>
+        <div class="rt-node" data-n="INIT"><span class="ic">🧊</span><div><div class="nl">Init</div><div class="ns">container + runtime cold/warm state</div></div><span class="who who-badge who-INIT">INIT</span></div>
+        <div class="rt-node" data-n="HANDLER"><span class="ic">▶️</span><div><div class="nl">Handler</div><div class="ns">your function code executes</div></div><span class="who who-badge who-HANDLER">HANDLER</span></div>
+        <div class="rt-node" data-n="SCALE"><span class="ic">📈</span><div><div class="nl">Scale</div><div class="ns">concurrency behavior</div></div><span class="who who-badge who-SCALE">SCALE</span></div>
+        <div class="rt-node" data-n="RES"><span class="ic">✅</span><div><div class="nl">Result</div><div class="ns">outcome</div></div><span class="who who-badge who-RES">RES</span></div>
+      </div>
+      <div class="rt-inspect" id="lamInspect">
+        <div class="rt-dir" id="lamDir">STEP 0 / 5</div>
+        <div class="rt-cap" id="lamCap">Pick a scenario and press ▶ Run</div>
+        <div class="rt-payload" id="lamPayload"></div>
+        <div class="rt-headers" id="lamHeaders"><span class="ht">INSPECTOR</span>(waiting)</div>
+      </div>
+    </div>
+    <div class="rt-result" id="lamResult"></div>
+  </div>
+  <div class="who-row">
+    <span class="who-badge who-TRIGGER">TRIGGER — the event source (S3, SQS, EventBridge, API Gateway…) invokes the function</span>
+    <span class="who-badge who-INIT">INIT — cold (fresh container) or warm (reused container) execution environment</span>
+    <span class="who-badge who-HANDLER">HANDLER — your function code actually runs</span>
+    <span class="who-badge who-SCALE">SCALE — how many concurrent executions this invocation competes with</span>
+    <span class="who-badge who-RES">RES — the actual outcome</span>
   </div>
 
   <!-- SECTION 1: Cold Start Explained -->
@@ -365,6 +413,113 @@ DevHubCodeWalk.mount('#cw-lambda',{
     'System.getenv("MY_CONFIG_VALUE") // environment variables read at runtime'
   ]
 });
+</script>
+
+<script>
+(function(){
+  const pfx='lam';
+  const SCEN={
+    cold:{label:'Cold start — no warm container, JVM + Spring init pays the tax',steps:[
+      {node:'TRIGGER',hdr:'S3 PUT event fires: uploads/batch-42.csv landed in the bucket — Lambda is invoked',pay:{eventSource:'S3:ObjectCreated',bucket:'ciam-user-imports',key:'uploads/batch-42.csv'},ins:'S3 delivers the event asynchronously — the uploader doesn\'t wait for Lambda to finish; it already got its 200 OK from S3 the moment the PUT completed.'},
+      {node:'INIT',tone:'bad',hdr:'No warm container exists — Lambda provisions a fresh one: download package (100ms) → start JVM (200ms) → static init (100ms) → Spring ApplicationContext init (2-8s)',pay:{containerState:'COLD (freshly provisioned)',initBreakdown:{download:'100ms',jvmStart:'200ms',staticInit:'100ms',springContext:'~5800ms'}},ins:'This Init phase is billed separately from Handler duration in Lambda\'s pricing model, but the CALLER still experiences it as latency — for an async S3 trigger that\'s fine, but this exact cost is why cold Java Lambdas are a bad fit for synchronous, user-facing API Gateway calls.'},
+      {node:'HANDLER',hdr:'handleRequest() finally executes: parses the CSV, calls the CIAM provisioning API for each row',pay:{rowsParsed:1200,action:'bulk-provision via Ping Identity API'},ins:'Only now does your actual business logic run — everything before this point was pure infrastructure startup cost, zero application work done.'},
+      {node:'SCALE',hdr:'Exactly 1 concurrent execution — this is the very first invocation, nothing to scale against yet',pay:{concurrentExecutions:1},ins:'Cold start cost is paid per NEW container, not per invocation — this matters a lot once burst traffic is in play (see the ③ Burst scenario).'},
+      {node:'RES',tone:'bad',hdr:'Total latency ≈ 6.2 seconds (mostly Init) — the container now stays warm for reuse by the next invocation',pay:{totalLatency:'~6200ms',billedInit:'~6100ms',billedHandler:'~100ms'},ins:'Acceptable here because this is an async S3-triggered batch job with no one waiting on a response — the same 6.2s on a synchronous /login API Gateway call would be a very real user-facing timeout risk.'},
+    ],result:{tone:'bad',text:'⚠️ A cold Java+Spring Lambda pays 3-10s of Init cost before any handler code runs — fine for async event-driven jobs, risky for synchronous request/response APIs.'}},
+
+    warm:{label:'Warm start — same container reused, init entirely skipped',steps:[
+      {node:'TRIGGER',hdr:'A second S3 PUT event arrives 30 seconds later: uploads/batch-43.csv',pay:{eventSource:'S3:ObjectCreated',key:'uploads/batch-43.csv',secondsSincePriorInvocation:30},ins:'Lambda keeps idle containers around for a while (typically minutes, not guaranteed) specifically to serve exactly this kind of follow-up invocation cheaply.'},
+      {node:'INIT',tone:'ok',hdr:'A warm container from the previous invocation is found and reused — download, JVM start, static init, and Spring context init are ALL skipped entirely',pay:{containerState:'WARM (reused)',initSkipped:true},ins:'This is the entire reason "warm vs cold" matters so much: it isn\'t a faster version of Init, it\'s the complete absence of it — the JVM and Spring context are already sitting in memory from last time.'},
+      {node:'HANDLER',hdr:'handleRequest() runs immediately against the already-initialized S3 client and Spring beans',pay:{rowsParsed:850,action:'bulk-provision via Ping Identity API'},ins:'The handler code itself is identical to the cold-start scenario — the only difference this entire run is what came before it.'},
+      {node:'SCALE',hdr:'Still 1 concurrent execution — same single container, just invoked a second time',pay:{concurrentExecutions:1},ins:'Reuse only happens when a request arrives on a container that\'s already idle and available — under concurrent load, new containers still have to cold-start (this is exactly what scenario ③ walks through).'},
+      {node:'RES',tone:'ok',hdr:'Total latency ≈ 45ms — roughly 130× faster than the cold path purely from skipping Init',pay:{totalLatency:'~45ms',billedInit:'0ms',billedHandler:'~45ms'},ins:'This is why teams that need consistently low latency from Java Lambda use Provisioned Concurrency (pay to keep N containers permanently warm) or SnapStart (restore from a post-init JVM snapshot) rather than hoping for warm reuse.'},
+    ],result:{tone:'ok',text:'✅ A warm container skips Init entirely — same handler code runs ~130× faster with zero JVM/Spring startup cost, purely from container reuse.'}},
+
+    burst:{label:'Burst of 500 events — Lambda scales out, mixing cold and warm',steps:[
+      {node:'TRIGGER',hdr:'A bulk operations team uploads 500 CSV files to S3 within the same second — 500 independent invocations queue up',pay:{eventSource:'S3:ObjectCreated ×500',windowSeconds:1},ins:'Each S3 object creation is its own independent event — Lambda doesn\'t batch these into one invocation unless you\'ve explicitly configured batching (e.g. for SQS), so this really is 500 separate function invocations.'},
+      {node:'INIT',tone:'bad',hdr:'Lambda provisions many new containers simultaneously to absorb the burst — only a handful of already-warm containers exist from earlier traffic, so most of the 500 pay a full cold start independently',pay:{alreadyWarmContainers:8,newContainersProvisioned:492},ins:'Cold start cost doesn\'t amortize across a burst — EVERY new container pays its own full Init cost in parallel, so scaling out fast and scaling out cheaply are in direct tension for a Java function.'},
+      {node:'HANDLER',hdr:'All 500 handler invocations execute concurrently, each processing its own CSV file',pay:{invocationsInFlight:500},ins:'This parallelism is exactly Lambda\'s core value proposition — going from 0 to 500 concurrent executions with zero capacity planning — the cost here is entirely about cold-start latency, not about whether it can scale at all.'},
+      {node:'SCALE',tone:'bad',hdr:'Concurrent executions climb toward the account\'s regional concurrency limit (default 1000, shared across every Lambda function in the account unless reserved concurrency is set aside)',pay:{concurrentExecutions:500,accountConcurrencyLimit:1000,note:'other functions in this account share the same pool'},ins:'A different, unrelated Lambda function in the same account and region could get throttled by this exact burst if reserved concurrency wasn\'t configured to protect it — this is a genuinely common multi-tenant surprise.'},
+      {node:'RES',tone:'bad',hdr:'The burst is fully absorbed and all 500 files process successfully — but with a bimodal latency distribution: ~8 finish in ~45ms (warm), ~492 finish in 3-8s each (cold)',pay:{fastInvocations:8,slowInvocations:492,p50Latency:'~6000ms',p99Latency:'~8200ms'},ins:'This bimodal cold/warm split is the real cost of bursty Java Lambda traffic — Provisioned Concurrency set to roughly the expected burst size is the standard fix, trading a constant hourly cost for consistently low latency.'},
+    ],result:{tone:'bad',text:'⚠️ Lambda scales concurrency instantly and reliably, but each newly-provisioned container still pays its own full cold start — a burst produces a bimodal fast/slow latency split unless Provisioned Concurrency is sized for it.'}},
+
+    timeout:{label:'Hung downstream call — the configured timeout kills mid-execution',steps:[
+      {node:'TRIGGER',hdr:'An EventBridge scheduled rule invokes the nightly Ping client-secret rotation function',pay:{eventSource:'EventBridge (cron)',schedule:'rate(1 day)'},ins:'Scheduled/cron-style triggers are a classic Lambda use case precisely because they\'re infrequent and short — which is exactly what makes an unexpected hang here so disruptive.'},
+      {node:'INIT',hdr:'A warm container is reused — this failure has nothing to do with cold start cost',pay:{containerState:'WARM (reused)'},ins:'Worth ruling out explicitly: this scenario\'s problem is entirely about elapsed wall-clock time inside the handler, not about container startup.'},
+      {node:'HANDLER',tone:'bad',hdr:'Handler calls Ping\'s secret-rotation API — due to a network partition, that call never returns and never times out on its own (no client-side timeout was configured on the HTTP client)',pay:{downstreamCall:'PATCH https://ping.internal/api/clients/{id}/secret',clientSideTimeoutConfigured:false},ins:'This is a very common real bug: the AWS SDK/HTTP client used inside the handler had no explicit timeout set, so it will happily hang forever waiting on a socket — only Lambda\'s own outer timeout will eventually save it.'},
+      {node:'SCALE',hdr:'Lambda\'s internal watchdog is counting elapsed execution time against the function\'s configured timeout (30 seconds) — independent of concurrency or container state',pay:{configuredTimeout:'30s',elapsedSoFar:'29.6s'},ins:'The configured timeout is a hard ceiling enforced by the Lambda service itself, not something your code can catch, extend, or negotiate with once it\'s about to fire.'},
+      {node:'RES',tone:'bad',hdr:'At exactly 30.0s, Lambda forcibly terminates the execution — "Task timed out after 30.00 seconds" — mid-flight, with no guaranteed cleanup',pay:{status:'Task timed out after 30.00 seconds',secretRotationCompleted:false,partialWorkDurablyWritten:false},ins:'Nothing after the point of termination runs — no finally block is guaranteed, no partial success is recorded — which is exactly why idempotency and checkpointing matter for any Lambda handler doing multi-step work, the same lesson as the EC2 Spot-interruption scenario elsewhere in this app.'},
+    ],result:{tone:'bad',text:'⚠️ Lambda enforces its configured timeout as a hard, unconditional kill — a hung downstream call with no client-side timeout will run right up to that limit and then be terminated mid-execution with no guaranteed cleanup.'}},
+  };
+
+  const nodes=['TRIGGER','INIT','HANDLER','SCALE','RES'];
+  function posOf(n){const i=nodes.indexOf(n);return i<0?50:10+i*20;}
+  let cur='cold',timers=[],running=false;
+
+  function resetHero(){
+    timers.forEach(clearTimeout);timers=[];running=false;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='ready';
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(el)el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+    });
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left='5%';chip.textContent='→';}
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP 0 / '+SCEN[cur].steps.length;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent='Pick a scenario and press ▶ Run';
+    const pay=document.getElementById(pfx+'Payload');if(pay)pay.textContent='';
+    const hdr=document.getElementById(pfx+'Headers');if(hdr)hdr.innerHTML='<span class="ht">INSPECTOR<\/span>(waiting)';
+    const res=document.getElementById(pfx+'Result');if(res){res.textContent='';res.className='rt-result';}
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=false;
+  }
+
+  function applyStepHero(s,idx,total){
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left=posOf(s.node)+'%';chip.textContent='→';}
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(!el)return;
+      el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+      if(n===s.node){
+        if(s.tone==='ok')el.className+=' vchk cur';
+        else if(s.tone==='bad')el.className+=' vskip curbad';
+        else el.className+=' cur';
+      }
+    });
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP '+idx+' / '+total;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent=s.hdr;
+    const pay=document.getElementById(pfx+'Payload');
+    if(pay)pay.textContent=JSON.stringify(s.pay,null,2);
+    const hdrEl=document.getElementById(pfx+'Headers');
+    if(hdrEl)hdrEl.innerHTML='<span class="ht">INSPECTOR<\/span>'+s.ins;
+  }
+
+  function runHero(){
+    resetHero();running=true;
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=true;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='running…';
+    const steps=SCEN[cur].steps;
+    steps.forEach((s,i)=>timers.push(setTimeout(()=>applyStepHero(s,i+1,steps.length),(i+1)*2000)));
+    timers.push(setTimeout(()=>{
+      const r=SCEN[cur].result;
+      const res=document.getElementById(pfx+'Result');
+      if(res){res.textContent=r.text;res.className='rt-result show '+(r.tone==='ok'?'ok':'bad');}
+      if(pill)pill.textContent='done';
+      running=false;const btn2=document.getElementById(pfx+'Run');if(btn2)btn2.disabled=false;
+    },(steps.length+1)*2000));
+  }
+
+  document.getElementById(pfx+'Run').onclick=runHero;
+  document.querySelectorAll('#'+pfx+'Seg button').forEach(b=>{
+    b.onclick=()=>{
+      if(running)return;
+      cur=b.dataset.s;
+      document.querySelectorAll('#'+pfx+'Seg button').forEach(x=>x.classList.toggle('on',x===b));
+      resetHero();
+    };
+  });
+  resetHero();
+})();
 </script>
 </body>
 </html>

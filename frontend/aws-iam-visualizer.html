@@ -49,6 +49,14 @@
 
     .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     @media(max-width:700px) { .two-col { grid-template-columns: 1fr; } }
+
+    .who-REQUEST{background:#22d3ee;color:#04232a}
+    .who-PRINCIPAL{background:#a78bfa;color:#1a1030}
+    .who-POLICY{background:#facc15;color:#3a2c00}
+    .who-DECISION{background:#fb923c;color:#2a1400}
+    .who-RES{background:#4ade80;color:#04231a}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
   </style>
   <link rel="stylesheet" href="devhub.css" />
 </head>
@@ -86,6 +94,46 @@
     </div>
     <div class="intro-ciam"><span class="tag">In CIAM / Context:</span> The CIAM ECS task role has exactly: Secrets Manager (read Ping client secret + DB password), S3 (read/write the profile-photos bucket only), CloudWatch Logs (write to <code>/ciam/*</code>). Nothing else. The Spring Boot app holds no AWS credentials — the SDK auto-discovers the task role — so a compromised microservice's blast radius is limited to what that role allows.</span>
     </div>
+  </div>
+
+  <!-- ── EXTREME-VIZ HERO ── -->
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">Scenario</span>
+      <span class="userseg" id="iamSeg">
+        <button class="on" data-s="allow">① Scoped Allow — s3:GetObject on one bucket ARN succeeds</button>
+        <button data-s="explicitdeny">② Explicit Deny wins — even over a broader Allow elsewhere</button>
+        <button data-s="implicitdeny">③ No matching statement anywhere — implicit default deny</button>
+        <button data-s="crossaccount">④ Cross-account AssumeRole — trust policy grants temp creds</button>
+      </span>
+      <button class="rt-run" id="iamRun">▶ Run</button>
+      <span class="rt-pill" id="iamPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="iamDiag">
+        <div class="rt-rail"></div>
+        <div class="rt-chip" id="iamChip">→</div>
+        <div class="rt-node" data-n="REQUEST"><span class="ic">📨</span><div><div class="nl">Request</div><div class="ns">an API call is made</div></div><span class="who who-badge who-REQUEST">REQUEST</span></div>
+        <div class="rt-node" data-n="PRINCIPAL"><span class="ic">🪪</span><div><div class="nl">Principal</div><div class="ns">caller identity resolved</div></div><span class="who who-badge who-PRINCIPAL">PRINCIPAL</span></div>
+        <div class="rt-node" data-n="POLICY"><span class="ic">📜</span><div><div class="nl">Policy</div><div class="ns">attached policies evaluated</div></div><span class="who who-badge who-POLICY">POLICY</span></div>
+        <div class="rt-node" data-n="DECISION"><span class="ic">⚖️</span><div><div class="nl">Decision</div><div class="ns">allow / explicit deny / implicit deny</div></div><span class="who who-badge who-DECISION">DECISION</span></div>
+        <div class="rt-node" data-n="RES"><span class="ic">✅</span><div><div class="nl">Result</div><div class="ns">outcome</div></div><span class="who who-badge who-RES">RES</span></div>
+      </div>
+      <div class="rt-inspect" id="iamInspect">
+        <div class="rt-dir" id="iamDir">STEP 0 / 5</div>
+        <div class="rt-cap" id="iamCap">Pick a scenario and press ▶ Run</div>
+        <div class="rt-payload" id="iamPayload"></div>
+        <div class="rt-headers" id="iamHeaders"><span class="ht">INSPECTOR</span>(waiting)</div>
+      </div>
+    </div>
+    <div class="rt-result" id="iamResult"></div>
+  </div>
+  <div class="who-row">
+    <span class="who-badge who-REQUEST">REQUEST — the API call being authorized</span>
+    <span class="who-badge who-PRINCIPAL">PRINCIPAL — who is making the call (user, role, or assumed role)</span>
+    <span class="who-badge who-POLICY">POLICY — every attached identity- and resource-based policy is evaluated</span>
+    <span class="who-badge who-DECISION">DECISION — explicit Deny beats everything; otherwise Allow beats implicit deny</span>
+    <span class="who-badge who-RES">RES — the actual outcome</span>
   </div>
 
   <!-- SECTION 1: Core Concepts -->
@@ -336,6 +384,113 @@ DevHubCodeWalk.mount('#cw-iam',{
     '// Spring Boot reads them automatically — no access keys in code'
   ]
 });
+</script>
+
+<script>
+(function(){
+  const pfx='iam';
+  const SCEN={
+    allow:{label:'Scoped Allow — s3:GetObject on one bucket ARN succeeds',steps:[
+      {node:'REQUEST',hdr:'App calls s3.getObject(bucket="ciam-uploads-prod", key="avatars/42.jpg")',pay:{action:'s3:GetObject',resource:'arn:aws:s3:::ciam-uploads-prod/avatars/42.jpg'},ins:'Every single AWS API call — SDK or console — is authorized through this exact same IAM evaluation, no exceptions.'},
+      {node:'PRINCIPAL',hdr:'Caller resolved: arn:aws:sts::111122223333:assumed-role/ciam-task-role/ecs-task-8f3a — a temporary, auto-refreshed identity, not a long-lived user',pay:{principal:'assumed-role/ciam-task-role',credentialType:'temporary (STS, ~1hr TTL)'},ins:'This is the ECS task role pattern: the container never held an access key — the SDK fetched temporary credentials from the task metadata endpoint automatically.'},
+      {node:'POLICY',hdr:'Task role\'s identity-based policy evaluated: Allow s3:GetObject scoped to arn:aws:s3:::ciam-uploads-prod/*',pay:{statement:'{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::ciam-uploads-prod/*"}'},ins:'The Resource is a specific bucket ARN with a wildcard suffix, not "*" — this is least privilege in practice: the role can read this one bucket\'s objects and nothing else in the account.'},
+      {node:'DECISION',tone:'ok',hdr:'No explicit Deny found anywhere; one matching Allow statement exists → final decision is ALLOW',pay:{explicitDeny:'none found',matchingAllow:1,decision:'ALLOW'},ins:'IAM\'s evaluation logic in one sentence: start at deny, look for an explicit Deny (if found, stop — deny wins), otherwise look for an Allow (if found, allow); if nothing matched either way, the default is deny.'},
+      {node:'RES',tone:'ok',hdr:'200 OK — object bytes returned to the app',pay:{status:200,bytesReturned:'14KB'},ins:'This scoped-ARN pattern is exactly what the CIAM ECS task role uses for profile photos — read/write on one bucket, nothing else, so a compromised container can\'t reach into unrelated buckets.'},
+    ],result:{tone:'ok',text:'✅ A single Allow statement scoped to one bucket ARN is enough — no Deny anywhere means the request succeeds, and the blast radius stays limited to that bucket.'}},
+
+    explicitdeny:{label:'Explicit Deny wins — even over a broader Allow elsewhere',steps:[
+      {node:'REQUEST',hdr:'Same task role now calls s3.deleteObject(bucket="ciam-uploads-prod", key="avatars/42.jpg")',pay:{action:'s3:DeleteObject',resource:'arn:aws:s3:::ciam-uploads-prod/avatars/42.jpg'},ins:'This is a plausible mistake to worry about: what if a broader, poorly-scoped policy got attached to this role by accident?'},
+      {node:'PRINCIPAL',hdr:'Same principal as before: assumed-role/ciam-task-role',pay:{principal:'assumed-role/ciam-task-role'},ins:'Nothing about identity changed — this scenario is entirely about what happens when TWO policies are attached to the same principal and they disagree.'},
+      {node:'POLICY',hdr:'Two policies are attached: Policy A (broad, legacy) has Allow "s3:*" on the bucket; Policy B (a security guardrail) has an explicit Deny on s3:DeleteObject for the same bucket',pay:{policyA:'{"Effect":"Allow","Action":"s3:*","Resource":"arn:aws:s3:::ciam-uploads-prod/*"}',policyB:'{"Effect":"Deny","Action":"s3:DeleteObject","Resource":"arn:aws:s3:::ciam-uploads-prod/*"}'},ins:'Both policies are independently attached and both are evaluated together — IAM doesn\'t pick one policy to "win," it collects every matching statement across every attached policy.'},
+      {node:'DECISION',tone:'bad',hdr:'An explicit Deny statement matches → decision is DENY, regardless of the Allow "s3:*" also matching',pay:{explicitDeny:'found (Policy B)',matchingAllow:'found (Policy A) — irrelevant now',decision:'DENY'},ins:'This is the single most important rule in IAM evaluation: an explicit Deny ALWAYS wins, no matter how many Allow statements also match. This is exactly why guardrail/boundary policies work even when someone else\'s policy is overly permissive.'},
+      {node:'RES',tone:'bad',hdr:'403 AccessDenied — the delete is blocked even though Policy A technically granted s3:*',pay:{status:403,error:'AccessDenied — explicit deny'},ins:'Teams use this pattern deliberately: attach a narrow "guardrail" policy with explicit Denies on dangerous actions (delete, IAM changes) so that even a mistakenly over-permissioned role can\'t perform them.'},
+    ],result:{tone:'bad',text:'⚠️ An explicit Deny statement always overrides any Allow, even one granting broader access like "s3:*" — this is what makes guardrail policies reliable.'}},
+
+    implicitdeny:{label:'No matching statement anywhere — implicit default deny',steps:[
+      {node:'REQUEST',hdr:'Same task role attempts dynamodb.deleteTable(tableName="ciam-sessions")',pay:{action:'dynamodb:DeleteTable',resource:'arn:aws:dynamodb:us-east-1:111122223333:table/ciam-sessions'},ins:'This action has nothing to do with anything the role was ever granted — no one wrote a policy about DynamoDB at all for this role.'},
+      {node:'PRINCIPAL',hdr:'Same principal: assumed-role/ciam-task-role — identity resolution succeeds fine, as always',pay:{principal:'assumed-role/ciam-task-role'},ins:'Authentication (who are you) always succeeds if the credentials are valid — authorization (are you allowed to do THIS) is the separate question this scenario is really about.'},
+      {node:'POLICY',hdr:'Every attached policy is scanned — Secrets Manager, S3, CloudWatch Logs statements exist, but none mention dynamodb:* at all',pay:{policiesScanned:3,dynamoStatementsFound:0},ins:'IAM doesn\'t need a Deny statement to block this — the absence of ANY matching Allow is enough on its own.'},
+      {node:'DECISION',tone:'bad',hdr:'No explicit Deny AND no matching Allow → falls through to the default: IMPLICIT DENY',pay:{explicitDeny:'none found',matchingAllow:'none found',decision:'DENY (implicit — the default)'},ins:'This is IAM\'s default-deny posture: unless something explicitly grants a permission, it is denied. A brand-new IAM role with zero attached policies can do literally nothing — not "everything except what\'s denied," the opposite.'},
+      {node:'RES',tone:'bad',hdr:'403 AccessDenied — "is not authorized to perform: dynamodb:DeleteTable"',pay:{status:403,error:'AccessDenied — implicit deny, no matching statement'},ins:'The fix here (if this action were actually needed) is to add exactly one narrowly-scoped Allow statement — never to attach a broad DynamoDB admin policy just to unblock one action.'},
+    ],result:{tone:'bad',text:'⚠️ IAM defaults to deny — if no policy statement explicitly allows an action, it is blocked, with no Deny statement required to cause that.'}},
+
+    crossaccount:{label:'Cross-account AssumeRole — trust policy grants temp creds',steps:[
+      {node:'REQUEST',hdr:'Account A\'s CI/CD pipeline role calls sts:AssumeRole to deploy into Account B\'s ECS cluster',pay:{action:'sts:AssumeRole',roleArnRequested:'arn:aws:iam::222233334444:role/deploy-from-pipeline'},ins:'This is the standard pattern for multi-account AWS setups (e.g. separate dev/staging/prod accounts) — no credentials are ever copied between accounts; a role in Account B simply trusts a specific principal in Account A.'},
+      {node:'PRINCIPAL',hdr:'Calling principal identified: arn:aws:iam::111122223333:role/ci-pipeline-role (Account A)',pay:{callingAccount:'111122223333 (Account A)',targetAccount:'222233334444 (Account B)'},ins:'AssumeRole is checked against TWO separate policies: the target role\'s trust policy (who is allowed to assume it) and, once assumed, the role\'s permissions policy (what it can then do) — this step is only the first check.'},
+      {node:'POLICY',hdr:'Account B\'s role has a trust policy: Principal { AWS: "arn:aws:iam::111122223333:role/ci-pipeline-role" }, Action: sts:AssumeRole',pay:{trustPolicy:'{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::111122223333:role/ci-pipeline-role"},"Action":"sts:AssumeRole"}'},ins:'A trust policy is itself just a resource-based policy attached to the role — it answers "who can assume ME," completely separately from "what can I do once assumed."'},
+      {node:'DECISION',tone:'ok',hdr:'Account A\'s role matches the trusted principal exactly → AssumeRole is authorized; STS issues temporary credentials',pay:{decision:'ALLOW (trust policy matched)',issuedCredentials:'AccessKeyId, SecretAccessKey, SessionToken — expire in 1 hour'},ins:'These temporary credentials are the ONLY thing that ever crosses the account boundary — no long-lived secret is shared, and they expire automatically whether or not anyone remembers to revoke them.'},
+      {node:'RES',tone:'ok',hdr:'Pipeline now acts as arn:aws:sts::222233334444:assumed-role/deploy-from-pipeline/session — deploys using Account B\'s role permissions, not Account A\'s',pay:{effectivePrincipal:'assumed-role/deploy-from-pipeline (Account B)',credentialLifetime:'1 hour, auto-expiring'},ins:'This is why cross-account AssumeRole is the recommended pattern over sharing IAM user access keys between accounts — it\'s auditable (CloudTrail logs exactly who assumed what and when) and self-expiring.'},
+    ],result:{tone:'ok',text:'✅ A trust policy on the target role, matched against the calling principal\'s identity, is what authorizes AssumeRole — the result is short-lived, auto-expiring, fully audited temporary credentials, never a shared long-lived secret.'}},
+  };
+
+  const nodes=['REQUEST','PRINCIPAL','POLICY','DECISION','RES'];
+  function posOf(n){const i=nodes.indexOf(n);return i<0?50:10+i*20;}
+  let cur='allow',timers=[],running=false;
+
+  function resetHero(){
+    timers.forEach(clearTimeout);timers=[];running=false;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='ready';
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(el)el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+    });
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left='5%';chip.textContent='→';}
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP 0 / '+SCEN[cur].steps.length;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent='Pick a scenario and press ▶ Run';
+    const pay=document.getElementById(pfx+'Payload');if(pay)pay.textContent='';
+    const hdr=document.getElementById(pfx+'Headers');if(hdr)hdr.innerHTML='<span class="ht">INSPECTOR<\/span>(waiting)';
+    const res=document.getElementById(pfx+'Result');if(res){res.textContent='';res.className='rt-result';}
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=false;
+  }
+
+  function applyStepHero(s,idx,total){
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left=posOf(s.node)+'%';chip.textContent='→';}
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(!el)return;
+      el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+      if(n===s.node){
+        if(s.tone==='ok')el.className+=' vchk cur';
+        else if(s.tone==='bad')el.className+=' vskip curbad';
+        else el.className+=' cur';
+      }
+    });
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP '+idx+' / '+total;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent=s.hdr;
+    const pay=document.getElementById(pfx+'Payload');
+    if(pay)pay.textContent=JSON.stringify(s.pay,null,2);
+    const hdrEl=document.getElementById(pfx+'Headers');
+    if(hdrEl)hdrEl.innerHTML='<span class="ht">INSPECTOR<\/span>'+s.ins;
+  }
+
+  function runHero(){
+    resetHero();running=true;
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=true;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='running…';
+    const steps=SCEN[cur].steps;
+    steps.forEach((s,i)=>timers.push(setTimeout(()=>applyStepHero(s,i+1,steps.length),(i+1)*2000)));
+    timers.push(setTimeout(()=>{
+      const r=SCEN[cur].result;
+      const res=document.getElementById(pfx+'Result');
+      if(res){res.textContent=r.text;res.className='rt-result show '+(r.tone==='ok'?'ok':'bad');}
+      if(pill)pill.textContent='done';
+      running=false;const btn2=document.getElementById(pfx+'Run');if(btn2)btn2.disabled=false;
+    },(steps.length+1)*2000));
+  }
+
+  document.getElementById(pfx+'Run').onclick=runHero;
+  document.querySelectorAll('#'+pfx+'Seg button').forEach(b=>{
+    b.onclick=()=>{
+      if(running)return;
+      cur=b.dataset.s;
+      document.querySelectorAll('#'+pfx+'Seg button').forEach(x=>x.classList.toggle('on',x===b));
+      resetHero();
+    };
+  });
+  resetHero();
+})();
 </script>
 </body>
 </html>

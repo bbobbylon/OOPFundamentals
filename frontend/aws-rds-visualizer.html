@@ -68,6 +68,14 @@
 
     .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     @media(max-width:680px) { .two-col { grid-template-columns: 1fr; } .az-cols { grid-template-columns: 1fr; } }
+
+    .who-CONNECT{background:#22d3ee;color:#04232a}
+    .who-SYNC{background:#a78bfa;color:#1a1030}
+    .who-EVENT{background:#f87171;color:#2a0a0a}
+    .who-RECOVER{background:#facc15;color:#3a2c00}
+    .who-RES{background:#4ade80;color:#04231a}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
   </style>
   <link rel="stylesheet" href="devhub.css" />
 </head>
@@ -104,6 +112,46 @@
       </div>
     </div>
     <div class="intro-ciam"><span class="tag">In CIAM / Context:</span> Production CIAM uses RDS PostgreSQL Multi-AZ (db.m5.large or db.r5.large by session/user count). Spring Boot connects via a HikariCP pool (10 connections per ECS task); the password lives in Secrets Manager with 90-day auto-rotation; Flyway manages schema migrations (never <code>ddl-auto=create</code> in prod). A read replica backs the audit-event reporting endpoint to offload heavy queries from the primary.</div>
+  </div>
+
+  <!-- ── EXTREME-VIZ HERO ── -->
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">Scenario</span>
+      <span class="userseg" id="rdsSeg">
+        <button class="on" data-s="failover">① Multi-AZ failover — primary dies, standby promoted in ~90s</button>
+        <button data-s="replicalag">② Read-replica lag — reading your own write too soon</button>
+        <button data-s="rotation">③ Secrets Manager rotates the master password — zero restarts</button>
+        <button data-s="proxy">④ Lambda burst exhausts max_connections — RDS Proxy saves it</button>
+      </span>
+      <button class="rt-run" id="rdsRun">▶ Run</button>
+      <span class="rt-pill" id="rdsPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="rdsDiag">
+        <div class="rt-rail"></div>
+        <div class="rt-chip" id="rdsChip">→</div>
+        <div class="rt-node" data-n="CONNECT"><span class="ic">🔌</span><div><div class="nl">Connect</div><div class="ns">app talks to the DB endpoint</div></div><span class="who who-badge who-CONNECT">CONNECT</span></div>
+        <div class="rt-node" data-n="SYNC"><span class="ic">🔁</span><div><div class="nl">Sync</div><div class="ns">replication / pooling state</div></div><span class="who who-badge who-SYNC">SYNC</span></div>
+        <div class="rt-node" data-n="EVENT"><span class="ic">⚠️</span><div><div class="nl">Event</div><div class="ns">the thing that changes everything</div></div><span class="who who-badge who-EVENT">EVENT</span></div>
+        <div class="rt-node" data-n="RECOVER"><span class="ic">🛠️</span><div><div class="nl">Recover</div><div class="ns">RDS / app response</div></div><span class="who who-badge who-RECOVER">RECOVER</span></div>
+        <div class="rt-node" data-n="RES"><span class="ic">✅</span><div><div class="nl">Result</div><div class="ns">outcome</div></div><span class="who who-badge who-RES">RES</span></div>
+      </div>
+      <div class="rt-inspect" id="rdsInspect">
+        <div class="rt-dir" id="rdsDir">STEP 0 / 5</div>
+        <div class="rt-cap" id="rdsCap">Pick a scenario and press ▶ Run</div>
+        <div class="rt-payload" id="rdsPayload"></div>
+        <div class="rt-headers" id="rdsHeaders"><span class="ht">INSPECTOR</span>(waiting)</div>
+      </div>
+    </div>
+    <div class="rt-result" id="rdsResult"></div>
+  </div>
+  <div class="who-row">
+    <span class="who-badge who-CONNECT">CONNECT — the app talks to the RDS endpoint</span>
+    <span class="who-badge who-SYNC">SYNC — synchronous standby, async replica, or connection pool state</span>
+    <span class="who-badge who-EVENT">EVENT — the failure, lag, rotation, or limit that changes the picture</span>
+    <span class="who-badge who-RECOVER">RECOVER — what RDS and/or the app does about it</span>
+    <span class="who-badge who-RES">RES — the actual outcome</span>
   </div>
 
   <!-- SECTION 1: Multi-AZ Architecture -->
@@ -415,6 +463,113 @@ function resetFailover() {
   document.getElementById('fo-arrow').textContent = '⟷';
   document.getElementById('fo-info').innerHTML = 'Multi-AZ standby is synchronously replicated — every write committed on primary is immediately on standby. Failover is automatic; no data loss for committed transactions.';
 }
+</script>
+
+<script>
+(function(){
+  const pfx='rds';
+  const SCEN={
+    failover:{label:'Multi-AZ failover — primary dies, standby promoted in ~90s',steps:[
+      {node:'CONNECT',hdr:'ECS tasks hold HikariCP connections open to the RDS cluster endpoint DNS name (never a raw IP)',pay:{endpoint:'ciam-db.cluster-abc123.us-east-1.rds.amazonaws.com:5432',poolSize:'10 connections per task'},ins:'Connecting via the cluster DNS name rather than a hardcoded IP is what makes automatic failover possible at all — the endpoint stays constant even though what it resolves to is about to change.'},
+      {node:'SYNC',hdr:'Every write is synchronously replicated to the standby in AZ-B before the transaction is considered committed',pay:{primaryAZ:'us-east-1a',standbyAZ:'us-east-1b',replicationMode:'SYNCHRONOUS'},ins:'Synchronous replication is what Multi-AZ trades for a slightly higher write latency: the primary won\'t acknowledge a commit until the standby has it too, so no committed transaction can ever be lost in a failover.'},
+      {node:'EVENT',tone:'bad',hdr:'AZ-A suffers a power/network failure — the primary instance becomes unreachable',pay:{failureDetectedAfter:'~10-30s',primaryStatus:'UNREACHABLE'},ins:'RDS detects this via its own internal health checks, not by waiting for the application to notice and report it.'},
+      {node:'RECOVER',hdr:'RDS promotes the AZ-B standby to primary and flips the cluster DNS record to point at it; HikariCP\'s dead connections fail their next health check and get replaced',pay:{action:'standby promoted → new primary',dnsUpdated:true,hikariRetry:'connection-test-query = SELECT 1 catches the dead pool entries'},ins:'The application never has to know a new IP address — it just keeps using the same hostname, and HikariCP\'s own connection validation is what notices the old connections are dead and reconnects.'},
+      {node:'RES',tone:'ok',hdr:'Total failover ≈ 60-120 seconds; every committed transaction survived, zero data loss',pay:{totalFailoverTime:'~90s',dataLoss:'none (synchronous replication)',appAction:'none required — HikariCP self-heals'},ins:'This ~90s is real, visible downtime from the app\'s perspective (queries fail during the window) — it is high availability, not zero downtime; for that you\'d need Aurora\'s faster failover or a multi-region active-active design.'},
+    ],result:{tone:'ok',text:'✅ Multi-AZ failover promotes the synchronous standby and flips DNS automatically — ~60-120s of write downtime, but zero data loss for anything already committed.'}},
+
+    replicalag:{label:'Read-replica lag — reading your own write too soon',steps:[
+      {node:'CONNECT',hdr:'App writes a new audit_events row to the PRIMARY: user 42 just completed MFA enrollment',pay:{target:'PRIMARY',query:'INSERT INTO audit_events (user_id, event_type) VALUES (42, \'mfa_enrolled\')'},ins:'All writes MUST go to the primary — a read replica is physically read-only at the database level, a write sent there would simply fail.'},
+      {node:'SYNC',tone:'bad',hdr:'The read replica in another AZ receives this row via ASYNCHRONOUS replication — typically milliseconds behind, but with no guaranteed upper bound',pay:{replicationMode:'ASYNCHRONOUS',typicalLag:'10-200ms',guaranteedLag:'none — can spike under load'},ins:'This is the fundamental difference from the Multi-AZ standby: async replication never blocks the primary\'s commit, which is exactly why it scales reads well but can\'t promise the replica is caught up at any given instant.'},
+      {node:'EVENT',tone:'bad',hdr:'8ms later, the app immediately queries the READ REPLICA to confirm the enrollment it just wrote — "SELECT * FROM audit_events WHERE user_id=42 AND event_type=\'mfa_enrolled\'"',pay:{target:'READ REPLICA',msAfterWrite:8,replicationCaughtUp:false},ins:'This is the classic read-your-own-writes bug: the code is logically correct — write then read — but it silently assumed the replica was already in sync, which async replication never actually guarantees.'},
+      {node:'RECOVER',tone:'bad',hdr:'The query returns ZERO rows — the replica genuinely hasn\'t received the row yet — and the app incorrectly concludes enrollment failed',pay:{rowsReturned:0,appBehavior:'shows "enrollment failed, please retry" to the user'},ins:'Nothing crashed and no error was thrown — this is worse than a hard failure, because it looks like a correctness bug in confusing, hard-to-reproduce ways rather than an obvious outage.'},
+      {node:'RES',tone:'bad',hdr:'The fix: read-after-write paths must query the PRIMARY, not a replica — replicas are for read-scaling of eventually-consistent reporting/analytics queries only',pay:{correctPattern:'route read-your-own-write queries to the primary endpoint explicitly',replicaUseCase:'dashboards, reports, anything that tolerates a few hundred ms of staleness'},ins:'In Spring Boot this is usually a routing-datasource decision — e.g. @Transactional(readOnly=false) paths and any "confirm what I just wrote" query pinned to the primary, while a separate reporting DataSource bean points at the replica.'},
+    ],result:{tone:'bad',text:'⚠️ A read replica is asynchronously replicated with no guaranteed lag bound — reading your own write from it can silently return stale (or missing) data; read-after-write paths must always hit the primary.'}},
+
+    rotation:{label:'Secrets Manager rotates the master password — zero restarts',steps:[
+      {node:'CONNECT',hdr:'All ECS tasks are currently connected using the CURRENT master password, fetched from Secrets Manager at container startup',pay:{secretArn:'arn:aws:secretsmanager:us-east-1:ACCT:secret:ciam/db-password',currentVersionLabel:'AWSCURRENT'},ins:'Nothing about this step is unusual — this is just steady-state operation before the rotation Lambda (managed automatically by Secrets Manager\'s RDS integration) does anything.'},
+      {node:'SYNC',hdr:'On day 90, Secrets Manager\'s built-in rotation Lambda generates a NEW random password and stores it as a pending version, without touching the live connections yet',pay:{newVersionLabel:'AWSPENDING',passwordGenerated:'cryptographically random, 32 chars'},ins:'Secrets Manager stages the new secret before doing anything destructive — this staged-then-promoted pattern is what makes the rotation safe to do without any coordinated downtime window.'},
+      {node:'EVENT',hdr:'The rotation Lambda calls RDS to actually change the master user\'s password to the new value — from this moment, the OLD password no longer authenticates',pay:{action:'ALTER USER ciamapp WITH PASSWORD \'<new>\'',oldPasswordValid:false},ins:'This is the one moment where a naive setup would break — any connection pool still holding the OLD password in memory is now one reconnect away from an authentication failure.'},
+      {node:'RECOVER',hdr:'Secrets Manager promotes the new version to AWSCURRENT; the next time HikariCP needs to open a fresh connection (pool churn, or its own periodic validation), the app re-reads the secret and gets the new password automatically',pay:{versionPromoted:'AWSPENDING → AWSCURRENT',appAction:'re-fetch secret on next connection creation, no explicit restart triggered'},ins:'Existing already-open connections in the pool keep working fine (they authenticated before the change) — the rotation only affects NEW connection attempts, which is exactly why zero restart is required.'},
+      {node:'RES',tone:'ok',hdr:'Password fully rotated with zero application downtime and zero manual coordination',pay:{downtime:'0s',manualStepsRequired:0,rotationSchedule:'every 90 days'},ins:'This is why Secrets Manager rotation (versus a manually-run credential-rotation script) is the standard pattern — it\'s specifically designed around this staged AWSPENDING/AWSCURRENT handoff so nothing has to be taken offline to rotate a live database credential.'},
+    ],result:{tone:'ok',text:'✅ Secrets Manager\'s staged AWSPENDING → AWSCURRENT rotation changes the master password with zero application downtime — existing connections keep working, only new ones pick up the new credential.'}},
+
+    proxy:{label:'Lambda burst exhausts max_connections — RDS Proxy saves it',steps:[
+      {node:'CONNECT',hdr:'A burst of 300 concurrent Lambda invocations each open their own direct connection to RDS PostgreSQL',pay:{concurrentLambdaInvocations:300,connectionStrategy:'each container opens its own direct JDBC connection'},ins:'Unlike ECS with a small number of long-lived tasks sharing a HikariCP pool, a Lambda burst can mean hundreds of brand-new containers each independently opening their own database connection at the same moment.'},
+      {node:'SYNC',hdr:'PostgreSQL\'s max_connections limit on this instance class is 200 — connections climb toward that ceiling as more Lambda containers spin up',pay:{maxConnections:200,currentConnections:198},ins:'Every PostgreSQL connection costs real memory on the database instance itself (multiple MB per connection) — this limit exists to protect the database, not to be arbitrarily unhelpful.'},
+      {node:'EVENT',tone:'bad',hdr:'The 201st connection attempt fails: "FATAL: too many connections for role \'ciamapp\'"',pay:{error:'FATAL: sorry, too many clients already',failedConnectionAttempts:100},ins:'This is a hard database-level rejection, not a graceful queue — any Lambda invocation unlucky enough to be the 201st (or later) connection attempt fails outright.'},
+      {node:'RECOVER',tone:'ok',hdr:'With RDS Proxy in front of the database instead: Lambda connects to the PROXY endpoint, and the proxy multiplexes 300 client connections down onto a small, stable pool of actual database connections (e.g. 20)',pay:{clientConnectionsToProxy:300,actualDbConnectionsUsed:20,multiplexingRatio:'15:1'},ins:'RDS Proxy sits between the app and the database specifically to solve this mismatch — it reuses a small set of real, warm database connections across a much larger number of short-lived client connections, which is exactly the connection pattern Lambda produces.'},
+      {node:'RES',tone:'ok',hdr:'All 300 invocations succeed — the database never sees more than the proxy\'s small backing pool of connections, regardless of how many Lambda containers are running',pay:{invocationsSucceeded:300,dbConnectionsPeak:20},ins:'RDS Proxy also has a secondary benefit relevant to the rotation scenario above: it can hold and reuse the Secrets Manager credential itself, so individual Lambda invocations don\'t each need to fetch the secret from Secrets Manager on every cold start.'},
+    ],result:{tone:'ok',text:'✅ RDS Proxy multiplexes a large burst of short-lived Lambda connections down onto a small, stable pool of real database connections — solving the connection-storm problem Lambda\'s scaling model creates for traditional databases.'}},
+  };
+
+  const nodes=['CONNECT','SYNC','EVENT','RECOVER','RES'];
+  function posOf(n){const i=nodes.indexOf(n);return i<0?50:10+i*20;}
+  let cur='failover',timers=[],running=false;
+
+  function resetHero(){
+    timers.forEach(clearTimeout);timers=[];running=false;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='ready';
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(el)el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+    });
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left='5%';chip.textContent='→';}
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP 0 / '+SCEN[cur].steps.length;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent='Pick a scenario and press ▶ Run';
+    const pay=document.getElementById(pfx+'Payload');if(pay)pay.textContent='';
+    const hdr=document.getElementById(pfx+'Headers');if(hdr)hdr.innerHTML='<span class="ht">INSPECTOR<\/span>(waiting)';
+    const res=document.getElementById(pfx+'Result');if(res){res.textContent='';res.className='rt-result';}
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=false;
+  }
+
+  function applyStepHero(s,idx,total){
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left=posOf(s.node)+'%';chip.textContent='→';}
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(!el)return;
+      el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+      if(n===s.node){
+        if(s.tone==='ok')el.className+=' vchk cur';
+        else if(s.tone==='bad')el.className+=' vskip curbad';
+        else el.className+=' cur';
+      }
+    });
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP '+idx+' / '+total;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent=s.hdr;
+    const pay=document.getElementById(pfx+'Payload');
+    if(pay)pay.textContent=JSON.stringify(s.pay,null,2);
+    const hdrEl=document.getElementById(pfx+'Headers');
+    if(hdrEl)hdrEl.innerHTML='<span class="ht">INSPECTOR<\/span>'+s.ins;
+  }
+
+  function runHero(){
+    resetHero();running=true;
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=true;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='running…';
+    const steps=SCEN[cur].steps;
+    steps.forEach((s,i)=>timers.push(setTimeout(()=>applyStepHero(s,i+1,steps.length),(i+1)*2000)));
+    timers.push(setTimeout(()=>{
+      const r=SCEN[cur].result;
+      const res=document.getElementById(pfx+'Result');
+      if(res){res.textContent=r.text;res.className='rt-result show '+(r.tone==='ok'?'ok':'bad');}
+      if(pill)pill.textContent='done';
+      running=false;const btn2=document.getElementById(pfx+'Run');if(btn2)btn2.disabled=false;
+    },(steps.length+1)*2000));
+  }
+
+  document.getElementById(pfx+'Run').onclick=runHero;
+  document.querySelectorAll('#'+pfx+'Seg button').forEach(b=>{
+    b.onclick=()=>{
+      if(running)return;
+      cur=b.dataset.s;
+      document.querySelectorAll('#'+pfx+'Seg button').forEach(x=>x.classList.toggle('on',x===b));
+      resetHero();
+    };
+  });
+  resetHero();
+})();
 </script>
 </body>
 </html>
