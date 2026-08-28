@@ -92,7 +92,12 @@
     let boxes = loadBoxes(deck.id);
     const state = { queue: [], pos: 0, flipped: false, reviewed: 0 };
 
-    function boxOf(i) { return boxes[i] || 1; }
+    // Cards with a stable c.id (notebook-sourced decks) key their box progress
+    // by that id instead of array position, so progress survives the notebook
+    // list changing shape (entries added/removed) between sessions. Static
+    // decks with no c.id keep the original positional-index behavior.
+    function keyOf(i) { const c = deck.cards[i]; return c && c.id != null ? 'k:' + c.id : i; }
+    function boxOf(i) { return boxes[keyOf(i)] || 1; }
     function mastered() { let c = 0; for (let i = 0; i < N; i++) if (boxOf(i) >= 5) c++; return c; }
     function screen(node) { root.innerHTML = ''; root.appendChild(node); window.scrollTo(0, 0); }
 
@@ -153,7 +158,13 @@
         state.flipped
           ? h('div', { class: 'df-back' }, c.back)
           : h('div', { class: 'df-front' }, c.front),
-        h('span', { class: 'df-tap' }, state.flipped ? 'tap to flip back' : 'tap to reveal'));
+        h('span', { class: 'df-tap' }, state.flipped ? 'tap to flip back' : 'tap to reveal'),
+        // c.link (notebook-sourced decks): a jump back to the original lesson
+        // section, preserving dual coding — the saved fact is never just text.
+        c.link ? h('a', {
+          class: 'dnb-link-chip', href: c.link.href || '#',
+          onclick: (e) => { e.stopPropagation(); if (c.link.onNavigate) { e.preventDefault(); c.link.onNavigate(); } }
+        }, '↗ ' + (c.link.label || 'Learn more')) : null);
       flash.addEventListener('click', () => { state.flipped = !state.flipped; study(); });
 
       let controls;
@@ -173,7 +184,7 @@
     }
 
     function rate(idx, known) {
-      boxes[idx] = known ? Math.min(5, boxOf(idx) + 1) : 1;
+      boxes[keyOf(idx)] = known ? Math.min(5, boxOf(idx) + 1) : 1;
       saveBoxes(deck.id, boxes);
       state.reviewed++;
       state.flipped = false; state.pos++;
@@ -197,5 +208,9 @@
     landing();
   }
 
-  global.DevHubFlash = { render: render };
+  // loadBoxes/saveBoxes/injectStyles are exported so devhub-notebook-review.js's
+  // Quiz Me / Interleaved modes can share the exact same Leitner box storage
+  // (same key scheme, same "mastery" number) and visual language as flashcards,
+  // without duplicating either the spaced-repetition state or the .df-* CSS.
+  global.DevHubFlash = { render: render, loadBoxes: loadBoxes, saveBoxes: saveBoxes, injectStyles: injectStyles };
 })(window);

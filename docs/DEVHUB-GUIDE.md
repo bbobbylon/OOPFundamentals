@@ -315,10 +315,40 @@ Algorithms.
   [Spring Annotations](../frontend/flashcards-spring.html), plus OAuth/OIDC/JWT
   terms, TypeScript, Angular, SQL, Git, Docker, and Kubernetes. Add a deck = new
   `flashcards-<topic>.html` from one of these + register it under Exam Prep.
+- [`frontend/devhub-notebook.js`](../frontend/devhub-notebook.js) — sitewide
+  **personal notebook** quick-add. Every `<h2>` on every one of the 453 content
+  pages gets a small "📖 Notebook" button (auto-scanned on load, `NotebookStore`
+  in localStorage); click it to save that section — id, file, anchor, title, and
+  a captured snippet, never a page-wide dump. Curated per Bobby's evidence-based
+  spec in the (now-resolved) Personal Notebook item that used to live in
+  [ROADMAP.md](ROADMAP.md) — spacing/retrieval/interleaving only, no
+  color-as-memory-aid.
+- [`frontend/notebook.html`](../frontend/notebook.html) — **My Notebook**, the
+  saved-entries page (also reachable via the 📓 topbar button in `app.html`).
+  Lists your saved sections grouped exactly like the sidebar (track → section),
+  with search + track filter, and three review modes built on
+  [`frontend/devhub-notebook-review.js`](../frontend/devhub-notebook-review.js):
+  **Flashcards** (thin wrapper over `DevHubFlash.render`), **Quiz Me** (forced
+  recall via a scratch textarea before reveal — the testing effect), and
+  **Interleaved Review** (entries shuffled round-robin across sections before
+  a Quiz-Me-style session — for Exam Prep/DSA-style discrimination practice).
+  All three share one Leitner box store per scope, keyed by entry id via
+  `DevHubFlash.loadBoxes/saveBoxes` (exported for this reason), so "mastered"
+  means the same thing in the notebook as it does in the exam-prep flashcard
+  decks.
 
 ---
 
-*This guide is updated as new tracks and deep-dives land. **Newest pass — the 🟦 Cloud — Azure track + AZ-204 (2026-07-03):**
+*This guide is updated as new tracks and deep-dives land. **Newest pass — the Personal Notebook (2026-08-28):**
+Every content page now has a "📖 Notebook" quick-add on each `<h2>` section (see
+[`frontend/devhub-notebook.js`](../frontend/devhub-notebook.js)), a topbar 📓 shortcut
+in `app.html`, and a dedicated [`My Notebook`](../frontend/notebook.html) page with
+three review modes (Flashcards, Quiz Me, Interleaved Review) built on the existing
+Leitner spaced-repetition engine — see the entries above for the full breakdown. This
+closes out the Personal Notebook item that previously sat in ROADMAP.md's NEXT UP
+section.
+
+**Previous pass — the 🟦 Cloud — Azure track + AZ-204 (2026-07-03):**
 The AZ-204 gap is closed. A new **Cloud — Azure** track (7 pages, all with the full scenario chip-walk + live inspector treatment) covers the Azure developer surface: [Azure Overview](../frontend/azure-overview-visualizer.html) (ARM, resource groups, RBAC allow/deny, Bicep), [App Service](../frontend/azure-app-service-visualizer.html) (plans, deploy, slot swaps, autoscale, app settings), [Functions](../frontend/azure-functions-visualizer.html) (triggers & bindings, queue-driven scale-out, cold starts, Durable orchestration replay), [Containers](../frontend/azure-containers-visualizer.html) (ACR Tasks, ACI, Container Apps revisions/canary, KEDA scale-to-zero), [Blob Storage](../frontend/azure-storage-visualizer.html) (Entra auth vs SAS, tiers & lifecycle, the 403 data-role trap), [Cosmos DB](../frontend/azure-cosmos-visualizer.html) (point reads vs fan-out, RUs & 429s, consistency levels, change feed), and [Key Vault & Managed Identities](../frontend/azure-keyvault-identity-visualizer.html) (the zero-secret IMDS→Entra→vault flow, rotation, leak response). The assessment layer grew with it: an **[AZ-204 practice exam](../frontend/exam-azure-developer.html)** (28 Q across 7 domains, every question ref-linked to the page that teaches it), an **[Azure Services flashcard deck](../frontend/flashcards-azure.html)** (28 cards), and an **Azure Developer learning path** ending in the AZ-204 capstone.
 
 **Previous pass — Assessment layer launched (2026-06-16):**
