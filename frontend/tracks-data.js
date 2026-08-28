@@ -135,6 +135,7 @@ window.DEVHUB_TRACKS = [
         { title: 'REST Client',             file: 'spring-boot-rest-client-visualizer.html',     level: 'intermediate' },
         { title: 'WebSocket',               file: 'spring-boot-websocket-visualizer.html',       level: 'advanced' },
         { title: 'CORS & Preflight',        file: 'spring-boot-cors-deep-visualizer.html',       level: 'advanced' },
+        { title: 'GraphQL',                 file: 'spring-boot-graphql-visualizer.html',         level: 'advanced' },
       ]},
       { label: 'Security & Identity', pages: [
         { title: 'Method Security (@PreAuthorize)', file: 'spring-boot-method-security-deep-visualizer.html', level: 'advanced' },
@@ -248,6 +249,7 @@ window.DEVHUB_TRACKS = [
       { label: 'Testing', pages: [
         { title: 'Testing (TestBed & Pyramid)', file: 'angular-testing-visualizer.html',         level: 'intermediate' },
         { title: 'Vitest & .spec.ts',       file: 'angular-vitest-visualizer.html',              level: 'intermediate' },
+        { title: 'E2E Testing (Playwright & Cypress)', file: 'angular-e2e-playwright-visualizer.html', level: 'intermediate' },
       ]},
       { label: 'Architecture & Build', pages: [
         { title: 'Standalone Migration',    file: 'angular-standalone-migration-visualizer.html',level: 'advanced' },
@@ -468,6 +470,10 @@ window.DEVHUB_TRACKS = [
       ]},
       { label: 'Authorization Patterns', pages: [
         { title: 'RBAC & Authorization Deep Dive', file: 'rbac-deep-visualizer.html',             level: 'advanced' },
+      ]},
+      { label: 'Web App Security', pages: [
+        { title: 'XSS & SQL Injection',        file: 'appsec-injection-xss-visualizer.html',   level: 'advanced' },
+        { title: 'OWASP Top 10',               file: 'appsec-owasp-top10-visualizer.html',     level: 'intermediate' },
       ]},
       { label: '🍳 Common Recipes', pages: [
         { title: 'Recipe: Password Complexity & Strength', file: 'identity-recipe-password-complexity-visualizer.html', level: 'intermediate' },
@@ -763,6 +769,10 @@ window.DEVHUB_TRACKS = [
         { title: 'PostgreSQL Deep Dive',          file: 'sql-postgres-visualizer.html',                     level: 'advanced' },
         { title: 'Replication & High Availability', file: 'sql-replication-visualizer.html',                level: 'advanced' },
         { title: 'Partitioning & Sharding',       file: 'sql-partitioning-visualizer.html',                 level: 'advanced' },
+      ]},
+      { label: 'NoSQL', pages: [
+        { title: 'Redis (Cache, Key-Value, Pub/Sub)', file: 'nosql-redis-visualizer.html',                  level: 'intermediate' },
+        { title: 'Document & Wide-Column Stores',  file: 'nosql-document-wide-column-visualizer.html',      level: 'intermediate' },
       ]},
     ]
   },

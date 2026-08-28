@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Redis — In-Memory Key-Value Store, Caching &amp; Pub/Sub</title>
+  <style>
+    .who-CLIENT{background:#60a5fa;color:#04203a}
+    .who-REDIS{background:#f87171;color:#450a0a}
+    .who-DB{background:#a78bfa;color:#1a1030}
+    .who-TTL{background:#fbbf24;color:#452b00}
+    .who-RESULT{background:#4ade80;color:#04231a}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:18px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
+    .cmp{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin:10px 0}
+    .cmp-col{border-radius:12px;padding:14px 16px}
+    .cmp-bad{background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.28)}
+    .cmp-good{background:rgba(74,222,128,.08);border:1px solid rgba(74,222,128,.28)}
+    .cmp-col h4{margin:0 0 8px;font-size:11.5px;font-weight:800;text-transform:uppercase;letter-spacing:.05em}
+    .cmp-bad h4{color:#fca5a5}.cmp-good h4{color:#86efac}
+    .key-insight{background:rgba(99,102,241,.07);border:1px solid rgba(99,102,241,.3);border-radius:8px;padding:14px;margin:12px 0;font-size:13px}
+    .key-insight strong{color:#a78bfa}
+    .xlink{font-size:11.5px;color:var(--blue)}
+    .struct-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin:10px 0}
+    .struct-card{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:11px 13px}
+    .struct-card h4{margin:0 0 4px;font-size:12.5px;color:var(--accent2)}
+    .struct-card p{margin:0;font-size:11.5px;color:var(--muted);line-height:1.6}
+  </style>
+  <link rel="stylesheet" href="devhub.css" />
+</head>
+<body class="track-sql">
+<div class="container">
+  <a class="back" href="app.html">&larr; Dev Hub</a>
+  <h1>Redis — In-Memory Key-Value Store, Caching &amp; Pub/Sub</h1>
+  <p class="sub">Every page in this track so far has been a relational store — rows, foreign keys, joins, ACID transactions. Redis is the opposite end of the spectrum: an in-memory, single-threaded key-value engine that trades durability and query flexibility for raw speed and a handful of purpose-built data structures. It's not a replacement for Postgres — it's the thing you put <em>in front of</em> Postgres.</p>
+
+  <!-- ── INTRO ── -->
+  <div class="intro">
+    <div class="intro-head"><span class="ico">⚡</span> What makes Redis fast, and what does that speed cost you?</div>
+    <p class="intro-lead">
+      Redis keeps its entire dataset in RAM and processes commands on a <strong>single thread</strong> — no locks, no lock contention, because only one command ever executes at a time. That single fact explains almost everything about Redis: it's why <code>INCR</code> is perfectly atomic with zero extra code, why it's blazingly fast (RAM access, no disk seek, no query planner), and why a single slow command (a giant <code>KEYS *</code> scan) blocks every other client until it finishes. The cost of that speed is durability and structure: RAM is volatile, so Redis persists to disk asynchronously (RDB snapshots or an AOF write-log) rather than synchronously like a relational commit — a crash can lose the last few seconds of writes unless you tune persistence aggressively. And there's no schema, no joins, no foreign keys — just keys mapped to one of a handful of data structures, each with its own purpose-built command set.
+    </p>
+    <ul class="intro-gist">
+      <li><b>In-memory + single-threaded</b> — RAM speed, and every command is atomic by construction, with no explicit locking.</li>
+      <li><b>Five core data structures</b> — string, hash, list, set, and sorted set — each solving a different shape of problem, not a generic document store.</li>
+      <li><b>TTL is a first-class citizen</b> — any key can expire automatically; this is what makes Redis a natural fit for caches, sessions, and rate limits.</li>
+      <li><b>Persistence is a trade-off you tune</b>, not a guarantee you get for free — RDB snapshots (fast restarts, can lose minutes) vs. AOF (near-durable, slower).</li>
+    </ul>
+    <div class="struct-grid">
+      <div class="struct-card"><h4>String</h4><p>The simplest structure — a value up to 512MB. Used for cached blobs, counters (<code>INCR</code>), and simple flags.</p></div>
+      <div class="struct-card"><h4>Hash</h4><p>A field→value map inside one key — like caching a whole object (<code>user:42</code> → <code>{name, email, plan}</code>) without one key per field.</p></div>
+      <div class="struct-card"><h4>List</h4><p>An ordered, linked sequence — <code>LPUSH</code>/<code>RPOP</code> make it a natural queue or a capped "recent activity" feed.</p></div>
+      <div class="struct-card"><h4>Set</h4><p>Unordered, unique members — fast membership checks (<code>SISMEMBER</code>) and set algebra (intersect/union) like "users who liked both posts."</p></div>
+      <div class="struct-card"><h4>Sorted Set</h4><p>Members ranked by a score — <code>ZADD</code>/<code>ZRANGE</code> power leaderboards and priority queues with O(log N) inserts.</p></div>
+    </div>
+    <div class="intro-cards">
+      <div class="intro-mini">
+        <h4>This app's cache-aside pattern</h4>
+        <p>Spring's <code>@Cacheable</code> (see <a href="spring-boot-caching-visualizer.html">Caching</a>) is cache-aside implemented for you: check the cache, and only call through to the annotated method — hitting the real repository/database — on a miss. This page shows the same pattern one layer lower, with the raw <code>RedisTemplate</code> calls <code>@Cacheable</code> is doing under the hood.</p>
+      </div>
+      <div class="intro-mini">
+        <h4>Not a transactional system of record</h4>
+        <p>Redis has no foreign keys and no multi-table ACID transactions the way Postgres does (see <a href="sql-transactions-visualizer.html">Transactions &amp; ACID</a>) — <code>MULTI</code>/<code>EXEC</code> queues commands atomically but doesn't roll back on a mid-transaction application error the way SQL does. Keep the source of truth in the relational database; use Redis to make reading it fast.</p>
+      </div>
+      <div class="intro-ciam">
+        <h4>CIAM angle</h4>
+        <p>Two of the most common Redis uses in an identity platform are exactly the two demoed below: <b>rate-limiting login attempts</b> (an atomic <code>INCR</code> + <code>EXPIRE</code> counter per user/IP, immune to race conditions because Redis is single-threaded) and <b>session/refresh-token storage</b> with a TTL that mirrors the token's own expiry, so an expired session simply evaporates instead of needing a cleanup job.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── EXTREME-VIZ HERO ── -->
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="rdSeg">
+        <button class="on" data-s="miss">① Cache-Aside — Miss</button>
+        <button data-s="hit">② Cache-Aside — Hit</button>
+        <button data-s="ttl">③ TTL Expiry &amp; Eviction</button>
+        <button data-s="counter">④ Atomic Rate-Limit Counter</button>
+        <button data-s="pubsub">⑤ Pub/Sub Fan-Out</button>
+      </span>
+      <button class="rt-run" id="rdRun">▶ Play</button>
+      <span class="rt-pill" id="rdPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="rdDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="rdDir">▶ READY</span>
+        <div class="rt-cap" id="rdCap">Pick a scenario and press ▶ Play</div>
+        <div class="rt-payload" id="rdPay"></div>
+        <div class="rt-headers" id="rdHdr"></div>
+        <div class="rt-result" id="rdRes"></div>
+      </div>
+    </div>
+    <div class="who-row">
+      <span class="who-badge who-CLIENT">CLIENT — the app request</span>
+      <span class="who-badge who-REDIS">REDIS — the cache operation</span>
+      <span class="who-badge who-DB">DB — source of truth</span>
+      <span class="who-badge who-TTL">TTL — expiry/eviction point</span>
+      <span class="who-badge who-RESULT">RESULT — what the caller gets</span>
+    </div>
+  </div>
+
+  <!-- 1 -->
+  <section>
+    <h2>1. Redis vs. a relational database — different jobs, not competitors</h2>
+    <table>
+      <tr><th>Axis</th><th>Redis</th><th>PostgreSQL / relational</th></tr>
+      <tr><td>Storage</td><td>RAM (optionally persisted to disk async)</td><td>Disk, with a buffer cache — durable by default on commit</td></tr>
+      <tr><td>Schema</td><td>None — keys map to one of ~5 data structure types</td><td>Strict — tables, columns, types, constraints, foreign keys</td></tr>
+      <tr><td>Queries</td><td>Direct key lookups + structure-specific commands (no joins)</td><td>Arbitrary <code>SELECT</code>/<code>JOIN</code>/aggregate queries via a query planner</td></tr>
+      <tr><td>Consistency</td><td>Single-threaded → naturally atomic per command; no cross-key ACID transactions</td><td>Full ACID — multi-row, multi-table transactions with rollback</td></tr>
+      <tr><td>Typical role</td><td>Cache, session store, rate limiter, real-time leaderboard, pub/sub bus</td><td>System of record — the data that must never be silently lost</td></tr>
+    </table>
+    <div class="key-insight"><strong>The rule of thumb: if losing this data on a crash would be a real problem, it belongs in Postgres, not (only) Redis.</strong> Redis excels precisely where speed matters more than durability — a cache can always be repopulated from the database it's fronting; the database itself cannot be "repopulated" from anywhere.</div>
+  </section>
+
+  <!-- 2 -->
+  <section>
+    <h2>2. Cache-aside: check the cache, fall through to the database on a miss</h2>
+    <div class="cmp">
+      <div class="cmp-col cmp-bad">
+        <h4>✗ No cache — every read hits the database</h4>
+        <pre><span class="kw">public</span> <span class="type">UserProfile</span> <span class="fn">getProfile</span>(<span class="type">Long</span> userId) {
+  <span class="cm">// every single call round-trips to Postgres,</span>
+  <span class="cm">// even though this profile rarely changes</span>
+  <span class="kw">return</span> userRepo.<span class="fn">findById</span>(userId);
+}</pre>
+      </div>
+      <div class="cmp-col cmp-good">
+        <h4>✓ Cache-aside with RedisTemplate</h4>
+        <pre><span class="kw">public</span> <span class="type">UserProfile</span> <span class="fn">getProfile</span>(<span class="type">Long</span> userId) {
+  <span class="type">String</span> key <span class="op">=</span> <span class="str">"user:profile:"</span> <span class="op">+</span> userId;
+  <span class="type">UserProfile</span> cached <span class="op">=</span> (<span class="type">UserProfile</span>) redis.<span class="fn">opsForValue</span>().<span class="fn">get</span>(key);
+  <span class="kw">if</span> (cached <span class="op">!=</span> <span class="kw">null</span>) <span class="kw">return</span> cached; <span class="cm">// hit — no DB call</span>
+
+  <span class="type">UserProfile</span> fresh <span class="op">=</span> userRepo.<span class="fn">findById</span>(userId); <span class="cm">// miss</span>
+  redis.<span class="fn">opsForValue</span>().<span class="fn">set</span>(key, fresh, <span class="type">Duration</span>.<span class="fn">ofMinutes</span>(<span class="str">15</span>));
+  <span class="kw">return</span> fresh;
+}</pre>
+      </div>
+    </div>
+    <div class="key-insight"><strong>The TTL (<code>Duration.ofMinutes(15)</code>) is doing double duty</strong> — it bounds how stale the cached copy can get AND it means there's no cache-invalidation cleanup job to write or forget; a key that's never explicitly deleted still self-removes.</div>
+  </section>
+
+  <!-- 3 -->
+  <section>
+    <h2>3. Atomic counters: why <code>INCR</code> is race-free and a naive read-then-write isn't</h2>
+    <div class="cmp">
+      <div class="cmp-col cmp-bad">
+        <h4>✗ Race condition — read, modify, write as three steps</h4>
+        <pre><span class="type">int</span> attempts <span class="op">=</span> (<span class="type">int</span>) redis.<span class="fn">opsForValue</span>().<span class="fn">get</span>(key); <span class="cm">// read: 4</span>
+attempts<span class="op">++</span>;                                          <span class="cm">// modify: 5 (in app memory)</span>
+redis.<span class="fn">opsForValue</span>().<span class="fn">set</span>(key, attempts);              <span class="cm">// write: 5</span>
+<span class="cm">// two concurrent login attempts can both read 4, both write 5 —</span>
+<span class="cm">// one increment is silently lost, rate limit under-counts</span></pre>
+      </div>
+      <div class="cmp-col cmp-good">
+        <h4>✓ Atomic — one command, no window for a race</h4>
+        <pre><span class="type">Long</span> attempts <span class="op">=</span> redis.<span class="fn">opsForValue</span>().<span class="fn">increment</span>(key); <span class="cm">// INCR</span>
+<span class="kw">if</span> (attempts <span class="op">==</span> <span class="str">1</span>) redis.<span class="fn">expire</span>(key, <span class="type">Duration</span>.<span class="fn">ofMinutes</span>(<span class="str">15</span>));
+<span class="kw">if</span> (attempts <span class="op">></span> <span class="str">5</span>) <span class="kw">throw new</span> <span class="type">TooManyAttemptsException</span>();
+<span class="cm">// Redis's single-threaded execution means INCR is indivisible —</span>
+<span class="cm">// every concurrent caller gets a distinct, correct count</span></pre>
+      </div>
+    </div>
+    <div class="key-insight"><strong><code>INCR</code> is atomic because Redis never interleaves two commands</strong> — there's no gap between "read the value" and "write the incremented value" for another client's command to slip into, because there's only one thread executing commands at all. This is the same structural guarantee this hub's <a href="spring-boot-rate-limiting-deep-visualizer.html">rate limiting</a> page relies on, applied at the storage layer instead of the application layer.</div>
+  </section>
+
+  <!-- 4 -->
+  <section>
+    <h2>4. One-sentence recap</h2>
+    <div class="card card-accent">
+      <p style="font-size:14px">⚡ Redis trades durability and query flexibility for RAM speed and single-threaded atomicity — use it as a <strong>cache-aside layer</strong> in front of the real database, an <strong>atomic counter</strong> for rate limits, a <strong>TTL-backed session store</strong>, or a <strong>pub/sub bus</strong>, but never as the only copy of data you can't afford to lose.</p>
+    </div>
+    <p class="xlink" style="margin-top:8px">↪ See also: <a href="nosql-document-wide-column-visualizer.html">NoSQL Document &amp; Wide-Column Stores</a> (MongoDB &amp; DynamoDB), <a href="spring-boot-caching-visualizer.html">Spring Boot Caching</a>, <a href="spring-boot-rate-limiting-deep-visualizer.html">Rate Limiting</a>, and <a href="system-design-visualizer.html">System Design Fundamentals</a> for cache-aside/write-through/write-behind at a higher level.</p>
+  </section>
+</div>
+
+<!-- Code Walkthrough: cache-aside getProfile method -->
+<h2 id="cw-redis" style="margin:0 0 4px;padding:0 1.5rem;max-width:clamp(40rem,94vw,90rem);margin-left:auto;margin-right:auto">👣 Step through it, line by line</h2>
+<div id="cw-redis-mount"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-redis-mount', {
+  title: 'UserProfileService.java — cache-aside with RedisTemplate',
+  intervalMs: 1700,
+  code: [
+    'public UserProfile getProfile(Long userId) {',
+    '  String key = "user:profile:" + userId;',
+    '  UserProfile cached = (UserProfile) redis.opsForValue().get(key);',
+    '  if (cached != null) {',
+    '    return cached;',
+    '  }',
+    '',
+    '  UserProfile fresh = userRepo.findById(userId)',
+    '      .orElseThrow(() -> new UserNotFoundException(userId));',
+    '  redis.opsForValue().set(key, fresh, Duration.ofMinutes(15));',
+    '  return fresh;',
+    '}',
+  ],
+  steps: [
+    { line: 2, note: 'The cache key is namespaced with a prefix (user:profile:) and the id — this convention avoids collisions with other cached types sharing the same Redis instance.', vars: { key: 'user:profile:42' } },
+    { line: 3, note: 'A GET against Redis is a single round-trip in RAM — typically sub-millisecond, versus a real query plan + disk I/O against Postgres.', vars: { redisLatency: '~0.3ms typical' } },
+    { line: 4, note: 'On a hit, the method returns immediately — the database is never touched for this call at all.', vars: { cacheHit: true, dbCallsMade: 0 }, tone: 'ok' },
+    { line: 8, note: 'Only on a miss does the code fall through to the real repository — this is the "aside" in cache-aside: the cache sits beside the read path, not inside it.', vars: { cacheHit: false } },
+    { line: 10, note: 'The freshly-loaded value is written back to Redis with a 15-minute TTL — the next call within that window will hit the cache; after it expires, the key self-removes with zero explicit invalidation code.', vars: { ttlSet: '15 minutes', selfExpiring: true }, tone: 'ok', callout: 'This TTL is a judgment call, not a fixed rule — it trades staleness risk (a profile edited elsewhere won\'t show up for up to 15 minutes) against cache-hit rate. Tighter TTLs for data that changes often; longer for data that rarely does.' },
+  ]
+});
+</script>
+
+<script>
+(function(){
+  const P='rd', $=id=>document.getElementById(id);
+  const SCEN={
+    miss:{ req:'GET /profile/42', intro:'A cache miss: the key isn\'t in Redis yet, so the request falls through to the real database and populates the cache for next time.',
+      nodes:[
+        {id:'client',icon:'🧑‍💻',nl:'getProfile(42)',ns:'application code calls the service',who:'CLIENT'},
+        {id:'redis',icon:'⚡',nl:'GET user:profile:42',ns:'key does not exist yet',who:'REDIS'},
+        {id:'db',icon:'🗄️',nl:'SELECT * FROM users WHERE id=42',ns:'fallback to Postgres',who:'DB'},
+        {id:'ttl',icon:'⏳',nl:'SET user:profile:42 ... EX 900',ns:'cached with a 15-minute TTL',who:'TTL'},
+        {id:'result',icon:'✅',nl:'UserProfile returned to caller',ns:'slow path, but only once',who:'RESULT'},
+      ],
+      steps:[
+        {node:'client',chip:'call',cap:'Application code asks the service for user 42\'s profile',pay:{method:'getProfile(42)',cacheKey:'user:profile:42'},ins:'Nothing about this call tells the caller whether it will be fast (cache hit) or slow (cache miss) — that\'s the whole point of cache-aside being transparent to callers.'},
+        {node:'redis',chip:'GET',tone:'bad',cap:'Redis is checked first — the key doesn\'t exist (first request ever, or it expired)',pay:{command:'GET user:profile:42',result:'(nil)'},ins:'A GET against a missing key returns nil in about the same sub-millisecond time as a hit — checking the cache first is cheap even when it fails.'},
+        {node:'db',chip:'query',tone:'ok',cap:'On a miss, the code falls through to the real repository — a full SQL query against Postgres',pay:{query:'SELECT * FROM users WHERE id = 42',latency:'~15ms (index lookup)'},ins:'This is the "real" cost of a miss — orders of magnitude slower than the Redis check that preceded it, but still fast because the underlying query is well-indexed.'},
+        {node:'ttl',chip:'SET',tone:'ok',cap:'The freshly-loaded row is written into Redis with a 15-minute expiry attached in the same command',pay:{command:'SET user:profile:42 {...} EX 900',ttlSeconds:900},ins:'EX 900 means Redis itself deletes this key after 900 seconds — no separate cleanup process, no risk of a forgotten cache-invalidation job leaving stale data forever.'},
+        {node:'result',chip:'return',tone:'ok',cap:'The profile is returned to the caller — this specific request paid the full DB cost, but the next one won\'t',pay:{thisRequestLatency:'~15.3ms',nextRequestLatency:'~0.3ms (cache hit)'},ins:'Cache-aside\'s entire value proposition is right here: pay the expensive path once per TTL window, not once per request.'},
+      ], result:{cls:'ok',text:'✅ Cache miss: fell through to Postgres, then populated Redis so the next 15 minutes of reads are nearly free.'} },
+
+    hit:{ req:'GET /profile/42 (again)', intro:'A cache hit: the same request, moments later, is answered entirely from RAM — the database never even hears about it.',
+      nodes:[
+        {id:'client',icon:'🧑‍💻',nl:'getProfile(42)',ns:'same request, 30 seconds later',who:'CLIENT'},
+        {id:'redis',icon:'⚡',nl:'GET user:profile:42',ns:'key exists, TTL not yet expired',who:'REDIS'},
+        {id:'db',icon:'🗄️',nl:'(not called)',ns:'database skipped entirely',who:'DB'},
+        {id:'ttl',icon:'⏳',nl:'~870s remaining on this key',ns:'TTL counts down independently',who:'TTL'},
+        {id:'result',icon:'✅',nl:'UserProfile returned in <1ms',ns:'fast path — this is the common case',who:'RESULT'},
+      ],
+      steps:[
+        {node:'client',chip:'call',cap:'The exact same profile is requested again, 30 seconds after the first call',pay:{method:'getProfile(42)',timeSinceFirstCall:'30s'},ins:'From the caller\'s perspective this looks identical to the miss scenario — same method signature, same return type. Nothing in the calling code knows or cares which path executes underneath.'},
+        {node:'redis',chip:'GET',tone:'ok',cap:'Redis has the key from the previous SET, and its TTL hasn\'t expired yet',pay:{command:'GET user:profile:42',result:'{ id:42, name:"...", ... } (found)'},ins:'This is the fast path doing its job — a RAM lookup answers the request without Postgres, the query planner, or a disk seek ever entering the picture.'},
+        {node:'db',chip:'skip',tone:'ok',cap:'The database is never contacted for this request at all',pay:{dbCallsMade:0},ins:'This is the metric that matters in production: cache-aside\'s job is to keep this number as close to zero as possible for hot, frequently-read data.'},
+        {node:'ttl',chip:'ticking',tone:'ok',cap:'The key\'s TTL is independently counting down — this hit doesn\'t reset or extend it',pay:{ttlRemaining:'~870s of the original 900s'},ins:'A plain GET does not refresh the TTL by default — the key will still expire 15 minutes after it was SET, regardless of how many hits it serves in between.'},
+        {node:'result',chip:'return',tone:'ok',cap:'The profile is returned in well under a millisecond',pay:{latency:'~0.3ms',speedupVsMiss:'~50x faster than the cache-miss path'},ins:'This is the entire economic case for caching: a ~50x latency improvement on every read that lands inside the TTL window, for the cost of one extra Redis round-trip on the occasional miss.'},
+      ], result:{cls:'ok',text:'✅ Cache hit: answered from RAM in under a millisecond — the database never knew this request happened.'} },
+
+    ttl:{ req:'MEMORY nearly full', intro:'When Redis hits its memory ceiling, an eviction policy decides which keys to discard to make room — a very different failure mode than a database running out of disk.',
+      nodes:[
+        {id:'client',icon:'🧑‍💻',nl:'SET new:key ...',ns:'a write that needs room to fit',who:'CLIENT'},
+        {id:'redis',icon:'⚡',nl:'maxmemory reached (e.g. 512MB)',ns:'no free RAM left to allocate',who:'REDIS'},
+        {id:'db',icon:'🗄️',nl:'(unaffected — DB has its own disk)',ns:'eviction is a Redis-only event',who:'DB'},
+        {id:'ttl',icon:'⏳',nl:'maxmemory-policy: allkeys-lru',ns:'evict the Least Recently Used key',who:'TTL'},
+        {id:'result',icon:'✅',nl:'oldest-unused key evicted, new SET succeeds',ns:'a cache miss next time that key is read',who:'RESULT'},
+      ],
+      steps:[
+        {node:'client',chip:'SET',cap:'A new key needs to be written, but Redis is already at its configured memory limit',pay:{command:'SET session:abc123 {...}',currentMemory:'511.8MB / 512MB maxmemory'},ins:'This is a very different situation from a disk filling up — Redis hits this ceiling constantly in normal operation for a cache workload, by design.'},
+        {node:'redis',chip:'full',tone:'bad',cap:'There\'s no free memory to allocate for the new key without discarding something else first',pay:{maxmemory:'512MB',used:'511.8MB',freeForNewKey:'~0.2MB — not enough'},ins:'Unlike a relational database, Redis doesn\'t reject the write with an out-of-space error by default — it\'s configured to make room instead.'},
+        {node:'db',chip:'unaffected',tone:'ok',cap:'Meanwhile, the actual source-of-truth database is completely unaffected by this — it has its own, much larger, disk-backed storage',pay:{dbInvolved:false},ins:'This is exactly why nothing irreplaceable should live ONLY in Redis: eviction is a normal, expected, silent event here — it would be a five-alarm incident on the real database.'},
+        {node:'ttl',chip:'evict',tone:'ok',cap:'The configured eviction policy picks a victim — allkeys-lru discards whichever key was least-recently accessed',pay:{policy:'allkeys-lru',evicted:'product:catalog:9981 (last read 40 minutes ago)',alternativePolicies:'allkeys-lfu (least frequently used), volatile-ttl (soonest-to-expire first), noeviction (reject writes instead)'},ins:'LRU approximates "this data probably isn\'t hot anymore" using recency as a proxy — it\'s a heuristic, not a guarantee that the evicted key was actually safe to lose.'},
+        {node:'result',chip:'ok',tone:'ok',cap:'The new SET succeeds using the freed memory — the evicted key simply becomes a cache miss the next time anyone asks for it',pay:{newSetSucceeded:true,nextReadOfEvictedKey:'falls through to the database, exactly like any other cache miss'},ins:'This is why eviction is safe for a cache but would be catastrophic for a system of record: the "lost" data was always recoverable from the database it was caching in the first place.'},
+      ], result:{cls:'ok',text:'✅ Eviction under memory pressure is Redis working as designed for a cache — the evicted key just becomes a future cache miss.'} },
+
+    counter:{ req:'POST /login (failed, 5th attempt)', intro:'Rate-limiting login attempts with a single atomic INCR — the same pattern this hub\'s rate-limiting page shows at the application layer, but enforced by Redis\'s single-threaded execution.',
+      nodes:[
+        {id:'client',icon:'🧑‍💻',nl:'POST /login (wrong password)',ns:'5th failed attempt for this user',who:'CLIENT'},
+        {id:'redis',icon:'⚡',nl:'INCR login:fail:user42',ns:'atomic — no read-modify-write gap',who:'REDIS'},
+        {id:'db',icon:'🗄️',nl:'(not involved in the count itself)',ns:'rate limiting stays out of Postgres',who:'DB'},
+        {id:'ttl',icon:'⏳',nl:'EXPIRE login:fail:user42 900',ns:'set only on the FIRST attempt (count==1)',who:'TTL'},
+        {id:'result',icon:'🚫',nl:'count(5) > threshold(5) → 429 Too Many Requests',ns:'account temporarily locked',who:'RESULT'},
+      ],
+      steps:[
+        {node:'client',chip:'POST',cap:'A 5th consecutive failed login attempt arrives for this user — possibly a credential-stuffing attempt, possibly just a forgotten password',pay:{endpoint:'POST /login',outcome:'wrong password',attemptNumber:5},ins:'The application doesn\'t yet know if this is malicious or just a frustrated legitimate user — the rate limiter treats both the same way, by design.'},
+        {node:'redis',chip:'INCR',tone:'ok',cap:'A single INCR command increments the failure counter for this user — atomically, with no separate read step',pay:{command:'INCR login:fail:user42',resultingValue:5},ins:'Because Redis is single-threaded, there is no possible interleaving where two concurrent failed attempts both read the same starting value — every INCR call gets a distinct, strictly increasing result.'},
+        {node:'db',chip:'skip',tone:'ok',cap:'Postgres is not involved in maintaining this counter at all — it lives entirely in Redis',pay:{dbInvolved:false,reason:'a counter that resets every 15 minutes doesn\'t belong in the system of record'},ins:'This is a textbook case of choosing Redis over the database on purpose: the data is inherently short-lived and doesn\'t need to survive a Redis restart, so its speed matters far more than its durability.'},
+        {node:'ttl',chip:'EXPIRE',tone:'ok',cap:'A 15-minute expiry was attached back on the FIRST failed attempt (when the count was 1) — this 5th attempt doesn\'t touch the TTL',pay:{code:'if (attempts == 1) redis.expire(key, Duration.ofMinutes(15))',ttlSetOnce:true},ins:'This detail matters: if EXPIRE were called on every attempt, a determined attacker retrying just fast enough could keep the window open indefinitely. Setting it once, on the first attempt, guarantees the lockout always fully clears 15 minutes after it started.'},
+        {node:'result',chip:'block',tone:'bad',cap:'The count (5) has crossed the configured threshold — the request is rejected before it even touches the real authentication logic',pay:{threshold:5,currentCount:5,response:'429 Too Many Requests',realPasswordCheckSkipped:true},ins:'Rejecting BEFORE running the real password check is itself a defensive detail — it avoids doing expensive bcrypt work (see the OWASP A02 page) on requests that are already going to be denied.'},
+      ], result:{cls:'bad',text:'🚫 5 failed attempts in the window trips the rate limit — Redis\'s atomic INCR made the count race-proof with zero extra locking code.'} },
+
+    pubsub:{ req:'PUBLISH orders:new {...}', intro:'Pub/Sub lets one event reach every interested subscriber instantly, without any of them polling — useful for real-time features, but Redis doesn\'t persist missed messages.',
+      nodes:[
+        {id:'client',icon:'🧑‍💻',nl:'new order placed',ns:'the triggering business event',who:'CLIENT'},
+        {id:'redis',icon:'⚡',nl:'PUBLISH orders:new {orderId:991}',ns:'fan-out to ALL current subscribers',who:'REDIS'},
+        {id:'db',icon:'🗄️',nl:'order already committed to Postgres',ns:'pub/sub is a notification, not storage',who:'DB'},
+        {id:'ttl',icon:'⏳',nl:'no persistence — message exists only in transit',ns:'a subscriber offline right now misses it',who:'TTL'},
+        {id:'result',icon:'✅',nl:'3 subscribers (dashboard, email worker, analytics) notified instantly',ns:'each reacts independently',who:'RESULT'},
+      ],
+      steps:[
+        {node:'client',chip:'event',cap:'A customer places an order — the triggering event that several OTHER parts of the system care about',pay:{event:'order placed',orderId:991},ins:'Multiple independent systems need to react to this: an admin dashboard should update live, a confirmation email should send, and an analytics pipeline should record it — none of them should have to poll for changes.'},
+        {node:'redis',chip:'PUBLISH',tone:'ok',cap:'The order service publishes one message to a channel — Redis instantly forwards it to every currently-connected subscriber',pay:{command:'PUBLISH orders:new {"orderId":991,"total":49.99}',channel:'orders:new'},ins:'Pub/Sub is push, not pull — subscribers don\'t ask "anything new?" on a timer; Redis delivers the message to them the moment it\'s published.'},
+        {node:'db',chip:'already done',tone:'ok',cap:'The order itself was already committed to Postgres before this publish — pub/sub is purely a notification that it happened',pay:{orderPersistedIn:'PostgreSQL (system of record)',pubsubRole:'notify interested parties, not store the order'},ins:'This ordering matters: the durable write happens first, in the database; the notification is a best-effort broadcast layered on top, not a replacement for it.'},
+        {node:'ttl',chip:'ephemeral',tone:'bad',cap:'Redis Pub/Sub has NO persistence — a subscriber that\'s offline at the moment of publish never receives this message, even after reconnecting',pay:{messagePersisted:false,offlineSubscriberBehavior:'silently misses the message entirely'},ins:'This is the sharpest trade-off of basic Redis Pub/Sub versus a real message queue (Kafka/RabbitMQ/SQS, see System Design) — it\'s fire-and-forget, with no replay, no durability, and no delivery guarantee.'},
+        {node:'result',chip:'fanout',tone:'ok',cap:'All three currently-connected subscribers receive the event within milliseconds and react independently',pay:{subscribers:['admin-dashboard (live order count)','email-worker (send confirmation)','analytics-pipeline (record event)'],latency:'~1ms fan-out to all three'},ins:'Each subscriber owns its own reaction — the order service that published the event has no idea what any of them do with it, which keeps the systems decoupled.'},
+      ], result:{cls:'ok',text:'✅ Pub/Sub fanned the event out to every live subscriber instantly — but a subscriber that was offline missed it for good, with no replay.'} },
+  };
+
+  let scen='miss', running=false, timers=[];
+  function clearT(){timers.forEach(clearTimeout);timers=[];}
+  function nodeEl(id){return document.querySelector('#'+P+'Diagram .rt-node[data-node="'+id+'"]');}
+  function nodeCenter(id){const n=nodeEl(id);return n?n.offsetTop+n.offsetHeight/2:0;}
+  function renderNodes(k){
+    let h='<div class="rt-rail"></div><div class="rt-chip" id="'+P+'Chip">→</div>';
+    SCEN[k].nodes.forEach(n=>{ h+='<div class="rt-node" data-node="'+n.id+'"><span class="ic">'+n.icon+'</span><div style="flex:1;min-width:0"><div class="nl">'+n.nl+'</div><div class="ns">'+n.ns+'</div></div><span class="who who-'+n.who+'">'+n.who+'</span></div>'; });
+    $(P+'Diagram').innerHTML=h;
+  }
+  function reset(){
+    renderNodes(scen); const s=SCEN[scen];
+    const chip=$(P+'Chip'); chip.style.transition='none'; chip.style.top=nodeCenter(s.steps[0].node)+'px'; chip.style.opacity='0'; chip.classList.remove('ok','bad'); void chip.offsetWidth; chip.style.transition='';
+    $(P+'Res').className='rt-result';
+    $(P+'Dir').textContent='▶ READY'; $(P+'Dir').className='rt-dir';
+    $(P+'Cap').textContent=s.intro;
+    $(P+'Pay').textContent='';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>— the command, TTL, and result appear here per step —';
+    $(P+'Pill').textContent=s.req;
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false;
+  }
+  function applyStep(steps,i){
+    const st=steps[i];
+    document.querySelectorAll('#'+P+'Diagram .rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
+    const n=nodeEl(st.node); n.classList.remove('vchk','vskip'); n.classList.add(st.tone==='bad'?'vskip':'vchk'); n.classList.add('cur'); if(st.tone==='bad')n.classList.add('curbad'); void n.offsetWidth; n.classList.add('rtpulse');
+    const chip=$(P+'Chip'); chip.textContent=st.chip||'→'; chip.classList.remove('ok','bad'); if(st.tone)chip.classList.add(st.tone==='bad'?'bad':'ok'); chip.style.opacity='1'; chip.style.top=nodeCenter(st.node)+'px';
+    $(P+'Dir').textContent=st.dir||('STEP '+(i+1)+' / '+steps.length); $(P+'Dir').className='rt-dir'+(st.tone==='bad'?' bad':'');
+    $(P+'Cap').textContent=st.cap;
+    $(P+'Pay').textContent=st.pay?JSON.stringify(st.pay,null,2):'';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>'+st.ins;
+  }
+  function run(){
+    if(running)return; running=true; clearT(); reset();
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=true); $(P+'Run').disabled=true;
+    $(P+'Pill').textContent='running…';
+    const s=SCEN[scen]; let i=0;
+    (function tick(){
+      if(i>=s.steps.length){ const r=$(P+'Res'); r.className='rt-result show '+(s.result.cls||'ok'); r.textContent=s.result.text; running=false; document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false; $(P+'Pill').textContent='done'; return; }
+      applyStep(s.steps,i); i++; timers.push(setTimeout(tick,2000));
+    })();
+  }
+  document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.onclick=()=>{ if(running)return; scen=b.dataset.s; document.querySelectorAll('#'+P+'Seg button').forEach(x=>x.classList.toggle('on',x===b)); reset(); });
+  $(P+'Run').onclick=run;
+  reset();
+})();
+</script>
+<script src="devhub-notebook.js"></script>
+</body>
+</html>

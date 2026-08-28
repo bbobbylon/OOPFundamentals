@@ -83,7 +83,7 @@
 </head>
 <body class="track-tools">
   <div class="container">
-    <a class="back" href="index.html">&larr; back to visualizers</a>
+    <a class="back" href="app.html">&larr; Dev Hub</a>
     <h1>SQL — Joins, Transactions &amp; Indexes</h1>
     <p class="sub">Tables hold rows. Joins combine rows from multiple tables. Indexes are how databases find anything fast. Transactions are how you stay consistent under failure.</p>
 
@@ -115,6 +115,169 @@
       </div>
       <div class="intro-ciam"><span class="tag">In your CIAM stack:</span> JOINs run constantly — a user's roles (users → user_roles → roles), active sessions (users → sessions WHERE expires_at > NOW()), audit trail with user details. Indexes are critical: <code>users.email</code> (login), <code>sessions.token_hash</code> (validated on every API call — must be ms), <code>user_roles.user_id</code> (every auth check). Transactions prevent partial state: provisioning (user + roles + audit), role assignment, session rotation. Spring's <code>@Transactional</code> handles it — but understanding the SQL underneath is essential for debugging, tuning, and queries JPA can't express.</div>
     </div>
+
+    <!-- ── EXTREME-VIZ HERO ── -->
+    <style>
+      .who-CLIENT{background:rgba(34,211,238,.14);color:#7dd3fc}
+      .who-POOL{background:rgba(129,140,248,.16);color:#a5b4fc}
+      .who-CORE{background:rgba(251,191,36,.16);color:#fcd34d}
+      .who-ENGINE{background:rgba(192,132,252,.16);color:#d8b4fe}
+      .who-RESULT{background:rgba(74,222,128,.14);color:#86efac}
+    </style>
+    <div style="margin:0 0 28px">
+      <div class="rt-ctlbar">
+        <span class="lbl">scenario:</span>
+        <span class="userseg" id="sqSeg">
+          <button class="on" data-s="indexed">① Indexed lookup — fast</button>
+          <button data-s="noindex">② No index — seq scan</button>
+          <button data-s="txok">③ Transaction — COMMIT</button>
+          <button data-s="txbad">④ Transaction — ROLLBACK</button>
+          <button data-s="injection">⑤ SQL injection — blocked</button>
+        </span>
+        <button class="rt-run" id="sqRun">▶ Play</button>
+        <span class="rt-pill" id="sqPill">ready</span>
+      </div>
+      <div class="rt-stage">
+        <div class="rt-diagram" id="sqDiagram"></div>
+        <div class="rt-inspect">
+          <span class="rt-dir" id="sqDir">▶ READY</span>
+          <div class="rt-cap" id="sqCap">Pick a scenario and press ▶ Play</div>
+          <div class="rt-payload" id="sqPay"></div>
+          <div class="rt-headers" id="sqHdr"></div>
+          <div class="rt-result" id="sqRes"></div>
+        </div>
+      </div>
+    </div>
+    <script>
+    (function(){
+      const P='sq', $=id=>document.getElementById(id);
+      const SCEN={
+        indexed:{ req:'SELECT * FROM users WHERE email = ?', intro:'A lookup on a column that HAS an index. The planner finds it and uses a B-tree — a handful of page reads instead of scanning the table.',
+          nodes:[
+            {id:'client',icon:'👤',nl:'repo.findByEmail(...)',ns:'PreparedStatement, 1 parameter',who:'CLIENT'},
+            {id:'pool',icon:'🔌',nl:'Connection Pool',ns:'borrows a connection from HikariCP',who:'POOL'},
+            {id:'core',icon:'🧠',nl:'Query Planner',ns:'chooses an execution plan',who:'CORE'},
+            {id:'engine',icon:'💾',nl:'Storage Engine',ns:'B-tree index scan on idx_users_email',who:'ENGINE'},
+            {id:'result',icon:'📨',nl:'Result',ns:'1 row, well under 1ms',who:'RESULT'},
+          ],
+          steps:[
+            {node:'client',chip:'send',cap:'The app calls a repository method with a parameterized email lookup',pay:{sql:'SELECT * FROM users WHERE email = ?',params:['bob@eg.com']},ins:'The ? placeholder keeps the parameter as DATA, never as part of the SQL text — the same mechanism that blocks injection in scenario ⑤.'},
+            {node:'pool',chip:'borrow',tone:'ok',cap:'HikariCP hands out a pooled, already-open connection instead of opening a new one',pay:{pool:'HikariCP',activeConnections:'4/10',borrowTimeMs:0.3},ins:'Opening a raw DB connection costs tens of milliseconds. Pooling amortizes that cost — never call DriverManager.getConnection() per request in production code.'},
+            {node:'core',chip:'plan',tone:'ok',cap:'The planner checks statistics, sees an index on users(email), and picks an Index Scan',pay:{plan:'Index Scan using idx_users_email',estimatedRows:1},ins:'EXPLAIN ANALYZE would show "Index Scan" here. This is the planner deciding HOW to run the SQL you wrote, without you telling it directly.'},
+            {node:'engine',chip:'B-tree',tone:'ok',cap:'The storage engine walks the B-tree — a few page reads instead of scanning the whole table',pay:{method:'B-tree traversal',pageReads:3,rowsScanned:1},ins:'A B-tree turns a 10-million-row table into about 3 node reads. This is the entire reason indexes exist.'},
+            {node:'result',chip:'<1ms',tone:'ok',cap:'The row comes back in well under a millisecond',pay:{status:'200 OK',rows:1,latencyMs:0.4},ins:'Fast, correct — this is what "just add an index" is buying you architecturally.'},
+          ], result:{cls:'ok',text:'✅ Indexed lookup: the planner found a B-tree index and used it — page reads, not a full scan.'} },
+
+        noindex:{ req:'SELECT * FROM users WHERE last_login > ?', intro:'The identical style of query — but on a column with NO index. The planner has no shortcut and falls back to reading every row.',
+          nodes:[
+            {id:'client',icon:'👤',nl:'repo.findByLastLoginAfter(...)',ns:'no index exists on last_login',who:'CLIENT'},
+            {id:'pool',icon:'🔌',nl:'Connection Pool',ns:'borrows a connection — same as always',who:'POOL'},
+            {id:'core',icon:'🧠',nl:'Query Planner',ns:'no usable index — falls back to Seq Scan',who:'CORE'},
+            {id:'engine',icon:'💾',nl:'Storage Engine',ns:'reads all 10,000,000 rows, one by one',who:'ENGINE'},
+            {id:'result',icon:'📨',nl:'Result',ns:'correct rows, but ~500ms later',who:'RESULT'},
+          ],
+          steps:[
+            {node:'client',chip:'send',cap:'The app calls a repository method filtering on last_login',pay:{sql:'SELECT * FROM users WHERE last_login > ?',params:['2026-08-01']},ins:'Nothing is wrong with this SQL — the problem is entirely about which indexes exist on the table.'},
+            {node:'pool',chip:'borrow',tone:'ok',cap:'Connection pooling works identically regardless of how slow the query itself will be',pay:{pool:'HikariCP',activeConnections:'4/10'},ins:'The pool isn\'t the bottleneck here — hold that thought for the next two steps.'},
+            {node:'core',chip:'seq plan',tone:'bad',cap:'The planner looks for a usable index on last_login and finds none — it falls back to a Sequential Scan',pay:{plan:'Seq Scan on users',reason:'no index on last_login'},ins:'EXPLAIN ANALYZE would show "Seq Scan on users" here — the single most common thing to look for and fix in a slow-query review.'},
+            {node:'engine',chip:'seq scan',tone:'bad',cap:'The engine reads every row in the table to check the condition — there is no shortcut without an index',pay:{method:'sequential scan',rowsScanned:10000000},ins:'This is O(n) instead of O(log n). At 10M rows, that difference is the gap between "instant" and "your API times out."'},
+            {node:'result',chip:'~500ms',tone:'bad',cap:'The correct rows come back — just roughly 1000x slower than the indexed version',pay:{status:'200 OK',rows:842,latencyMs:497},ins:'The response is technically correct, which is exactly why this bug often ships to production undetected until the table grows.'},
+          ], result:{cls:'bad',text:'🐢 Sequential scan: the query is CORRECT, just slow — the classic "works in dev, times out in prod" bug. Fix: CREATE INDEX ON users(last_login).'} },
+
+        txok:{ req:'BEGIN; INSERT user; INSERT user_role; INSERT audit_event; COMMIT;', intro:'A multi-statement write wrapped in @Transactional. All three inserts succeed, so all three become durable together.',
+          nodes:[
+            {id:'client',icon:'👤',nl:'createUser(...)',ns:'@Transactional wraps the whole method',who:'CLIENT'},
+            {id:'pool',icon:'🔌',nl:'Connection Pool',ns:'ONE connection held for the whole method',who:'POOL'},
+            {id:'core',icon:'🧠',nl:'Transaction Manager',ns:'BEGIN opens a transaction boundary',who:'CORE'},
+            {id:'engine',icon:'💾',nl:'Storage Engine',ns:'applies 3 INSERTs, all pending',who:'ENGINE'},
+            {id:'result',icon:'📨',nl:'Result',ns:'COMMIT — all 3 rows now visible',who:'RESULT'},
+          ],
+          steps:[
+            {node:'client',chip:'send',cap:'createUser() is annotated @Transactional — Spring opens a transaction before the method body runs',pay:{method:'createUser(CreateUserRequest req)',annotation:'@Transactional'},ins:'Spring wraps this in a proxy: BEGIN on entry, COMMIT on a normal return, ROLLBACK on any RuntimeException.'},
+            {node:'pool',chip:'hold',tone:'ok',cap:'A single connection is checked out and held for the ENTIRE method — not released between statements',pay:{pool:'HikariCP',connectionsHeld:1},ins:'This is why long @Transactional methods can starve a pool under load: one thread ties up one connection until the whole method finishes.'},
+            {node:'core',chip:'BEGIN',tone:'ok',cap:'BEGIN opens the transaction boundary — none of the writes below are visible to other connections yet',pay:{statement:'BEGIN'},ins:'Everything from here until COMMIT or ROLLBACK is one atomic unit — all of it happens, or none of it does.'},
+            {node:'engine',chip:'3 inserts',tone:'ok',cap:'The engine applies all three INSERTs — user, user_role, audit_event — but they stay PENDING, not yet durable',pay:{inserts:['users','user_roles','audit_events'],state:'pending'},ins:'Other connections still see the OLD state right now (READ COMMITTED) — this is Isolation at work.'},
+            {node:'result',chip:'COMMIT',tone:'ok',cap:'COMMIT makes all three writes durable and visible at once',pay:{statement:'COMMIT',rowsAffected:3},ins:'If the audit_event insert had failed, ALL THREE would roll back — no user with no role, no role with no audit trail. See scenario ④.'},
+          ], result:{cls:'ok',text:'✅ All-or-nothing: 3 statements, 1 transaction, 1 COMMIT. No partial state is possible.'} },
+
+        txbad:{ req:'BEGIN; INSERT user; INSERT user_role (FK violation); ROLLBACK;', intro:'Same @Transactional method — but this time one statement fails midway. Watch what happens to the OTHER two statements that already "succeeded."',
+          nodes:[
+            {id:'client',icon:'👤',nl:'createUser(...)',ns:'references a role_id deleted moments ago',who:'CLIENT'},
+            {id:'pool',icon:'🔌',nl:'Connection Pool',ns:'one connection held, same as the success path',who:'POOL'},
+            {id:'core',icon:'🧠',nl:'Transaction Manager',ns:'BEGIN opens the boundary — identical so far',who:'CORE'},
+            {id:'engine',icon:'💾',nl:'Storage Engine',ns:'user_role INSERT violates a foreign key',who:'ENGINE'},
+            {id:'result',icon:'📨',nl:'Result',ns:'ROLLBACK — the user INSERT is undone too',who:'RESULT'},
+          ],
+          steps:[
+            {node:'client',chip:'send',cap:'Same createUser() call — but this request references a role_id that a concurrent admin just deleted',pay:{method:'createUser(...)',roleId:'999 (no longer exists)'},ins:'A realistic failure: two admins editing roles concurrently, or a stale dropdown on the frontend.'},
+            {node:'pool',chip:'hold',tone:'ok',cap:'One connection held for the method, same as the success case',pay:{connectionsHeld:1},ins:'Nothing different yet — the failure hasn\'t happened.'},
+            {node:'core',chip:'BEGIN',tone:'ok',cap:'BEGIN opens the transaction — identical so far to the success path',pay:{statement:'BEGIN'},ins:'Up to this point, this scenario is indistinguishable from scenario ③.'},
+            {node:'engine',chip:'FK violation',tone:'bad',cap:'The user_role INSERT references role_id=999, which no longer exists — the database rejects it with a foreign key violation',pay:{inserts:['users (pending)'],failedInsert:'user_roles',error:'FK constraint "fk_role" violated'},ins:'The user row IS written into this transaction\'s pending state — but it is NOT yet committed. That distinction is about to matter.'},
+            {node:'result',chip:'ROLLBACK',tone:'bad',cap:'Spring catches the exception and triggers ROLLBACK — the pending user INSERT is undone too, not just the failed one',pay:{statement:'ROLLBACK',rowsAffected:0},ins:'This is Atomicity doing its job: without the transaction, you\'d have an orphaned user with no role — a corrupt, half-created account. The "failure" here is the safety net working, not a bug.'},
+          ], result:{cls:'bad',text:'↩️ ROLLBACK: one statement failed, so ALL THREE were undone — no orphaned user, no corrupt state. This is ACID working as designed.'} },
+
+        injection:{ req:'form field name = "\'; DROP TABLE users; --"', intro:'A classic SQL injection payload, submitted through an ordinary form field. Watch WHY a PreparedStatement makes this harmless.',
+          nodes:[
+            {id:'client',icon:'👤',nl:'Attacker submits a form field',ns:"name = '; DROP TABLE users; --",who:'CLIENT'},
+            {id:'pool',icon:'🔌',nl:'Connection Pool',ns:'a completely normal connection is borrowed',who:'POOL'},
+            {id:'core',icon:'🧠',nl:'PreparedStatement',ns:'the payload is bound as parameter 1 — never SQL text',who:'CORE'},
+            {id:'engine',icon:'💾',nl:'Storage Engine',ns:'runs a harmless string match; table stays intact',who:'ENGINE'},
+            {id:'result',icon:'📨',nl:'Result',ns:'0 rows found — no user has that name',who:'RESULT'},
+          ],
+          steps:[
+            {node:'client',chip:'attack',tone:'bad',cap:'An attacker submits a classic injection payload in a name field, hoping the server concatenates it into raw SQL',pay:{formField:'name',value:"'; DROP TABLE users; --"},ins:'If this string ever gets glued directly into SQL text ("...WHERE name = \'" + name + "\'"), it closes the string early and appends a second statement.'},
+            {node:'pool',chip:'borrow',tone:'ok',cap:'Connection pooling proceeds completely normally — this layer has no idea an attack is happening',pay:{pool:'HikariCP'},ins:'The defense against injection doesn\'t live at the connection layer — it lives entirely in HOW the query is built.'},
+            {node:'core',chip:'bind',tone:'ok',cap:'The repository uses a PreparedStatement with a ? placeholder — the ENTIRE malicious string is bound as one parameter value, never parsed as SQL',pay:{sql:'SELECT * FROM users WHERE name = ?',boundParam:"'; DROP TABLE users; --"},ins:'The driver sends the parameter separately from the already-parsed SQL text over the wire. A parameter value can never "become" a second statement.'},
+            {node:'engine',chip:'scan',tone:'ok',cap:'The engine searches for a row where name literally equals that entire string — quotes, semicolon, and all, as plain characters',pay:{method:'exact string match'},ins:'DROP TABLE never executes. To the database, this is just a (very unusual) name to search for.'},
+            {node:'result',chip:'0 rows',tone:'ok',cap:'0 rows found — no user is named that string. The table is completely intact.',pay:{status:'200 OK',rows:0},ins:'This is the entire value of parameterized queries: attacker input can never change WHAT SQL runs, only what data it searches for.'},
+          ], result:{cls:'ok',text:'🛡️ Injection blocked: the PreparedStatement treated the payload as pure data. The table survives untouched.'} },
+      };
+
+      let scen='indexed', running=false, timers=[];
+      function clearT(){timers.forEach(clearTimeout);timers=[];}
+      function nodeEl(id){return document.querySelector('#'+P+'Diagram .rt-node[data-node="'+id+'"]');}
+      function nodeCenter(id){const n=nodeEl(id);return n?n.offsetTop+n.offsetHeight/2:0;}
+      function renderNodes(k){
+        let h='<div class="rt-rail"></div><div class="rt-chip" id="'+P+'Chip">→</div>';
+        SCEN[k].nodes.forEach(n=>{ h+='<div class="rt-node" data-node="'+n.id+'"><span class="ic">'+n.icon+'</span><div style="flex:1;min-width:0"><div class="nl">'+n.nl+'</div><div class="ns">'+n.ns+'</div></div><span class="who who-'+n.who+'">'+n.who+'</span></div>'; });
+        $(P+'Diagram').innerHTML=h;
+      }
+      function reset(){
+        renderNodes(scen); const s=SCEN[scen];
+        const chip=$(P+'Chip'); chip.style.transition='none'; chip.style.top=nodeCenter(s.steps[0].node)+'px'; chip.style.opacity='0'; chip.classList.remove('ok','bad'); void chip.offsetWidth; chip.style.transition='';
+        $(P+'Res').className='rt-result';
+        $(P+'Dir').textContent='▶ READY'; $(P+'Dir').className='rt-dir';
+        $(P+'Cap').textContent=s.intro;
+        $(P+'Pay').textContent='';
+        $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>— each layer\'s decision appears here per step —';
+        $(P+'Pill').textContent=s.req;
+        document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false;
+      }
+      function applyStep(steps,i){
+        const st=steps[i];
+        document.querySelectorAll('#'+P+'Diagram .rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
+        const n=nodeEl(st.node); n.classList.remove('vchk','vskip'); n.classList.add(st.tone==='bad'?'vskip':'vchk'); n.classList.add('cur'); if(st.tone==='bad')n.classList.add('curbad'); void n.offsetWidth; n.classList.add('rtpulse');
+        const chip=$(P+'Chip'); chip.textContent=st.chip||'→'; chip.classList.remove('ok','bad'); if(st.tone)chip.classList.add(st.tone==='bad'?'bad':'ok'); chip.style.opacity='1'; chip.style.top=nodeCenter(st.node)+'px';
+        $(P+'Dir').textContent=st.dir||('STEP '+(i+1)+' / '+steps.length); $(P+'Dir').className='rt-dir'+(st.tone==='bad'?' bad':'');
+        $(P+'Cap').textContent=st.cap;
+        $(P+'Pay').textContent=st.pay?JSON.stringify(st.pay,null,2):'';
+        $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>'+st.ins;
+      }
+      function run(){
+        if(running)return; running=true; clearT(); reset();
+        document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=true); $(P+'Run').disabled=true;
+        $(P+'Pill').textContent='running…';
+        const s=SCEN[scen]; let i=0;
+        (function tick(){
+          if(i>=s.steps.length){ const r=$(P+'Res'); r.className='rt-result show '+(s.result.cls||'ok'); r.textContent=s.result.text; running=false; document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false; $(P+'Pill').textContent='done'; return; }
+          applyStep(s.steps,i); i++; timers.push(setTimeout(tick,2000));
+        })();
+      }
+      document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.onclick=()=>{ if(running)return; scen=b.dataset.s; document.querySelectorAll('#'+P+'Seg button').forEach(x=>x.classList.toggle('on',x===b)); reset(); });
+      $(P+'Run').onclick=run;
+      reset();
+    })();
+    </script>
 
     <div class="panel">
       <div class="controls" style="margin-bottom: 14px;">

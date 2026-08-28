@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>GraphQL — One Endpoint, Client-Specified Shape</title>
+  <style>
+    .who-QUERY{background:#60a5fa;color:#04203a}
+    .who-RESOLVE{background:#a78bfa;color:#1a1030}
+    .who-FETCH{background:#f87171;color:#450a0a}
+    .who-COST{background:#fbbf24;color:#452b00}
+    .who-RESULT{background:#4ade80;color:#04231a}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:18px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
+    .cmp{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin:10px 0}
+    .cmp-col{border-radius:12px;padding:14px 16px}
+    .cmp-bad{background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.28)}
+    .cmp-good{background:rgba(74,222,128,.08);border:1px solid rgba(74,222,128,.28)}
+    .cmp-col h4{margin:0 0 8px;font-size:11.5px;font-weight:800;text-transform:uppercase;letter-spacing:.05em}
+    .cmp-bad h4{color:#fca5a5}.cmp-good h4{color:#86efac}
+    .key-insight{background:rgba(99,102,241,.07);border:1px solid rgba(99,102,241,.3);border-radius:8px;padding:14px;margin:12px 0;font-size:13px}
+    .key-insight strong{color:#a78bfa}
+    .xlink{font-size:11.5px;color:var(--blue)}
+  </style>
+  <link rel="stylesheet" href="devhub.css" />
+</head>
+<body class="track-spring">
+<div class="container">
+  <a class="back" href="app.html">&larr; Dev Hub</a>
+  <h1>GraphQL — One Endpoint, Client-Specified Shape</h1>
+  <p class="sub">Every REST page in this hub — <a href="spring-boot-rest-api-visualizer.html">REST API</a>, <a href="spring-boot-api-design-deep-visualizer.html">REST API Design</a> — teaches a URL-per-resource model where the server decides the response shape. GraphQL inverts that: one endpoint, and the <em>client</em> specifies exactly which fields it wants, nested arbitrarily deep, in a single request.</p>
+
+  <!-- ── INTRO ── -->
+  <div class="intro">
+    <div class="intro-head"><span class="ico">🕸️</span> What problem does GraphQL actually solve that REST doesn't?</div>
+    <p class="intro-lead">
+      A REST endpoint returns a fixed shape decided at the server — <code>GET /api/users/42</code> always returns the same fields, whether the caller needs all eighteen of them or just two. That mismatch has a name on each side: <strong>over-fetching</strong> (the response includes fields the client throws away) and <strong>under-fetching</strong> (the response is missing a nested relation, so the client fires a second — or third — request to stitch the full picture together). GraphQL solves both with one mechanism: a single <code>/graphql</code> endpoint accepts a query describing <em>exactly</em> which fields the client wants, including nested relations, and the server walks that query — field by field, through a graph of <strong>resolver</strong> functions — to assemble precisely that shape in one response. The cost of that flexibility is real: a naive resolver graph re-fetches related data once per parent row (the classic <strong>N+1 problem</strong>), and a schema with no field-level authorization can let an authenticated-but-unauthorized caller simply ask for a sensitive field REST would never have exposed at that URL in the first place.
+    </p>
+    <ul class="intro-gist">
+      <li><b>One endpoint, not one-per-resource</b> — <code>POST /graphql</code> for everything; the query body determines the shape, not the URL.</li>
+      <li><b>Resolvers are per-field, not per-endpoint</b> — each field in the schema (<code>User.name</code>, <code>User.orders</code>, <code>Order.shippingAddress</code>) has its own function, called only if the client asked for it.</li>
+      <li><b>The N+1 problem is GraphQL's signature performance trap</b> — a list of 50 items, each resolving one related field naively, means 51 database round trips instead of 2.</li>
+      <li><b>A permissive schema is a security surface</b> — "the caller is authenticated" is not the same question as "the caller may see THIS field, on THIS record."</li>
+    </ul>
+    <div class="intro-cards">
+      <div class="intro-mini">
+        <h4>Schema-first: the contract is strongly typed</h4>
+        <p>A GraphQL schema (SDL) declares every type and field up front — <code>type User { id: ID! name: String! orders: [Order!]! }</code> — and the server rejects any query asking for a field that doesn't exist. This is closer to <a href="spring-boot-openapi-visualizer.html">OpenAPI/Swagger</a>'s contract-first spirit than to REST's typically looser response shapes.</p>
+      </div>
+      <div class="intro-mini">
+        <h4>This app's REST convention, contrasted</h4>
+        <p>Every controller in this scaffold returns <code>ResponseEntity&lt;HttpResponse&gt;</code> — one fixed envelope per endpoint. GraphQL has no equivalent "envelope" convention to design; the response shape IS the query, echoed back with data instead of field names.</p>
+      </div>
+      <div class="intro-ciam">
+        <h4>CIAM angle — field-level authorization is easy to forget</h4>
+        <p>REST's one-URL-per-resource shape means an authorization check at the controller (<code>@PreAuthorize</code>) naturally guards everything that endpoint returns. GraphQL's flexible field selection means a resolver for a sensitive field (<code>User.ssn</code>, <code>User.internalNotes</code>) needs its <em>own</em> authorization check — "authenticated" and "authorized to see this specific field on this specific record" are different questions, and scenario 5 below shows exactly how that gap gets exploited.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── EXTREME-VIZ HERO ── -->
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="gqSeg">
+        <button class="on" data-s="overfetch">① Over-Fetching, Solved</button>
+        <button data-s="underfetch">② Under-Fetching, Solved</button>
+        <button data-s="nplus1">③ The N+1 Problem</button>
+        <button data-s="dataloader">④ Batched Fix (DataLoader)</button>
+        <button data-s="authgap">⑤ Field-Level Auth Gap</button>
+      </span>
+      <button class="rt-run" id="gqRun">▶ Play</button>
+      <span class="rt-pill" id="gqPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="gqDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="gqDir">▶ READY</span>
+        <div class="rt-cap" id="gqCap">Pick a scenario and press ▶ Play</div>
+        <div class="rt-payload" id="gqPay"></div>
+        <div class="rt-headers" id="gqHdr"></div>
+        <div class="rt-result" id="gqRes"></div>
+      </div>
+    </div>
+    <div class="who-row">
+      <span class="who-badge who-QUERY">QUERY — the client's request shape</span>
+      <span class="who-badge who-RESOLVE">RESOLVE — server-side field resolution</span>
+      <span class="who-badge who-FETCH">FETCH — the underlying data access</span>
+      <span class="who-badge who-COST">COST — the trade-off or trap</span>
+      <span class="who-badge who-RESULT">RESULT — what the client gets back</span>
+    </div>
+  </div>
+
+  <!-- 1 -->
+  <section>
+    <h2>1. REST vs GraphQL, side by side</h2>
+    <table>
+      <tr><th>Axis</th><th>REST</th><th>GraphQL</th></tr>
+      <tr><td>Endpoints</td><td>One URL per resource — <code>GET /api/users/42</code>, <code>GET /api/users/42/orders</code></td><td>One endpoint — <code>POST /graphql</code> — for every query and mutation</td></tr>
+      <tr><td>Response shape</td><td>Fixed per endpoint, decided by the server</td><td>Decided per-request by the client's query</td></tr>
+      <tr><td>Over/under-fetching</td><td>Common — either extra unused fields, or extra round trips for nested data</td><td>Solved by construction — the client asks for exactly the shape it needs, nested, in one request</td></tr>
+      <tr><td>Caching</td><td>HTTP caching (ETags, <code>Cache-Control</code>) works natively per URL</td><td>Harder — every query can have a different shape, so URL-level HTTP caching doesn't apply the same way</td></tr>
+      <tr><td>Performance risk</td><td>N round trips for nested data (under-fetching)</td><td>N+1 database queries inside ONE request if resolvers aren't batched</td></tr>
+    </table>
+    <div class="key-insight"><strong>Neither is strictly better</strong> — REST's fixed shapes make HTTP caching and simple mental models easy; GraphQL's flexible shapes make mobile clients and complex nested UIs far more efficient over the network, at the cost of new server-side problems (N+1, field-level auth) that REST's URL-per-resource model didn't have in the same form.</div>
+  </section>
+
+  <!-- 2 -->
+  <section>
+    <h2>2. Over-fetching: REST returns the whole row; GraphQL returns exactly what was asked</h2>
+    <div class="cmp">
+      <div class="cmp-col cmp-bad">
+        <h4>✗ REST — fixed shape, client discards the rest</h4>
+        <pre><span class="type">GET</span> /api/users/42
+<span class="cm">// server has no idea the client only wants 2 fields —</span>
+<span class="cm">// it always returns the full DTO</span>
+{
+  <span class="str">"id"</span>: <span class="str">42</span>, <span class="str">"name"</span>: <span class="str">"..."</span>, <span class="str">"email"</span>: <span class="str">"..."</span>,
+  <span class="str">"address"</span>: {...}, <span class="str">"phone"</span>: <span class="str">"..."</span>, <span class="str">"createdAt"</span>: <span class="str">"..."</span>,
+  <span class="cm">// ...12 more fields the mobile client will discard</span>
+}</pre>
+      </div>
+      <div class="cmp-col cmp-good">
+        <h4>✓ GraphQL — the query IS the shape</h4>
+        <pre><span class="kw">query</span> {
+  user(id: <span class="str">"42"</span>) {
+    name
+    avatarUrl
+  }
+}
+<span class="cm">// resolver only fetches/returns these 2 fields —</span>
+<span class="cm">// nothing else is even computed</span></pre>
+      </div>
+    </div>
+    <div class="key-insight"><strong>The server literally does less work for the GraphQL request</strong> — since each field has its own resolver, a field the client didn't ask for is never resolved, never queried, never serialized. REST's DTO, by contrast, is assembled in full regardless of what the caller actually needed.</div>
+  </section>
+
+  <!-- 3 -->
+  <section>
+    <h2>3. The N+1 problem: GraphQL's signature performance trap</h2>
+    <div class="cmp">
+      <div class="cmp-col cmp-bad">
+        <h4>✗ Naive resolver — one query per row</h4>
+        <pre><span class="cm">// SchemaMapping on Order.customer, called ONCE PER ORDER</span>
+<span class="an">@SchemaMapping</span>(typeName <span class="op">=</span> <span class="str">"Order"</span>, field <span class="op">=</span> <span class="str">"customer"</span>)
+<span class="kw">public</span> <span class="type">Customer</span> <span class="fn">customer</span>(<span class="type">Order</span> order) {
+  <span class="kw">return</span> customerRepo.<span class="fn">findById</span>(order.getCustomerId());
+  <span class="cm">// 50 orders → 1 query for orders + 50 queries here = 51 total</span>
+}</pre>
+      </div>
+      <div class="cmp-col cmp-good">
+        <h4>✓ Batched resolver — one query for ALL rows</h4>
+        <pre><span class="cm">// BatchMapping — Spring for GraphQL collects every order</span>
+<span class="cm">// in this tick and calls this ONCE with the whole batch</span>
+<span class="an">@BatchMapping</span>(typeName <span class="op">=</span> <span class="str">"Order"</span>, field <span class="op">=</span> <span class="str">"customer"</span>)
+<span class="kw">public</span> <span class="type">Map</span>&lt;<span class="type">Order</span>, <span class="type">Customer</span>&gt; <span class="fn">customers</span>(<span class="type">List</span>&lt;<span class="type">Order</span>&gt; orders) {
+  <span class="kw">return</span> customerRepo.<span class="fn">findAllByIdIn</span>(orderCustomerIds(orders));
+  <span class="cm">// 50 orders → 1 query for orders + 1 batched query = 2 total</span>
+}</pre>
+      </div>
+    </div>
+    <div class="key-insight"><strong>Spring for GraphQL's <code>@BatchMapping</code> is the idiomatic fix</strong> for exactly the problem the standalone <code>DataLoader</code> pattern (common in Node/Apollo servers) also solves: collect every pending request for a field during one execution tick, then satisfy them all with a single <code>WHERE id IN (...)</code> query instead of N individual ones.</div>
+  </section>
+
+  <!-- 4 -->
+  <section>
+    <h2>4. One-sentence recap</h2>
+    <div class="card card-accent">
+      <p style="font-size:14px">🕸️ GraphQL trades REST's fixed, per-endpoint response shape for a client-specified one — solving over/under-fetching by construction — but that flexibility introduces two traps of its own: the <strong>N+1 problem</strong> (fixed with <code>@BatchMapping</code>/DataLoader) and a <strong>field-level authorization gap</strong> that REST's URL-per-resource model doesn't have in the same shape.</p>
+    </div>
+    <p class="xlink" style="margin-top:8px">↪ See also: <a href="spring-boot-rest-api-visualizer.html">REST API</a> and <a href="spring-boot-api-design-deep-visualizer.html">REST API Design</a> for the model this contrasts against, <a href="rbac-deep-visualizer.html">RBAC &amp; Authorization</a> for field/record-level authorization patterns, and <a href="appsec-owasp-top10-visualizer.html">OWASP Top 10</a> (A01 — Broken Access Control) for the security angle in scenario 5.</p>
+  </section>
+</div>
+
+<!-- Code Walkthrough: fixing N+1 with @BatchMapping -->
+<h2 id="cw-graphql" style="margin:0 0 4px;padding:0 1.5rem;max-width:clamp(40rem,94vw,90rem);margin-left:auto;margin-right:auto">👣 Step through it, line by line</h2>
+<div id="cw-graphql-mount"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-graphql-mount', {
+  title: 'OrderResolver.java — from N+1 SchemaMapping to a batched fix',
+  intervalMs: 1700,
+  code: [
+    '// ✗ BEFORE — called once PER order in the result set',
+    '@SchemaMapping(typeName = "Order", field = "customer")',
+    'public Customer customer(Order order) {',
+    '  return customerRepo.findById(order.getCustomerId());',
+    '}',
+    '',
+    '// ✓ AFTER — called ONCE per query, with the full batch',
+    '@BatchMapping(typeName = "Order", field = "customer")',
+    'public Map<Order, Customer> customers(List<Order> orders) {',
+    '  List<Long> ids = orders.stream()',
+    '      .map(Order::getCustomerId).distinct().toList();',
+    '  Map<Long, Customer> byId = customerRepo.findAllByIdIn(ids)',
+    '      .stream().collect(toMap(Customer::getId, c -> c));',
+    '  return orders.stream()',
+    '      .collect(toMap(o -> o, o -> byId.get(o.getCustomerId())));',
+    '}',
+  ],
+  steps: [
+    { line: 2, note: '@SchemaMapping wires this method to the Order.customer field — Spring for GraphQL calls it automatically whenever a query asks for customer on an Order.', vars: {} },
+    { line: 3, note: 'Here\'s the trap: this method takes ONE order and returns ONE customer. For a query returning 50 orders, GraphQL calls this exact method 50 separate times — once per order in the result list.', vars: { calledPerOrder: true }, tone: 'bad' },
+    { line: 4, note: 'Each call is its own independent database round trip — 50 orders means 50 of these, plus the 1 query that fetched the orders in the first place.', vars: { totalQueries: '1 (orders) + 50 (this method) = 51' }, tone: 'bad', callout: 'This is the N+1 problem by definition: N related-record lookups for N parent rows, instead of one batched lookup for all of them.' },
+    { line: 8, note: '@BatchMapping changes the contract entirely: instead of one order in, one customer out, this method receives the FULL LIST of orders from the current query — Spring for GraphQL collects them all before calling it once.', vars: {} },
+    { line: 11, note: 'Every distinct customerId needed across all 50 orders is collected into one list — duplicates removed, since two orders might share a customer.', vars: { distinctIdsNeeded: '≤50, often fewer' } },
+    { line: 12, note: 'ONE query fetches every needed customer at once — findAllByIdIn generates a single WHERE id IN (...) SQL statement.', vars: { totalQueries: '1 (orders) + 1 (this batched call) = 2' }, tone: 'ok', callout: 'Same GraphQL query, same response shape, same client code — the only thing that changed is how many database round trips it took to build the response: 51 down to 2.' },
+    { line: 15, note: 'The method returns a Map from each Order to its resolved Customer — Spring for GraphQL uses this map to slot the right customer back into each order\'s position in the response.', vars: {} },
+  ]
+});
+</script>
+
+<script>
+(function(){
+  const P='gq', $=id=>document.getElementById(id);
+  const SCEN={
+    overfetch:{ req:'query { user(id:"42"){ name avatarUrl } }', intro:'A REST endpoint returns its full fixed shape regardless of need; a GraphQL query only resolves the exact fields the client asked for.',
+      nodes:[
+        {id:'query',icon:'🧑‍💻',nl:'{ user(id:"42"){ name avatarUrl } }',ns:'client asks for exactly 2 fields',who:'QUERY'},
+        {id:'resolve',icon:'🧩',nl:'only User.name + User.avatarUrl resolve',ns:'other 16 fields never invoked',who:'RESOLVE'},
+        {id:'fetch',icon:'🗄️',nl:'SELECT name, avatar_url FROM users WHERE id=42',ns:'a narrow, targeted query',who:'FETCH'},
+        {id:'cost',icon:'⚖️',nl:'REST equivalent: GET /api/users/42',ns:'would return all 18 fields, always',who:'COST'},
+        {id:'result',icon:'✅',nl:'{ "name": "...", "avatarUrl": "..." }',ns:'~40 bytes vs REST\'s ~600+ byte DTO',who:'RESULT'},
+      ],
+      steps:[
+        {node:'query',chip:'ask',cap:'A mobile client, showing just a name and avatar in a list row, asks for precisely those two fields',pay:{query:'{ user(id:"42"){ name avatarUrl } }',fieldsRequested:2},ins:'This client genuinely has no use for the user\'s address, phone, order history, or any of a dozen other fields a full user object would carry.'},
+        {node:'resolve',chip:'resolve',tone:'ok',cap:'The GraphQL engine walks the query and invokes ONLY the resolvers for the requested fields',pay:{resolversInvoked:['User.name','User.avatarUrl'],resolversSkipped:'every other field on User — address, phone, orders, createdAt, ...'},ins:'This is structurally different from REST: there\'s no "full object" ever assembled here to selectively serialize — fields that weren\'t asked for are never computed at all.'},
+        {node:'fetch',chip:'query',tone:'ok',cap:'The resolver issues a narrow database query for exactly the two columns needed',pay:{sql:'SELECT name, avatar_url FROM users WHERE id = 42',columnsFetched:2},ins:'A well-implemented resolver layer pushes the field selection all the way down to the SQL projection — not just filtering fields out after a SELECT *.'},
+        {node:'cost',chip:'contrast',tone:'bad',cap:'The equivalent REST call has no way to know what the client actually needs — it returns its one, fixed, full shape every time',pay:{restEndpoint:'GET /api/users/42',restAlwaysReturns:'all 18 fields, regardless of caller'},ins:'This is over-fetching, concretely: 16 fields the client will parse, hold in memory, and immediately discard — on every single request, for every caller who only needed 2.'},
+        {node:'result',chip:'response',tone:'ok',cap:'The GraphQL response contains exactly the 2 requested fields — nothing more',pay:{responseSize:'~40 bytes',restEquivalentSize:'~600+ bytes for the same logical request'},ins:'At mobile scale (thousands of list rows fetched over a slow connection) this difference compounds into a real, measurable data and battery cost — not just a tidiness preference.'},
+      ], result:{cls:'ok',text:'✅ The query shape IS the response shape — no unused fields ever computed, queried, or transmitted.'} },
+
+    underfetch:{ req:'query { user{ name orders(limit:3){ total shippingCity } } }', intro:'REST\'s under-fetching problem — needing several round trips to assemble nested, related data — disappears when the client can ask for nested fields in one GraphQL query.',
+      nodes:[
+        {id:'query',icon:'🧑‍💻',nl:'user{ name orders(limit:3){ total shippingCity } }',ns:'nested selection, 3 levels deep',who:'QUERY'},
+        {id:'resolve',icon:'🧩',nl:'User → Order[] → shippingCity, one query tree',ns:'server walks the whole nested shape',who:'RESOLVE'},
+        {id:'fetch',icon:'🗄️',nl:'3 targeted queries, orchestrated server-side',ns:'user, orders, shipping — all on the server',who:'FETCH'},
+        {id:'cost',icon:'⚖️',nl:'REST equivalent: 3 sequential HTTP round trips',ns:'user → orders → each order\'s shipping info',who:'COST'},
+        {id:'result',icon:'✅',nl:'ONE network round trip delivers the full nested shape',ns:'vs. 3 over a real, latency-bound network',who:'RESULT'},
+      ],
+      steps:[
+        {node:'query',chip:'ask',cap:'A dashboard needs a user\'s name plus their 3 most recent orders, each with its shipping city — three levels of nesting, one request',pay:{query:'{ user(id:"42"){ name orders(limit:3){ total shippingCity } } }',nestingDepth:3},ins:'REST has no native concept of "and also give me this related, nested thing" inside one response — that\'s the under-fetching gap GraphQL is built to close.'},
+        {node:'resolve',chip:'walk',tone:'ok',cap:'The GraphQL engine resolves the ENTIRE nested tree — User, then its Orders, then each Order\'s shippingCity — as one coordinated operation',pay:{resolverChain:'User.name → User.orders → Order.shippingCity (×3)'},ins:'The client only sees one request/response pair; the orchestration of walking the nested graph happens entirely on the server, invisible to the caller.'},
+        {node:'fetch',chip:'fetch',tone:'ok',cap:'The server issues the underlying queries it needs — still multiple queries, but all server-side, none of them crossing the network back to the client',pay:{serverSideQueries:3,networkRoundTripsToClient:1},ins:'This is the key distinction from the REST comparison: GraphQL doesn\'t eliminate the underlying data-fetching work — it eliminates the CLIENT having to wait on multiple network hops to get it.'},
+        {node:'cost',chip:'contrast',tone:'bad',cap:'The REST equivalent needs the CLIENT itself to make 3 sequential round trips, each paying full network latency',pay:{restCall1:'GET /api/users/42',restCall2:'GET /api/users/42/orders?limit=3',restCall3:'GET /api/orders/{id}/shipping (×3, or a 4th call)',roundTrips:'3-4, each ~150ms on a mobile network'},ins:'Round trips are the expensive part on a real network — even a fast server response is bottlenecked by physical latency (light-speed + routing) each time the client has to wait and then fire the next request.'},
+        {node:'result',chip:'response',tone:'ok',cap:'The full nested shape — name, 3 orders, each with a shipping city — arrives in exactly one response',pay:{clientRoundTrips:1,estimatedLatencySavings:'~300-450ms on a typical mobile connection vs. the REST sequence'},ins:'This is GraphQL\'s clearest real-world win: not less server work, but far fewer network round trips for genuinely nested UI data — exactly the shape a dashboard or detail screen usually needs.'},
+      ], result:{cls:'ok',text:'✅ One GraphQL round trip replaced a chain of REST calls that would otherwise wait on the network 3-4 times in sequence.'} },
+
+    nplus1:{ req:'query { orders(first:50){ id customer{ name } } }', intro:'A naive per-row resolver turns one GraphQL query into 51 database round trips — the classic N+1 problem, and GraphQL\'s signature performance trap.',
+      nodes:[
+        {id:'query',icon:'🧑‍💻',nl:'{ orders(first:50){ id customer{ name } } }',ns:'50 orders, each with a nested customer',who:'QUERY'},
+        {id:'resolve',icon:'🧩',nl:'Order.customer resolver runs 50 times',ns:'once per order in the result list',who:'RESOLVE'},
+        {id:'fetch',icon:'🗄️',nl:'1 query for orders + 50 for customers',ns:'each customer fetched individually',who:'FETCH'},
+        {id:'cost',icon:'⚖️',nl:'51 total database round trips',ns:'for what looks like ONE GraphQL request',who:'COST'},
+        {id:'result',icon:'❌',nl:'response takes ~800ms instead of ~40ms',ns:'scales linearly, and badly, with page size',who:'RESULT'},
+      ],
+      steps:[
+        {node:'query',chip:'ask',cap:'A client requests 50 orders, each with its customer\'s name nested inside',pay:{query:'{ orders(first:50){ id customer{ name } } }',expectedOrders:50},ins:'This looks like a perfectly reasonable query — nothing about the request itself suggests a performance problem is coming.'},
+        {node:'resolve',chip:'per-row',tone:'bad',cap:'The Order.customer resolver, written the naive way (one order in, one customer out), gets invoked once for EACH of the 50 orders',pay:{resolverCode:'@SchemaMapping customer(Order order) { return repo.findById(order.getCustomerId()); }',invocationCount:50},ins:'GraphQL doesn\'t automatically know that fetching 50 customers one-at-a-time is wasteful — it just faithfully calls this resolver exactly as many times as the schema says it should.'},
+        {node:'fetch',chip:'fan-out',tone:'bad',cap:'Each of those 50 resolver calls independently hits the database',pay:{queryForOrders:1,queryPerCustomer:'50 separate SELECT ... WHERE id = ? calls'},ins:'This is "N+1" spelled out concretely: 1 query for the parent list, plus N (50) queries for the related data — one per row, instead of one for all of them together.'},
+        {node:'cost',chip:'51 queries',tone:'bad',cap:'What looked like one GraphQL request actually costs the database 51 round trips',pay:{totalQueries:51,scalesWith:'linearly with the number of orders returned — 500 orders would mean 501 queries'},ins:'This is exactly why N+1 is considered GraphQL\'s signature trap: the query LOOKS innocent, the schema LOOKS correct, and the bug only becomes visible under load or with a larger result set.'},
+        {node:'result',chip:'slow',tone:'bad',cap:'The response that should take about as long as 2 queries instead takes as long as 51 sequential (or even parallel-but-still-51) ones',pay:{observedLatency:'~800ms',expectedLatency:'~40ms if batched (see the next scenario)'},ins:'This is usually first noticed as "the API got slow after we added a nested field to this query" — the fix isn\'t removing the nested field, it\'s batching the resolver, shown next.'},
+      ], result:{cls:'bad',text:'💥 N+1: one GraphQL request triggered 51 separate database queries because the nested resolver runs once per row.'} },
+
+    dataloader:{ req:'@BatchMapping customers(orders)', intro:'The fix: collect every pending customer lookup for this query into one batch, and satisfy them all with a single query instead of N individual ones.',
+      nodes:[
+        {id:'query',icon:'🧑‍💻',nl:'{ orders(first:50){ id customer{ name } } }',ns:'the exact same query as before',who:'QUERY'},
+        {id:'resolve',icon:'🧩',nl:'@BatchMapping customers(List<Order> orders)',ns:'called ONCE with all 50 orders',who:'RESOLVE'},
+        {id:'fetch',icon:'🗄️',nl:'SELECT * FROM customers WHERE id IN (...)',ns:'one query, up to 50 ids at once',who:'FETCH'},
+        {id:'cost',icon:'⚖️',nl:'1 query for orders + 1 batched query',ns:'2 total, down from 51',who:'COST'},
+        {id:'result',icon:'✅',nl:'response in ~40ms — same data, same shape',ns:'~20x fewer database round trips',who:'RESULT'},
+      ],
+      steps:[
+        {node:'query',chip:'ask',cap:'The exact same client query as the N+1 scenario — nothing about the REQUEST needed to change',pay:{query:'{ orders(first:50){ id customer{ name } } }'},ins:'This is an important property of the fix: it\'s entirely server-side. The client, the schema, and the response shape are all identical to the broken version — only the resolver implementation changes.'},
+        {node:'resolve',chip:'batch',tone:'ok',cap:'@BatchMapping changes the resolver\'s contract: instead of (Order) → Customer, it\'s (List&lt;Order&gt;) → Map&lt;Order,Customer&gt;, called exactly once',pay:{resolverCode:'@BatchMapping customers(List<Order> orders) { ... }',invocationCount:1},ins:'Spring for GraphQL collects every Order that needs a customer resolved during this execution tick, THEN calls this method once with the complete list — the same batching idea as the Node/Apollo DataLoader pattern.'},
+        {node:'fetch',chip:'IN (...)',tone:'ok',cap:'One SQL query fetches every needed customer at once using a WHERE ... IN clause',pay:{sql:'SELECT * FROM customers WHERE id IN (101,102,103,...) -- up to 50 ids',queriesIssued:1},ins:'Duplicate customer ids (two orders from the same customer) are naturally deduplicated before the query runs, so the IN clause is never larger than the number of DISTINCT customers actually needed.'},
+        {node:'cost',chip:'2 queries',tone:'ok',cap:'Total database round trips drop from 51 to exactly 2 — one for the orders, one batched query for every customer',pay:{totalQueries:2,reductionFactor:'~25x fewer round trips'},ins:'This ratio gets even better as the result set grows: 500 orders is still just 2 queries (assuming the IN clause size is within reasonable limits), where the naive version would have been 501.'},
+        {node:'result',chip:'fast',tone:'ok',cap:'The response returns in roughly the time of 2 queries instead of 51 — same data, same JSON shape, dramatically different cost',pay:{latency:'~40ms',clientVisibleChange:'none — response is byte-for-byte the same shape as before'},ins:'This is the ideal shape of a performance fix: completely invisible to callers, fully contained inside the resolver implementation, with no schema or client-side changes required at all.'},
+      ], result:{cls:'ok',text:'✅ Batching collapsed 51 database queries into 2 — same query, same response, ~20x fewer round trips.'} },
+
+    authgap:{ req:'query { user(id:"99"){ name email ssn } }', intro:'GraphQL\'s flexible field selection means "the caller is authenticated" and "the caller may see THIS field on THIS record" are different questions — a resolver that only checks the first one leaks data the second one should have blocked.',
+      nodes:[
+        {id:'query',icon:'🧑‍💻',nl:'{ user(id:"99"){ name email ssn } }',ns:'attacker, authenticated as a DIFFERENT user',who:'QUERY'},
+        {id:'resolve',icon:'🧩',nl:'User.ssn resolver executes',ns:'checks "is caller authenticated?" only',who:'RESOLVE'},
+        {id:'fetch',icon:'🗄️',nl:'SELECT ssn FROM users WHERE id=99',ns:'no record-level ownership check applied',who:'FETCH'},
+        {id:'cost',icon:'⚖️',nl:'endpoint-level auth passed; field-level auth was never checked',ns:'the actual gap being exploited',who:'COST'},
+        {id:'result',icon:'❌',nl:'ssn returned to a caller with no right to see it',ns:'A01 Broken Access Control, GraphQL-shaped',who:'RESULT'},
+      ],
+      steps:[
+        {node:'query',chip:'ask',cap:'An attacker, authenticated as their OWN account (id 47), crafts a query asking for user 99\'s SSN — a field REST would never have exposed at a guessable URL',pay:{query:'{ user(id:"99"){ name email ssn } }',callerIdentity:'user 47 (authenticated, but requesting user 99\'s data)'},ins:'GraphQL\'s introspection makes this trivially discoverable, too — the schema itself can be queried to find out that a "ssn" field exists on User at all, something a REST API\'s undocumented internal fields wouldn\'t casually reveal.'},
+        {node:'resolve',chip:'resolve',tone:'bad',cap:'The User.ssn resolver runs — its only guard is a check that SOME valid JWT was presented, not that THIS caller may see THIS field on THIS record',pay:{checkPerformed:'@PreAuthorize("isAuthenticated()")',checkMissing:'is caller.id == user.id, or does caller hold an explicit PII-read permission?'},ins:'This is precisely the gap the intro warned about: "authenticated" and "authorized for this specific field and record" are two different questions, and this resolver only ever asked the first one.'},
+        {node:'fetch',chip:'query',tone:'bad',cap:'The database dutifully returns the SSN — from its perspective, this is just a normal, well-formed query',pay:{sql:'SELECT ssn FROM users WHERE id = 99',ownershipCheckedInSql:false},ins:'The database has no idea who\'s asking or why — record-level authorization is an APPLICATION responsibility, and here, it simply wasn\'t implemented at the field-resolver layer.'},
+        {node:'cost',chip:'gap',tone:'bad',cap:'The REAL gap: an endpoint-level "must be logged in" check passed, but no code anywhere asked "is THIS caller allowed to see THIS record\'s SSN?"',pay:{authenticationCheck:'PASSED — caller has a valid JWT',authorizationCheck:'MISSING — no ownership or permission check on this specific field/record'},ins:'This is the same authentication-vs-authorization distinction the OWASP Top 10 page (A01) teaches — GraphQL just gives it a new shape, because the flexible schema lets a caller ask for ANY exposed field on ANY record id, not just the ones a REST URL structure happened to expose.'},
+        {node:'result',chip:'leak',tone:'bad',cap:'A sensitive field is returned to a caller who was never supposed to see it — a real, published class of GraphQL vulnerability',pay:{leaked:'user 99\'s SSN',exposedTo:'user 47, who has no relationship to user 99',fix:'a field-level authorization check inside the ssn resolver itself: caller.id == user.id (or an explicit PII-read grant), independent of the general "is authenticated" gate'},ins:'The fix mirrors this hub\'s RBAC page\'s IDOR fix — the check has to live at the point where the sensitive data is actually resolved, not just at a broader "is logged in" gate several layers up.'},
+      ], result:{cls:'bad',text:'💥 Field-level authorization gap: authentication passed, but nothing checked whether THIS caller could see THIS field on THIS record.'} },
+  };
+
+  let scen='overfetch', running=false, timers=[];
+  function clearT(){timers.forEach(clearTimeout);timers=[];}
+  function nodeEl(id){return document.querySelector('#'+P+'Diagram .rt-node[data-node="'+id+'"]');}
+  function nodeCenter(id){const n=nodeEl(id);return n?n.offsetTop+n.offsetHeight/2:0;}
+  function renderNodes(k){
+    let h='<div class="rt-rail"></div><div class="rt-chip" id="'+P+'Chip">→</div>';
+    SCEN[k].nodes.forEach(n=>{ h+='<div class="rt-node" data-node="'+n.id+'"><span class="ic">'+n.icon+'</span><div style="flex:1;min-width:0"><div class="nl">'+n.nl+'</div><div class="ns">'+n.ns+'</div></div><span class="who who-'+n.who+'">'+n.who+'</span></div>'; });
+    $(P+'Diagram').innerHTML=h;
+  }
+  function reset(){
+    renderNodes(scen); const s=SCEN[scen];
+    const chip=$(P+'Chip'); chip.style.transition='none'; chip.style.top=nodeCenter(s.steps[0].node)+'px'; chip.style.opacity='0'; chip.classList.remove('ok','bad'); void chip.offsetWidth; chip.style.transition='';
+    $(P+'Res').className='rt-result';
+    $(P+'Dir').textContent='▶ READY'; $(P+'Dir').className='rt-dir';
+    $(P+'Cap').textContent=s.intro;
+    $(P+'Pay').textContent='';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>— the resolver, query, and result appear here per step —';
+    $(P+'Pill').textContent=s.req;
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false;
+  }
+  function applyStep(steps,i){
+    const st=steps[i];
+    document.querySelectorAll('#'+P+'Diagram .rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
+    const n=nodeEl(st.node); n.classList.remove('vchk','vskip'); n.classList.add(st.tone==='bad'?'vskip':'vchk'); n.classList.add('cur'); if(st.tone==='bad')n.classList.add('curbad'); void n.offsetWidth; n.classList.add('rtpulse');
+    const chip=$(P+'Chip'); chip.textContent=st.chip||'→'; chip.classList.remove('ok','bad'); if(st.tone)chip.classList.add(st.tone==='bad'?'bad':'ok'); chip.style.opacity='1'; chip.style.top=nodeCenter(st.node)+'px';
+    $(P+'Dir').textContent=st.dir||('STEP '+(i+1)+' / '+steps.length); $(P+'Dir').className='rt-dir'+(st.tone==='bad'?' bad':'');
+    $(P+'Cap').textContent=st.cap;
+    $(P+'Pay').textContent=st.pay?JSON.stringify(st.pay,null,2):'';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>'+st.ins;
+  }
+  function run(){
+    if(running)return; running=true; clearT(); reset();
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=true); $(P+'Run').disabled=true;
+    $(P+'Pill').textContent='running…';
+    const s=SCEN[scen]; let i=0;
+    (function tick(){
+      if(i>=s.steps.length){ const r=$(P+'Res'); r.className='rt-result show '+(s.result.cls||'ok'); r.textContent=s.result.text; running=false; document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false; $(P+'Pill').textContent='done'; return; }
+      applyStep(s.steps,i); i++; timers.push(setTimeout(tick,2000));
+    })();
+  }
+  document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.onclick=()=>{ if(running)return; scen=b.dataset.s; document.querySelectorAll('#'+P+'Seg button').forEach(x=>x.classList.toggle('on',x===b)); reset(); });
+  $(P+'Run').onclick=run;
+  reset();
+})();
+</script>
+<script src="devhub-notebook.js"></script>
+</body>
+</html>

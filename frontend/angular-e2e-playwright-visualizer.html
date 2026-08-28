@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>E2E Testing — Playwright &amp; Cypress: What Unit Tests Can't Catch</title>
+  <style>
+    .who-SETUP{background:#60a5fa;color:#04203a}
+    .who-ACT{background:#a78bfa;color:#1a1030}
+    .who-WAIT{background:#fbbf24;color:#452b00}
+    .who-ASSERT{background:#4ade80;color:#04231a}
+    .who-CI{background:#fb923c;color:#3a1600}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:18px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
+    .cmp{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin:10px 0}
+    .cmp-col{border-radius:12px;padding:14px 16px}
+    .cmp-bad{background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.28)}
+    .cmp-good{background:rgba(74,222,128,.08);border:1px solid rgba(74,222,128,.28)}
+    .cmp-col h4{margin:0 0 8px;font-size:11.5px;font-weight:800;text-transform:uppercase;letter-spacing:.05em}
+    .cmp-bad h4{color:#fca5a5}.cmp-good h4{color:#86efac}
+    .key-insight{background:rgba(99,102,241,.07);border:1px solid rgba(99,102,241,.3);border-radius:8px;padding:14px;margin:12px 0;font-size:13px}
+    .key-insight strong{color:#a78bfa}
+    .xlink{font-size:11.5px;color:var(--blue)}
+    .axis-table{width:100%;border-collapse:collapse;margin:12px 0;font-size:12.5px}
+    .axis-table th,.axis-table td{border:1px solid var(--border);padding:8px 10px;text-align:left;vertical-align:top}
+    .axis-table th{background:var(--panel2);color:var(--accent2);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+    .axis-table td b{color:#eef4fb}
+  </style>
+  <link rel="stylesheet" href="devhub.css" />
+</head>
+<body class="track-angular">
+<div class="container">
+  <a class="back" href="app.html">&larr; Dev Hub</a>
+  <h1>E2E Testing — Playwright &amp; Cypress: What Unit Tests Can't Catch</h1>
+  <p class="sub">The top tier of the test pyramid: driving a real browser through a real user flow against a real (or realistically mocked) backend. Unit and component tests already cover this hub's <a href="angular-testing-visualizer.html">Angular Testing</a> and <a href="spring-boot-testing-visualizer.html">Spring Boot Testing</a> pages — this page is what happens one layer up, where the thing under test is the whole app wired together.</p>
+
+  <!-- ── INTRO ── -->
+  <div class="intro">
+    <div class="intro-head"><span class="ico">🎭</span> What does an E2E test actually verify, and why is it the tier everyone gets wrong first?</div>
+    <p class="intro-lead">
+      An end-to-end test opens a real browser, navigates to a real URL, and interacts with the page the exact way a user would — click a button by its visible role, type into a field, wait for a network call to resolve, assert something rendered. It's the only tier that can catch bugs living <em>between</em> the pieces unit tests mock away: a route guard that redirects wrong, a CORS header missing in prod config, a CSS change that hides the submit button behind a modal. The trade-off is cost — E2E tests are slow (seconds, not milliseconds), expensive to write, and the tier most prone to <strong>flakiness</strong>: a test that passes 98% of the time and fails the other 2% for reasons that have nothing to do with the code being wrong. Almost all flakiness traces back to one root cause: the test asserted before the browser was actually ready, because it used a fixed delay instead of waiting for a real condition.
+    </p>
+    <ul class="intro-gist">
+      <li><b>Locate by role/test-id, never by CSS class</b> — a class rename shouldn't break a test that never claimed to care about styling.</li>
+      <li><b>Auto-waiting is the whole point</b> — Playwright/Cypress re-check a condition until it's true (or times out); a hardcoded <code>sleep(2000)</code> is either wastefully slow or a flaky bug waiting to happen.</li>
+      <li><b>Page Object Model</b> keeps selectors in one place per page, so a UI refactor means editing one file, not every spec that touches that page.</li>
+      <li><b>Mock the network at the edge, not the code</b> — <code>page.route()</code>/<code>cy.intercept()</code> intercept real HTTP calls, so the app under test never knows it's not talking to a real backend.</li>
+    </ul>
+    <div class="intro-cards">
+      <div class="intro-mini">
+        <h4>Playwright vs Cypress, in one line</h4>
+        <p>Playwright drives real browser engines (Chromium/Firefox/WebKit) out-of-process via CDP-like protocols and supports multiple tabs/origins natively. Cypress runs inside the browser alongside your app (historically Chromium-family only, though WebKit/Firefox support has matured) — that in-browser position is why its API feels so synchronous, and why cross-origin/multi-tab scenarios needed workarounds for years.</p>
+      </div>
+      <div class="intro-mini">
+        <h4>Where this fits the pyramid</h4>
+        <p>The <code>spring-boot-testing-visualizer.html</code> pyramid labels its top tier "E2E / Integration Tests" — this page is what actually goes there: a handful of critical happy-path flows (login, checkout, "create X"), not exhaustive coverage. Push everything that can live lower in the pyramid down to unit/component tests, which are orders of magnitude cheaper to run and debug.</p>
+      </div>
+      <div class="intro-ciam">
+        <h4>CIAM angle</h4>
+        <p>Login is the single highest-value E2E flow in an identity-heavy app: it's the one path that genuinely can't be faithfully unit-tested (real redirect, real token issuance/storage, real guard evaluation) and the one path where a silent regression locks out every user. A minimal E2E suite that only covers "log in as a normal user" and "log in as an admin and see the admin nav" already captures most of the ROI.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── EXTREME-VIZ HERO ── -->
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="pwSeg">
+        <button class="on" data-s="locators">① Locators &amp; Page Object Model</button>
+        <button data-s="flake">② Fixed Delay → Flaky Test</button>
+        <button data-s="mock">③ Network Interception</button>
+        <button data-s="retry">④ Retry &amp; Trace Debugging</button>
+        <button data-s="ci">⑤ CI Pipeline Integration</button>
+      </span>
+      <button class="rt-run" id="pwRun">▶ Play</button>
+      <span class="rt-pill" id="pwPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="pwDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="pwDir">▶ READY</span>
+        <div class="rt-cap" id="pwCap">Pick a scenario and press ▶ Play</div>
+        <div class="rt-payload" id="pwPay"></div>
+        <div class="rt-headers" id="pwHdr"></div>
+        <div class="rt-result" id="pwRes"></div>
+      </div>
+    </div>
+    <div class="who-row">
+      <span class="who-badge who-SETUP">SETUP — arrange the page</span>
+      <span class="who-badge who-ACT">ACT — user interaction</span>
+      <span class="who-badge who-WAIT">WAIT — the flake-risk point</span>
+      <span class="who-badge who-ASSERT">ASSERT — the check</span>
+      <span class="who-badge who-CI">CI — pipeline behavior</span>
+    </div>
+  </div>
+
+  <!-- 1 -->
+  <section>
+    <h2>1. Playwright vs Cypress, side by side</h2>
+    <table class="axis-table">
+      <tr><th>Axis</th><th>Playwright</th><th>Cypress</th></tr>
+      <tr><td><b>Architecture</b></td><td>Out-of-process, drives real browser engines via a devtools-protocol-style bridge</td><td>Runs inside the browser, in the same run-loop as your app</td></tr>
+      <tr><td><b>Browsers</b></td><td>Chromium, Firefox, WebKit — one API, three engines</td><td>Chromium-family primary; Firefox/WebKit support exists but is newer</td></tr>
+      <tr><td><b>Multi-tab / multi-origin</b></td><td>Native — <code>context.newPage()</code>, cross-origin navigation just works</td><td>Historically required workarounds; has improved but is still Cypress's rougher edge</td></tr>
+      <tr><td><b>Parallelism</b></td><td>Built-in test sharding, no paid add-on required</td><td>Free parallelization requires the Cypress Cloud dashboard (paid at scale)</td></tr>
+      <tr><td><b>Debugging</b></td><td><code>--trace on</code> records a full timeline (DOM snapshots, network, console) replayable in the Trace Viewer</td><td>Time-travel debugger in the interactive Test Runner UI — arguably the friendlier live-debugging experience</td></tr>
+    </table>
+    <div class="key-insight"><strong>Neither is strictly "better"</strong> — Playwright's out-of-process model wins on true cross-browser + multi-origin coverage and free CI parallelism; Cypress's in-browser model wins on the interactive debugging feel while you're first writing a test. Both auto-wait, both intercept network calls, both support a Page Object Model — the concepts on this page transfer directly between them.</div>
+  </section>
+
+  <!-- 2 -->
+  <section>
+    <h2>2. Locate by role/test-id — Page Object Model keeps it in one place</h2>
+    <div class="cmp">
+      <div class="cmp-col cmp-bad">
+        <h4>✗ Brittle — CSS-class selector, inline in the spec</h4>
+        <pre><span class="cm">// breaks the instant a designer renames a class</span>
+<span class="kw">await</span> page.<span class="fn">click</span>(<span class="str">'.btn.btn-primary.submit-v2'</span>);
+<span class="kw">await</span> page.<span class="fn">fill</span>(<span class="str">'#email-input-field'</span>, <span class="str">'a@b.com'</span>);
+<span class="cm">// this selector says nothing about WHY it's being clicked</span></pre>
+      </div>
+      <div class="cmp-col cmp-good">
+        <h4>✓ Resilient — role/test-id, behind a Page Object</h4>
+        <pre><span class="cm">// login.page.ts — one file owns every selector for this page</span>
+<span class="kw">export class</span> <span class="type">LoginPage</span> {
+  <span class="kw">constructor</span>(<span class="kw">private</span> page: Page) {}
+  emailInput <span class="op">=</span> <span class="kw">this</span>.page.<span class="fn">getByTestId</span>(<span class="str">'login-email'</span>);
+  submitBtn  <span class="op">=</span> <span class="kw">this</span>.page.<span class="fn">getByRole</span>(<span class="str">'button'</span>, { name: <span class="str">'Sign in'</span> });
+  <span class="kw">async</span> <span class="fn">loginAs</span>(email: <span class="type">string</span>) {
+    <span class="kw">await this</span>.emailInput.<span class="fn">fill</span>(email);
+    <span class="kw">await this</span>.submitBtn.<span class="fn">click</span>();
+  }
+}</pre>
+      </div>
+    </div>
+    <div class="key-insight"><strong>A CSS class is a styling concern, not an identity contract</strong> — <code>getByTestId</code>/<code>getByRole</code> selectors survive a full redesign because they describe <em>what the element is for</em>, not how it currently looks. The Page Object Model is the same idea applied at the file level: every spec that logs in calls <code>loginPage.loginAs(email)</code>, so a login-page redesign means editing <code>login.page.ts</code> once, not every spec file that happens to log in first.</div>
+  </section>
+
+  <!-- 3 -->
+  <section>
+    <h2>3. Auto-waiting vs. fixed delays — the #1 cause of flaky tests</h2>
+    <div class="cmp">
+      <div class="cmp-col cmp-bad">
+        <h4>✗ Flaky — a fixed delay guesses how long is "enough"</h4>
+        <pre><span class="kw">await</span> page.<span class="fn">click</span>(<span class="str">'#save-btn'</span>);
+<span class="kw">await</span> page.<span class="fn">waitForTimeout</span>(<span class="str">2000</span>); <span class="cm">// hope 2s is enough</span>
+<span class="kw">const</span> toast <span class="op">=</span> <span class="kw">await</span> page.<span class="fn">textContent</span>(<span class="str">'.toast'</span>);
+<span class="cm">// fails ~2% of the time under CI load, when the API takes 2.3s</span>
+<span class="cm">// OR wastes 1.9s of real time when it resolves in 100ms</span></pre>
+      </div>
+      <div class="cmp-col cmp-good">
+        <h4>✓ Stable — assert on the condition itself</h4>
+        <pre><span class="kw">await</span> page.<span class="fn">click</span>(<span class="str">'#save-btn'</span>);
+<span class="kw">await</span> <span class="fn">expect</span>(page.<span class="fn">getByRole</span>(<span class="str">'status'</span>)).<span class="fn">toHaveText</span>(<span class="str">'Saved!'</span>);
+<span class="cm">// Playwright retries this assertion internally until it passes</span>
+<span class="cm">// or the timeout elapses — takes exactly as long as it needs to</span></pre>
+      </div>
+    </div>
+    <div class="key-insight"><strong><code>waitForTimeout</code>/<code>cy.wait(2000)</code> is a code smell, not a tool</strong> — it's either too short (flaky under real-world CI load, where a shared runner is slower than your laptop) or too long (a fast test suite becomes a slow one, multiplied by every spec that does it). <code>expect(...).toHaveText(...)</code> and <code>cy.get(...).should(...)</code> both poll-and-retry against the real DOM until the assertion is true or a timeout is hit — they're the auto-waiting mechanism working <em>for</em> you instead of you guessing against it.</div>
+  </section>
+
+  <!-- 4 -->
+  <section>
+    <h2>4. One-sentence recap</h2>
+    <div class="card card-accent">
+      <p style="font-size:14px">🎭 E2E tests are the only tier that verifies the whole app wired together the way a user actually experiences it — worth the cost <strong>only</strong> for a handful of critical flows, kept fast and stable by locating elements through <strong>role/test-id behind a Page Object</strong>, asserting on <strong>real conditions instead of fixed delays</strong>, and mocking the network at the HTTP boundary instead of the application code.</p>
+    </div>
+    <p class="xlink" style="margin-top:8px">↪ See also: <a href="angular-testing-visualizer.html">Angular Testing (TestBed &amp; Pyramid)</a> for the tiers below this one, <a href="angular-vitest-visualizer.html">Vitest &amp; .spec.ts</a> for the modern unit runner, and <a href="devops-cicd-pipeline-visualizer.html">CI/CD Pipeline</a> for where this suite runs in practice.</p>
+  </section>
+</div>
+
+<!-- Code Walkthrough: a Page Object Model login spec -->
+<h2 id="cw-e2e" style="margin:0 0 4px;padding:0 1.5rem;max-width:clamp(40rem,94vw,90rem);margin-left:auto;margin-right:auto">👣 Step through it, line by line</h2>
+<div id="cw-e2e-mount"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-e2e-mount', {
+  title: 'login.spec.ts — a full Page-Object-backed Playwright test',
+  intervalMs: 1700,
+  code: [
+    'import { test, expect } from "@playwright/test";',
+    'import { LoginPage } from "./login.page";',
+    '',
+    'test("admin sees the admin nav after logging in", async ({ page }) => {',
+    '  await page.route("**/api/auth/login", route =>',
+    '    route.fulfill({ json: { token: "fake-jwt", role: "ADMIN" } })',
+    '  );',
+    '',
+    '  const loginPage = new LoginPage(page);',
+    '  await page.goto("/login");',
+    '  await loginPage.loginAs("admin@app.com");',
+    '',
+    '  await expect(page.getByRole("link", { name: "Admin" })).toBeVisible();',
+    '});',
+  ],
+  steps: [
+    { line: 1, note: 'Playwright\'s test runner is imported directly — no separate assertion library needed, unlike the Jasmine/Jest split Angular unit tests use.', vars: { imports: '{ test, expect }' } },
+    { line: 2, note: 'The Page Object from the previous section is imported here, not redefined — this spec never touches a raw selector.', vars: { pageObject: 'LoginPage' } },
+    { line: 5, note: 'page.route intercepts the login network call BEFORE it reaches a real server and fulfills it with a canned response — the test never depends on a real backend, a real database, or a real admin account existing.', vars: { intercepted: 'POST **/api/auth/login', mockedResponse: '{ token: "fake-jwt", role: "ADMIN" }' }, tone: 'ok', callout: 'Mocking at the network boundary (not the app code) means the browser, the app\'s HTTP client, and every interceptor in between all run for real — only the actual server response is faked.' },
+    { line: 9, note: 'The Page Object is instantiated once, wrapping this test\'s page instance.', vars: {} },
+    { line: 11, note: 'loginAs() encapsulates fill-email + click-submit behind one call — if the login form\'s markup changes, this line never needs to change.', vars: { calledWith: 'admin@app.com' } },
+    { line: 13, note: 'expect(...).toBeVisible() auto-waits and retries — Playwright polls the DOM until the Admin nav link appears (or the default timeout elapses), so no explicit wait was ever needed for the mocked response to "arrive" and the app to re-render.', vars: { assertion: 'Admin nav link is visible', autoWaited: true }, tone: 'ok' },
+  ]
+});
+</script>
+
+<script>
+(function(){
+  const P='pw', $=id=>document.getElementById(id);
+  const SCEN={
+    locators:{ req:'getByTestId / getByRole', intro:'Locator strategy determines whether a UI refactor breaks your test suite or sails right past it — role/test-id selectors describe intent, CSS selectors describe styling.',
+      nodes:[
+        {id:'setup',icon:'🧱',nl:'page.goto("/login")',ns:'navigate to the page under test',who:'SETUP'},
+        {id:'act',icon:'👆',nl:'loginPage.loginAs(email)',ns:'Page Object method, not raw selectors',who:'ACT'},
+        {id:'wait',icon:'⏳',nl:'getByRole auto-waits for the button',ns:'element must be visible + enabled',who:'WAIT'},
+        {id:'assert',icon:'✅',nl:'expect(nav).toBeVisible()',ns:'asserts on the outcome, not internals',who:'ASSERT'},
+        {id:'ci',icon:'🏗️',nl:'designer renames .btn-primary → .cta',ns:'test suite: unaffected',who:'CI'},
+      ],
+      steps:[
+        {node:'setup',chip:'goto',cap:'Test navigates to the login page — a real browser, a real route',pay:{url:'/login',browser:'chromium (headless in CI)'},ins:'This is a real navigation in a real browser instance — not a simulated DOM like a component test uses.'},
+        {node:'act',chip:'call',tone:'ok',cap:'The spec calls loginPage.loginAs(email) — a Page Object method, never a raw selector',pay:{method:'LoginPage.loginAs()',internallyUses:'getByTestId("login-email"), getByRole("button", {name:"Sign in"})'},ins:'Every spec that needs to log in calls this same one method — the selectors themselves live in exactly one file.'},
+        {node:'wait',chip:'auto-wait',tone:'ok',cap:'getByRole resolves only once the button is attached, visible, AND enabled',pay:{waitsFor:['attached to DOM','visible','not disabled','stable (not animating)'],noExplicitWaitWritten:true},ins:'This is Playwright\'s actionability check — four conditions verified automatically before the click fires, with zero waitForTimeout anywhere in this spec.'},
+        {node:'assert',chip:'assert',tone:'ok',cap:'Assertion targets the OUTCOME (admin nav visible), not an implementation detail',pay:{assertion:'expect(page.getByRole("link",{name:"Admin"})).toBeVisible()',notAsserted:'internal auth store state, JWT contents, etc — those belong in lower-tier tests'},ins:'A good E2E assertion checks what the USER would see, matching the "test behaviour, not implementation" rule from the Angular Testing page.'},
+        {node:'ci',chip:'refactor',tone:'ok',cap:'A designer renames every CSS class on this page for a redesign — the test suite doesn\'t even need to run to know it\'s fine',pay:{cssClassChanged:'.btn-primary → .cta-button',testDependsOnCss:false},ins:'This is the entire payoff of role/test-id locators: a purely visual refactor is invisible to a test suite that never referenced visual attributes in the first place.'},
+      ], result:{cls:'ok',text:'✅ Role/test-id locators behind a Page Object describe WHAT an element is for — a pure styling refactor never touches the test suite.'} },
+
+    flake:{ req:'waitForTimeout(2000)', intro:'The classic flaky test: a fixed delay that\'s sometimes too short (fails under CI load) and always either wasteful or risky — never actually correct.',
+      nodes:[
+        {id:'setup',icon:'🧱',nl:'page.click("#save-btn")',ns:'triggers an async save request',who:'SETUP'},
+        {id:'act',icon:'👆',nl:'await page.waitForTimeout(2000)',ns:'a guess, not a condition',who:'ACT'},
+        {id:'wait',icon:'⏳',nl:'API takes 2.3s under CI load today',ns:'shared runner, slower than local',who:'WAIT'},
+        {id:'assert',icon:'❌',nl:'toast text read too early — empty',ns:'assertion fails, code was never wrong',who:'ASSERT'},
+        {id:'ci',icon:'🏗️',nl:'test reruns, passes locally',ns:'"flaky" — the team starts ignoring it',who:'CI'},
+      ],
+      steps:[
+        {node:'setup',chip:'click',cap:'User clicks Save — this kicks off an async network request the test needs to wait for',pay:{action:'click #save-btn',triggers:'POST /api/orders/save'},ins:'Nothing wrong yet — clicking Save is exactly what a real user does next.'},
+        {node:'act',chip:'guess',tone:'bad',cap:'The spec waits a FIXED 2 seconds and hopes that\'s enough time for the save to complete',pay:{code:'await page.waitForTimeout(2000)',reasoning:'"the save usually takes about a second, so 2s should be safe"'},ins:'This line has no idea whether the save actually finished — it just stops the test for a fixed duration and hopes.'},
+        {node:'wait',chip:'slow day',tone:'bad',cap:'Today, the shared CI runner is under load and the save call actually takes 2.3 seconds',pay:{localDuration:'~900ms',ciDuration:'~2300ms',fixedWait:'2000ms — not enough today'},ins:'This is precisely why fixed waits are flaky rather than simply wrong: they pass most of the time (whenever real timing happens to fit inside the guess) and fail unpredictably whenever it doesn\'t.'},
+        {node:'assert',chip:'fail',tone:'bad',cap:'The test reads the toast text 300ms too early — it\'s still empty, and the assertion fails',pay:{expected:'"Saved!"',actual:'""',rootCause:'test timing, not application bug'},ins:'This is the most expensive kind of test failure: someone now has to investigate a "bug" that isn\'t one, burning real debugging time on the test itself.'},
+        {node:'ci',chip:'rerun',tone:'bad',cap:'A teammate reruns the test locally, it passes (their machine is faster), and the failure gets written off as "flaky, ignore it"',pay:{outcome:'the test is now distrusted',realCost:'the NEXT genuine regression on this page gets ignored too, because "that test is flaky"'},ins:'This is the actual damage of flaky tests: not the one failure, but the erosion of trust that makes the team stop believing red means broken.'},
+      ], result:{cls:'bad',text:'💥 A fixed delay never asserts on a real condition — it always either wastes time or risks exactly this failure.'} },
+
+    mock:{ req:'page.route("**/api/orders")', intro:'Network interception lets a test control the backend\'s exact response — including error states that are hard or slow to reproduce against a real server.',
+      nodes:[
+        {id:'setup',icon:'🧱',nl:'page.route intercepts before goto()',ns:'registered before navigation',who:'SETUP'},
+        {id:'act',icon:'👆',nl:'app calls fetch("/api/orders")',ns:'app has no idea it\'s mocked',who:'ACT'},
+        {id:'wait',icon:'⏳',nl:'route.fulfill({status:500, json:{...}})',ns:'a canned error response',who:'WAIT'},
+        {id:'assert',icon:'✅',nl:'expect(errorBanner).toBeVisible()',ns:'verifies the error UI, not the network',who:'ASSERT'},
+        {id:'ci',icon:'🏗️',nl:'no real backend needed to run this test',ns:'fast, deterministic, runs anywhere',who:'CI'},
+      ],
+      steps:[
+        {node:'setup',chip:'route',cap:'Before navigating, the test registers an interceptor for a specific API path',pay:{code:'await page.route("**/api/orders", route => {...})',registeredBefore:'page.goto(...)'},ins:'Registering the route BEFORE navigation matters — any request made during page load also needs to hit this interceptor to be mocked correctly.'},
+        {node:'act',chip:'fetch',tone:'ok',cap:'The application code calls its normal HTTP client — completely unaware anything is mocked',pay:{appCode:'this.http.get("/api/orders")',awareOfMocking:false},ins:'This is the key property of edge-level mocking: zero test-only branches or "if (isTestMode)" code paths inside the actual application.'},
+        {node:'wait',chip:'fulfill',tone:'ok',cap:'The interceptor returns a canned 500 error response instead of letting the request reach a real server',pay:{status:500,json:{error:'INVENTORY_UNAVAILABLE'},realServerInvolved:false},ins:'Reproducing a real 500 from a real backend reliably is often slow or outright impractical (race conditions, specific DB states) — mocking it takes one line and is 100% deterministic.'},
+        {node:'assert',chip:'assert',tone:'ok',cap:'The test verifies the app\'s error-handling UI actually appears',pay:{assertion:'expect(page.getByText("Inventory unavailable")).toBeVisible()',verifies:'the ERROR PATH, which is otherwise nearly impossible to trigger on demand'},ins:'Error states are exactly the scenarios most likely to go untested manually, because they\'re inconvenient to trigger by hand — interception makes them trivial to cover.'},
+        {node:'ci',chip:'isolated',tone:'ok',cap:'This entire test runs with zero dependency on a real backend, database, or network',pay:{requiresRealBackend:false,runsOffline:true,deterministic:true},ins:'This is also why intercepted tests are fast and safe to run in CI in parallel — there\'s no shared external state for concurrent test runs to collide on.'},
+      ], result:{cls:'ok',text:'✅ Interception mocks the network boundary, not the app — real code runs against a fake, fully controllable server response.'} },
+
+    retry:{ req:'--trace on, retries: 2', intro:'When a test fails intermittently despite good locators and no fixed waits, the trace viewer — not guesswork — is how you find the real cause.',
+      nodes:[
+        {id:'setup',icon:'🧱',nl:'CI config: retries: 2, trace: "on-first-retry"',ns:'a real safety net, not a fix',who:'SETUP'},
+        {id:'act',icon:'👆',nl:'test fails once in 200 CI runs',ns:'too rare to reproduce by eye',who:'ACT'},
+        {id:'wait',icon:'⏳',nl:'trace captured: DOM snapshots + network + console',ns:'a full timeline of the failing run',who:'WAIT'},
+        {id:'assert',icon:'🔍',nl:'trace viewer shows a toast from a PRIOR test still fading out',ns:'test isolation bug, not app bug',who:'ASSERT'},
+        {id:'ci',icon:'🏗️',nl:'fix: reset app state between tests',ns:'root cause addressed, not masked',who:'CI'},
+      ],
+      steps:[
+        {node:'setup',chip:'config',cap:'CI is configured to retry a failed test up to twice, capturing a trace only when a retry happens',pay:{retries:2,trace:'on-first-retry',reasoning:'a real network blip or CI hiccup shouldn\'t fail the whole build'},ins:'Retries are a safety net for genuine environmental flakiness — NOT a substitute for fixing a test that\'s wrong. The trace-on-retry setting means you only pay the recording cost when something actually needs investigating.'},
+        {node:'act',chip:'rare fail',tone:'bad',cap:'The test fails once in roughly 200 CI runs — rare enough that reproducing it by simply re-running is impractical',pay:{failureRate:'~0.5%',reproducibleLocally:false},ins:'This failure rate is exactly the profile of a real, subtle bug — common enough to eventually break a release, rare enough that staring at the code won\'t find it.'},
+        {node:'wait',chip:'trace',tone:'ok',cap:'On the retry, Playwright records a full trace: DOM snapshots at each step, every network request, console output, screenshots',pay:{captured:['DOM snapshots','network log','console log','screenshot per action'],replayableIn:'Playwright Trace Viewer'},ins:'This is the same category of tool as a heap/thread dump on the backend side — a complete record of what actually happened, captured once, instead of trying to catch a rare event live.'},
+        {node:'assert',chip:'root cause',tone:'ok',cap:'Replaying the trace shows a success toast from the PREVIOUS test still fading out, overlapping the button this test needed to click',pay:{finding:'previous test\'s toast intercepted the click target for ~150ms',realCause:'tests don\'t reset shared app state between runs',notTheCause:'the application code itself'},ins:'This is a common real root cause behind "unexplainable" E2E flakiness: test isolation, not application correctness — each test needs to start from a clean, known state.'},
+        {node:'ci',chip:'fix',tone:'ok',cap:'The actual fix resets app state (or reloads the page) between tests, instead of just accepting the retry as "good enough"',pay:{fix:'beforeEach(() => page.goto("/", {waitUntil:"networkidle"}))',outcome:'failure rate drops to 0 across the next 2,000 CI runs'},ins:'Finding the trace evidence turns "this test is flaky, just let it retry" into an actual fix — the difference between suppressing a symptom and closing the ticket for real.'},
+      ], result:{cls:'ok',text:'✅ Retries buy time to investigate — the trace viewer is what actually finds the root cause instead of just hiding it.'} },
+
+    ci:{ req:'CI: headless, sharded, artifacts on fail', intro:'Running E2E tests in CI is a different environment than a developer\'s laptop — headless, parallel, and disposable, with artifacts as the only evidence when something breaks.',
+      nodes:[
+        {id:'setup',icon:'🧱',nl:'pipeline stage: npx playwright test',ns:'runs headless, no visible browser',who:'SETUP'},
+        {id:'act',icon:'👆',nl:'--shard=2/4 splits the suite 4 ways',ns:'parallel runners, faster wall-clock time',who:'ACT'},
+        {id:'wait',icon:'⏳',nl:'app + DB spun up as CI services first',ns:'a real (ephemeral) backend, not a mock',who:'WAIT'},
+        {id:'assert',icon:'✅',nl:'suite exits 0 → merge gate passes',ns:'or 1 → PR blocked from merging',who:'ASSERT'},
+        {id:'ci',icon:'🏗️',nl:'on failure: screenshot + trace uploaded',ns:'as build artifacts, downloadable from the run',who:'CI'},
+      ],
+      steps:[
+        {node:'setup',chip:'headless',cap:'The pipeline runs the suite headless — no visible browser window, just the automation',pay:{command:'npx playwright test --project=chromium',mode:'headless',reasoning:'CI runners have no display and rendering a real window would be pure overhead'},ins:'Headless is functionally identical to headed for almost all purposes — same rendering engine, same DOM, same network behavior — just without drawing pixels to a screen nobody\'s watching.'},
+        {node:'act',chip:'shard',tone:'ok',cap:'The full suite is split across 4 parallel CI runners using sharding, cutting wall-clock time roughly 4x',pay:{totalTests:120,shards:4,perShard:'~30 tests',wallClockSavings:'~75%'},ins:'This is one of Playwright\'s built-in, free advantages mentioned in the comparison table — no paid dashboard required to parallelize a suite across CI workers.'},
+        {node:'wait',chip:'services',tone:'ok',cap:'Before tests run, CI spins up the actual app and a real (ephemeral, seeded) database as pipeline services',pay:{services:['spring-boot app container','postgres container (fresh, seeded)'],lifetime:'this pipeline run only, destroyed after'},ins:'This is a REAL backend, not a mock — E2E in CI typically hits real HTTP endpoints against a throwaway database, unlike the network-interception scenario, which is for one-off targeted tests.'},
+        {node:'assert',chip:'gate',tone:'ok',cap:'The suite\'s exit code becomes a merge gate — 0 lets the PR merge, non-zero blocks it',pay:{exitCode:'0 = pass, 1 = fail',gates:'PR merge into main',bypassable:'only with explicit override, logged'},ins:'This is the actual payoff of writing E2E tests at all: a broken critical flow gets caught BEFORE it reaches production, not after a user reports it.'},
+        {node:'ci',chip:'artifact',tone:'ok',cap:'On any failure, a screenshot AND a full trace are uploaded as downloadable build artifacts',pay:{onFailure:['screenshot at point of failure','full trace.zip (replayable)','console + network logs'],whoUsesThis:'whoever investigates the failed PR — no need to reproduce locally first'},ins:'This closes the loop with the retry/trace scenario: the evidence needed to debug a CI-only failure is captured automatically, every time, without anyone needing to remember to turn tracing on.'},
+      ], result:{cls:'ok',text:'✅ CI E2E runs headless and sharded against a real ephemeral backend — failures leave a trace/screenshot behind, not just a red X.'} },
+  };
+
+  let scen='locators', running=false, timers=[];
+  function clearT(){timers.forEach(clearTimeout);timers=[];}
+  function nodeEl(id){return document.querySelector('#'+P+'Diagram .rt-node[data-node="'+id+'"]');}
+  function nodeCenter(id){const n=nodeEl(id);return n?n.offsetTop+n.offsetHeight/2:0;}
+  function renderNodes(k){
+    let h='<div class="rt-rail"></div><div class="rt-chip" id="'+P+'Chip">→</div>';
+    SCEN[k].nodes.forEach(n=>{ h+='<div class="rt-node" data-node="'+n.id+'"><span class="ic">'+n.icon+'</span><div style="flex:1;min-width:0"><div class="nl">'+n.nl+'</div><div class="ns">'+n.ns+'</div></div><span class="who who-'+n.who+'">'+n.who+'</span></div>'; });
+    $(P+'Diagram').innerHTML=h;
+  }
+  function reset(){
+    renderNodes(scen); const s=SCEN[scen];
+    const chip=$(P+'Chip'); chip.style.transition='none'; chip.style.top=nodeCenter(s.steps[0].node)+'px'; chip.style.opacity='0'; chip.classList.remove('ok','bad'); void chip.offsetWidth; chip.style.transition='';
+    $(P+'Res').className='rt-result';
+    $(P+'Dir').textContent='▶ READY'; $(P+'Dir').className='rt-dir';
+    $(P+'Cap').textContent=s.intro;
+    $(P+'Pay').textContent='';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>— the setup, action, and outcome appear here per step —';
+    $(P+'Pill').textContent=s.req;
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false;
+  }
+  function applyStep(steps,i){
+    const st=steps[i];
+    document.querySelectorAll('#'+P+'Diagram .rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
+    const n=nodeEl(st.node); n.classList.remove('vchk','vskip'); n.classList.add(st.tone==='bad'?'vskip':'vchk'); n.classList.add('cur'); if(st.tone==='bad')n.classList.add('curbad'); void n.offsetWidth; n.classList.add('rtpulse');
+    const chip=$(P+'Chip'); chip.textContent=st.chip||'→'; chip.classList.remove('ok','bad'); if(st.tone)chip.classList.add(st.tone==='bad'?'bad':'ok'); chip.style.opacity='1'; chip.style.top=nodeCenter(st.node)+'px';
+    $(P+'Dir').textContent=st.dir||('STEP '+(i+1)+' / '+steps.length); $(P+'Dir').className='rt-dir'+(st.tone==='bad'?' bad':'');
+    $(P+'Cap').textContent=st.cap;
+    $(P+'Pay').textContent=st.pay?JSON.stringify(st.pay,null,2):'';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>'+st.ins;
+  }
+  function run(){
+    if(running)return; running=true; clearT(); reset();
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=true); $(P+'Run').disabled=true;
+    $(P+'Pill').textContent='running…';
+    const s=SCEN[scen]; let i=0;
+    (function tick(){
+      if(i>=s.steps.length){ const r=$(P+'Res'); r.className='rt-result show '+(s.result.cls||'ok'); r.textContent=s.result.text; running=false; document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false; $(P+'Pill').textContent='done'; return; }
+      applyStep(s.steps,i); i++; timers.push(setTimeout(tick,2000));
+    })();
+  }
+  document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.onclick=()=>{ if(running)return; scen=b.dataset.s; document.querySelectorAll('#'+P+'Seg button').forEach(x=>x.classList.toggle('on',x===b)); reset(); });
+  $(P+'Run').onclick=run;
+  reset();
+})();
+</script>
+<script src="devhub-notebook.js"></script>
+</body>
+</html>

@@ -1,11 +1,11 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 454 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 461 pages.** Pick a *path* below and follow it.
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **454 browser visualizers** across **29 tracks** (grouped into
+DevHub is a learning hub: **461 browser visualizers** across **29 tracks** (grouped into
 categories in the sidebar — Languages & Concepts, Frontend, Backend & APIs, DevOps/Cloud & Data, Practice & Prep; several tracks also have a 🍳 **Common Recipes** section of practical how-tos — API→form, batch upload, password complexity), plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
@@ -339,7 +339,10 @@ Algorithms.
 
 ---
 
-*This guide is updated as new tracks and deep-dives land. **Newest pass — the Personal Notebook (2026-08-28):**
+*This guide is updated as new tracks and deep-dives land. **Newest pass — sitewide depth-audit gaps closed (2026-08-28):**
+Four more gaps from ROADMAP.md's sitewide depth audit are closed, all with the full scenario chip-walk + live inspector treatment: [E2E Testing — Playwright & Cypress](../frontend/angular-e2e-playwright-visualizer.html) (Page Object Model, brittle selectors vs auto-waiting, trace-viewer debugging, CI sharding — registered under Angular's Testing section), [Redis](../frontend/nosql-redis-visualizer.html) (data structures, cache-aside with `RedisTemplate`, TTL/eviction, atomic `INCR` rate-limiting, pub/sub — new NoSQL section under the SQL track), [Document & Wide-Column Stores — MongoDB & DynamoDB](../frontend/nosql-document-wide-column-visualizer.html) (embedding vs referencing, partition-key hot-spotting, eventual vs strong consistency, GSIs), and [GraphQL](../frontend/spring-boot-graphql-visualizer.html) (over/under-fetching solved by client-specified shape, the N+1 resolver trap fixed with Spring's `@BatchMapping`, and a field-level authorization gap as the CIAM security angle — registered under Spring Boot's APIs & Communication section). Also fixed a real bug found while resuming: two literal `</script>` strings inside a JS payload in `appsec-injection-xss-visualizer.html` were prematurely closing the page's real `<script>` tag and breaking its entire demo — escaped to `<\/script>`.
+
+**Previous pass — the Personal Notebook (2026-08-28):**
 Every content page now has a "📖 Notebook" quick-add on each `<h2>` section (see
 [`frontend/devhub-notebook.js`](../frontend/devhub-notebook.js)), a topbar 📓 shortcut
 in `app.html`, and a dedicated [`My Notebook`](../frontend/notebook.html) page with
@@ -564,6 +567,25 @@ The **🔐 Identity &amp; Auth** track gained an Authorization Patterns section:
 [Optional](../frontend/java-optional-visualizer.html) (pipeline short-circuit when Optional becomes empty),
 [Strings](../frontend/java-strings-visualizer.html) (naive `+=` = O(n²) allocations; StringBuilder = single buffer O(n)),
 [File I/O & NIO](../frontend/java-io-nio-visualizer.html) (Files.readString auto-close vs try-with-resources vs descriptor leak).
+
+**Core full-stack foundation pass (2026-08-28)** — the beginner-facing bedrock pages of the
+🛠️ Dev Tools track now carry the same animated chip-walk + live inspector, not just the advanced
+companion pages:
+[Polymorphism](../frontend/polymorphism-visualizer.html) (5 scenarios: `Shape[]` dynamic dispatch,
+the same call site resolving to a new subtype under Open/Closed, compile-time overload resolution
+contrasted against runtime dispatch, and two classic interview traps — fields are NOT polymorphic,
+and calling an overridable method from a superclass constructor before subclass fields init),
+[HTTP & REST](../frontend/http-rest-visualizer.html) (5 scenarios walk a request through
+Client → Network → Security Filter Chain → Controller → Response to physically show WHERE 401 vs
+403 diverge — 401 rejected at the filter before the controller ever runs, 403 denied after
+authentication passes — plus a 404 business-logic case and a browser-side CORS preflight block),
+[SQL](../frontend/sql-visualizer.html) (5 scenarios walk a query through
+Client → Connection Pool → Query Planner → Storage Engine → Result: an indexed B-tree lookup vs. an
+unindexed sequential scan, a 3-statement transaction COMMIT vs. a foreign-key-violation ROLLBACK,
+and a SQL-injection payload neutralized by a bound `PreparedStatement` parameter).
+Back links across the five untouched-but-verified OOP pages (Encapsulation, Inheritance,
+Abstraction, SOLID, Exceptions) were also fixed from the legacy `index.html` to `app.html`.
+
 **🔷 TypeScript deep companions:** [Narrowing/CFA deep](../frontend/typescript-narrowing-cfa-deep-visualizer.html) (flow graph: null check prunes type below the guard),
 [Generic Inference deep](../frontend/typescript-generic-inference-deep-visualizer.html) (candidate collection → union on conflict → contextual flow inward),
 [Classes internals deep](../frontend/typescript-classes-internals-deep-visualizer.html) (`private` erased at runtime — bypass with `as any`; `#` is WeakMap, blocked even with cast),
