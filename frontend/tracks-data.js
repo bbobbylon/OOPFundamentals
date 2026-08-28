@@ -136,6 +136,7 @@ window.DEVHUB_TRACKS = [
         { title: 'WebSocket',               file: 'spring-boot-websocket-visualizer.html',       level: 'advanced' },
         { title: 'CORS & Preflight',        file: 'spring-boot-cors-deep-visualizer.html',       level: 'advanced' },
         { title: 'GraphQL',                 file: 'spring-boot-graphql-visualizer.html',         level: 'advanced' },
+        { title: 'gRPC & Protocol Buffers', file: 'spring-boot-grpc-visualizer.html',            level: 'advanced' },
       ]},
       { label: 'Security & Identity', pages: [
         { title: 'Method Security (@PreAuthorize)', file: 'spring-boot-method-security-deep-visualizer.html', level: 'advanced' },
@@ -711,6 +712,7 @@ window.DEVHUB_TRACKS = [
       { label: 'Putting It Together', pages: [
         { title: 'Full-Stack Web Stacks Compared', file: 'web-stacks-visualizer.html', level: 'intermediate' },
         { title: 'Full-Stack Round-Trip (deep)', file: 'fullstack-request-roundtrip-deep-visualizer.html', level: 'advanced' },
+        { title: 'From git push to Production (capstone)', file: 'production-deployment-visualizer.html', level: 'intermediate' },
       ]},
     ]
   },
@@ -748,6 +750,7 @@ window.DEVHUB_TRACKS = [
     sections: [
       { label: 'Delivery', pages: [
         { title: 'CI/CD Pipelines (GitHub Actions)', file: 'devops-cicd-pipeline-visualizer.html',           level: 'beginner' },
+        { title: 'Deployment Strategies (Blue-Green, Canary, Flags, GitOps)', file: 'devops-deployment-strategies-visualizer.html', level: 'intermediate' },
       ]},
       { label: 'Infrastructure as Code', pages: [
         { title: 'Terraform — plan / apply / state',  file: 'devops-iac-terraform-visualizer.html',           level: 'intermediate' },

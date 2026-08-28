@@ -1,11 +1,11 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 461 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 464 pages.** Pick a *path* below and follow it.
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **461 browser visualizers** across **29 tracks** (grouped into
+DevHub is a learning hub: **464 browser visualizers** across **29 tracks** (grouped into
 categories in the sidebar — Languages & Concepts, Frontend, Backend & APIs, DevOps/Cloud & Data, Practice & Prep; several tracks also have a 🍳 **Common Recipes** section of practical how-tos — API→form, batch upload, password complexity), plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
@@ -339,7 +339,10 @@ Algorithms.
 
 ---
 
-*This guide is updated as new tracks and deep-dives land. **Newest pass — sitewide depth-audit gaps closed (2026-08-28):**
+*This guide is updated as new tracks and deep-dives land. **Newest pass — ROADMAP's remaining gaps closed (2026-08-28):**
+The last three near-term gaps from ROADMAP.md's sitewide depth audit are closed: [Deployment Strategies](../frontend/devops-deployment-strategies-visualizer.html) (blue-green, canary with an automated metrics-gated abort, feature flags, and GitOps — contrasted against the rolling-deployment baseline already covered on the Kubernetes/ECS pages; registered under DevOps & CI/CD's Delivery section), [From git push to Production](../frontend/production-deployment-visualizer.html) (a capstone walking a Spring Boot API to Kubernetes, an Angular SPA to a CDN, a function to Lambda, and a monolith to a PaaS, ending on an incident-rollback scenario — registered under Full-Stack Stacks' Putting It Together section), and [gRPC & Protocol Buffers (Spring)](../frontend/spring-boot-grpc-visualizer.html) (unary/server-stream/client-stream/bidi-stream RPC shapes plus a metadata-based JWT auth interceptor, contrasted against REST and GraphQL — registered under Spring Boot's APIs & Communication section, cross-linked from the existing Go gRPC page). Only GCP coverage remains, explicitly deferred per Bobby's own stated phasing.
+
+**Previous pass — sitewide depth-audit gaps closed (2026-08-28):**
 Four more gaps from ROADMAP.md's sitewide depth audit are closed, all with the full scenario chip-walk + live inspector treatment: [E2E Testing — Playwright & Cypress](../frontend/angular-e2e-playwright-visualizer.html) (Page Object Model, brittle selectors vs auto-waiting, trace-viewer debugging, CI sharding — registered under Angular's Testing section), [Redis](../frontend/nosql-redis-visualizer.html) (data structures, cache-aside with `RedisTemplate`, TTL/eviction, atomic `INCR` rate-limiting, pub/sub — new NoSQL section under the SQL track), [Document & Wide-Column Stores — MongoDB & DynamoDB](../frontend/nosql-document-wide-column-visualizer.html) (embedding vs referencing, partition-key hot-spotting, eventual vs strong consistency, GSIs), and [GraphQL](../frontend/spring-boot-graphql-visualizer.html) (over/under-fetching solved by client-specified shape, the N+1 resolver trap fixed with Spring's `@BatchMapping`, and a field-level authorization gap as the CIAM security angle — registered under Spring Boot's APIs & Communication section). Also fixed a real bug found while resuming: two literal `</script>` strings inside a JS payload in `appsec-injection-xss-visualizer.html` were prematurely closing the page's real `<script>` tag and breaking its entire demo — escaped to `<\/script>`.
 
 **Previous pass — the Personal Notebook (2026-08-28):**

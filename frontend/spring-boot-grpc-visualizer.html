@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>gRPC & Protocol Buffers — Spring's Binary, Contract-First RPC</title>
+  <style>
+    .who-CLIENT{background:#60a5fa;color:#04203a}
+    .who-WIRE{background:#fbbf24;color:#452b00}
+    .who-SERVICE{background:#a78bfa;color:#1a1030}
+    .who-STREAM{background:#22d3ee;color:#062a30}
+    .who-RESULT{background:#4ade80;color:#04231a}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:18px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
+    .cmp{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin:10px 0}
+    .cmp-col{border-radius:12px;padding:14px 16px}
+    .cmp-bad{background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.28)}
+    .cmp-good{background:rgba(74,222,128,.08);border:1px solid rgba(74,222,128,.28)}
+    .cmp-col h4{margin:0 0 8px;font-size:11.5px;font-weight:800;text-transform:uppercase;letter-spacing:.05em}
+    .cmp-bad h4{color:#fca5a5}.cmp-good h4{color:#86efac}
+    .key-insight{background:rgba(99,102,241,.07);border:1px solid rgba(99,102,241,.3);border-radius:8px;padding:14px;margin:12px 0;font-size:13px}
+    .key-insight strong{color:#a78bfa}
+    .xlink{font-size:11.5px;color:var(--blue)}
+  </style>
+  <link rel="stylesheet" href="devhub.css" />
+</head>
+<body class="track-spring">
+<div class="container">
+  <a class="back" href="app.html">&larr; Dev Hub</a>
+  <h1>gRPC & Protocol Buffers — Spring's Binary, Contract-First RPC</h1>
+  <p class="sub">REST (<a href="spring-boot-rest-api-visualizer.html">REST API</a>) sends JSON over HTTP/1.1 and GraphQL (<a href="spring-boot-graphql-visualizer.html">GraphQL</a>) lets the client shape a JSON response — both are text-based and both assume a request gets exactly one response. gRPC is a third option: a binary wire format, a strongly-typed contract compiled into real code, and — uniquely among the three — native support for a server or client (or both) sending a <em>stream</em> of messages instead of just one.</p>
+
+  <!-- ── INTRO ── -->
+  <div class="intro">
+    <div class="intro-head"><span class="ico">📡</span> What problem does gRPC solve that REST and GraphQL don't?</div>
+    <p class="intro-lead">
+      REST and GraphQL both serialize every message as JSON text — human-readable, but verbose (field names repeated in every payload) and slow to parse at scale. gRPC compiles a <code>.proto</code> file — a language-neutral <strong>Interface Definition Language (IDL)</strong> describing every message and service method — into real client and server code in whatever language you're using, including Java. Messages are serialized as <strong>Protocol Buffers</strong>: a compact binary format where each field is a number, not a repeated string key, making payloads far smaller and faster to parse than the equivalent JSON. And because gRPC runs on <strong>HTTP/2</strong> instead of HTTP/1.1, a single TCP connection can multiplex many concurrent request/response exchanges — including <em>streams</em>, where a client or server keeps sending messages over the same call instead of just one round trip. That combination — a strict compiled contract, a compact binary wire format, and native streaming — makes gRPC the default choice for internal, polyglot, service-to-service communication (microservice A in Java calling microservice B in Go), where REST's human-readability and GraphQL's client-shaped queries matter less than raw throughput and a contract the compiler enforces.
+    </p>
+    <ul class="intro-gist">
+      <li><b>The contract is code, not documentation</b> — a <code>.proto</code> file is compiled into typed stubs; there's no way to call a method with the wrong argument types the way a hand-typed REST request body can drift from its DTO.</li>
+      <li><b>Binary beats JSON on the wire</b> — protobuf fields are numbered, not spelled out per-message, so payloads are typically 3-10x smaller than the equivalent JSON, and parsing is a fixed binary read instead of a text scan.</li>
+      <li><b>Streaming is native, not bolted on</b> — unary (1 request → 1 response), server-streaming, client-streaming, and bidirectional-streaming are all first-class RPC types in the <code>.proto</code> definition itself.</li>
+      <li><b>Browsers can't speak raw gRPC</b> — it depends on HTTP/2 trailers a browser's <code>fetch</code>/XHR can't read, so a public browser-facing API needs a <code>grpc-web</code> proxy layer, or should just be REST/GraphQL instead.</li>
+    </ul>
+    <div class="intro-cards">
+      <div class="intro-mini">
+        <h4>grpc-spring-boot-starter: the idiomatic wiring</h4>
+        <p>The community <code>grpc-spring-boot-starter</code> lets a service implementation be a plain <code>@GrpcService</code> bean extending the generated base class — Spring Boot auto-starts a gRPC server alongside (or instead of) the usual Tomcat/Netty HTTP server, on its own port (default <code>9090</code>).</p>
+      </div>
+      <div class="intro-mini">
+        <h4>This app's REST convention, contrasted</h4>
+        <p>Every controller in this scaffold returns <code>ResponseEntity&lt;HttpResponse&gt;</code> — a hand-written envelope. gRPC has no equivalent to design: the response message's shape is whatever the <code>.proto</code> file declares, generated into a typed Java class the compiler checks for you.</p>
+      </div>
+      <div class="intro-ciam">
+        <h4>CIAM angle — auth travels as metadata, not a header</h4>
+        <p>REST and GraphQL both carry a JWT in the HTTP <code>Authorization</code> header. gRPC has no HTTP headers in the traditional sense — it carries key/value pairs called <strong>metadata</strong> alongside each call, and a <code>ServerInterceptor</code> (Spring's <code>GrpcGlobalServerInterceptor</code>) reads and validates it before the service method runs — the same filter-before-controller shape as <a href="spring-boot-rest-api-visualizer.html">Spring Security's filter chain</a>, just for a different transport. Scenario 5 below walks through exactly that.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── EXTREME-VIZ HERO ── -->
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="grSeg">
+        <button class="on" data-s="unary">① Unary RPC</button>
+        <button data-s="serverstream">② Server Streaming</button>
+        <button data-s="clientstream">③ Client Streaming</button>
+        <button data-s="bidi">④ Bidirectional Streaming</button>
+        <button data-s="authmeta">⑤ Metadata Auth Interceptor</button>
+      </span>
+      <button class="rt-run" id="grRun">▶ Play</button>
+      <span class="rt-pill" id="grPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="grDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="grDir">▶ READY</span>
+        <div class="rt-cap" id="grCap">Pick a scenario and press ▶ Play</div>
+        <div class="rt-payload" id="grPay"></div>
+        <div class="rt-headers" id="grHdr"></div>
+        <div class="rt-result" id="grRes"></div>
+      </div>
+    </div>
+    <div class="who-row">
+      <span class="who-badge who-CLIENT">CLIENT — the generated stub call</span>
+      <span class="who-badge who-WIRE">WIRE — HTTP/2 + protobuf on the network</span>
+      <span class="who-badge who-SERVICE">SERVICE — the generated server implementation</span>
+      <span class="who-badge who-STREAM">STREAM — streaming-specific behavior</span>
+      <span class="who-badge who-RESULT">RESULT — what the caller sees</span>
+    </div>
+  </div>
+
+  <!-- 1 -->
+  <section>
+    <h2>1. REST vs GraphQL vs gRPC, side by side</h2>
+    <table>
+      <tr><th>Axis</th><th>REST</th><th>GraphQL</th><th>gRPC</th></tr>
+      <tr><td>Wire format</td><td>JSON text over HTTP/1.1</td><td>JSON text over HTTP/1.1</td><td>Protocol Buffers (binary) over HTTP/2</td></tr>
+      <tr><td>Contract</td><td>Loose — usually documented via OpenAPI, not enforced</td><td>Strongly typed schema (SDL), enforced at query time</td><td>Strongly typed <code>.proto</code> IDL, compiled into client + server code</td></tr>
+      <tr><td>Streaming</td><td>Not native — polling or a separate WebSocket</td><td>Subscriptions exist but are a bolt-on, not core</td><td>Native — unary, server-, client-, and bidirectional-streaming are all first-class</td></tr>
+      <tr><td>Browser support</td><td>Native — every browser speaks HTTP/1.1 + JSON</td><td>Native — it's just a JSON POST</td><td>None directly — needs a <code>grpc-web</code> proxy; built for service-to-service</td></tr>
+      <tr><td>Best for</td><td>Public APIs, simple CRUD, easy caching</td><td>Client-shaped reads, mobile, complex nested UIs</td><td>Internal polyglot microservices, low-latency, high-throughput, streaming data</td></tr>
+    </table>
+    <div class="key-insight"><strong>These aren't ranked — they're shaped for different callers.</strong> A public-facing SPA talks REST or GraphQL because a browser can call them directly with no extra tooling. Service-to-service calls inside a cluster — where every caller is a language-agnostic backend, not a browser — are exactly where gRPC's binary speed and native streaming pay off.</div>
+  </section>
+
+  <!-- 2 -->
+  <section>
+    <h2>2. The contract: one <code>.proto</code> file, generated code on both sides</h2>
+    <div class="cmp">
+      <div class="cmp-col cmp-bad">
+        <h4>✗ REST — the contract lives in documentation, not the compiler</h4>
+        <pre><span class="cm">// OpenAPI describes this, but nothing stops a client</span>
+<span class="cm">// from sending the wrong field name or type — it's</span>
+<span class="cm">// only caught at runtime, by @Valid, if at all</span>
+<span class="type">POST</span> /api/orders
+{ "customerId": "42", "items": [...] }</pre>
+      </div>
+      <div class="cmp-col cmp-good">
+        <h4>✓ gRPC — the contract IS code, on both ends</h4>
+        <pre><span class="kw">service</span> OrderService {
+  <span class="kw">rpc</span> CreateOrder(CreateOrderRequest)
+      <span class="kw">returns</span> (Order);
+}
+<span class="kw">message</span> CreateOrderRequest {
+  <span class="type">int64</span> customer_id = <span class="str">1</span>;
+  <span class="kw">repeated</span> OrderItem items = <span class="str">2</span>;
+}
+<span class="cm">// protoc generates a typed OrderServiceGrpc.Stub</span>
+<span class="cm">// AND a matching server base class — from ONE file</span></pre>
+      </div>
+    </div>
+    <div class="key-insight"><strong>The numbers after each field (<code>= 1</code>, <code>= 2</code>) are the wire-format field tags</strong> — protobuf serializes by number, not by writing the field name into every message, which is a large part of why the binary payload is so much smaller than the equivalent JSON.</div>
+  </section>
+
+  <!-- 3 -->
+  <section>
+    <h2>3. The four RPC shapes — only one of these exists in REST</h2>
+    <table>
+      <tr><th>RPC type</th><th><code>.proto</code> signature</th><th>Real-world use</th></tr>
+      <tr><td>Unary</td><td><code>rpc GetOrder(OrderId) returns (Order);</code></td><td>Exactly like a REST <code>GET</code> — one request, one response. Most gRPC calls are this shape.</td></tr>
+      <tr><td>Server streaming</td><td><code>rpc WatchPriceUpdates(Ticker) returns (stream PriceUpdate);</code></td><td>One request opens a channel the server keeps pushing messages into — live price ticks, log tailing, progress updates.</td></tr>
+      <tr><td>Client streaming</td><td><code>rpc UploadChunks(stream Chunk) returns (UploadResult);</code></td><td>The client sends many messages over one call, server responds once at the end — large file upload, batched sensor telemetry.</td></tr>
+      <tr><td>Bidirectional streaming</td><td><code>rpc Chat(stream ChatMsg) returns (stream ChatMsg);</code></td><td>Both sides send whenever they want, independently, over the same open call — chat, live collaborative editing, real-time metrics duplex.</td></tr>
+    </table>
+    <div class="key-insight"><strong>REST can only ever express the first row natively.</strong> A "streaming" REST API is really long-polling, Server-Sent Events, or a separate WebSocket bolted on — gRPC gets all four shapes from one protocol, because HTTP/2 already supports multiple concurrent, long-lived, independently-flowing streams over a single TCP connection.</div>
+  </section>
+
+  <!-- 4 -->
+  <section>
+    <h2>4. One-sentence recap</h2>
+    <div class="card card-accent">
+      <p style="font-size:14px">📡 gRPC trades REST's human-readable JSON and GraphQL's client-shaped queries for a compiler-enforced binary contract and native streaming — the right default for internal, polyglot, high-throughput service-to-service calls, not for a public browser-facing API.</p>
+    </div>
+    <p class="xlink" style="margin-top:8px">↪ See also: <a href="go-grpc-visualizer.html">gRPC & Protocol Buffers (Go)</a> for the same protocol from a different language's stub-generation side, <a href="spring-boot-graphql-visualizer.html">GraphQL</a> and <a href="spring-boot-rest-api-visualizer.html">REST API</a> for the two text-based alternatives this contrasts against, and <a href="spring-boot-method-security-deep-visualizer.html">Method Security (@PreAuthorize)</a> for the interceptor-adjacent authorization pattern in scenario 5.</p>
+  </section>
+</div>
+
+<!-- Code Walkthrough: a server-streaming gRPC service in Spring -->
+<h2 id="cw-grpc" style="margin:0 0 4px;padding:0 1.5rem;max-width:clamp(40rem,94vw,90rem);margin-left:auto;margin-right:auto">👣 Step through it, line by line</h2>
+<div id="cw-grpc-mount"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-grpc-mount', {
+  title: 'PriceServiceImpl.java — a server-streaming gRPC service',
+  intervalMs: 1700,
+  code: [
+    '@GrpcService',
+    'public class PriceServiceImpl',
+    '    extends PriceServiceGrpc.PriceServiceImplBase {',
+    '',
+    '  @Override',
+    '  public void watchPriceUpdates(Ticker request,',
+    '      StreamObserver<PriceUpdate> responseObserver) {',
+    '    String symbol = request.getSymbol();',
+    '    priceFeed.subscribe(symbol, price -> {',
+    '      PriceUpdate update = PriceUpdate.newBuilder()',
+    '          .setSymbol(symbol)',
+    '          .setPrice(price)',
+    '          .build();',
+    '      responseObserver.onNext(update);',
+    '    });',
+    '  }',
+    '}',
+  ],
+  steps: [
+    { line: 1, note: '@GrpcService is grpc-spring-boot-starter\'s equivalent of @RestController — it registers this bean as a live gRPC service the moment the app starts.', vars: {} },
+    { line: 3, note: 'PriceServiceImplBase is generated code — protoc reads the .proto file\'s service definition and emits this base class, with one abstract method per RPC. There is no way to implement a method that doesn\'t match the contract.', vars: {} },
+    { line: 7, note: 'The second parameter is the key to server streaming: a StreamObserver the method can call onNext() on as many times as it wants, whenever new data is ready — NOT a single return value.', vars: { rpcType: 'server-streaming' } },
+    { line: 9, note: 'The service subscribes to a live price feed for this ticker symbol — this callback fires every time a new price tick arrives, for as long as the client stays connected.', vars: {} },
+    { line: 10, note: 'Each price tick is wrapped in a strongly-typed PriceUpdate message, built via the generated builder — there\'s no way to typo a field name here, the compiler would reject it.', vars: {} },
+    { line: 14, note: 'responseObserver.onNext(update) pushes ONE message down the still-open HTTP/2 stream to the client — the call never "returns" in the traditional sense; it stays open, pushing updates, until the client disconnects or the server calls onCompleted().', vars: {}, tone: 'ok', callout: 'This is the structural difference from a unary REST endpoint: the method\'s job isn\'t to compute one final value and return it — it\'s to keep pushing values onto an open channel for as long as the subscription is live.' },
+  ]
+});
+</script>
+
+<script>
+(function(){
+  const P='gr', $=id=>document.getElementById(id);
+  const SCEN={
+    unary:{ req:'GetOrder(OrderId{id:42}) → Order', intro:'The simplest gRPC shape — one request message in, one response message out — structurally identical to a REST GET, but binary-encoded and compiler-checked end to end.',
+      nodes:[
+        {id:'client',icon:'🧑‍💻',nl:'stub.getOrder(OrderId{id:42})',ns:'a typed method call, not a hand-built HTTP request',who:'CLIENT'},
+        {id:'wire',icon:'📡',nl:'protobuf-encoded request frame over HTTP/2',ns:'binary bytes, field tags not names',who:'WIRE'},
+        {id:'service',icon:'🧩',nl:'OrderServiceImpl.getOrder(...) runs',ns:'generated base class method, one impl',who:'SERVICE'},
+        {id:'stream',icon:'🔁',nl:'no stream — one response, call ends',ns:'exactly one message each direction',who:'STREAM'},
+        {id:'result',icon:'✅',nl:'Order object returned to the caller',ns:'strongly typed, no manual JSON parsing',who:'RESULT'},
+      ],
+      steps:[
+        {node:'client',chip:'call',cap:'Application code calls a generated stub method exactly like calling any other Java method — no URL, no manually building a request body',pay:{call:'orderStub.getOrder(OrderId.newBuilder().setId(42).build())',returnType:'Order (generated class)'},ins:'There\'s no way to pass the wrong type here — the compiler enforces the .proto contract before this code even runs, unlike a hand-typed REST request body.'},
+        {node:'wire',chip:'encode',cap:'The request is serialized to compact binary Protocol Buffers and sent as one HTTP/2 frame',pay:{wireFormat:'protobuf binary',approxSize:'~8 bytes for {id:42} vs ~20+ for the equivalent JSON {"id":42}'},ins:'Field 1 (id) is written as a number tag plus a varint-encoded value — no field NAME is ever transmitted, which is most of protobuf\'s size advantage over JSON at scale.'},
+        {node:'service',chip:'dispatch',tone:'ok',cap:'The generated server stub deserializes the frame and invokes the one Java method that implements this RPC',pay:{invoked:'OrderServiceImpl.getOrder(OrderId request, StreamObserver<Order> responseObserver)'},ins:'Because both client and server were generated from the SAME .proto file, there is no possibility of a field-name mismatch the way a REST DTO can silently drift from its OpenAPI spec.'},
+        {node:'stream',chip:'unary',cap:'This RPC is unary — exactly one response message, then the call is done, no open channel remains',pay:{requestMessages:1,responseMessages:1},ins:'This is the shape every REST call already has — a unary gRPC call and a REST GET solve the same problem, just with a different contract mechanism and wire format underneath.'},
+        {node:'result',chip:'return',tone:'ok',cap:'The caller receives a fully-typed Order object — no JSON parsing, no risk of a missing/misspelled field going unnoticed until runtime',pay:{result:'Order{id:42, customerId:7, total:129.99, ...}'},ins:'If the .proto file changes a field\'s type, every caller fails to COMPILE, not fails silently at runtime the way an unversioned REST/JSON contract change often does.'},
+      ], result:{cls:'ok',text:'✅ One typed call, one binary round trip, one typed response — the same shape as REST, enforced by the compiler instead of documentation.'} },
+
+    serverstream:{ req:'WatchPriceUpdates(Ticker{symbol:"ACME"}) → stream PriceUpdate', intro:'One request opens a channel the server keeps pushing messages into — REST has no native equivalent to this without polling or a separate WebSocket.',
+      nodes:[
+        {id:'client',icon:'🧑‍💻',nl:'stub.watchPriceUpdates(Ticker{symbol:"ACME"})',ns:'ONE call, expects MANY responses',who:'CLIENT'},
+        {id:'wire',icon:'📡',nl:'one HTTP/2 stream stays open',ns:'server writes frames as prices change',who:'WIRE'},
+        {id:'service',icon:'🧩',nl:'responseObserver.onNext(update) × many',ns:'called once per price tick, no fixed count',who:'SERVICE'},
+        {id:'stream',icon:'🔁',nl:'1 request in, N responses out over time',ns:'the defining shape of server streaming',who:'STREAM'},
+        {id:'result',icon:'✅',nl:'client\'s onNext() fires per tick, live',ns:'like a subscription, not a poll loop',who:'RESULT'},
+      ],
+      steps:[
+        {node:'client',chip:'subscribe',cap:'The client calls the stub once, passing a StreamObserver callback instead of expecting one return value',pay:{call:'priceStub.watchPriceUpdates(Ticker{symbol:"ACME"}, myObserver)',expectedResponses:'unbounded, until unsubscribed'},ins:'A REST client wanting this would have to poll GET /prices/ACME on a timer, wasting requests when nothing changed — or stand up an entirely separate WebSocket connection.'},
+        {node:'wire',chip:'open',tone:'ok',cap:'HTTP/2 opens ONE stream for this call and keeps it alive — the server can write new frames onto it at any time',pay:{httpVersion:'HTTP/2',streamState:'open, half-duplex (server → client only)'},ins:'This is only possible because HTTP/2 supports long-lived, independently-flowing streams multiplexed over a single TCP connection — HTTP/1.1 has no equivalent primitive.'},
+        {node:'service',chip:'push',tone:'ok',cap:'Every time the price feed ticks, the service calls responseObserver.onNext() again — the method body never "returns" in the traditional sense',pay:{onNextCalls:'one per price change, e.g. 340 over a trading session'},ins:'The service method is still just a plain Java method under the hood — the streaming behavior comes entirely from calling onNext() repeatedly instead of returning once.'},
+        {node:'stream',chip:'1→N',cap:'One request message opened the call; the response side can carry an unbounded number of messages over its lifetime',pay:{requestMessages:1,responseMessages:'N, unbounded — until client cancels or server calls onCompleted()'},ins:'This asymmetry — 1 in, N out — is exactly what the .proto keyword "stream" on the RETURN type (not the parameter) means.'},
+        {node:'result',chip:'live',tone:'ok',cap:'The client\'s callback fires once per tick, in real time, for as long as the subscription stays open',pay:{clientExperience:'myObserver.onNext(update) called live, no polling delay'},ins:'This is the gRPC-native equivalent of a subscription — no polling interval to tune, no wasted empty-response requests, updates arrive the instant the server has them.'},
+      ], result:{cls:'ok',text:'✅ Server streaming turned a single call into a live subscription — no polling, no separate WebSocket needed.'} },
+
+    clientstream:{ req:'UploadChunks(stream Chunk) → UploadResult', intro:'The reverse shape: the CLIENT sends many messages over one open call, and the server responds exactly once, after it has seen everything.',
+      nodes:[
+        {id:'client',icon:'🧑‍💻',nl:'requestObserver.onNext(chunk) × many',ns:'client streams data in, piece by piece',who:'CLIENT'},
+        {id:'wire',icon:'📡',nl:'one HTTP/2 stream, client → server frames',ns:'each chunk is its own protobuf message',who:'WIRE'},
+        {id:'service',icon:'🧩',nl:'server buffers/processes each chunk as it arrives',ns:'no response sent until the client is done',who:'SERVICE'},
+        {id:'stream',icon:'🔁',nl:'N requests in, exactly 1 response out',ns:'the mirror image of server streaming',who:'STREAM'},
+        {id:'result',icon:'✅',nl:'UploadResult returned once, after onCompleted()',ns:'e.g. total bytes received + a checksum',who:'RESULT'},
+      ],
+      steps:[
+        {node:'client',chip:'stream in',cap:'The client calls the stub and gets back a StreamObserver it can call onNext() on repeatedly — one call per chunk of a large file being uploaded',pay:{call:'StreamObserver<Chunk> req = uploadStub.uploadChunks(resultObserver)',chunksToSend:128},ins:'This avoids ever holding the entire file in memory at once, on either side — each chunk is sent, and can be processed, independently as it arrives.'},
+        {node:'wire',chip:'frames',tone:'ok',cap:'Each chunk becomes its own protobuf-encoded frame on the SAME open HTTP/2 stream — no new connection per chunk',pay:{framesSent:128,connectionReused:true},ins:'A REST equivalent would either need 128 separate HTTP requests, or a single giant multipart body the server must buffer entirely before it can start processing.'},
+        {node:'service',chip:'accumulate',tone:'ok',cap:'The server-side implementation receives each chunk via its own onNext() callback and can process or persist it immediately, incrementally',pay:{serverSideMethod:'onNext(Chunk chunk) { totalBytes += chunk.getData().size(); digest.update(chunk.getData()); }'},ins:'The server never needs to know the total chunk count in advance — it just keeps accumulating until the client signals it\'s done.'},
+        {node:'stream',chip:'N→1',cap:'The request side carries an unbounded number of messages; the response side sends exactly one, and only after the client finishes',pay:{requestMessages:'N (128 in this case)',responseMessages:1},ins:'This is the .proto keyword "stream" on the PARAMETER type instead of the return type — the mirror image of the server-streaming scenario.'},
+        {node:'result',chip:'complete',tone:'ok',cap:'Once the client calls requestObserver.onCompleted(), the server finalizes and sends its single UploadResult response',pay:{result:'UploadResult{totalBytes:16777216, checksum:"a3f5..."}',triggeredBy:'client\'s onCompleted() signal'},ins:'Only at this point does the "1 response" side of the RPC actually fire — the server was accumulating state across all 128 chunks, waiting for the explicit end-of-stream signal.'},
+      ], result:{cls:'ok',text:'✅ Client streaming let 128 chunks flow over one open call, with the server responding once, after everything arrived.'} },
+
+    bidi:{ req:'Chat(stream ChatMsg) → stream ChatMsg', intro:'Both sides send whenever they want, independently, over the same open call — the shape REST fundamentally cannot express without an entirely different protocol underneath.',
+      nodes:[
+        {id:'client',icon:'🧑‍💻',nl:'requestObserver.onNext(msg) whenever user types',ns:'client sends on its own schedule',who:'CLIENT'},
+        {id:'wire',icon:'📡',nl:'ONE HTTP/2 stream, frames flow BOTH directions',ns:'independently, interleaved, no strict turn order',who:'WIRE'},
+        {id:'service',icon:'🧩',nl:'server\'s onNext() fires per incoming msg',ns:'may call responseObserver.onNext() any time too',who:'SERVICE'},
+        {id:'stream',icon:'🔁',nl:'N requests, M responses — fully independent',ns:'not paired 1:1, not turn-based',who:'STREAM'},
+        {id:'result',icon:'✅',nl:'both sides see messages the instant they\'re sent',ns:'a real duplex channel, not request/response at all',who:'RESULT'},
+      ],
+      steps:[
+        {node:'client',chip:'send',cap:'The client calls onNext() on its own request stream every time the user sends a chat message — not tied to any response from the server',pay:{call:'chatRequestObserver.onNext(ChatMsg{from:"bob",text:"hey"})'},ins:'Nothing about sending a message here waits for, or is paired with, any particular server response — the two directions are genuinely independent.'},
+        {node:'wire',chip:'duplex',tone:'ok',cap:'A single HTTP/2 stream carries frames in BOTH directions, interleaved in whatever order either side actually sends them',pay:{direction:'bidirectional',framesCanInterleave:true},ins:'This is the one RPC shape that has literally no analog in request/response HTTP — it requires a protocol where both peers can write to the connection independently, which is exactly what an HTTP/2 stream provides.'},
+        {node:'service',chip:'react',tone:'ok',cap:'The server\'s onNext() fires for each incoming ChatMsg, and it can call its OWN responseObserver.onNext() at any time — not necessarily right after receiving one',pay:{serverBehavior:'may broadcast a message from another user the instant it arrives, unrelated to what this client just sent'},ins:'A real chat server broadcasts messages from OTHER connected clients on this exact channel — proving the two streams aren\'t request/response pairs at all, just two independent flows sharing one call.'},
+        {node:'stream',chip:'N,M',cap:'The request stream might carry 5 messages while the response stream carries 12 (messages from other users) — the counts are unrelated',pay:{requestMessages:5,responseMessages:12,paired1to1:false},ins:'This is the clearest proof that bidirectional streaming isn\'t "request/response, just repeated" — it\'s a genuine full-duplex channel, more like a raw socket than an RPC call.'},
+        {node:'result',chip:'realtime',tone:'ok',cap:'Both participants see new messages the instant either side sends them, over the one open connection',pay:{latency:'as low as the network allows — no polling, no separate connections per direction'},ins:'This is the RPC shape that makes gRPC genuinely competitive with raw WebSockets for real-time features, while still keeping the typed, compiler-checked contract every other RPC on this page has.'},
+      ], result:{cls:'ok',text:'✅ Bidirectional streaming gave both sides an independent, real-time channel over one call — the shape REST cannot express at all.'} },
+
+    authmeta:{ req:'GetOrder(OrderId) + metadata["authorization"]="Bearer eyJ..."', intro:'gRPC has no HTTP Authorization header — a JWT travels as call metadata instead, and a ServerInterceptor validates it before the service method ever runs, the same filter-before-controller shape as Spring Security.',
+      nodes:[
+        {id:'client',icon:'🧑‍💻',nl:'stub attaches metadata("authorization", "Bearer <jwt>")',ns:'set once on the channel, sent with every call',who:'CLIENT'},
+        {id:'wire',icon:'📡',nl:'metadata travels as HTTP/2 HEADERS frame',ns:'alongside, not inside, the protobuf message body',who:'WIRE'},
+        {id:'service',icon:'🧩',nl:'GrpcGlobalServerInterceptor runs FIRST',ns:'before OrderServiceImpl.getOrder() is ever called',who:'SERVICE'},
+        {id:'stream',icon:'🔁',nl:'unary — but auth check happens pre-dispatch',ns:'interceptor wraps every RPC, not just this one',who:'STREAM'},
+        {id:'result',icon:'✅',nl:'valid JWT → call proceeds; invalid → UNAUTHENTICATED',ns:'rejected before any business logic runs',who:'RESULT'},
+      ],
+      steps:[
+        {node:'client',chip:'attach',cap:'The client attaches the JWT as call metadata — a key/value pair sent alongside the request, set once when the channel is built so every call on it carries it automatically',pay:{metadataKey:'authorization',metadataValue:'Bearer eyJhbGciOiJSUzI1NiJ9...'},ins:'This mirrors exactly how a REST client sets the Authorization header once on an HTTP client instance — the mechanism differs (gRPC metadata vs HTTP headers) but the caller-side pattern is identical.'},
+        {node:'wire',chip:'headers',cap:'Metadata is sent in the HTTP/2 HEADERS frame that opens the call — separate from the protobuf-encoded message body that follows',pay:{transport:'HTTP/2 HEADERS frame',separateFrom:'the DATA frame carrying the actual OrderId message'},ins:'This separation is deliberate — metadata is meant to be readable by infrastructure (interceptors, proxies, load balancers) without needing to deserialize the protobuf payload itself.'},
+        {node:'service',chip:'intercept',tone:'ok',cap:'A GrpcGlobalServerInterceptor registered once, application-wide, reads the metadata and validates the JWT BEFORE any service method is dispatched — the gRPC equivalent of a Spring Security filter running before the controller',pay:{interceptorCode:'@GrpcGlobalServerInterceptor class AuthInterceptor implements ServerInterceptor { ... }',checksHere:'signature, expiry, issuer — identical checks to the REST JWT filter'},ins:'This is the same "filter runs before the request reaches business logic" shape as the REST security filter chain — just implemented for gRPC\'s interceptor API instead of Spring\'s FilterChain.'},
+        {node:'stream',chip:'gate',cap:'The interceptor wraps EVERY RPC registered in the application, not just this one call — one auth check, applied uniformly, the same way a global Spring Security filter chain covers every REST endpoint',pay:{scope:'application-wide, all @GrpcService methods'},ins:'Without this interceptor, each individual service method would need to remember to check auth itself — exactly the kind of easy-to-forget, per-endpoint responsibility Spring Security\'s filter chain (and this interceptor) exist to centralize.'},
+        {node:'result',chip:'gate-pass',tone:'ok',cap:'A valid JWT lets the call proceed to OrderServiceImpl.getOrder() normally; an invalid or missing one gets rejected with an UNAUTHENTICATED status, and the service method body never even runs',pay:{onValid:'call proceeds to the actual RPC implementation',onInvalid:'Status.UNAUTHENTICATED.withDescription("...").asRuntimeException()'},ins:'Just like the REST filter-chain page shows for 401 — the rejection happens at the interceptor, one layer before business logic, so an invalid caller never touches order data at all.'},
+      ], result:{cls:'ok',text:'✅ The JWT travels as metadata, not a header, but the interceptor-before-service-method shape is the same gate REST\'s filter chain already teaches.'} },
+  };
+
+  let scen='unary', running=false, timers=[];
+  function clearT(){timers.forEach(clearTimeout);timers=[];}
+  function nodeEl(id){return document.querySelector('#'+P+'Diagram .rt-node[data-node="'+id+'"]');}
+  function nodeCenter(id){const n=nodeEl(id);return n?n.offsetTop+n.offsetHeight/2:0;}
+  function renderNodes(k){
+    let h='<div class="rt-rail"></div><div class="rt-chip" id="'+P+'Chip">→</div>';
+    SCEN[k].nodes.forEach(n=>{ h+='<div class="rt-node" data-node="'+n.id+'"><span class="ic">'+n.icon+'</span><div style="flex:1;min-width:0"><div class="nl">'+n.nl+'</div><div class="ns">'+n.ns+'</div></div><span class="who who-'+n.who+'">'+n.who+'</span></div>'; });
+    $(P+'Diagram').innerHTML=h;
+  }
+  function reset(){
+    renderNodes(scen); const s=SCEN[scen];
+    const chip=$(P+'Chip'); chip.style.transition='none'; chip.style.top=nodeCenter(s.steps[0].node)+'px'; chip.style.opacity='0'; chip.classList.remove('ok','bad'); void chip.offsetWidth; chip.style.transition='';
+    $(P+'Res').className='rt-result';
+    $(P+'Dir').textContent='▶ READY'; $(P+'Dir').className='rt-dir';
+    $(P+'Cap').textContent=s.intro;
+    $(P+'Pay').textContent='';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>— the metadata, wire encoding, and result appear here per step —';
+    $(P+'Pill').textContent=s.req;
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false;
+  }
+  function applyStep(steps,i){
+    const st=steps[i];
+    document.querySelectorAll('#'+P+'Diagram .rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
+    const n=nodeEl(st.node); n.classList.remove('vchk','vskip'); n.classList.add(st.tone==='bad'?'vskip':'vchk'); n.classList.add('cur'); if(st.tone==='bad')n.classList.add('curbad'); void n.offsetWidth; n.classList.add('rtpulse');
+    const chip=$(P+'Chip'); chip.textContent=st.chip||'→'; chip.classList.remove('ok','bad'); if(st.tone)chip.classList.add(st.tone==='bad'?'bad':'ok'); chip.style.opacity='1'; chip.style.top=nodeCenter(st.node)+'px';
+    $(P+'Dir').textContent=st.dir||('STEP '+(i+1)+' / '+steps.length); $(P+'Dir').className='rt-dir'+(st.tone==='bad'?' bad':'');
+    $(P+'Cap').textContent=st.cap;
+    $(P+'Pay').textContent=st.pay?JSON.stringify(st.pay,null,2):'';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>'+st.ins;
+  }
+  function run(){
+    if(running)return; running=true; clearT(); reset();
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=true); $(P+'Run').disabled=true;
+    $(P+'Pill').textContent='running…';
+    const s=SCEN[scen]; let i=0;
+    (function tick(){
+      if(i>=s.steps.length){ const r=$(P+'Res'); r.className='rt-result show '+(s.result.cls||'ok'); r.textContent=s.result.text; running=false; document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false; $(P+'Pill').textContent='done'; return; }
+      applyStep(s.steps,i); i++; timers.push(setTimeout(tick,2000));
+    })();
+  }
+  document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.onclick=()=>{ if(running)return; scen=b.dataset.s; document.querySelectorAll('#'+P+'Seg button').forEach(x=>x.classList.toggle('on',x===b)); reset(); });
+  $(P+'Run').onclick=run;
+  reset();
+})();
+</script>
+<script src="devhub-notebook.js"></script>
+</body>
+</html>

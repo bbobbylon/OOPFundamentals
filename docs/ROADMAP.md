@@ -62,19 +62,28 @@ N+1 resolver trap fixed with Spring's `@BatchMapping`, and a field-level authori
 CIAM security angle), registered under Spring Boot's APIs & Communication section and cross-linked
 from `spring-boot-rest-api-visualizer.html` and `spring-boot-api-design-deep-visualizer.html`.
 
-1. **Deployment strategy concepts (blue-green, canary, feature flags, GitOps) aren't taught.**
-   Rolling deployment IS covered (ECS + Kubernetes deployment pages), but the alternative
-   strategies and why teams pick one aren't. Suggested: extend the ♾️ DevOps & CI/CD track with
-   one more page.
-2. **No general, learner-facing "how do you deploy a web app to production" conceptual page.**
-   `docs/DEPLOYMENT.md` documents deploying *this specific app*, which is not the same as teaching
-   the concept — though the concept is already distributed across the CI/CD, Docker, Kubernetes,
-   and cloud tracks, so this is lower priority than it looks; a capstone page tying those together
-   (similar in spirit to `fullstack-request-roundtrip-deep-visualizer.html` for the CIAM auth
-   thread) would close it rather than new fragmented content.
-3. **gRPC is Go-only** (`go-grpc-visualizer.html`) — no vendor-neutral or Spring-side gRPC
-   coverage. Lower priority; the protocol concepts mostly transfer from the Go page already.
-4. **GCP has zero coverage** (AWS: 16 pages, Azure: 7 pages, GCP: 0). Explicitly **not** a near-term
+~~1. Deployment strategy concepts (blue-green, canary, feature flags, GitOps) aren't taught.~~
+**DONE (2026-08-28):** built `devops-deployment-strategies-visualizer.html` (blue-green's instant
+router-flip rollback, canary with an automated metrics-gated abort, feature flags decoupling
+deploy from release, and GitOps' git-as-source-of-truth reconciliation loop, all contrasted
+against the rolling-deployment baseline already covered on the Kubernetes/ECS pages), registered
+under the ♾️ DevOps & CI/CD track's Delivery section.
+
+~~2. No general, learner-facing "how do you deploy a web app to production" conceptual page.~~
+**DONE (2026-08-28):** built `production-deployment-visualizer.html`, a capstone (in the spirit of
+`fullstack-request-roundtrip-deep-visualizer.html`) walking 5 real paths end to end — a Spring Boot
+API to Kubernetes, an Angular SPA to a CDN with no server at all, an event-driven function to
+Lambda, a monolith to a PaaS, and a production incident ending in rollback — tying together the
+CI/CD, Docker, Kubernetes/cloud, and Deployment Strategies pages instead of adding more fragmented
+content. Registered under Full-Stack Stacks' Putting It Together section.
+
+~~3. gRPC is Go-only.~~ **DONE (2026-08-28):** built `spring-boot-grpc-visualizer.html` (the
+`.proto` contract-as-code, all four RPC shapes — unary/server-stream/client-stream/bidi-stream —
+and a metadata-based JWT auth interceptor as the CIAM angle, contrasted against REST and GraphQL),
+registered under Spring Boot's APIs & Communication section and cross-linked from
+`go-grpc-visualizer.html`.
+
+1. **GCP has zero coverage** (AWS: 16 pages, Azure: 7 pages, GCP: 0). Explicitly **not** a near-term
    priority — matches Bobby's own stated phasing in the "Longer-term expansion" note below
    (entry-level AWS/Azure/Angular first, broaden later); flagged here only so it isn't forgotten.
 
