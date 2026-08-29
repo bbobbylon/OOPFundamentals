@@ -355,6 +355,17 @@ visualizers).
   `DevHubFlash.loadBoxes/saveBoxes` (exported for this reason), so "mastered"
   means the same thing in the notebook as it does in the exam-prep flashcard
   decks.
+- [`frontend/devhub-transitions.js`](../frontend/devhub-transitions.js) —
+  sitewide **click feedback + page-fade transitions**, on all 527 pages via
+  one `<script>` tag (no per-page markup). A pointer-position ripple on every
+  real `button`/`.tab`/`[role="button"]`/`.page-link`/`.track-card`/`.tc-dot`
+  (styled in `devhub.css`'s `.dh-ripple`), plus a fade-in on load and a
+  fade-out before leaving to another DevHub page. The fade-out layer only
+  ever runs for a real top-level document navigation — it's a no-op inside
+  `app.html`'s `#viewer` iframe, where several pages already `postMessage` a
+  `dlh-navigate` event to the parent hub instead of following the link
+  directly (grep `dlh-navigate` if touching that pattern). Everything here
+  is inert under `prefers-reduced-motion: reduce`.
 
 ---
 

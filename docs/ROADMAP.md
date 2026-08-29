@@ -10,6 +10,44 @@ page/track counts in `README.md` and `DEVHUB-GUIDE.md`, then delete the item fro
 
 ---
 
+## Done — sitewide UI animations & transitions (requested + landed 2026-08-29)
+
+Bobby wanted "fancy" motion on the app's own chrome — not the content-visualizer animations that
+already exist (step-walk engines, gliding chips, etc. — see `feedback_extreme_visualization_default`
+in memory), but the *interaction* layer: button clicks, link hovers/opens, and moving between
+pages. Landed as one new shared file pair, reaching all 527 pages through the existing
+"one script tag, zero per-page markup" pattern already used for `devhub-notebook.js`:
+
+- **[`frontend/devhub-transitions.js`](../frontend/devhub-transitions.js)** — a pointer-position
+  ripple (own `.dh-ripple` span, sized/positioned at the actual click) on every real
+  `button`/`.tab`/`[role="button"]`/`.page-link`/`.track-card`/`.tc-dot`; a page fade-out
+  before leaving to another DevHub page (`.dh-leaving` on `<html>`, short delay, then navigate).
+- **`devhub.css`** — the `:active` press-scale, the ripple keyframe, and the page
+  fade-in/fade-out keyframes, all wrapped in `@media (prefers-reduced-motion: no-preference)` so
+  the whole feature is inert for anyone with that OS setting.
+- Injected the `<script src="devhub-transitions.js">` tag before `</body>` on all 527
+  `frontend/*.html` files via a one-off Node script (scratchpad only, not committed).
+
+**The real design question from scoping — resolved:** DevHub is a plain multi-page site (every
+page is its own `.html` file via `<a href>`, not a client-side router), and `app.html`'s hub loads
+pages into an `#viewer` iframe rather than navigating the top-level document. Went with the manual
+intercept-then-fade approach (not the View Transitions API's cross-document mode, to avoid a
+double-transition risk stacking with the manual fade in Chromium) — but **only when
+`window.top === window.self`**, i.e. only for a real top-level navigation. Inside the hub's
+iframe, the fade layer is a deliberate no-op, because several pages already `postMessage` a
+`dlh-navigate` event to the parent hub instead of following the link directly (grep `dlh-navigate`
+in this repo) — that existing, working pattern must never race a second navigation mechanism.
+Ripple has no such guard and fires everywhere, including inside the iframe, since it never
+touches navigation.
+
+Verified in a real browser (not just read): ripple confirmed positioned correctly and
+self-removing (`devtools` script injection into the hub's live iframe), ctrl+click confirmed to
+bypass the fade-intercept entirely (native "open in new tab" preserved), a plain click confirmed
+to set `.dh-leaving` and navigate, and the hub's iframe confirmed to report
+`window.top !== window.self` so the fade layer never engages there.
+
+---
+
 ## Coding Practice Exercises (in-page IDE) — Phase 1 pilot LANDED (2026-08-29)
 
 **The gap:** every existing track teaches *concepts* (visualizers, walkthroughs, quizzes,
