@@ -254,8 +254,72 @@ All three registered in `tracks-data.js`, `app.html`'s `CATEGORIES` (new "Data &
 **498 pages / 33 tracks / 19 exams (560 Q) / 16 flashcard decks (459 cards) / 19 learning paths**.
 Certs remain scoped to **entry-level only** — mid/senior-level certs are an explicitly later phase.
 
-**Next up:** a sitewide cleanup/depth-audit pass on existing shallow content (task queued, not yet
-started), then the previously-queued AWS deployment boilerplate work.
+**Next up:** ~~a sitewide cleanup/depth-audit pass on existing shallow content~~ — done, see
+"Done — sitewide depth-audit sweep #2" below. ~~The previously-queued AWS deployment boilerplate
+work~~ — also done, see "Done — AWS App Runner hardening" below.
+
+---
+
+## Done — AWS App Runner hardening (completed 2026-08-29)
+
+Bobby shared an AWS Deployment Playbook PDF (ECS Fargate + ALB + CloudFront + Secrets Manager +
+Aiven MySQL) for the queued "AWS deployment boilerplate work" backlog item. Investigation found
+this repo already had a **working, different, lighter AWS path** — `deploy/aws/apprunner.json` +
+`deploy/aws/deploy.sh` (App Runner, built 2026-06-15), documented in `docs/DEPLOYMENT.md` §3b
+alongside Render and Azure Container Apps, with its own CI/CD workflow
+(`.github/workflows/deploy-backend-aws.yml`). Asked Bobby whether to replace it with the heavier
+ECS/ALB/CloudFront shape or harden the existing App Runner path against the playbook's gotcha
+catalog — **chose hardening**, no architecture change.
+
+Closed the real gap: `apprunner.json` had `DATABASE_PASSWORD` and `JWT_SECRET` as **plaintext**
+`RuntimeEnvironmentVariables` — the same class of mistake the playbook's #1 gotcha warns about.
+Fixed:
+- New [`deploy/aws/secrets-setup.sh`](../deploy/aws/secrets-setup.sh) — creates
+  `devhub-backend/jwt-secret` (real random value immediately) and `devhub-backend/db-password`
+  (CHANGE_ME placeholder) in Secrets Manager.
+- `apprunner.json` — those two moved to `RuntimeEnvironmentSecrets` (ARN references); added the
+  previously-missing `InstanceConfiguration.InstanceRoleArn` (App Runner's instance role is
+  separate from the ECR access role and needs `secretsmanager:GetSecretValue`, or the task loops
+  with AccessDenied on boot — same shape as the playbook's ECS execution-role gotcha).
+- `deploy.sh` — now creates `AppRunnerDevHubInstanceRole` if missing (idempotent), resolves both
+  secret ARNs via `describe-secret` (never hand-built), and writes a git-ignored
+  `apprunner.generated.json` with account ID/image/role/ARNs already filled in, so
+  `create-service` needs no manual JSON surgery.
+- `docs/DEPLOYMENT.md` §3b — rewritten for the secrets-based flow; added `cli_pager ""` setup note,
+  a log-retention step (App Runner's log group defaults to Never Expire), and a troubleshooting row
+  for the AccessDenied failure mode.
+- `.gitignore` — excluded `deploy/aws/apprunner.generated.json` (carries a real account ID + ARNs).
+
+No billable AWS commands were run — this was drafting/hardening scripts and docs only, per the
+standing rule that actually provisioning (creating the IAM role, the secrets, the App Runner
+service) requires Bobby to run those commands himself.
+
+---
+
+## Done — sitewide depth-audit sweep #2: Playground intro cards (completed 2026-08-29)
+
+Bobby asked to do the queued sitewide sweep before the AWS boilerplate work ("let's do both of
+those in that order"). A background audit pass checked every conceptual/interactive page for the
+standing "plain-English intro card before the interactive part" requirement (see
+`docs/DEVHUB-GUIDE.md` conventions). Findings, independently re-verified file-by-file (the raw
+audit's blanket claim was one file off — `auth-identity-live-visualizer.html` already had an
+intro-equivalent, just in the old pre-`.intro`-class wrapper style):
+
+- **6 pages got a brand-new `.intro` card** (modern `.intro-head`/`.intro-lead`/`.intro-gist`/
+  `.intro-cards`/`.intro-ciam` format, matching `sql-playground-visualizer.html`'s template):
+  `api-playground-visualizer.html`, `jwt-playground-visualizer.html`,
+  `python-playground-visualizer.html`, `shell-playground-visualizer.html`,
+  `spring-boot-playground-visualizer.html`, `typescript-playground-visualizer.html`.
+- **1 page had its old-style card converted**, not duplicated: `auth-identity-live-visualizer.html`
+  (`<div class="card card-accent"><h3>What is this…</h3>` → the modern `.intro` structure,
+  same content).
+- A second, lower-confidence finding from the same audit (5 debugging mini-pages lacking an
+  animated step-walk engine) was left alone — the audit itself flagged it as "likely intentional
+  design, awareness only," consistent with the site's precedent of not retrofitting pages that
+  already use a different-but-legitimate interaction style.
+
+This closes the sitewide depth-audit backlog item. Verified via div-tag balance + single-`.intro`
+count across all 7 files.
 
 ---
 

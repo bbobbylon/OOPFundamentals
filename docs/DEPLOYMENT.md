@@ -103,23 +103,47 @@ path `frontend/config.js` already defaults to (`https://devhub-backend.onrender.
 
 App Runner runs a container from ECR with autoscaling + HTTPS, no servers to manage — the closest
 AWS analog to Render. **Config files:** [`deploy/aws/apprunner.json`](../deploy/aws/apprunner.json)
-· [`deploy/aws/deploy.sh`](../deploy/aws/deploy.sh).
+· [`deploy/aws/deploy.sh`](../deploy/aws/deploy.sh) · [`deploy/aws/secrets-setup.sh`](../deploy/aws/secrets-setup.sh).
+
+The JWT secret and DB password live in **AWS Secrets Manager**, not in plaintext JSON — App Runner
+reads them at container start via `RuntimeEnvironmentSecrets` (an ARN per secret), which needs its
+own **instance role** (separate from the ECR access role) granting `secretsmanager:GetSecretValue`.
+`deploy.sh` creates that role and resolves both ARNs for you — never hand-type an ARN, it carries
+an unpredictable 6-char suffix.
 
 **One-time setup**
-1. Install + configure the AWS CLI v2 (`aws configure`). Have Docker running.
+1. Install + configure the AWS CLI v2 (`aws configure`). Also run `aws configure set cli_pager ""`
+   once — v2's default pager makes a large response (like `apprunner create-service`'s output) look
+   like a hung terminal. Have Docker running.
 2. Create the **AppRunnerECRAccessRole** (lets App Runner pull from ECR) — AWS console offers it
    automatically on first service create, or create it from the `AWSAppRunnerServicePolicyForECRAccess` managed policy.
+3. Create the secrets once:
+   ```bash
+   AWS_REGION=us-east-1 ./deploy/aws/secrets-setup.sh
+   # then set the real DB password (the script prints the exact command)
+   ```
 
 **Deploy**
 ```bash
-AWS_REGION=us-east-1 ./deploy/aws/deploy.sh      # builds image, creates ECR repo, pushes :latest
+AWS_REGION=us-east-1 ./deploy/aws/deploy.sh
 ```
-Then plug your credentials into `deploy/aws/apprunner.json` (the `<ANGLE_BRACKET>` placeholders:
-account id, region, the DB vars, `JWT_SECRET`, your Pages origin) and create the service once:
+This builds the image, pushes it to ECR, creates the App Runner instance role if it doesn't exist,
+resolves both secret ARNs, and writes `deploy/aws/apprunner.generated.json` — a ready-to-use copy
+of `apprunner.json` with the account ID, image, instance role, and secret ARNs already filled in
+(git-ignored: it contains real account/ARN values). Fill in the three remaining plain values
+(`CORS_ALLOWED_ORIGINS`, `DATABASE_URL`, `DATABASE_USERNAME`), then create the service once:
 ```bash
-aws apprunner create-service --cli-input-json file://deploy/aws/apprunner.json --region us-east-1
+aws apprunner create-service --cli-input-json file://deploy/aws/apprunner.generated.json --region us-east-1
 ```
-With `AutoDeploymentsEnabled: true`, every later `:latest` push redeploys automatically.
+With `AutoDeploymentsEnabled: true`, every later `:latest` push redeploys automatically — just
+re-run `deploy.sh` (it's idempotent: the role/secret lookups are create-or-describe).
+
+Once the service exists, set an explicit log retention — App Runner's auto-created CloudWatch log
+group defaults to **Never Expire**, which grows (and bills) forever:
+```bash
+aws logs put-retention-policy --region us-east-1 --retention-in-days 14 \
+  --log-group-name "/aws/apprunner/devhub-backend/<SERVICE_ID>/application"
+```
 
 **Get the URL** (`https://xxxxx.<region>.awsapprunner.com`) → drop it into `config.js`, set
 `CORS_ALLOWED_ORIGINS` to your Pages origin.
@@ -193,6 +217,7 @@ curl https://<your-backend-url>/actuator/health        # {"status":"UP"}
 | Every call 401 after a redeploy | `JWT_SECRET` changed → old tokens invalid; sign out/in |
 | Backend won't start / DB errors | `DATABASE_URL` must be `jdbc:postgresql://HOST:5432/DB`; creds in their own vars |
 | App Runner stuck "Operation in progress" | health check path must be `/actuator/health`; check the service logs |
+| App Runner task loops / AccessDenied on boot (AWS) | instance role missing `secretsmanager:GetSecretValue` — re-run `deploy.sh`, it creates `AppRunnerDevHubInstanceRole` for you |
 
 ---
 
