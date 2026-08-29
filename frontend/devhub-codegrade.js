@@ -43,6 +43,19 @@
  *     hints: ['Try a hashmap…', 'Store each…'],
  *     ref: { label: 'Two-pointer & hashmap technique', file: 'interview-arrays-strings-visualizer.html' }
  *   }
+ *
+ * OPTIONAL SHAPE ADAPTERS (for data-structure exercises like linked lists):
+ * plain JSON test data (arrays, objects, numbers) is all __eq() can compare, but some
+ * problems need the user's own function to receive/return real node objects. Set
+ * `argShapes: [shape, shape, …]` (one entry per positional arg, undefined = pass through
+ * as-is) and/or `resultShape: shape` on an exercise; the runner converts before calling
+ * the user's function and after, so `tests[].args`/`expected` stay plain JSON:
+ *   - 'list'            — a plain array becomes a real { val, next } chain; a returned
+ *                          chain converts back to a plain array for comparison.
+ *   - 'list-with-cycle' — a plain { values: [...], pos: n } spec becomes a chain whose
+ *                          tail.next points at index n (n < 0 = no cycle). Input only —
+ *                          there is no matching resultShape (converting a cyclic chain
+ *                          back to an array would infinite-loop).
  * ========================================================================== */
 (function (global) {
   'use strict';
@@ -194,7 +207,7 @@
   }
 
   /* ---- run JS (or transpiled TS) inside a sandboxed iframe, get graded results ---- */
-  function runJsLike(fnCode, functionName, tests, timeoutMs) {
+  function runJsLike(fnCode, functionName, tests, timeoutMs, argShapes, resultShape) {
     return new Promise(resolve => {
       const channel = 'cg-' + Math.random().toString(36).slice(2);
       let settled = false;
@@ -215,8 +228,38 @@
       global.addEventListener('message', onMsg);
 
       const harness = `
+function __buildList(arr) {
+  let head = null, tail = null;
+  for (const v of arr) {
+    const node = { val: v, next: null };
+    if (!head) { head = node; tail = node; } else { tail.next = node; tail = node; }
+  }
+  return head;
+}
+function __buildListWithCycle(spec) {
+  const nodes = spec.values.map(v => ({ val: v, next: null }));
+  for (let i = 0; i < nodes.length - 1; i++) nodes[i].next = nodes[i + 1];
+  if (spec.pos >= 0 && nodes.length) nodes[nodes.length - 1].next = nodes[spec.pos];
+  return nodes.length ? nodes[0] : null;
+}
+function __listToArray(node) {
+  const out = []; let cur = node, guard = 0;
+  while (cur && guard++ < 100000) { out.push(cur.val); cur = cur.next; }
+  return out;
+}
+function __applyArgShape(shape, value) {
+  if (shape === 'list') return __buildList(value);
+  if (shape === 'list-with-cycle') return __buildListWithCycle(value);
+  return value;
+}
+function __applyResultShape(shape, value) {
+  if (shape === 'list') return __listToArray(value);
+  return value;
+}
 ${fnCode}
 const __tests = ${JSON.stringify(tests)};
+const __argShapes = ${JSON.stringify(argShapes || [])};
+const __resultShape = ${JSON.stringify(resultShape || null)};
 function __eq(a,b){
   if(a===b) return true;
   if(typeof a==='number'&&typeof b==='number'&&Number.isNaN(a)&&Number.isNaN(b)) return true;
@@ -228,7 +271,9 @@ function __eq(a,b){
 }
 const __results = __tests.map(t => {
   try {
-    const got = ${functionName}(...t.args);
+    const __callArgs = t.args.map((a, i) => __applyArgShape(__argShapes[i], a));
+    const rawGot = ${functionName}(...__callArgs);
+    const got = __applyResultShape(__resultShape, rawGot);
     let pass;
     if (t.unordered && Array.isArray(got) && Array.isArray(t.expected)) {
       const gs = got.slice().sort(), es = t.expected.slice().sort();
@@ -274,16 +319,71 @@ parent.postMessage({ channel: ${JSON.stringify(channel)}, kind: 'done', results:
     })();
     return pyBooting;
   }
-  async function runPython(code, functionName, tests) {
+  async function runPython(code, functionName, tests, argShapes, resultShape) {
     const py = await bootPyodide();
     const harness = `
 import json
+
+class __ListNode:
+    def __init__(self, val=0, next=None):
+        self.val = val
+        self.next = next
+
+def __build_list(arr):
+    head = None
+    tail = None
+    for v in arr:
+        node = __ListNode(v)
+        if head is None:
+            head = node
+            tail = node
+        else:
+            tail.next = node
+            tail = node
+    return head
+
+def __build_list_with_cycle(spec):
+    values = spec['values']
+    pos = spec['pos']
+    nodes = [__ListNode(v) for v in values]
+    for i in range(len(nodes) - 1):
+        nodes[i].next = nodes[i + 1]
+    if pos >= 0 and nodes:
+        nodes[-1].next = nodes[pos]
+    return nodes[0] if nodes else None
+
+def __list_to_array(node):
+    out = []
+    cur = node
+    guard = 0
+    while cur is not None and guard < 100000:
+        out.append(cur.val)
+        cur = cur.next
+        guard += 1
+    return out
+
+def __apply_arg_shape(shape, value):
+    if shape == 'list':
+        return __build_list(value)
+    if shape == 'list-with-cycle':
+        return __build_list_with_cycle(value)
+    return value
+
+def __apply_result_shape(shape, value):
+    if shape == 'list':
+        return __list_to_array(value)
+    return value
+
 ${code}
 __tests = json.loads(${JSON.stringify(JSON.stringify(tests))})
+__arg_shapes = json.loads(${JSON.stringify(JSON.stringify(argShapes || []))})
+__result_shape = json.loads(${JSON.stringify(JSON.stringify(resultShape || null))})
 __results = []
 for __t in __tests:
     try:
-        __got = ${functionName}(*__t['args'])
+        __call_args = [__apply_arg_shape(__arg_shapes[__i] if __i < len(__arg_shapes) else None, __a) for __i, __a in enumerate(__t['args'])]
+        __raw_got = ${functionName}(*__call_args)
+        __got = __apply_result_shape(__result_shape, __raw_got)
         if __t.get('unordered') and isinstance(__got, list) and isinstance(__t['expected'], list):
             __pass = sorted(__got) == sorted(__t['expected'])
         else:
@@ -381,7 +481,7 @@ __results
       let outcome;
       try {
         if (lang === 'python') {
-          outcome = await runPython(ta.value, ex.functionName.python, ex.tests);
+          outcome = await runPython(ta.value, ex.functionName.python, ex.tests, ex.argShapes, ex.resultShape);
         } else {
           let code = ta.value, fnName = ex.functionName[lang];
           if (lang === 'typescript') {
@@ -389,7 +489,7 @@ __results
             if (!ok) { statusEl.textContent = 'offline — could not load the TypeScript compiler'; runBtn.disabled = false; return; }
             code = transpileTs(code);
           }
-          outcome = await runJsLike(code, fnName, ex.tests, 5000);
+          outcome = await runJsLike(code, fnName, ex.tests, 5000, ex.argShapes, ex.resultShape);
         }
       } catch (e) {
         outcome = { error: (e && e.message) || String(e) };
