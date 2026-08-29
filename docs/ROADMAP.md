@@ -34,7 +34,7 @@ suite and having to make it pass, under a clock.
   replayed operation log (`ops` + parallel `argsList` → an array of per-op results) instead of a
   single pure function call — no engine changes needed beyond how the exercise bank shapes its
   test cases.
-- Five topics now live, 30 exercises total, all gradable in JS, TS, and Python:
+- Six topics now live, 36 exercises total, all gradable in JS, TS, and Python:
   - `practice-arrays-strings.html` — Two Sum, Contains Duplicate, Valid Anagram, Best Time to
     Buy/Sell Stock, Valid Palindrome, Longest Substring Without Repeating Characters.
   - `practice-stacks-queues.html` — Valid Parentheses, Min Stack (Design), Daily Temperatures,
@@ -45,6 +45,9 @@ suite and having to make it pass, under a clock.
     Increasing Subsequence, Maximum Subarray (Kadane's), Unique Paths (2D grid DP).
   - `practice-linked-lists.html` — Reverse Linked List, Merge Two Sorted Lists, Linked List
     Cycle, Remove Nth Node From End of List, Middle of the Linked List, Add Two Numbers.
+  - `practice-trees.html` — Maximum Depth of Binary Tree, Invert Binary Tree, Same Tree,
+    Validate Binary Search Tree, Binary Tree Level Order Traversal, Lowest Common Ancestor of
+    a BST.
   - Every exercise's expected test values were independently verified against a reference
     solution in Node before shipping (not just hand-traced), and each new page was smoke-tested
     live in-browser (JS, TS, Python, and the ops-replay/shape-adapter patterns all confirmed
@@ -63,9 +66,12 @@ suite and having to make it pass, under a clock.
   `{ val, next }` object literals (no class needed — duck typing), TypeScript uses a type-only
   `interface ListNode` in the starter (erased at transpile time, so it can't collide with
   anything), and Python gets a real `class ListNode` in the starter (redefinition is harmless in
-  Python, unlike JS's ES-module scoping). This same adapter mechanism is the intended path for
-  Trees (`'tree'` shape, level-order array ⇄ real node structure) whenever that topic is next.
-- "Coding Practice (IDE)" track in `tracks-data.js` (5 pages), under the "Practice & Prep"
+  Python, unlike JS's ES-module scoping). The same mechanism now also has a `'tree'` shape
+  (LeetCode's standard level-order array with `null` gaps ⇄ a real `{ val, left, right }`
+  structure, BFS-built/BFS-serialized, trailing nulls trimmed on output), used by
+  `practice-trees.html`. Both round-trip converters were verified against known-correct
+  encodings in Node (not just eyeballed) before shipping.
+- "Coding Practice (IDE)" track in `tracks-data.js` (6 pages), under the "Practice & Prep"
   sidebar category in `app.html`.
 - Deliberately 100% client-side/offline for Phase 1 — the existing server-side sandboxed
   `/api/run/*` execution backend (`ExecutionService.java`, JAVA/TYPESCRIPT/SHELL via
@@ -73,11 +79,11 @@ suite and having to make it pass, under a clock.
   like the rest of the site.
 
 **What's still open / not built:**
-- Remaining `interview-*-visualizer.html` topics with no matching `practice-*.html` yet: Trees,
-  Graphs, Hashmaps & Sets, Backtracking. Trees can reuse the same `argShapes`/`resultShape`
-  adapter pattern used for Linked Lists (add a `'tree'` shape converting a level-order array with
-  `null` gaps to/from a real node structure) — no further engine-architecture decision needed,
-  just the implementation work.
+- Remaining `interview-*-visualizer.html` topics with no matching `practice-*.html` yet: Graphs,
+  Hashmaps & Sets, Backtracking. Graphs will likely want their own shape (adjacency list is
+  already just plain arrays/objects, so this may need no new adapter at all — check before
+  assuming one is required). Hashmaps & Sets and Backtracking need no adapters either; they're
+  array/primitive-in-array/primitive-out like the four earliest topics.
 - **Open architectural question, unchanged — surface to Bobby before deciding:** Java/C#/Go/Rust/
   PHP/Ruby have no real in-browser runtime in this repo. Either a WASM JVM/etc. (CheerpJ, TeaVM)
   or reusing the existing `/api/run/*` backend (adding a `JAVA` case to `Language.java`) is a real

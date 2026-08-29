@@ -56,6 +56,11 @@
  *                          tail.next points at index n (n < 0 = no cycle). Input only —
  *                          there is no matching resultShape (converting a cyclic chain
  *                          back to an array would infinite-loop).
+ *   - 'tree'            — a level-order array with `null` gaps (LeetCode's standard binary
+ *                          tree encoding, e.g. [3,9,20,null,null,15,7]) becomes a real
+ *                          { val, left, right } node structure; a returned tree converts
+ *                          back to the same level-order-with-nulls array (trailing nulls
+ *                          trimmed) for comparison.
  * ========================================================================== */
 (function (global) {
   'use strict';
@@ -247,13 +252,44 @@ function __listToArray(node) {
   while (cur && guard++ < 100000) { out.push(cur.val); cur = cur.next; }
   return out;
 }
+function __buildTree(arr) {
+  if (!arr || !arr.length || arr[0] === null) return null;
+  const root = { val: arr[0], left: null, right: null };
+  const queue = [root];
+  let i = 1;
+  while (queue.length && i < arr.length) {
+    const node = queue.shift();
+    if (i < arr.length) {
+      const lv = arr[i++];
+      if (lv !== null) { node.left = { val: lv, left: null, right: null }; queue.push(node.left); }
+    }
+    if (i < arr.length) {
+      const rv = arr[i++];
+      if (rv !== null) { node.right = { val: rv, left: null, right: null }; queue.push(node.right); }
+    }
+  }
+  return root;
+}
+function __treeToArray(root) {
+  if (!root) return [];
+  const out = []; const queue = [root];
+  while (queue.length) {
+    const node = queue.shift();
+    if (node) { out.push(node.val); queue.push(node.left); queue.push(node.right); }
+    else out.push(null);
+  }
+  while (out.length && out[out.length - 1] === null) out.pop();
+  return out;
+}
 function __applyArgShape(shape, value) {
   if (shape === 'list') return __buildList(value);
   if (shape === 'list-with-cycle') return __buildListWithCycle(value);
+  if (shape === 'tree') return __buildTree(value);
   return value;
 }
 function __applyResultShape(shape, value) {
   if (shape === 'list') return __listToArray(value);
+  if (shape === 'tree') return __treeToArray(value);
   return value;
 }
 ${fnCode}
@@ -362,16 +398,64 @@ def __list_to_array(node):
         guard += 1
     return out
 
+class __TreeNode:
+    def __init__(self, val=0, left=None, right=None):
+        self.val = val
+        self.left = left
+        self.right = right
+
+def __build_tree(arr):
+    if not arr or arr[0] is None:
+        return None
+    root = __TreeNode(arr[0])
+    queue = [root]
+    i = 1
+    n = len(arr)
+    while queue and i < n:
+        node = queue.pop(0)
+        if i < n:
+            lv = arr[i]; i += 1
+            if lv is not None:
+                node.left = __TreeNode(lv)
+                queue.append(node.left)
+        if i < n:
+            rv = arr[i]; i += 1
+            if rv is not None:
+                node.right = __TreeNode(rv)
+                queue.append(node.right)
+    return root
+
+def __tree_to_array(root):
+    if root is None:
+        return []
+    out = []
+    queue = [root]
+    while queue:
+        node = queue.pop(0)
+        if node is not None:
+            out.append(node.val)
+            queue.append(node.left)
+            queue.append(node.right)
+        else:
+            out.append(None)
+    while out and out[-1] is None:
+        out.pop()
+    return out
+
 def __apply_arg_shape(shape, value):
     if shape == 'list':
         return __build_list(value)
     if shape == 'list-with-cycle':
         return __build_list_with_cycle(value)
+    if shape == 'tree':
+        return __build_tree(value)
     return value
 
 def __apply_result_shape(shape, value):
     if shape == 'list':
         return __list_to_array(value)
+    if shape == 'tree':
+        return __tree_to_array(value)
     return value
 
 ${code}

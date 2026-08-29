@@ -561,6 +561,7 @@ window.DEVHUB_TRACKS = [
       { label: 'Data Structures & Algorithms', pages: [
         { title: 'Arrays & Strings',        file: 'practice-arrays-strings.html',              level: 'beginner' },
         { title: 'Linked Lists',            file: 'practice-linked-lists.html',                level: 'intermediate' },
+        { title: 'Trees',                   file: 'practice-trees.html',                       level: 'intermediate' },
         { title: 'Stacks & Queues',         file: 'practice-stacks-queues.html',               level: 'intermediate' },
         { title: 'Sorting & Searching',     file: 'practice-sorting-searching.html',           level: 'intermediate' },
         { title: 'Dynamic Programming',     file: 'practice-dynamic-programming.html',         level: 'advanced' },
