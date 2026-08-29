@@ -20,7 +20,7 @@ window.DEVHUB_EXAMS = [
     file: 'exam-aws-developer.html',
     track: 'Cloud — AWS',
     passPct: 72,
-    count: 24,
+    count: 40,
     available: true
   },
   {
@@ -150,7 +150,7 @@ window.DEVHUB_EXAMS = [
     file: 'exam-sql.html',
     track: 'Databases',
     passPct: 70,
-    count: 24,
+    count: 30,
     available: true
   },
   {

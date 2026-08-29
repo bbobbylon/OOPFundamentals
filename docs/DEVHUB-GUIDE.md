@@ -63,7 +63,7 @@ Or jump straight to any file linked below.
 | ⎈ **Kubernetes** | pods, deployments, services, config & secrets, Helm, Spring on K8s | [Kubernetes Fundamentals](../frontend/kubernetes-fundamentals-visualizer.html) |
 | 🗄️ **SQL & Databases** | SQL, indexes & query plans, transactions/ACID, CTEs, normalization, Postgres | [SQL Fundamentals](../frontend/sql-fundamentals-visualizer.html) |
 | ⌨️ **Shell & Scripting** | CLI basics, **Bash**, **PowerShell** objects, **CMD/Batch** — three shells side by side | [CLI Basics](../frontend/shell-cli-basics-visualizer.html) |
-| 🎓 **Exam Prep — Practice Tests** | 15 timed/scored mock exams (426 Q), a **readiness dashboard**, **15 learning paths**, and **spaced-repetition flashcards** (12 decks / 340 cards) | [Readiness Dashboard](../frontend/exam-readiness.html) · [Learning Paths](../frontend/learning-paths.html) · [exams](../frontend/exam-aws-developer.html) |
+| 🎓 **Exam Prep — Practice Tests** | 15 timed/scored mock exams (448 Q), a **readiness dashboard**, **15 learning paths**, and **spaced-repetition flashcards** (12 decks / 345 cards) | [Readiness Dashboard](../frontend/exam-readiness.html) · [Learning Paths](../frontend/learning-paths.html) · [exams](../frontend/exam-aws-developer.html) |
 | 🤖 **AI-Assisted Development** | the landscape of AI coding tools (inline vs chat vs agentic, by context & autonomy), **GitHub Copilot** mode by mode, and **Claude Code**'s explore→edit→verify tool loop, Plan Mode, subagents, and hooks | [AI Coding Assistants — The Landscape](../frontend/ai-assistants-overview-visualizer.html) |
 
 Pages are tagged **beginner → intermediate → advanced → expert**. The deepest
@@ -226,8 +226,10 @@ The DevHub isn't only *exposition* — the **🎓 Exam Prep** track adds **retri
 practice**, the part that actually makes knowledge stick and turns "I read it" into
 "I can pass the cert." It is one reusable engine plus per-exam data:
 
-**The catalog (15 exams · 426 Q):** *Cloud* — AWS Cloud Practitioner, Developer
-Associate, Solutions Architect Associate,
+**The catalog (15 exams · 448 Q):** *Cloud* — AWS Cloud Practitioner,
+[Developer Associate](../frontend/exam-aws-developer.html) (DVA-C02, 40 Q — the real
+exam guide's four domains: Development with AWS Services, Security, Deployment,
+Troubleshooting and Optimization), Solutions Architect Associate,
 [Azure Developer Associate (AZ-204)](../frontend/exam-azure-developer.html) (28 Q —
 every question linked to one of the seven azure-* visualizers). *Languages & Frameworks* — Java SE 21
 (OCP), Spring Professional, [Angular v17+](../frontend/exam-angular.html),
@@ -236,7 +238,8 @@ every question linked to one of the seven azure-* visualizers). *Languages & Fra
 day-job exam: grant types, PKCE, ID-vs-access tokens, JWT validation, Ping/Entra).
 *Containers & DevOps* — [Docker](../frontend/exam-docker.html),
 [Kubernetes](../frontend/exam-kubernetes.html). *Data & APIs* —
-[SQL](../frontend/exam-sql.html),
+[SQL](../frontend/exam-sql.html) (30 Q — includes a PostgreSQL Internals & Scale
+domain: JSONB, VACUUM, connection pooling, replication, partitioning/sharding),
 [HTTP & REST APIs](../frontend/exam-http-rest.html). *Developer Tools* —
 [Git](../frontend/exam-git.html). *Coding Interview* — Data Structures &
 Algorithms.

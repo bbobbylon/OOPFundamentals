@@ -137,15 +137,21 @@ found this reaches well past AWS and DS&A):
   `ds-hash-tables-visualizer.html`, `ds-heaps-visualizer.html`, `ds-tries-visualizer.html`,
   `ds-graphs-advanced-visualizer.html`, and `ds-disjoint-sets-visualizer.html`. Every DS&A page now
   has the full scenario-walk + live-inspector treatment — nothing left to retrofit in this track.
-- `exam-sql.html` (24 Q) doesn't test anything from `sql-postgres-visualizer.html` (JSONB,
-  connection pooling, VACUUM) — add a domain once the replication/partitioning pages above are
-  registered.
-- `exam-aws-developer.html` mislabels its domains against the real DVA-C02 exam guide (uses
-  service-based tags instead of Development/Security/Deployment/Troubleshooting) and has no
-  real Deployment or Troubleshooting & Optimization coverage — only 24 questions vs the other
-  two AWS banks' 37–41.
-- `flashcards-bigo.html` has no cards for two-pointer/sliding-window or backtracking once those
-  pages exist.
+~~`exam-sql.html` doesn't test anything from `sql-postgres-visualizer.html`/replication/
+partitioning~~ — **DONE (2026-08-28).** Added a PostgreSQL Internals & Scale domain (JSONB,
+VACUUM/MVCC, PgBouncer connection pooling, async/sync replication failover risk, partition
+pruning, shard-key selection) — 24 Q → 30 Q, registered in `quiz-banks.js`.
+
+~~`exam-aws-developer.html` mislabels its domains against the real DVA-C02 exam guide~~ —
+**DONE (2026-08-28).** Relabeled into the exam guide's real four domains (Development with AWS
+Services, Security, Deployment, Troubleshooting and Optimization) and added DynamoDB, API
+Gateway, CloudFormation/CDK, deployment-strategy, Lambda Layers, and cost-optimization questions
+to fill the previously-empty Deployment and Troubleshooting domains — 24 Q → 40 Q, registered in
+`quiz-banks.js`.
+
+~~`flashcards-bigo.html` has no cards for two-pointer/sliding-window or backtracking~~ — **DONE
+(2026-08-28).** Added 5 cards covering converging two pointers, variable/fixed sliding windows,
+3Sum, and backtracking's pruned-but-still-exponential complexity.
 
 ---
 

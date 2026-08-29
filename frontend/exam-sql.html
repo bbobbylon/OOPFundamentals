@@ -27,7 +27,7 @@
 <div class="container">
   <a class="back" href="app.html">← Hub</a>
   <h1>SQL — Practice Exam</h1>
-  <p class="sub">A pool of questions across SELECT &amp; filtering, joins, aggregation, keys &amp; constraints, indexes, transactions (ACID/isolation), and normalization.</p>
+  <p class="sub">A pool of questions across SELECT &amp; filtering, joins, aggregation, keys &amp; constraints, indexes, transactions (ACID/isolation), normalization, and PostgreSQL internals &amp; scale (JSONB, VACUUM, pooling, replication, partitioning/sharding).</p>
 
   <div class="intro">
     <p><b>SQL is declarative: you say WHAT rows you want, the engine decides how to get them.</b> The traps that separate juniors from seniors: the logical order of evaluation (WHERE before GROUP BY before HAVING), why a filter in the WHERE clause silently turns a LEFT JOIN back into an INNER JOIN, three-valued NULL logic, and when an index actually gets used. <b>Practice mode</b> links each answer to the visualizer that proves it — and there’s a live SQL playground if you want to run queries. Drill until the bars are green on the <a href="exam-readiness.html" style="color:var(--accent)">dashboard</a>.</p>
@@ -41,7 +41,8 @@
 /* ============================================================================
  * SQL practice bank.
  * Domains: Querying & Filtering, Joins, Aggregation, Keys & Constraints,
- *          Indexes & Performance, Transactions, Normalization.
+ *          Indexes & Performance, Transactions, Normalization,
+ *          PostgreSQL Internals & Scale.
  * ========================================================================== */
 DevHubQuiz.render(document.getElementById('quiz'), {
   id: 'sql',
@@ -49,8 +50,8 @@ DevHubQuiz.render(document.getElementById('quiz'), {
   cert: 'SQL · practice exam',
   accent: '#4f93c4',
   passPct: 70,
-  examCount: 22,
-  timeLimitMin: 30,
+  examCount: 30,
+  timeLimitMin: 35,
   questions: [
     /* ============ Querying & Filtering ============ */
     {
@@ -520,6 +521,122 @@ DevHubQuiz.render(document.getElementById('quiz'), {
       ],
       explanation: 'Denormalization trades write complexity and redundancy for faster reads (fewer joins), common in analytics/reporting and read-heavy paths. It’s a conscious performance trade-off, not a default — you must keep the duplicated data in sync.',
       ref: { label: 'Normalization', file: 'sql-normalization-visualizer.html' }
+    },
+
+    /* ============ PostgreSQL Internals & Scale ============ */
+    {
+      id: 'pg-jsonb', domain: 'PostgreSQL Internals & Scale', difficulty: 'medium',
+      stem: 'Why store audit-log metadata as JSONB instead of JSON in PostgreSQL?',
+      choices: [
+        'JSONB stores parsed binary and dedupes/reorders keys, which enables GIN indexing and the @> containment operator; JSON is raw text with no index support beyond a full scan',
+        'They are two names for the exact same on-disk storage format, so the choice between JSON and JSONB never has any effect on indexing or query performance',
+        'JSON is the faster, indexable binary format, while JSONB stores the raw uninterpreted text and preserves key order for later human inspection',
+        'JSONB is only a stricter validation mode that rejects malformed documents at insert time — it stores the exact same raw text as JSON and offers no query or indexing benefit'
+      ],
+      answer: 0,
+      why: [
+        'Right — JSONB’s binary form is what makes a GIN index and operators like @> possible; JSON is stored as text and can only be scanned.',
+        'They differ meaningfully — JSON preserves whitespace/key order/duplicates as text, JSONB parses into binary and dedupes keys, and only JSONB supports indexing.',
+        'That’s backwards — JSON is the raw-text format with no index support, JSONB is the binary, GIN-indexable one.',
+        'JSONB does more than validate — its binary representation is what unlocks indexing and containment queries, not just a stricter input check.'
+      ],
+      explanation: 'JSON stores raw text (preserves whitespace, key order, duplicate keys). JSONB stores parsed binary (deduplicates keys, strips whitespace) and supports GIN indexing plus operators like -> / ->> / @> / ?. Use JSONB unless you must preserve the exact input text.',
+      ref: { label: 'PostgreSQL', file: 'sql-postgres-visualizer.html' }
+    },
+    {
+      id: 'pg-vacuum', domain: 'PostgreSQL Internals & Scale', difficulty: 'hard',
+      stem: 'Why does a high-churn table (e.g. login_events) need VACUUM, and what happens if autovacuum falls behind?',
+      choices: [
+        'VACUUM only compresses old backups of the table onto cheaper storage — skipping it just means backups consume more disk, with no effect on live query performance',
+        'Postgres’ MVCC leaves the old row version behind on every UPDATE/DELETE as a dead tuple; unreclaimed dead tuples bloat the table and slow scans, so autovacuum (or manual VACUUM ANALYZE) reclaims space and refreshes planner stats',
+        'VACUUM deletes rows that have exceeded a configured retention period, so skipping it just means old rows accumulate instead of being purged automatically',
+        'Skipping VACUUM has no real consequence in practice, since Postgres reclaims dead tuple space automatically the instant every single transaction commits, making autovacuum, manual VACUUM, and VACUUM ANALYZE all pure legacy commands with nothing left for any of them to actually do on a modern server'
+      ],
+      answer: 1,
+      why: [
+        'VACUUM has nothing to do with backups — it operates on the live table’s storage, reclaiming space MVCC left behind, not archiving anything.',
+        'Right — every UPDATE/DELETE leaves a dead tuple under MVCC; VACUUM reclaims that space and updates planner stats, and a long-open transaction can block it, causing bloat.',
+        'VACUUM isn’t a retention/purge tool — it doesn’t decide which live rows to delete based on age; that’s an application-level DELETE or partition-drop concern.',
+        'Reclamation is not automatic on commit — the old row version sits on disk as a dead tuple until VACUUM (autovacuum or manual) actually removes it; if it were automatic, autovacuum wouldn’t need to exist at all.'
+      ],
+      explanation: 'MVCC means an UPDATE/DELETE doesn’t overwrite in place — it marks the old row version dead and leaves it on disk so concurrent readers aren’t blocked. VACUUM (or autovacuum) reclaims those dead tuples and refreshes planner statistics; a long-running transaction can hold dead tuples hostage, and high-churn tables often need autovacuum_vacuum_scale_factor tuned lower (e.g. 0.01) to vacuum sooner.',
+      ref: { label: 'PostgreSQL', file: 'sql-postgres-visualizer.html' }
+    },
+    {
+      id: 'pg-pool', domain: 'PostgreSQL Internals & Scale', difficulty: 'medium',
+      stem: 'A Spring Boot app runs 10 pods, each with a HikariCP pool of 10 connections. Why put PgBouncer in front of Postgres?',
+      choices: [
+        'PgBouncer encrypts traffic between the app and the database, a capability Postgres itself is completely incapable of providing on its own without it',
+        'It has no real effect at this scale — 100 direct Postgres connections is a negligible load that any default Postgres installation on any hardware, however small, would handle identically whether or not a pooler sits in front of it',
+        'Postgres is process-per-connection (~5-10MB each); 10 pods × 10 connections = 100 heavyweight backend processes, and PgBouncer multiplexes them onto a much smaller number of real database connections',
+        'PgBouncer is required before Spring Boot can use JDBC at all, since HikariCP cannot open a connection directly to a raw PostgreSQL port without a pooling proxy in between'
+      ],
+      answer: 2,
+      why: [
+        'TLS is a separate concern (sslmode on the JDBC URL or Postgres itself) — pooling and encryption are unrelated features of PgBouncer.',
+        '100 processes at ~5-10MB each is real memory pressure, and it only grows with more pods — this is exactly the problem PgBouncer exists to solve.',
+        'Right — Postgres’ per-connection process model makes many idle connections expensive; PgBouncer collapses many app-side connections onto few real backend ones (e.g. transaction-mode pooling).',
+        'HikariCP connects to plain PostgreSQL constantly without any pooler in front — PgBouncer is an optional scaling layer, not a JDBC requirement.'
+      ],
+      explanation: 'PostgreSQL forks a full OS process per connection (~5-10MB). At 10 pods × 10 connections that’s 100 backend processes. PgBouncer sits between the app and Postgres, multiplexing many app-side (HikariCP) connections onto a small pool of real ones — commonly configured in transaction mode.',
+      ref: { label: 'PostgreSQL', file: 'sql-postgres-visualizer.html' }
+    },
+    {
+      id: 'pg-async-failover', domain: 'PostgreSQL Internals & Scale', difficulty: 'hard',
+      stem: 'The primary dies and you promote its asynchronous replica. What is the risk?',
+      choices: [
+        'None whatsoever — asynchronous and synchronous replicas are guaranteed to be byte-for-byte identical to the primary at every instant, so promotion is always lossless',
+        'The replica may be missing the last few committed transactions the primary never had time to ship over the WAL stream before it died — silent data loss on failover',
+        'The replica will refuse to be promoted at all unless it first replays every WAL byte the original primary ever generated since the cluster was created',
+        'Promotion always corrupts the replica’s own data files, so the new primary must be restored from a separate backup before it can serve any traffic'
+      ],
+      answer: 1,
+      why: [
+        'That guarantee only holds for synchronous replication with remote_apply — async replication explicitly does not wait, so lag is expected, not impossible.',
+        'Right — async replication doesn’t block the primary’s COMMIT on the replica, so WAL generated just before the crash may never have shipped; promoting loses it silently.',
+        'Promotion doesn’t require catching up to every historical WAL byte — it replays whatever WAL it already has and starts accepting new writes from there.',
+        'Promotion doesn’t corrupt data files — the risk is missing recent transactions, not damage to what the replica already has.'
+      ],
+      explanation: 'Asynchronous replication lets the primary commit and acknowledge the client without waiting for any replica, so a replica can lag by milliseconds to seconds. If the primary dies before shipping its most recent WAL, promoting the async replica makes it the new primary missing those last transactions — data loss that synchronous replication (remote_apply) avoids at the cost of write latency.',
+      ref: { label: 'Replication & HA', file: 'sql-replication-visualizer.html' }
+    },
+    {
+      id: 'pg-partition-prune', domain: 'PostgreSQL Internals & Scale', difficulty: 'hard',
+      stem: 'A table is PARTITION BY RANGE (created_at) with 24 monthly partitions. A query filters only on customer_id, with no created_at predicate. What happens?',
+      choices: [
+        'The planner still touches just the single partition holding that customer_id’s most recent row, because RANGE partitioning secretly maintains a hidden per-customer lookup index behind the scenes for exactly this situation',
+        'The query fails outright with a planner error, since PostgreSQL requires every query against a partitioned table to filter on the partition key or it won’t generate a plan at all',
+        'Partition pruning can’t apply — the filter doesn’t touch the partition key (created_at), so the planner must scan all 24 partitions, which is worse than an unpartitioned table for this query',
+        'PostgreSQL automatically rewrites the query to add a synthetic created_at predicate covering all 24 months, restoring pruning transparently with no plan-level difference'
+      ],
+      answer: 2,
+      why: [
+        'RANGE partitioning has nothing to do with customer_id — there’s no hidden per-customer index; pruning only ever keys off the declared partition column.',
+        'Postgres doesn’t reject the query — it plans and runs it, just without the pruning benefit; the query still returns correct results, only slower.',
+        'Right — pruning depends entirely on filtering the partition key; filtering on an unrelated column forces an Append across every partition, strictly worse than one unpartitioned table.',
+        'There’s no automatic rewrite — the planner works only with the predicates actually given; a query without a created_at filter gets no pruning help.'
+      ],
+      explanation: 'Partition pruning only works when the query filters on the declared partition key. Filtering on customer_id against a table partitioned by created_at gives the planner nothing to prune with — EXPLAIN would show every partition under Append, meaning all 24 get scanned instead of the 1 a matching date filter would touch.',
+      ref: { label: 'Partitioning & Sharding', file: 'sql-partitioning-visualizer.html' }
+    },
+    {
+      id: 'pg-shard-key', domain: 'PostgreSQL Internals & Scale', difficulty: 'hard',
+      stem: 'You shard a multi-tenant users table across 8 Postgres instances. Which shard key keeps routine CIAM queries (login, session list, permission check) on a single shard?',
+      choices: [
+        'user_id, because every table’s primary key is always the correct shard key regardless of which columns the application’s actual queries filter on',
+        'tenant_id — nearly every CIAM query is already scoped to one tenant, so sharding on it keeps those queries single-shard; user_id as the key would force cross-shard fan-out on routine tenant-wide admin queries',
+        'created_at, since spreading rows evenly by signup date guarantees balanced shards no matter what column the application later filters on',
+        'No shard key choice matters here at all, since a query without an explicit WHERE clause on the shard key gets pruned and routed to the correct single shard automatically no matter which column was originally chosen'
+      ],
+      answer: 1,
+      why: [
+        'A primary key isn’t automatically the right shard key — the right key is whichever column the app’s actual query patterns filter on, and here that’s tenant_id, not user_id.',
+        'Right — login, session, and permission checks are naturally tenant-scoped, so sharding by tenant_id keeps them single-shard; user_id would scatter a tenant’s rows across shards instead.',
+        'created_at might balance row counts, but it isn’t what the queries filter on — balancing storage evenly is irrelevant if every query still has to fan out.',
+        'The shard key absolutely matters — a router can only route to one shard when the query filters on the chosen key; there’s no automatic pruning independent of that choice.'
+      ],
+      explanation: 'Sharding, like partitioning, only avoids fan-out when queries filter on the shard key. CIAM traffic (login, session list, permission check) is almost always scoped to a single tenant, so tenant_id as the shard key keeps that traffic single-shard. Choosing user_id instead would scatter one tenant’s users across shards, forcing routine tenant-wide admin queries to scatter-gather across all 8.',
+      ref: { label: 'Partitioning & Sharding', file: 'sql-partitioning-visualizer.html' }
     }
   ]
 });
