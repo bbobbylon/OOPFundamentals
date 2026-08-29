@@ -95,14 +95,35 @@ practice exam, length-bracketed per the quality standard — 7/7/7/7 answer-posi
 0/28 "longest choice is correct" bias), `flashcards-gcp.html` (30-card deck), and a GCP capstone
 entry in `learning-paths.html`, all registered in `quiz-banks.js` / `tracks-data.js`.
 
-**Longer-term expansion (in progress as of 2026-08-28):** grow beyond software development into
-every IT field — AI, Data Science, Software Dev, DevOps, and whatever else — per Bobby's "zero to
-hero / zero to full-stack / zero to data or AI dev" directive. Add practice exams/study guides for
-certificates, scoped to **entry-level certs only** (e.g. AWS, Azure, GCP, Claude Code, Angular) —
-the full universe of certs is too large to chase, and entry-level is where a zero-experience
-learner actually needs the on-ramp. **Mid- and senior-level certs are an explicitly later phase.**
-New tracks in flight: Web Fundamentals (HTML/CSS/JS/DOM/browser), Data Science & ML, and AI/LLM
-Engineering, plus a sitewide cleanup/depth-audit pass on existing shallow content.
+**Longer-term expansion — "zero to hero" gap closure, DONE (2026-08-28):** grow beyond software
+development into every IT field — AI, Data Science, Software Dev, DevOps, and whatever else — per
+Bobby's "zero to hero / zero to full-stack / zero to data or AI dev" directive. Three new tracks
+built and fully registered (pages, exam, flashcard deck, learning path):
+
+- **🌐 Web Fundamentals** (7 pages) — the true zero-starting-point before Angular/React/TypeScript:
+  HTML structure/forms/a11y, CSS box model/specificity, Flexbox & Grid, JS fundamentals/closures,
+  the DOM & events, async JS (Promises/async-await/fetch), and how browsers actually render a page.
+  `exam-web-fundamentals.html` (26 Q), `flashcards-web-fundamentals.html` (26 cards).
+- **📊 Data Science & ML** (9 pages) — NumPy/pandas, data cleaning & EDA, visualization, ML
+  fundamentals (bias-variance), regression/classification, model evaluation, clustering/PCA, and
+  neural networks/PyTorch. `exam-data-science.html` (30 Q, quality-audited via
+  `tmp_examtell_audit.mjs` — first draft failed on answer-length bias, fixed and re-audited clean),
+  `flashcards-data-science.html` (30 cards).
+- **🧠 AI / LLM Engineering** (9 pages) — transformers & attention, how LLMs work (tokenization/
+  sampling), prompt engineering, embeddings & vector databases, RAG, tool-calling agents, LLM API
+  integration, fine-tuning vs RAG vs prompting & LLMOps, and AI safety/guardrails (prompt injection,
+  jailbreaks, PII handling — treated with the same rigor as `appsec-injection-xss-visualizer.html`).
+  `exam-ai-engineering.html` (28 Q, quality-audited via `tmp_examtell_audit.mjs` — first draft
+  failed badly, correct answer was the longest choice in 89% of questions; rewrote choice text
+  across nearly every question and re-audited clean), `flashcards-ai-engineering.html` (28 cards).
+
+All three registered in `tracks-data.js`, `app.html`'s `CATEGORIES` (new "Data & AI" group),
+`devhub.css` (theme accents), `quiz-banks.js`, and `learning-paths.html`. Site now stands at
+**498 pages / 33 tracks / 19 exams (560 Q) / 16 flashcard decks (459 cards) / 19 learning paths**.
+Certs remain scoped to **entry-level only** — mid/senior-level certs are an explicitly later phase.
+
+**Next up:** a sitewide cleanup/depth-audit pass on existing shallow content (task queued, not yet
+started), then the previously-queued AWS deployment boilerplate work.
 
 ---
 

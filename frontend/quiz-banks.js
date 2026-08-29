@@ -172,5 +172,35 @@ window.DEVHUB_EXAMS = [
     passPct: 70,
     count: 28,
     available: true
+  },
+  {
+    id: 'web-fundamentals',
+    title: 'Web Fundamentals',
+    cert: 'HTML/CSS/JS',
+    file: 'exam-web-fundamentals.html',
+    track: 'Web Fundamentals',
+    passPct: 70,
+    count: 26,
+    available: true
+  },
+  {
+    id: 'data-science',
+    title: 'Data Science & ML',
+    cert: 'DS/ML',
+    file: 'exam-data-science.html',
+    track: 'Data Science & ML',
+    passPct: 70,
+    count: 30,
+    available: true
+  },
+  {
+    id: 'ai-engineering',
+    title: 'AI / LLM Engineering',
+    cert: 'GenAI',
+    file: 'exam-ai-engineering.html',
+    track: 'AI / LLM Engineering',
+    passPct: 70,
+    count: 28,
+    available: true
   }
 ];

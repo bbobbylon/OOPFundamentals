@@ -1,11 +1,11 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 473 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 498 pages.** Pick a *path* below and follow it.
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **473 browser visualizers** across **30 tracks** (grouped into
+DevHub is a learning hub: **498 browser visualizers** across **33 tracks** (grouped into
 categories in the sidebar — Languages & Concepts, Frontend, Backend & APIs, DevOps/Cloud & Data, Practice & Prep; several tracks also have a 🍳 **Common Recipes** section of practical how-tos — API→form, batch upload, password complexity), plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
@@ -64,7 +64,10 @@ Or jump straight to any file linked below.
 | ⎈ **Kubernetes** | pods, deployments, services, config & secrets, Helm, Spring on K8s | [Kubernetes Fundamentals](../frontend/kubernetes-fundamentals-visualizer.html) |
 | 🗄️ **SQL & Databases** | SQL, indexes & query plans, transactions/ACID, CTEs, normalization, Postgres | [SQL Fundamentals](../frontend/sql-fundamentals-visualizer.html) |
 | ⌨️ **Shell & Scripting** | CLI basics, **Bash**, **PowerShell** objects, **CMD/Batch** — three shells side by side | [CLI Basics](../frontend/shell-cli-basics-visualizer.html) |
-| 🎓 **Exam Prep — Practice Tests** | 16 timed/scored mock exams (476 Q), a **readiness dashboard**, **16 learning paths**, and **spaced-repetition flashcards** (13 decks / 375 cards) | [Readiness Dashboard](../frontend/exam-readiness.html) · [Learning Paths](../frontend/learning-paths.html) · [exams](../frontend/exam-aws-developer.html) |
+| 🌐 **Web Fundamentals** | the true zero-starting-point before Angular/React/TypeScript: **HTML** structure/forms/a11y, **CSS** box model/specificity/Flexbox/Grid, plain **JavaScript** (closures, `this`, the DOM & events), **async JS** (Promises/async-await/`fetch`), and **how browsers actually render a page** | [HTML Fundamentals](../frontend/web-html-fundamentals-visualizer.html) |
+| 📊 **Data Science & ML** | **NumPy/pandas**, data cleaning & **EDA**, **visualization**, ML fundamentals (bias-variance), **regression/classification**, model evaluation, **clustering/PCA**, and **neural networks/PyTorch** | [NumPy & Pandas](../frontend/datasci-numpy-pandas-visualizer.html) |
+| 🧠 **AI / LLM Engineering** | **transformers & attention**, how LLMs work (tokenization/sampling), **prompt engineering**, **embeddings & vector DBs**, **RAG**, **tool-calling agents**, wiring an **LLM API** into a real backend, fine-tuning vs RAG vs prompting & **LLMOps**, and **AI safety/guardrails** (prompt injection, jailbreaks, PII) | [Transformers & Attention](../frontend/genai-transformers-attention-visualizer.html) |
+| 🎓 **Exam Prep — Practice Tests** | 19 timed/scored mock exams (560 Q), a **readiness dashboard**, **19 learning paths**, and **spaced-repetition flashcards** (16 decks / 459 cards) | [Readiness Dashboard](../frontend/exam-readiness.html) · [Learning Paths](../frontend/learning-paths.html) · [exams](../frontend/exam-aws-developer.html) |
 | 🤖 **AI-Assisted Development** | the landscape of AI coding tools (inline vs chat vs agentic, by context & autonomy), **GitHub Copilot** mode by mode, and **Claude Code**'s explore→edit→verify tool loop, Plan Mode, subagents, and hooks | [AI Coding Assistants — The Landscape](../frontend/ai-assistants-overview-visualizer.html) |
 
 Pages are tagged **beginner → intermediate → advanced → expert**. The deepest
@@ -228,7 +231,7 @@ The DevHub isn't only *exposition* — the **🎓 Exam Prep** track adds **retri
 practice**, the part that actually makes knowledge stick and turns "I read it" into
 "I can pass the cert." It is one reusable engine plus per-exam data:
 
-**The catalog (16 exams · 476 Q):** *Cloud* — AWS Cloud Practitioner,
+**The catalog (19 exams · 560 Q):** *Cloud* — AWS Cloud Practitioner,
 [Developer Associate](../frontend/exam-aws-developer.html) (DVA-C02, 40 Q — the real
 exam guide's four domains: Development with AWS Services, Security, Deployment,
 Troubleshooting and Optimization), Solutions Architect Associate,
@@ -246,7 +249,14 @@ day-job exam: grant types, PKCE, ID-vs-access tokens, JWT validation, Ping/Entra
 domain: JSONB, VACUUM, connection pooling, replication, partitioning/sharding),
 [HTTP & REST APIs](../frontend/exam-http-rest.html). *Developer Tools* —
 [Git](../frontend/exam-git.html). *Coding Interview* — Data Structures &
-Algorithms.
+Algorithms. *Zero-to-Hero* —
+[Web Fundamentals](../frontend/exam-web-fundamentals.html) (26 Q — HTML/CSS/JS/DOM/
+async/rendering, every question linked to one of the seven web-* visualizers),
+[Data Science & ML](../frontend/exam-data-science.html) (30 Q — NumPy/pandas
+through PyTorch, quality-audited via `tmp_examtell_audit.mjs`),
+[AI/LLM Engineering](../frontend/exam-ai-engineering.html) (28 Q — transformers
+through RAG/agents/safety, every question linked to one of the nine genai-*
+visualizers).
 
 - [`frontend/devhub-quiz.js`](../frontend/devhub-quiz.js) — a dependency-free engine.
   Call `DevHubQuiz.render(rootEl, bank)` and it paints the whole experience:

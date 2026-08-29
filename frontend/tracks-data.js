@@ -914,6 +914,11 @@ window.DEVHUB_TRACKS = [
       { label: 'Coding Interview', pages: [
         { title: 'Data Structures & Algorithms',  file: 'exam-dsa-interview.html',                          level: 'intermediate' },
       ]},
+      { label: 'Zero-to-Hero Certifications', pages: [
+        { title: 'Web Fundamentals',              file: 'exam-web-fundamentals.html',                      level: 'beginner' },
+        { title: 'Data Science & ML',             file: 'exam-data-science.html',                          level: 'intermediate' },
+        { title: 'AI / LLM Engineering',          file: 'exam-ai-engineering.html',                        level: 'intermediate' },
+      ]},
       { label: 'Flashcards (spaced repetition)', pages: [
         { title: 'AWS Services',                  file: 'flashcards-aws.html',                              level: 'beginner' },
         { title: 'Azure Services',                file: 'flashcards-azure.html',                            level: 'beginner' },
@@ -928,6 +933,9 @@ window.DEVHUB_TRACKS = [
         { title: 'Git Commands',                  file: 'flashcards-git.html',                              level: 'beginner' },
         { title: 'Docker',                        file: 'flashcards-docker.html',                           level: 'beginner' },
         { title: 'Kubernetes',                    file: 'flashcards-kubernetes.html',                       level: 'intermediate' },
+        { title: 'Web Fundamentals',              file: 'flashcards-web-fundamentals.html',                 level: 'beginner' },
+        { title: 'Data Science & ML',             file: 'flashcards-data-science.html',                     level: 'intermediate' },
+        { title: 'AI / LLM Engineering',          file: 'flashcards-ai-engineering.html',                   level: 'intermediate' },
       ]},
     ]
   },
