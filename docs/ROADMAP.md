@@ -10,6 +10,85 @@ page/track counts in `README.md` and `DEVHUB-GUIDE.md`, then delete the item fro
 
 ---
 
+## Coding Practice Exercises (in-page IDE) — Phase 1 pilot LANDED (2026-08-29)
+
+**The gap:** every existing track teaches *concepts* (visualizers, walkthroughs, quizzes,
+flashcards) but nothing grades a learner's own code against test cases the way LeetCode/
+HackerRank/Exercism do. The `interview-*-visualizer.html` pages (arrays-strings, linked-lists,
+trees, graphs, sorting-searching, hashmaps-sets, stacks-queues, system-design) are conceptual
+walkthroughs with step-button state machines — not a code editor, not a test runner, no
+pass/fail grading. This was the single biggest "am I job-ready" gap left in the app: reading
+about two-pointer technique isn't the same as being handed an empty function and a hidden test
+suite and having to make it pass, under a clock.
+
+**What shipped (Phase 1):**
+- `devhub-codegrade.js` — new shared grading engine (`DevHubCodeGrade.render(rootEl, bank)`,
+  same shape as `devhub-quiz.js`/`devhub-flashcards.js`). Runs real JavaScript and TypeScript
+  (sandboxed `<iframe sandbox="allow-scripts">` + `postMessage`, dynamic `import()` of a Blob
+  URL, kill-timer for infinite loops, deep-equal + unordered-array comparison) and real Python
+  (Pyodide/WASM CPython). No CodeMirror dependency — reused the existing textarea+gutter editor
+  pattern from the playground pages instead. Per-exercise hints, difficulty/domain chips, a link
+  back to the matching `interview-*-visualizer.html` technique walkthrough, and localStorage
+  progress tracking (`dlh-codegrade:<id>`) exactly like quizzes/flashcards.
+- `practice-arrays-strings.html` — first topic, 6 exercises (Two Sum, Contains Duplicate, Valid
+  Anagram, Best Time to Buy/Sell Stock, Valid Palindrome, Longest Substring Without Repeating
+  Characters), each gradable in JS, TS, or Python.
+- New "Coding Practice (IDE)" track in `tracks-data.js`, added to the "Practice & Prep" sidebar
+  category in `app.html`.
+- Verified end-to-end live in-browser: correct solutions pass in all 3 languages, partial
+  failures and thrown exceptions render correctly per-test, progress persists across reload, hub
+  sidebar → iframe navigation works. Zero console errors.
+- Deliberately 100% client-side/offline for Phase 1 — the existing server-side sandboxed
+  `/api/run/*` execution backend (`ExecutionService.java`, JAVA/TYPESCRIPT/SHELL via
+  `Language.java`) was evaluated but intentionally NOT used, to keep this feature dependency-free
+  like the rest of the site.
+
+**What's still open / not built:**
+- Only one DSA topic (Arrays & Strings) has exercises. The other `interview-*-visualizer.html`
+  topics — Linked Lists, Trees, Graphs, Sorting & Searching, Hashmaps & Sets, Stacks & Queues,
+  System Design — have no matching `practice-*.html` page yet. Next sessions should add these
+  one at a time, mirroring the `practice-arrays-strings.html` shape.
+- **Open architectural question, unchanged — surface to Bobby before deciding:** Java/C#/Go/Rust/
+  PHP/Ruby have no real in-browser runtime in this repo. Either a WASM JVM/etc. (CheerpJ, TeaVM)
+  or reusing the existing `/api/run/*` backend (adding a `JAVA` case to `Language.java`) is a real
+  new-infra decision (sandboxing, resource/timeout limits, hosting cost) and should not be taken
+  on silently.
+
+**What already exists to build on** (real execution engines, not simulations):
+- `python-playground-visualizer.html` — real CPython 3.12 via Pyodide (WASM), stdout captured.
+- `typescript-playground-visualizer.html` — the real `typescript` package compiling in-browser
+  (actual type errors, actual emitted JS, actually run).
+- `shell-playground-visualizer.html` — an in-memory mini-shell (Bash/PowerShell/CMD modes).
+- `sql-playground-visualizer.html`, `spring-boot-playground-visualizer.html`, `api-playground-visualizer.html`,
+  `jwt-playground-visualizer.html` — topic-scoped sandboxes, worth checking each for reusable
+  execution/grading plumbing before writing new engine code.
+- None of these are LeetCode-style yet: they're free-form REPLs with preset buttons, not
+  "here's a spec + hidden tests + a pass/fail bar."
+
+**Open architectural question — how far execution can reasonably go:**
+- **JS/TS/Python are cheap** — real, already-proven in-browser engines exist in this repo today.
+  A grading harness (user function + hidden `assert`/`expect`-style test cases + pass/fail per
+  case + diff on failure) is realistic to build with **zero new infra** — same offline,
+  no-server, no-build-step model as every other page.
+- **Java/C#/Go/Rust/PHP/Ruby are the hard case.** No real in-browser runtime for these exists
+  in this repo (WASM JVMs like CheerpJ/TeaVM, or a server-side sandboxed execution service like
+  Judge0, are the only real options) — either is a genuine new-infra decision (security
+  sandboxing, resource/timeout limits, hosting cost) and should NOT be taken on silently; surface
+  it to Bobby explicitly before building rather than picking a direction here.
+- **Recommended phased approach:** Phase 1 — JS, TS, and Python exercises only, reusing the
+  existing Pyodide/TS-compiler engines, a lightweight in-browser code editor (CodeMirror 6 via
+  CDN — same "CDN dependency accepted for real engines" precedent as Pyodide), and a small
+  dependency-free grading widget (`devhub-codegrade.js`, mirroring the `devhub-quiz.js` /
+  `devhub-flashcards.js` shape: call `.render(rootEl, exerciseBank)`). Track progress the same way
+  quiz/flashcard history is tracked (localStorage + the existing progress-sync backend hook).
+  Phase 2 (later, explicitly gated on a Bobby decision) — real execution for compiled/typed
+  languages once the WASM-runtime-vs-backend-sandbox tradeoff is decided.
+
+**Not started. Next session: scope Phase 1 concretely (how many exercises, which DSA topics
+first, editor library choice) before writing any code.**
+
+---
+
 ## Done — audit (not built) — sitewide depth audit against "zero to hired" goal (completed 2026-08-27)
 
 **Verdict: the full-stack-lifecycle bar is met better than expected in most named categories —

@@ -555,6 +555,15 @@ window.DEVHUB_TRACKS = [
     ]
   },
   {
+    id: 'coding-practice', icon: '🧑‍💻', label: 'Coding Practice (IDE)',
+    desc: 'The missing piece the rest of the app can\'t give you: an actual code editor and hidden test suite. Write the function, press Run, get graded — real JavaScript/TypeScript/Python execution in your browser, no server required',
+    sections: [
+      { label: 'Data Structures & Algorithms', pages: [
+        { title: 'Arrays & Strings',        file: 'practice-arrays-strings.html',              level: 'beginner' },
+      ]},
+    ]
+  },
+  {
     id: 'python', icon: '🐍', label: 'Python',
     desc: 'Python from first principles to expert: syntax, OOP, functions, decorators, generators, exceptions, type hints, async/await, FastAPI — plus a live in-browser interpreter',
     sections: [
