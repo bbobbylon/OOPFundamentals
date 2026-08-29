@@ -29,25 +29,37 @@ suite and having to make it pass, under a clock.
   (Pyodide/WASM CPython). No CodeMirror dependency — reused the existing textarea+gutter editor
   pattern from the playground pages instead. Per-exercise hints, difficulty/domain chips, a link
   back to the matching `interview-*-visualizer.html` technique walkthrough, and localStorage
-  progress tracking (`dlh-codegrade:<id>`) exactly like quizzes/flashcards.
-- `practice-arrays-strings.html` — first topic, 6 exercises (Two Sum, Contains Duplicate, Valid
-  Anagram, Best Time to Buy/Sell Stock, Valid Palindrome, Longest Substring Without Repeating
-  Characters), each gradable in JS, TS, or Python.
-- New "Coding Practice (IDE)" track in `tracks-data.js`, added to the "Practice & Prep" sidebar
-  category in `app.html`.
-- Verified end-to-end live in-browser: correct solutions pass in all 3 languages, partial
-  failures and thrown exceptions render correctly per-test, progress persists across reload, hub
-  sidebar → iframe navigation works. Zero console errors.
+  progress tracking (`dlh-codegrade:<id>`) exactly like quizzes/flashcards. The engine also
+  supports "design a data structure" problems (Min Stack, Queue using Stacks) by grading a
+  replayed operation log (`ops` + parallel `argsList` → an array of per-op results) instead of a
+  single pure function call — no engine changes needed beyond how the exercise bank shapes its
+  test cases.
+- Four topics now live, 24 exercises total, all gradable in JS, TS, and Python:
+  - `practice-arrays-strings.html` — Two Sum, Contains Duplicate, Valid Anagram, Best Time to
+    Buy/Sell Stock, Valid Palindrome, Longest Substring Without Repeating Characters.
+  - `practice-stacks-queues.html` — Valid Parentheses, Min Stack (Design), Daily Temperatures,
+    Evaluate Reverse Polish Notation, Implement Queue using Stacks, Sliding Window Maximum.
+  - `practice-sorting-searching.html` — Binary Search, Merge Two Sorted Arrays, Find Minimum in
+    Rotated Sorted Array, Search in Rotated Sorted Array, Kth Largest Element, Merge Intervals.
+  - `practice-dynamic-programming.html` — Climbing Stairs, House Robber, Coin Change, Longest
+    Increasing Subsequence, Maximum Subarray (Kadane's), Unique Paths (2D grid DP).
+  - Every exercise's expected test values were independently verified against a reference
+    solution in Node before shipping (not just hand-traced), and each new page was smoke-tested
+    live in-browser (JS, Python, and the ops-replay design-problem pattern all confirmed passing).
+- "Coding Practice (IDE)" track in `tracks-data.js` (4 pages), under the "Practice & Prep"
+  sidebar category in `app.html`.
 - Deliberately 100% client-side/offline for Phase 1 — the existing server-side sandboxed
   `/api/run/*` execution backend (`ExecutionService.java`, JAVA/TYPESCRIPT/SHELL via
   `Language.java`) was evaluated but intentionally NOT used, to keep this feature dependency-free
   like the rest of the site.
 
 **What's still open / not built:**
-- Only one DSA topic (Arrays & Strings) has exercises. The other `interview-*-visualizer.html`
-  topics — Linked Lists, Trees, Graphs, Sorting & Searching, Hashmaps & Sets, Stacks & Queues,
-  System Design — have no matching `practice-*.html` page yet. Next sessions should add these
-  one at a time, mirroring the `practice-arrays-strings.html` shape.
+- Remaining `interview-*-visualizer.html` topics with no matching `practice-*.html` yet: Linked
+  Lists, Trees, Graphs, Hashmaps & Sets, Backtracking. Linked Lists and Trees are a harder case
+  than the topics done so far — they need a cross-language convention for building/returning node
+  structures (e.g. accept a pre-built head/root, or accept a level-order array and build the
+  structure inside the exercise) before exercises can be written; that's a small design decision
+  to make explicitly, not just "copy the pattern," when that topic is next.
 - **Open architectural question, unchanged — surface to Bobby before deciding:** Java/C#/Go/Rust/
   PHP/Ruby have no real in-browser runtime in this repo. Either a WASM JVM/etc. (CheerpJ, TeaVM)
   or reusing the existing `/api/run/*` backend (adding a `JAVA` case to `Language.java`) is a real
