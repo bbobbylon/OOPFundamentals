@@ -567,6 +567,7 @@ window.DEVHUB_TRACKS = [
         { title: 'Hashmaps & Sets',         file: 'practice-hashmaps-sets.html',               level: 'intermediate' },
         { title: 'Sorting & Searching',     file: 'practice-sorting-searching.html',           level: 'intermediate' },
         { title: 'Dynamic Programming',     file: 'practice-dynamic-programming.html',         level: 'advanced' },
+        { title: 'Backtracking',            file: 'practice-backtracking.html',                level: 'advanced' },
       ]},
     ]
   },

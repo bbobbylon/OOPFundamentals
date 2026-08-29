@@ -1,11 +1,11 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 512 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 513 pages.** Pick a *path* below and follow it.
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **512 browser visualizers** across **34 tracks** (grouped into
+DevHub is a learning hub: **513 browser visualizers** across **34 tracks** (grouped into
 categories in the sidebar — Languages & Concepts, Frontend, Backend & APIs, DevOps/Cloud & Data, Practice & Prep; several tracks also have a 🍳 **Common Recipes** section of practical how-tos — API→form, batch upload, password complexity), plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
@@ -50,7 +50,7 @@ Or jump straight to any file linked below.
 | 🔐 **Identity & Auth** | JWTs, **tokens/keys & signing**, OAuth2/OIDC, Entra ID, Ping, claims | [Tokens, Keys & Signing](../frontend/identity-keys-signing-deep-visualizer.html) |
 | 🐛 **Debugging** | find bugs faster: CORS, 401-vs-403, JWTs (more stacks coming) | [CORS Failures](../frontend/debugging-cors-visualizer.html) |
 | 🧪 **Playgrounds** | six *live* sandboxes — real `tsc`, real CPython, a Bash/PowerShell/CMD shell, HTTP, JWT, Spring | [TypeScript Playground](../frontend/typescript-playground-visualizer.html) |
-| 🧑‍💻 **Coding Practice (IDE)** | write real JS/TS/Python, run it in-browser, pass/fail against hidden tests — 8 topics, 48 exercises (Arrays & Strings, Linked Lists, Trees, Graphs, Stacks & Queues, Hashmaps & Sets, Sorting & Searching, Dynamic Programming) | [Arrays & Strings](../frontend/practice-arrays-strings.html) |
+| 🧑‍💻 **Coding Practice (IDE)** | write real JS/TS/Python, run it in-browser, pass/fail against hidden tests — 9 topics, 54 exercises (Arrays & Strings, Linked Lists, Trees, Graphs, Stacks & Queues, Hashmaps & Sets, Sorting & Searching, Dynamic Programming, Backtracking) | [Arrays & Strings](../frontend/practice-arrays-strings.html) |
 | 🐍 **Python** | fundamentals, functions/scope, **decorators, generators, exceptions**, OOP, type hints, asyncio, **FastAPI · Django · Flask** | [Python Fundamentals](../frontend/python-fundamentals-visualizer.html) |
 | ⚛️ **React** | JSX/Fiber, hooks, state management, Router v6, forms, performance | [React Fundamentals](../frontend/react-fundamentals-visualizer.html) |
 | 🟢 **Node.js & TypeScript Backend** | the single-threaded event loop & runtime, Express, **NestJS** (Spring-style DI), Fastify, **JWT/sessions auth** (401 vs 403) | [Node.js Runtime & the Event Loop](../frontend/node-fundamentals-visualizer.html) |
