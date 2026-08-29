@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Tool Use &amp; Agents — Function Calling</title>
+  <style>
+    .who-user{background:#64748b;color:#fff}
+    .who-model{background:#10a37f;color:#fff}
+    .who-call{background:#fbbf24;color:#1a1a1a}
+    .who-exec{background:#ab68ff;color:#fff}
+    .who-result{background:#22d3ee;color:#1a1a1a}
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:18px 0 0}
+    .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:monospace}
+    .loop-model{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:14px 0;text-align:center}
+    .loop-stage{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 8px;font-size:12px}
+    .loop-stage .label{font-weight:700;font-family:monospace;color:var(--accent);margin-bottom:4px}
+    .loop-stage .detail{color:var(--muted);font-size:11px;line-height:1.5}
+    .tool-schema{display:flex;flex-direction:column;gap:6px;margin:12px 0}
+    .tool-schema-row{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:6px;border:1px solid var(--border);background:var(--panel)}
+    .tool-schema-row .lbl{width:120px;font-weight:700;font-family:monospace;font-size:13px;color:var(--accent)}
+    .tool-schema-row .desc{font-size:13px;color:var(--text);flex:1}
+    .tool-schema-row .example{font-family:monospace;font-size:12px;color:var(--accent2)}
+    .cred-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:10px 0}
+    .cred-box{background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:10px 14px;font-family:monospace;font-size:12px}
+    .cred-box .cred-val{font-size:15px;font-weight:800;color:var(--accent);display:block}
+  </style>
+  <link rel="stylesheet" href="devhub.css" />
+</head>
+<body class="track-ai-engineering">
+<div class="container">
+  <a class="back" href="app.html">&larr; Dev Hub</a>
+  <h1>Tool Use &amp; Agents — Function Calling &amp; the Plan/Act/Observe Loop</h1>
+  <p class="sub">How an LLM reaches outside its own weights: structured tool definitions, the model emitting JSON instead of prose, the application executing the real work, and the plan &rarr; act &rarr; observe loop that turns a single Q&amp;A model into an agent.</p>
+
+  <!-- ── INTRO ── -->
+  <div class="intro">
+    <div class="intro-head"><span class="ico">🛠️</span> What is "tool use" — and why does an LLM need it at all?</div>
+    <p class="intro-lead">
+      An LLM only knows what was in its training data plus whatever text is in its current context window — it can't check today's weather, query your database, or send an email. <strong>Tool use (a.k.a. function calling)</strong> closes that gap: you hand the model a list of <strong>tool definitions</strong> — a name, a natural-language description, and a JSON Schema describing the arguments — alongside the user's message. If the model decides a tool is needed, it doesn't call anything itself; it emits a structured JSON object naming the tool and the arguments. <strong>Your application code is the one that actually executes the function</strong> — hits the API, queries the database, runs the calculation — then feeds the result back to the model as a new message so it can continue reasoning or answer the user. Chain that cycle — decide what to do, do it, look at what happened, decide again — and you get an <strong>agent</strong>: a model that can complete multi-step tasks no single prompt could answer alone. This page teaches the general mechanism; the <a href="claude-code-visualizer.html">Claude Code visualizer</a> shows one concrete, production example of this same loop (edit &rarr; test &rarr; verify) applied to a coding agent specifically.
+    </p>
+    <ul class="intro-gist">
+      <li><b>Tools are JSON Schemas, not code</b> — the model only ever sees/emits structured text.</li>
+      <li><b>The model decides; your app executes</b> — the LLM never touches a network call, a DB, or a filesystem directly.</li>
+      <li><b>Plan &rarr; Act &rarr; Observe &rarr; repeat</b> is the general agent loop — the same shape as Claude Code's own cycle, generalized.</li>
+      <li><b>Independent tool calls can run in parallel</b>; dependent ones must run in sequence, one result feeding the next call's arguments.</li>
+      <li><b>Tool credentials need the SAME least-privilege thinking as OAuth scopes</b> — an agent is a new authenticated actor, not an extension of your admin key.</li>
+    </ul>
+    <div class="intro-cards">
+      <div class="intro-mini">
+        <h4>A tool definition (JSON Schema)</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code>{ &#10;  "name": "get_weather", &#10;  "description": "Get current weather for a city. Use this whenever the user asks about weather, temperature, or conditions in a specific place.", &#10;  "parameters": { &#10;    "type": "object", &#10;    "properties": { &#10;      "city": { "type": "string", "description": "City name, e.g. Tokyo" } &#10;    }, &#10;    "required": ["city"] &#10;  } &#10;} &#10;&#10;&#35; The "description" fields are the ONLY thing &#10;&#35; steering the model — vague wording = wrong &#10;&#35; tool picked, or malformed arguments.</code></p>
+      </div>
+      <div class="intro-mini">
+        <h4>What the model actually emits</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code>&#35; NOT executed code — structured JSON: &#10;{ &#10;  "tool_call_id": "call_abc123", &#10;  "name": "get_weather", &#10;  "arguments": "{\"city\": \"Tokyo\"}" &#10;} &#10;&#10;&#35; finish_reason: "tool_calls" &#10;&#35; The API call PAUSES here. Your code must &#10;&#35; run get_weather(city="Tokyo") yourself, then &#10;&#35; send the result back as a new message before &#10;&#35; the model will continue.</code></p>
+      </div>
+      <div class="intro-mini">
+        <h4>Feeding the result back</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code>messages.append(response.message)  &#35; the tool_calls msg &#10;messages.append({ &#10;  "role": "tool", &#10;  "tool_call_id": "call_abc123", &#10;  "content": '{"temp_c": 18, "condition": "rain"}' &#10;}) &#10;&#10;&#35; Call the model again with the FULL history — &#10;&#35; it now sees the tool result and writes the &#10;&#35; final natural-language answer.</code></p>
+      </div>
+    </div>
+    <div class="intro-ciam"><span class="tag">CIAM lens:</span> An agent that can call tools is a <strong>new authenticated actor</strong>, not a passthrough for your service's own privileges. Scope every tool's credential to exactly what the current user/session is allowed to do — the same least-privilege discipline as an OAuth access token's scopes — never attach a blanket admin key "to be safe." Scenario 4 below walks through exactly why that shortcut turns a prompt-injection bug into a data breach.</div>
+  </div>
+
+  <!-- ── EXTREME-VIZ HERO ── -->
+  <div style="margin:0 0 28px">
+    <div class="rt-ctlbar">
+      <span class="lbl">Scenario</span>
+      <div class="userseg" id="taSeg">
+        <button class="on" data-s="single">Single Tool Call</button>
+        <button data-s="sequential">Plan/Act/Observe Loop</button>
+        <button data-s="parallel">Parallel Tool Calls</button>
+        <button data-s="scoped">Scoped vs Admin Credentials</button>
+      </div>
+      <button class="rt-run" id="taRun">&#9654; Run</button>
+      <span class="rt-pill" id="taPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="taDiag">
+        <div class="rt-rail"></div>
+        <div class="rt-chip" id="taChip">&#x2192;</div>
+        <div class="rt-node" data-n="USER"><span class="ic">&#x1f9d1;</span><div><div class="nl">User / App</div><div class="ns">the calling request</div></div><span class="who who-badge who-user">USER</span></div>
+        <div class="rt-node" data-n="MODEL"><span class="ic">&#x1f916;</span><div><div class="nl">LLM</div><div class="ns">reasons, decides which tool</div></div><span class="who who-badge who-model">MODEL</span></div>
+        <div class="rt-node" data-n="CALL"><span class="ic">&#x1f6e0;&#xfe0f;</span><div><div class="nl">Tool Call</div><div class="ns">structured JSON: name + args</div></div><span class="who who-badge who-call">CALL</span></div>
+        <div class="rt-node" data-n="EXEC"><span class="ic">&#x2699;&#xfe0f;</span><div><div class="nl">App Executes</div><div class="ns">runs the real function + creds</div></div><span class="who who-badge who-exec">EXEC</span></div>
+        <div class="rt-node" data-n="RESULT"><span class="ic">&#x1f4ec;</span><div><div class="nl">Result &rarr; Model</div><div class="ns">fed back as a new message</div></div><span class="who who-badge who-result">RESULT</span></div>
+      </div>
+      <div class="rt-inspect" id="taInspect">
+        <div class="rt-dir" id="taDir">STEP 0 / 5</div>
+        <div class="rt-cap" id="taCap">Pick a scenario and press &#9654; Run</div>
+        <div class="rt-payload" id="taPayload"></div>
+        <div class="rt-headers" id="taHeaders"><span class="ht">INSPECTOR</span>(waiting)</div>
+      </div>
+    </div>
+    <div class="rt-result" id="taResult"></div>
+    <div class="rt-legend"><span>&#x1f7e2; succeeds / scoped</span><span>&#x1f534; risk / over-privileged</span><span>&#x25a1; executing</span></div>
+  </div>
+  <div class="who-row">
+    <span class="who-badge who-user">USER — calling request</span>
+    <span class="who-badge who-model">MODEL — decides, never executes</span>
+    <span class="who-badge who-call">CALL — structured JSON, not code</span>
+    <span class="who-badge who-exec">EXEC — app runs it, with credentials</span>
+    <span class="who-badge who-result">RESULT — observation fed back</span>
+  </div>
+
+  <section>
+    <h2>1. Tool Definitions &amp; Structured Output</h2>
+    <p>A tool definition is metadata, not code: a name the model will reference, a natural-language <code>description</code>, and a JSON Schema for the arguments. That description is the single highest-leverage lever you have over reliability — the model never reads your function's source.</p>
+    <div class="tool-schema">
+      <div class="tool-schema-row"><span class="lbl">name</span><span class="desc">The identifier the model emits in <code>tool_calls</code> — must exactly match what your app dispatches on</span><span class="example">get_weather</span></div>
+      <div class="tool-schema-row"><span class="lbl">description</span><span class="desc">Natural language telling the model WHEN to use this tool — the biggest lever on correct tool selection</span><span class="example">"Use when the user asks about weather…"</span></div>
+      <div class="tool-schema-row"><span class="lbl">parameters</span><span class="desc">A JSON Schema object — types, required fields, enums — that the model's arguments must satisfy</span><span class="example">{ type: "object", properties: {…} }</span></div>
+      <div class="tool-schema-row"><span class="lbl">tool_calls</span><span class="desc">What the model actually returns instead of prose: an array of {id, name, arguments} objects</span><span class="example">finish_reason: "tool_calls"</span></div>
+    </div>
+    <pre><code>tools = [{
+    "name": "get_weather",
+    "description": "Get current weather for a city. Use this whenever the user asks about weather, temperature, or outdoor conditions.",
+    "parameters": {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"]
+    }
+}]
+
+response = client.chat.completions.create(
+    model="gpt-4",
+    messages=[{"role": "user", "content": "What's the weather in Tokyo?"}],
+    tools=tools
+)
+# response.choices[0].message.tool_calls[0].function.arguments
+#   -> '{"city": "Tokyo"}'   (a JSON STRING you must parse)</code></pre>
+    <div class="callout info">A vague description ("weather stuff") is worse than a missing one — the model may pick the wrong tool, invent arguments not in the schema, or skip calling the tool when it should have. Treat tool descriptions like public API docs: precise, with the exact conditions under which to use them.</div>
+  </section>
+
+  <section>
+    <h2>2. The Agent Loop — Plan, Act, Observe, Repeat</h2>
+    <p>A single tool call is just a round-trip. An <strong>agent</strong> is what you get when the model's own output — the tool result — becomes the input to another reasoning step, and that repeats until the task is done. This is the same shape the <a href="claude-code-visualizer.html">Claude Code visualizer</a> shows for its specific edit/test/verify cycle — generalized here to any tool-using agent, not just a coding one.</p>
+    <div class="loop-model">
+      <div class="loop-stage"><div class="label">Plan</div><div class="detail">model reasons over the message history, decides the next action</div></div>
+      <div class="loop-stage"><div class="label">Act</div><div class="detail">model emits a tool_call; the app executes it for real</div></div>
+      <div class="loop-stage"><div class="label">Observe</div><div class="detail">tool result appended to history as a new message</div></div>
+      <div class="loop-stage"><div class="label">Replan / Answer</div><div class="detail">model checks: enough info? loop again, or write final answer</div></div>
+    </div>
+    <pre><code>while True:
+    response = client.chat.completions.create(model=MODEL, messages=messages, tools=tools)
+    msg = response.choices[0].message
+    messages.append(msg)
+
+    if not msg.tool_calls:
+        return msg.content          # model wrote a final answer — loop ends
+
+    for call in msg.tool_calls:     # ACT: run every requested tool
+        args = json.loads(call.function.arguments)
+        result = dispatch(call.function.name, args)   # your code, not the model
+        messages.append({
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": json.dumps(result)              # OBSERVE
+        })
+    # loop restarts -> model REPLANS with the new observation in context</code></pre>
+    <div class="callout warn">Nothing bounds this loop by default. Always cap it — a max iteration count, a timeout, or a step budget — so a model stuck re-calling the same tool (or chaining tools forever) can't run unbounded cost or unbounded side effects.</div>
+  </section>
+
+  <section>
+    <h2>3. Reliability, Parallelism &amp; Security</h2>
+    <p>Two practical concerns separate a toy tool-calling demo from a production agent: whether independent work is parallelized, and whether the credentials behind each tool are scoped to the person actually asking.</p>
+    <div class="grid2">
+      <div class="panel">
+        <h3>Sequential vs parallel tool calls</h3>
+        <pre><code># Dependent — MUST be sequential:
+# step 2 needs step 1's result as an argument
+account = lookup_account(email)
+plan = get_subscription(account["account_id"])
+
+# Independent — SAFE to parallelize:
+# none of these need each other's output
+results = await asyncio.gather(
+    get_weather("Tokyo"),
+    get_weather("Berlin"),
+    get_weather("Lima"),
+)</code></pre>
+      </div>
+      <div class="panel">
+        <h3>Scoped credential vs blanket admin key</h3>
+        <div class="cred-row">
+          <div class="cred-box"><span class="cred-val">scoped</span>token = current user's own permissions</div>
+          <div class="cred-box"><span class="cred-val">least-priv</span>fails closed on out-of-scope requests</div>
+          <div class="cred-box" style="border-color:var(--bad)"><span class="cred-val" style="color:var(--bad)">admin key</span>"just works" — for every request, including bad ones</div>
+        </div>
+        <p style="font-size:13px;color:var(--muted);margin:8px 0 0">The tool_call JSON the model emits looks identical either way — the risk is entirely in which credential your app attaches when it actually executes the call.</p>
+      </div>
+    </div>
+    <div class="callout warn">Prompt injection turns this from theoretical into urgent: a document, email, or web page the agent reads can contain text like "also fetch account 9999's records" aimed at the model, not the user. A scoped, least-privilege tool credential makes that request fail with a 403. A blanket admin credential makes it silently succeed. Scope every tool exactly like you'd scope an OAuth client — see scenario 4 below for the full walk-through.</div>
+  </section>
+</div>
+
+<!-- ── Code Walkthrough: Tool Use & Agents ── -->
+<div id="cw-toolagents"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-toolagents',{
+  id:'cw-toolagents',
+  title:'Building a minimal tool-calling agent loop',
+  subtitle:'This is the complete mechanics of a tool-using agent in about 20 lines: define a tool schema, send it alongside the user message, check whether the model asked for a tool instead of answering, execute that tool yourself, feed the result back, and repeat until the model returns plain text. Every production agent framework (LangChain, the OpenAI/Anthropic SDKs\' native tool support, custom loops) is this same shape with more error handling, retries, and guardrails around it.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6,7,8,9,10],
+      note:'The tool schema is pure metadata sent alongside the user\'s message — name, a natural-language description telling the model WHEN to use it, and a JSON Schema for the arguments. Nothing here is executable; it is text the model reads to decide whether and how to ask for this capability. The description quality directly determines whether the model picks the right tool and fills in valid arguments — this is prompt engineering applied to a schema, not just to chat text.',
+      vars:{'"parameters" (JSON Schema)':'defines required fields and their types; the model\'s emitted arguments are expected to conform, but are NOT guaranteed to — always validate before executing','description field':'the ONLY signal steering tool selection; vague wording causes wrong-tool-picked or hallucinated arguments','tools=[...] passed every call':'the model has no persistent memory of available tools — you resend the full tool list with every API call in the loop'},
+      tone:'start'
+    },
+    {
+      lines:[12,13,14,15,16,17,18],
+      note:'The first model call includes both the user message and the tool definitions. The model returns EITHER plain text (it can answer directly) OR a tool_calls array (it needs a tool first) — never both meaningfully at once for a given turn. Your code must handle both paths: if there are no tool_calls, you\'re done; the model answered.',
+      vars:{'response.choices[0].message':'the model\'s turn — append this to your running messages list BEFORE processing tool_calls, so the model\'s own reasoning stays in context for the next round','finish_reason: "tool_calls"':'signals the API call paused waiting for you to execute something — this is not an error, it is the expected pause point','messages list':'the full conversation history — every user turn, model turn, and tool result — is resent on every call; the model has no memory outside what you include here'},
+      tone:'ok'
+    },
+    {
+      lines:[20,21],
+      note:'This is the loop\'s exit condition: if the model turn has no tool_calls, it wrote a final natural-language answer and the loop returns. Forgetting this check is the most common agent-loop bug — the loop either never terminates or terminates one step too early, cutting off the model before it delivers the answer.',
+      vars:{'if not msg.tool_calls: return msg.content':'the ONLY way this loop naturally ends — the model itself decides it has enough information and stops requesting tools'},
+      tone:'ok'
+    },
+    {
+      lines:[23,24,25,26,27,28,29],
+      note:'For every requested tool call — there can be more than one in a single turn, see the parallel-calls scenario — parse the JSON arguments, dispatch to your OWN function (never eval the model\'s output directly), and append a role:"tool" message carrying the result, tagged with the matching tool_call_id so the model can line results back up with the calls that produced them.',
+      vars:{'json.loads(call.function.arguments)':'arguments arrive as a JSON STRING, not a parsed object — always parse and VALIDATE before executing, the model can emit malformed or out-of-schema JSON','dispatch(name, args)':'your own routing function — a lookup table from tool name to real Python/Java/etc function, never string-eval the model\'s output','tool_call_id':'links each result back to its originating call — required when multiple tool_calls happen in one turn (parallel scenario) so the model doesn\'t mismatch results'},
+      tone:'ok'
+    },
+    {
+      lines:[30,31],
+      note:'The loop repeats: the tool result is now part of the message history (the OBSERVE step), so the next model call sees it and can either request another tool (chaining, as in the sequential account-lookup scenario) or write the final answer. This is exactly the plan/act/observe cycle, expressed as a while loop.',
+      vars:{'loop restarts':'plan (reason over history) -> act (emit + execute tool_call) -> observe (append result) -> replan; repeats until finish_reason is NOT tool_calls','unbounded loop risk':'this snippet has no iteration cap — production code MUST add a max-turns limit or budget so a confused model can\'t loop indefinitely and rack up cost'},
+      tone:'ok',
+      callout:'CIAM framing: dispatch(name, args) is exactly where credential scoping happens. A production dispatch table should attach a token scoped to the CURRENT authenticated user/session for every tool call — never a shared service-admin key "for simplicity." An agent with tool access is a new authenticated actor and needs the same least-privilege treatment as any OAuth client: minimum scopes, short-lived tokens, and fail-closed on anything outside what the calling user is actually allowed to do.'
+    }
+  ],
+  code:[
+    'tools = [{',
+    '    "name": "get_weather",',
+    '    "description": "Get current weather for a city. Use when the user asks about weather or conditions.",',
+    '    "parameters": {',
+    '        "type": "object",',
+    '        "properties": {"city": {"type": "string"}},',
+    '        "required": ["city"]',
+    '    }',
+    '}]',
+    '',
+    'messages = [{"role": "user", "content": "What\'s the weather in Tokyo?"}]',
+    'while True:',
+    '    response = client.chat.completions.create(',
+    '        model="gpt-4", messages=messages, tools=tools',
+    '    )',
+    '    msg = response.choices[0].message',
+    '    messages.append(msg)',
+    '',
+    '    if not msg.tool_calls:',
+    '        return msg.content   # model answered — loop ends',
+    '',
+    '    for call in msg.tool_calls:',
+    '        args = json.loads(call.function.arguments)',
+    '        result = dispatch(call.function.name, args)  # scoped creds here',
+    '        messages.append({',
+    '            "role": "tool",',
+    '            "tool_call_id": call.id,',
+    '            "content": json.dumps(result)',
+    '        })',
+    '    # loop restarts: model observes the result, replans'
+  ]
+});
+</script>
+
+<script>
+(function(){
+  const pfx='ta';
+  const SCEN={
+    single:{label:'Single Tool Call',steps:[
+      {node:'USER',hdr:'User asks: "What\'s the weather in Tokyo?"',pay:{user_message:"What's the weather in Tokyo?"},ins:'The application sends the user\'s message plus the list of available tool schemas to the model in a single API call.'},
+      {node:'MODEL',hdr:'Model decides: call get_weather(city="Tokyo")',pay:{model_reasoning:"user wants current weather data the model doesn't have",decision:'get_weather',args:{city:'Tokyo'}},ins:"The model doesn't execute anything — it emits a structured tool_calls object naming the function and JSON arguments matching the schema."},
+      {node:'CALL',hdr:'tool_call: get_weather({city:"Tokyo"})',pay:{tool_call_id:'call_abc123',function:'get_weather',arguments:'{"city":"Tokyo"}'},tone:'ok',ins:'This is JSON, not code execution. finish_reason: "tool_calls" — the API response pauses here, waiting for the application to run the function.'},
+      {node:'EXEC',hdr:'Application runs get_weather(city="Tokyo")',pay:{executed_by:'application code, NOT the model',network_call:'GET https://api.weather.example/v1/Tokyo',credentials:'read-only weather API key'},tone:'ok',ins:'The model never touches the network. Your code owns the actual HTTP call, auth, retries, and error handling — the model only ever sees JSON in and JSON out.'},
+      {node:'RESULT',hdr:'Result fed back: 18°C, light rain — model writes final answer',pay:{tool_result:{temp_c:18,condition:'light rain'},final_answer:"It's 18°C and lightly raining in Tokyo right now."},tone:'ok',ins:'The tool result is appended to the conversation as a role:"tool" message. The model is called again with the full history and produces the final natural-language answer.'}
+    ],result:{tone:'ok',text:'✅ Single tool round-trip: model plans → app executes → model observes → model answers'}},
+
+    sequential:{label:'Plan/Act/Observe Loop',steps:[
+      {node:'USER',hdr:'User asks: "Am I on the Pro plan?"',pay:{user_message:'Am I on the Pro plan?'},ins:"A multi-step question — the model can't answer from the message alone. It needs to look something up, then look up something else that depends on the first result."},
+      {node:'MODEL',hdr:'Plan: step 1 — call lookup_account(email)',pay:{plan:['1. lookup_account to get account_id','2. get_subscription(account_id) to check plan'],act:'lookup_account(email="user@example.com")'},ins:"This is the PLAN step of plan/act/observe — the same loop pattern the Claude Code visualizer shows for Claude Code's own edit/test/verify cycle, generalized to any tool-using agent."},
+      {node:'CALL',hdr:'ACT: tool_call lookup_account({email})',pay:{tool_call_id:'call_1',function:'lookup_account',arguments:'{"email":"user@example.com"}'},tone:'ok',ins:'The model acts on step 1 of its plan only — it does not call get_subscription yet because it does not have the account_id.'},
+      {node:'EXEC',hdr:'App executes lookup_account → returns account_id: "acct_9f2"',pay:{executed:'lookup_account(email=...)',result:{account_id:'acct_9f2'}},tone:'ok',ins:'OBSERVE: the result is appended to the conversation. The model is called again — now WITH the account_id in context.'},
+      {node:'RESULT',hdr:'Model re-plans: ACT step 2 — get_subscription(acct_9f2) → "Pro"',pay:{second_tool_call:'get_subscription(account_id="acct_9f2")',second_result:{plan:'Pro',renews:'2026-11-02'},final_answer:"Yes — you're on the Pro plan, renewing 2026-11-02."},tone:'ok',ins:'This loop — plan, act, observe, replan — repeats until the model has enough information to answer without calling another tool.'}
+    ],result:{tone:'ok',text:'✅ Plan → Act → Observe → Replan: two sequential tool calls, each informed by the previous result'}},
+
+    parallel:{label:'Parallel Tool Calls',steps:[
+      {node:'USER',hdr:'User asks: "Compare weather in Tokyo, Berlin, and Lima"',pay:{user_message:'Compare weather in Tokyo, Berlin, and Lima'},ins:"Three independent lookups — none depends on another's result. A well-designed agent loop recognizes this and doesn't serialize them."},
+      {node:'MODEL',hdr:'Model emits 3 tool_calls in ONE response',pay:{tool_calls:[{name:'get_weather',args:{city:'Tokyo'}},{name:'get_weather',args:{city:'Berlin'}},{name:'get_weather',args:{city:'Lima'}}]},ins:'Modern tool-calling APIs let a single model turn return an ARRAY of tool_calls when the calls are independent — the model decides parallelism, not the app.'},
+      {node:'CALL',hdr:'App dispatches all 3 calls concurrently',pay:{dispatch:'asyncio.gather(...) / Promise.all(...)',calls_in_flight:3},tone:'ok',ins:'Sequential execution here would triple the latency for no benefit — the three weather lookups share no dependency, so the app fans them out concurrently.'},
+      {node:'EXEC',hdr:'All 3 complete: Tokyo 18°C, Berlin 9°C, Lima 22°C',pay:{results:{Tokyo:'18°C rain',Berlin:'9°C clear',Lima:'22°C sun'}},tone:'ok',ins:'Each tool_call_id maps its result back to the matching call — the app must return all 3 tool results before calling the model again, in the same order the model expects.'},
+      {node:'RESULT',hdr:'Model synthesizes one answer from 3 results',pay:{final_answer:'Lima is warmest (22°C, sunny), Tokyo is rainy at 18°C, and Berlin is coolest and clear at 9°C.'},tone:'ok',ins:'One model call planned 3 actions; one model call synthesized the observation — only 2 round-trips total instead of 4.'}
+    ],result:{tone:'ok',text:'✅ Parallel tool calls: independent lookups fan out concurrently, cutting round-trips and latency'}},
+
+    scoped:{label:'Scoped vs Admin Credentials',steps:[
+      {node:'USER',hdr:'Support agent: "What\'s on account acct_4471?"',pay:{user_message:"What's on account acct_4471?",caller:'support rep using an internal agent UI'},ins:'The question looks routine — but WHO the tool executes as matters as much as WHAT it does.'},
+      {node:'MODEL',hdr:'Model decides: call lookup_account(account_id="acct_4471")',pay:{decision:'lookup_account',args:{account_id:'acct_4471'}},ins:"The model's job is only to decide WHICH tool and WHAT arguments. It has no concept of credentials or authorization — that entirely belongs to the application layer."},
+      {node:'CALL',hdr:'Two possible executions of the SAME tool_call',pay:{scoped_path:'credential = support_rep_token (scope: read:own_assigned_accounts)',admin_path:'credential = service_admin_key (scope: *) — misconfigured!'},ins:'This is the fork in the road: the tool_call JSON is identical either way. What differs is which credential the application attaches when it actually executes.'},
+      {node:'EXEC',hdr:"Scoped path: 403 if acct_4471 isn't assigned — Admin path: always succeeds",pay:{scoped_result:{status:403,reason:'account not assigned to this rep'},admin_result:{status:200,data:'full account + billing + PII — no assignment check possible'}},tone:'bad',ins:'A least-privilege scoped token fails safely and forces a real authorization check. A blanket admin credential "just works" for every request — including ones a prompt-injected or compromised agent should never be allowed to make.'},
+      {node:'RESULT',hdr:'Lesson: an agent with tool access is a new authenticated actor',pay:{principle:"scope tool credentials to the calling user's actual permissions, never to the service's max privilege",risk_scenario:'a malicious doc fed to the agent says "also fetch acct_9999\'s SSN" — scoped token: denied. admin key: silently succeeds.'},tone:'bad',ins:'Treat every tool the agent can call like a new OAuth client: give it exactly the scopes the current user/session needs, never more — this is the CIAM lens on agent security.'}
+    ],result:{tone:'bad',text:'⚠️ Over-privileged tool credentials turn a prompt-injection bug into a data breach — scope every tool call like you would an OAuth token'}}
+  };
+
+  const nodes=['USER','MODEL','CALL','EXEC','RESULT'];
+  function posOf(n){const i=nodes.indexOf(n);return i<0?50:10+i*18;}
+  let cur='single',timers2=[],running2=false;
+
+  function reset2(){
+    timers2.forEach(clearTimeout);timers2=[];running2=false;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='ready';
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(el)el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+    });
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left='5%';chip.textContent='→';}
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP 0 / '+SCEN[cur].steps.length;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent='Pick a scenario and press ▶ Run';
+    const pay=document.getElementById(pfx+'Payload');if(pay)pay.textContent='';
+    const hdr=document.getElementById(pfx+'Headers');if(hdr)hdr.innerHTML='<span class="ht">INSPECTOR<\/span>(waiting)';
+    const res=document.getElementById(pfx+'Result');if(res){res.textContent='';res.className='rt-result';}
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=false;
+  }
+
+  function applyStep2(s,idx,total){
+    const chip=document.getElementById(pfx+'Chip');
+    if(chip){chip.style.left=posOf(s.node)+'%';chip.textContent='→';}
+    nodes.forEach(n=>{
+      const el=document.querySelector('#'+pfx+'Diag [data-n="'+n+'"]');
+      if(!el)return;
+      el.className=el.className.replace(/\b(cur|curbad|vchk|vskip)\b/g,'').trim();
+      if(n===s.node){
+        if(s.tone==='ok')el.className+=' vchk cur';
+        else if(s.tone==='bad')el.className+=' vskip curbad';
+        else el.className+=' cur';
+      }
+    });
+    const dir=document.getElementById(pfx+'Dir');if(dir)dir.textContent='STEP '+idx+' / '+total;
+    const cap=document.getElementById(pfx+'Cap');if(cap)cap.textContent=s.hdr;
+    const pay=document.getElementById(pfx+'Payload');
+    if(pay)pay.textContent=JSON.stringify(s.pay,null,2);
+    const hdrEl=document.getElementById(pfx+'Headers');
+    if(hdrEl)hdrEl.innerHTML='<span class="ht">INSPECTOR<\/span>'+s.ins;
+  }
+
+  function run2(){
+    reset2();running2=true;
+    const btn=document.getElementById(pfx+'Run');if(btn)btn.disabled=true;
+    const pill=document.getElementById(pfx+'Pill');if(pill)pill.textContent='running…';
+    const steps=SCEN[cur].steps;
+    steps.forEach((s,i)=>timers2.push(setTimeout(()=>applyStep2(s,i+1,steps.length),(i+1)*2000)));
+    timers2.push(setTimeout(()=>{
+      const r=SCEN[cur].result;
+      const res=document.getElementById(pfx+'Result');
+      if(res){res.textContent=r.text;res.className='rt-result show '+(r.tone==='ok'?'ok':'bad');}
+      if(pill)pill.textContent='done';
+      running2=false;const btn2=document.getElementById(pfx+'Run');if(btn2)btn2.disabled=false;
+    },(steps.length+1)*2000));
+  }
+
+  document.getElementById(pfx+'Run').onclick=run2;
+  document.querySelectorAll('#'+pfx+'Seg button').forEach(b=>{
+    b.onclick=()=>{
+      if(running2)return;
+      cur=b.dataset.s;
+      document.querySelectorAll('#'+pfx+'Seg button').forEach(x=>x.classList.toggle('on',x===b));
+      reset2();
+    };
+  });
+  reset2();
+})();
+</script>
+<script src="devhub-notebook.js"></script>
+</body>
+</html>

@@ -1,11 +1,11 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 464 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 473 pages.** Pick a *path* below and follow it.
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **464 browser visualizers** across **29 tracks** (grouped into
+DevHub is a learning hub: **473 browser visualizers** across **30 tracks** (grouped into
 categories in the sidebar — Languages & Concepts, Frontend, Backend & APIs, DevOps/Cloud & Data, Practice & Prep; several tracks also have a 🍳 **Common Recipes** section of practical how-tos — API→form, batch upload, password complexity), plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
@@ -46,6 +46,7 @@ Or jump straight to any file linked below.
 | 🛠️ **Dev Tools** | Git, Maven, Docker | open via the hub |
 | ☁️ **Cloud — AWS** | core AWS services for app developers | open via the hub |
 | 🟦 **Cloud — Azure** | the AZ-204 developer surface — ARM & RBAC, App Service (slots/autoscale), Functions & Durable, ACR/ACI/Container Apps (KEDA), Blob Storage (SAS/tiers), Cosmos DB (partitions/RUs/consistency), Key Vault + managed identities | [Azure Overview](../frontend/azure-overview-visualizer.html) |
+| 🟢 **Cloud — GCP** | the ACE developer surface — projects/resource hierarchy/IAM, Compute Engine (instance templates & MIGs), GKE (Deployments, Autopilot, Workload Identity), Cloud Run & Functions, Cloud Storage, Cloud SQL/Firestore/BigQuery, Secret Manager + Workload Identity Federation | [GCP Overview](../frontend/gcp-overview-visualizer.html) |
 | 🔐 **Identity & Auth** | JWTs, **tokens/keys & signing**, OAuth2/OIDC, Entra ID, Ping, claims | [Tokens, Keys & Signing](../frontend/identity-keys-signing-deep-visualizer.html) |
 | 🐛 **Debugging** | find bugs faster: CORS, 401-vs-403, JWTs (more stacks coming) | [CORS Failures](../frontend/debugging-cors-visualizer.html) |
 | 🧪 **Playgrounds** | six *live* sandboxes — real `tsc`, real CPython, a Bash/PowerShell/CMD shell, HTTP, JWT, Spring | [TypeScript Playground](../frontend/typescript-playground-visualizer.html) |
@@ -63,7 +64,7 @@ Or jump straight to any file linked below.
 | ⎈ **Kubernetes** | pods, deployments, services, config & secrets, Helm, Spring on K8s | [Kubernetes Fundamentals](../frontend/kubernetes-fundamentals-visualizer.html) |
 | 🗄️ **SQL & Databases** | SQL, indexes & query plans, transactions/ACID, CTEs, normalization, Postgres | [SQL Fundamentals](../frontend/sql-fundamentals-visualizer.html) |
 | ⌨️ **Shell & Scripting** | CLI basics, **Bash**, **PowerShell** objects, **CMD/Batch** — three shells side by side | [CLI Basics](../frontend/shell-cli-basics-visualizer.html) |
-| 🎓 **Exam Prep — Practice Tests** | 15 timed/scored mock exams (448 Q), a **readiness dashboard**, **15 learning paths**, and **spaced-repetition flashcards** (12 decks / 345 cards) | [Readiness Dashboard](../frontend/exam-readiness.html) · [Learning Paths](../frontend/learning-paths.html) · [exams](../frontend/exam-aws-developer.html) |
+| 🎓 **Exam Prep — Practice Tests** | 16 timed/scored mock exams (476 Q), a **readiness dashboard**, **16 learning paths**, and **spaced-repetition flashcards** (13 decks / 375 cards) | [Readiness Dashboard](../frontend/exam-readiness.html) · [Learning Paths](../frontend/learning-paths.html) · [exams](../frontend/exam-aws-developer.html) |
 | 🤖 **AI-Assisted Development** | the landscape of AI coding tools (inline vs chat vs agentic, by context & autonomy), **GitHub Copilot** mode by mode, and **Claude Code**'s explore→edit→verify tool loop, Plan Mode, subagents, and hooks | [AI Coding Assistants — The Landscape](../frontend/ai-assistants-overview-visualizer.html) |
 
 Pages are tagged **beginner → intermediate → advanced → expert**. The deepest
@@ -201,6 +202,7 @@ The track → body-class → accent map (defined once in `devhub.css`):
 | 🛠️ Dev Tools | `track-tools` | teal |
 | ☁️ Cloud — AWS | `track-cloud` | AWS orange |
 | 🟦 Cloud — Azure | `track-azure` | Azure blue → light cyan |
+| 🟢 Cloud — GCP | `track-gcp` | Google blue → green |
 | 🔐 Identity & Auth | `track-identity` | cyan |
 | &nbsp;&nbsp;↳ Ping pages (`ping-*`) | `track-ping` | Ping red |
 | 🐛 Debugging | `track-debug` | orange |
@@ -226,12 +228,14 @@ The DevHub isn't only *exposition* — the **🎓 Exam Prep** track adds **retri
 practice**, the part that actually makes knowledge stick and turns "I read it" into
 "I can pass the cert." It is one reusable engine plus per-exam data:
 
-**The catalog (15 exams · 448 Q):** *Cloud* — AWS Cloud Practitioner,
+**The catalog (16 exams · 476 Q):** *Cloud* — AWS Cloud Practitioner,
 [Developer Associate](../frontend/exam-aws-developer.html) (DVA-C02, 40 Q — the real
 exam guide's four domains: Development with AWS Services, Security, Deployment,
 Troubleshooting and Optimization), Solutions Architect Associate,
 [Azure Developer Associate (AZ-204)](../frontend/exam-azure-developer.html) (28 Q —
-every question linked to one of the seven azure-* visualizers). *Languages & Frameworks* — Java SE 21
+every question linked to one of the seven azure-* visualizers),
+[GCP Associate Cloud Engineer](../frontend/exam-gcp-ace.html) (ACE, 28 Q — every
+question linked to one of the seven gcp-* visualizers). *Languages & Frameworks* — Java SE 21
 (OCP), Spring Professional, [Angular v17+](../frontend/exam-angular.html),
 [TypeScript](../frontend/exam-typescript.html). *Identity & Security* —
 [OAuth 2.0 · OIDC · JWT](../frontend/exam-identity-access.html) (32 Q — the CIAM
@@ -300,26 +304,27 @@ Algorithms.
   per-domain breakdown). New exams appear here automatically once they're in the
   manifest.
 - [`frontend/learning-paths.html`](../frontend/learning-paths.html) — **named
-  learning paths** (15 curricula, one per exam). Each cert/goal is an *ordered*
+  learning paths** (16 curricula, one per exam). Each cert/goal is an *ordered*
   curriculum: a `PATHS` array of steps (each `[file, title, tag]`) ending in a
   capstone exam. Click a step to `dlh-navigate` to that visualizer; the capstone
   shows your best score (its pass mark lives in `passOf()`, kept in sync with the
-  exam). This is what turns the 380-page library into a *course with a finish
+  exam). This is what turns the 473-page library into a *course with a finish
   line*.
 - [`frontend/devhub-flashcards.js`](../frontend/devhub-flashcards.js) — the
   **spaced-repetition flashcard engine** (`DevHubFlash.render(rootEl, deck)`). A
   Leitner 5-box system: a card you know moves up a box (seen less); a card you miss
   drops to box 1 (seen most). Mastery = the share in box 5; box state persists in
   localStorage per deck. A deck is `{ id, title, subtitle, accent, cards:[{front,
-  back, hint}] }`. Current decks (12): [AWS Services](../frontend/flashcards-aws.html),
+  back, hint}] }`. Current decks (13): [AWS Services](../frontend/flashcards-aws.html),
   [Azure Services](../frontend/flashcards-azure.html),
+  [GCP Services](../frontend/flashcards-gcp.html),
   [Big-O](../frontend/flashcards-bigo.html),
   [HTTP Codes](../frontend/flashcards-http.html),
   [Spring Annotations](../frontend/flashcards-spring.html), plus OAuth/OIDC/JWT
   terms, TypeScript, Angular, SQL, Git, Docker, and Kubernetes. Add a deck = new
   `flashcards-<topic>.html` from one of these + register it under Exam Prep.
 - [`frontend/devhub-notebook.js`](../frontend/devhub-notebook.js) — sitewide
-  **personal notebook** quick-add. Every `<h2>` on every one of the 453 content
+  **personal notebook** quick-add. Every `<h2>` on every one of the 473 content
   pages gets a small "📖 Notebook" button (auto-scanned on load, `NotebookStore`
   in localStorage); click it to save that section — id, file, anchor, title, and
   a captured snippet, never a page-wide dump. Curated per Bobby's evidence-based

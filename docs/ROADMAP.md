@@ -83,16 +83,26 @@ and a metadata-based JWT auth interceptor as the CIAM angle, contrasted against 
 registered under Spring Boot's APIs & Communication section and cross-linked from
 `go-grpc-visualizer.html`.
 
-1. **GCP has zero coverage** (AWS: 16 pages, Azure: 7 pages, GCP: 0). Explicitly **not** a near-term
-   priority — matches Bobby's own stated phasing in the "Longer-term expansion" note below
-   (entry-level AWS/Azure/Angular first, broaden later); flagged here only so it isn't forgotten.
+~~1. GCP has zero coverage (AWS: 16 pages, Azure: 7 pages, GCP: 0).~~ **DONE (2026-08-28):** built
+the full 🟢 Cloud — GCP track (7 pages: `gcp-overview-visualizer.html` — projects, resource
+hierarchy & IAM; `gcp-compute-engine-visualizer.html` — instance templates & MIGs; `gcp-gke-visualizer.html`;
+`gcp-serverless-visualizer.html` — Cloud Run & Functions; `gcp-storage-visualizer.html`;
+`gcp-databases-visualizer.html` — Cloud SQL/Firestore/BigQuery; `gcp-iam-secrets-visualizer.html` —
+service account impersonation, Secret Manager & Workload Identity Federation), registered in
+`tracks-data.js` mirroring the Azure track's exact section shape (Foundations×1, Compute×3,
+Data & Storage×2, Security×1). Also added `exam-gcp-ace.html` (28-question Associate Cloud Engineer
+practice exam, length-bracketed per the quality standard — 7/7/7/7 answer-position distribution,
+0/28 "longest choice is correct" bias), `flashcards-gcp.html` (30-card deck), and a GCP capstone
+entry in `learning-paths.html`, all registered in `quiz-banks.js` / `tracks-data.js`.
 
-**Longer-term expansion (unchanged from the original ask, not immediate):** grow beyond software
-development into every IT field — AI, Data Science, Software Dev, DevOps, and whatever else. Add
-practice exams/study guides for certificates, scoped to **entry-level certs only** (e.g. AWS,
-Claude Code, Angular) — the full universe of certs is too large to chase, and entry-level is where
-a zero-experience learner actually needs the on-ramp. **Mid- and senior-level certs are an
-explicitly later phase.**
+**Longer-term expansion (in progress as of 2026-08-28):** grow beyond software development into
+every IT field — AI, Data Science, Software Dev, DevOps, and whatever else — per Bobby's "zero to
+hero / zero to full-stack / zero to data or AI dev" directive. Add practice exams/study guides for
+certificates, scoped to **entry-level certs only** (e.g. AWS, Azure, GCP, Claude Code, Angular) —
+the full universe of certs is too large to chase, and entry-level is where a zero-experience
+learner actually needs the on-ramp. **Mid- and senior-level certs are an explicitly later phase.**
+New tracks in flight: Web Fundamentals (HTML/CSS/JS/DOM/browser), Data Science & ML, and AI/LLM
+Engineering, plus a sitewide cleanup/depth-audit pass on existing shallow content.
 
 ---
 

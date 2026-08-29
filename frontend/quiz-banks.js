@@ -162,5 +162,15 @@ window.DEVHUB_EXAMS = [
     passPct: 70,
     count: 21,
     available: true
+  },
+  {
+    id: 'gcp-ace',
+    title: 'Google Cloud Associate Cloud Engineer',
+    cert: 'ACE',
+    file: 'exam-gcp-ace.html',
+    track: 'Cloud — GCP',
+    passPct: 70,
+    count: 28,
+    available: true
   }
 ];

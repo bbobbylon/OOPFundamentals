@@ -7,6 +7,25 @@
  * ========================================================================== */
 window.DEVHUB_TRACKS = [
   {
+    id: 'web-fundamentals', icon: '🌐', label: 'Web Fundamentals',
+    desc: 'The true zero-starting-point before Angular/React/TypeScript make sense: HTML, CSS, plain JavaScript, the DOM, and how browsers actually render a page',
+    sections: [
+      { label: 'Foundations', pages: [
+        { title: 'HTML Fundamentals — Structure, Forms & Accessibility', file: 'web-html-fundamentals-visualizer.html', level: 'beginner' },
+        { title: 'CSS Fundamentals — Box Model, Selectors & Specificity',  file: 'web-css-fundamentals-visualizer.html',  level: 'beginner' },
+        { title: 'CSS Layout — Flexbox, Grid & Responsive Design',        file: 'web-css-layout-visualizer.html',        level: 'beginner' },
+      ]},
+      { label: 'JavaScript in the Browser', pages: [
+        { title: 'JavaScript Fundamentals — Variables, Functions & Closures', file: 'web-js-fundamentals-visualizer.html', level: 'beginner' },
+        { title: 'The DOM & Events — Selecting, Manipulating & Delegation',   file: 'web-dom-events-visualizer.html',      level: 'beginner' },
+        { title: 'Async JavaScript — Promises, async/await & fetch()',       file: 'web-js-async-visualizer.html',        level: 'intermediate' },
+      ]},
+      { label: 'How Browsers Work', pages: [
+        { title: 'How Browsers Work — Parsing, Render Tree, Layout & Paint', file: 'web-browser-rendering-visualizer.html', level: 'intermediate' },
+      ]},
+    ]
+  },
+  {
     id: 'java-oop', icon: '☕', label: 'Java — OOP & Language',
     desc: 'Core OOP, design patterns, generics, streams, concurrency, and JVM internals',
     sections: [
@@ -445,6 +464,27 @@ window.DEVHUB_TRACKS = [
     ]
   },
   {
+    id: 'gcp', icon: '🟢', label: 'Cloud — GCP',
+    desc: 'Core Google Cloud for developers (the Associate Cloud Engineer surface): projects, IAM & resource hierarchy, Compute Engine & GKE, Cloud Run & Functions, Storage/Firestore/BigQuery, and Secret Manager + Workload Identity Federation',
+    sections: [
+      { label: 'Foundations', pages: [
+        { title: 'GCP Overview — Projects, Resource Hierarchy & IAM', file: 'gcp-overview-visualizer.html',        level: 'beginner' },
+      ]},
+      { label: 'Compute', pages: [
+        { title: 'Compute Engine — VMs, Templates & MIGs',       file: 'gcp-compute-engine-visualizer.html',      level: 'intermediate' },
+        { title: 'GKE — Pods, Deployments & Autopilot',          file: 'gcp-gke-visualizer.html',                 level: 'advanced' },
+        { title: 'Cloud Run & Functions — Serverless',           file: 'gcp-serverless-visualizer.html',          level: 'intermediate' },
+      ]},
+      { label: 'Data & Storage', pages: [
+        { title: 'Cloud Storage — Signed URLs & Lifecycle',      file: 'gcp-storage-visualizer.html',             level: 'intermediate' },
+        { title: 'Cloud SQL, Firestore & BigQuery',              file: 'gcp-databases-visualizer.html',           level: 'advanced' },
+      ]},
+      { label: 'Security', pages: [
+        { title: 'IAM Policies, Service Accounts & Secret Manager', file: 'gcp-iam-secrets-visualizer.html',      level: 'advanced' },
+      ]},
+    ]
+  },
+  {
     id: 'identity', icon: '🔐', label: 'Identity & Auth',
     desc: 'JWTs, tokens & signing keys, OAuth2/OIDC, Microsoft Entra ID (Azure AD), and Ping Identity',
     sections: [
@@ -554,6 +594,48 @@ window.DEVHUB_TRACKS = [
       ]},
       { label: '🍳 Common Recipes', pages: [
         { title: 'Recipe: Validate & Parse Request Data', file: 'python-recipe-validate-parse-visualizer.html', level: 'intermediate' },
+      ]},
+    ]
+  },
+  {
+    id: 'data-science', icon: '📊', label: 'Data Science & ML',
+    desc: 'From raw data to a trained model: NumPy/pandas, cleaning & EDA, visualization, the ML fundamentals (train/test, bias-variance), regression/classification, evaluation, clustering/PCA, and neural networks/PyTorch',
+    sections: [
+      { label: 'Data Tooling', pages: [
+        { title: 'NumPy & Pandas — Arrays, Vectorization & DataFrames', file: 'datasci-numpy-pandas-visualizer.html',           level: 'beginner' },
+        { title: 'Data Cleaning & EDA — Missing Data & Outliers',       file: 'datasci-data-cleaning-eda-visualizer.html',      level: 'beginner' },
+        { title: 'Data Visualization — Matplotlib, Seaborn & Choosing the Right Chart', file: 'datasci-visualization-visualizer.html', level: 'beginner' },
+      ]},
+      { label: 'ML Fundamentals', pages: [
+        { title: 'ML Fundamentals — Supervised vs Unsupervised, Bias-Variance', file: 'datasci-ml-fundamentals-visualizer.html', level: 'intermediate' },
+        { title: 'Regression & Classification — Linear/Logistic, Trees & Forests', file: 'datasci-regression-classification-visualizer.html', level: 'intermediate' },
+        { title: 'Model Evaluation — Precision, Recall, F1 & ROC-AUC',  file: 'datasci-model-evaluation-visualizer.html',        level: 'intermediate' },
+        { title: 'Clustering & PCA — K-Means & Dimensionality Reduction', file: 'datasci-clustering-pca-visualizer.html',        level: 'advanced' },
+      ]},
+      { label: 'Deep Learning', pages: [
+        { title: 'Neural Networks Fundamentals — Perceptrons, Backprop & Gradient Descent', file: 'datasci-neural-networks-visualizer.html', level: 'advanced' },
+        { title: 'Deep Learning in Practice — CNNs, RNNs & PyTorch',    file: 'datasci-deep-learning-pytorch-visualizer.html',  level: 'advanced' },
+      ]},
+    ]
+  },
+  {
+    id: 'ai-engineering', icon: '🧠', label: 'AI / LLM Engineering',
+    desc: 'How to actually build with LLMs: the transformer architecture, tokenization & sampling, prompt engineering, embeddings/vector search, RAG, tool-calling agents, wiring an LLM API into a real backend, fine-tuning vs RAG vs prompting & LLMOps, and AI safety/guardrails',
+    sections: [
+      { label: 'Foundations', pages: [
+        { title: 'Transformers & Attention — The Architecture Behind Every LLM', file: 'genai-transformers-attention-visualizer.html', level: 'intermediate' },
+        { title: 'How LLMs Work — Tokenization, Next-Token Prediction & Sampling', file: 'genai-how-llms-work-visualizer.html',       level: 'beginner' },
+      ]},
+      { label: 'Building with LLMs', pages: [
+        { title: 'Prompt Engineering — Zero/Few-Shot, Chain-of-Thought & System Prompts', file: 'genai-prompt-engineering-visualizer.html', level: 'beginner' },
+        { title: 'Embeddings & Vector Databases — Semantic Search',           file: 'genai-embeddings-vector-db-visualizer.html',  level: 'intermediate' },
+        { title: 'RAG — Retrieval-Augmented Generation',                     file: 'genai-rag-visualizer.html',                   level: 'intermediate' },
+        { title: 'Tool Use & Agents — Function Calling & the Plan/Act/Observe Loop', file: 'genai-tool-calling-agents-visualizer.html', level: 'intermediate' },
+        { title: 'LLM API Integration — Calling Claude/OpenAI from a Backend, Streaming', file: 'genai-llm-api-integration-visualizer.html', level: 'intermediate' },
+      ]},
+      { label: 'Production AI', pages: [
+        { title: 'Fine-Tuning vs RAG vs Prompting & LLMOps — Choosing the Right Approach', file: 'genai-finetuning-llmops-visualizer.html', level: 'advanced' },
+        { title: 'AI Safety & Guardrails — Prompt Injection, Jailbreaks & PII Handling', file: 'genai-safety-guardrails-visualizer.html', level: 'advanced' },
       ]},
     ]
   },
@@ -807,6 +889,7 @@ window.DEVHUB_TRACKS = [
         { title: 'AWS Developer Associate',       file: 'exam-aws-developer.html',                          level: 'intermediate' },
         { title: 'AWS Solutions Architect Assoc.', file: 'exam-aws-sa-associate.html',                      level: 'advanced' },
         { title: 'Azure Developer (AZ-204)',      file: 'exam-azure-developer.html',                        level: 'intermediate' },
+        { title: 'GCP Associate Cloud Engineer',  file: 'exam-gcp-ace.html',                                level: 'intermediate' },
       ]},
       { label: 'Language & Framework Certifications', pages: [
         { title: 'Java SE 21 Developer (OCP)',    file: 'exam-java-ocp.html',                               level: 'intermediate' },
@@ -834,6 +917,7 @@ window.DEVHUB_TRACKS = [
       { label: 'Flashcards (spaced repetition)', pages: [
         { title: 'AWS Services',                  file: 'flashcards-aws.html',                              level: 'beginner' },
         { title: 'Azure Services',                file: 'flashcards-azure.html',                            level: 'beginner' },
+        { title: 'GCP Services',                  file: 'flashcards-gcp.html',                              level: 'beginner' },
         { title: 'Big-O Cheat Sheet',             file: 'flashcards-bigo.html',                             level: 'beginner' },
         { title: 'HTTP Status Codes',             file: 'flashcards-http.html',                             level: 'beginner' },
         { title: 'Spring Annotations',            file: 'flashcards-spring.html',                           level: 'beginner' },
