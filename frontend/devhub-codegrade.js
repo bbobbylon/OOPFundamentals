@@ -16,6 +16,15 @@
  *     runInSandbox().
  *   - Python: real CPython via Pyodide/WASM (same CDN build as
  *     python-playground-visualizer.html).
+ *   - Java: a real JVM + the real javac compiler via CheerpJ (WASM JVM from
+ *     Leaning Tech, CDN loader — same "CDN dependency accepted for real
+ *     engines" precedent as Pyodide). The runtime boots inside a hidden
+ *     same-origin iframe owned by this engine: user code is written to the
+ *     virtual FS as /str/Solution.java, compiled by com.sun.tools.javac.Main
+ *     (classpath = a tools.jar fetched once and kept in Cache Storage),
+ *     then a generated Harness.java replays the hidden tests against
+ *     `new Solution()` and prints one sentinel-marked JSON result per test,
+ *     which this file reads back from the iframe's #console element.
  *
  * USAGE (from a standalone page, loaded in the hub iframe):
  *
@@ -36,9 +45,17 @@
  *     prompt: 'Given an array…',                  // HTML allowed
  *     signature: { javascript: 'function twoSum(nums, target)',
  *                  typescript: 'function twoSum(nums: number[], target: number): number[]',
- *                  python: 'def two_sum(nums, target):' },
- *     starter:   { javascript: '…', typescript: '…', python: '…' },
- *     functionName: { javascript: 'twoSum', typescript: 'twoSum', python: 'two_sum' },
+ *                  python: 'def two_sum(nums, target):',
+ *                  java: 'public int[] twoSum(int[] nums, int target)' },
+ *     starter:   { javascript: '…', typescript: '…', python: '…', java: '…' },
+ *     functionName: { javascript: 'twoSum', typescript: 'twoSum', python: 'two_sum', java: 'twoSum' },
+ *     javaTypes: ['int[]', 'int'],   // Java only: the declared Java type of each
+ *                                    // positional arg, so plain JSON test data can be
+ *                                    // rendered as typed Java literals in the harness
+ *                                    // (JSON can't distinguish int[] from long[] or
+ *                                    // char[][] from String[][]). Shaped args
+ *                                    // ('list'/'tree'/…) may use 'ListNode'/'TreeNode'
+ *                                    // as documentation — the shape wins either way.
  *     tests: [ { args: [[2,7,11,15], 9], expected: [0,1], unordered: true }, … ],
  *     hints: ['Try a hashmap…', 'Store each…'],
  *     ref: { label: 'Two-pointer & hashmap technique', file: 'interview-arrays-strings-visualizer.html' }
@@ -67,6 +84,10 @@
 
   const TS_CDN = 'https://cdn.jsdelivr.net/npm/typescript@5.6.3/lib/typescript.js';
   const PY_BASE = 'https://cdn.jsdelivr.net/pyodide/v0.26.2/full/';
+  const CHEERPJ_LOADER = 'https://cjrtnc.leaningtech.com/4.3/loader.js';
+  /* javac lives in tools.jar (the JDK-8 compiler jar JavaFiddle ships) — pinned to a
+   * commit SHA so an upstream change can never silently break grading. */
+  const JAVA_TOOLS_JAR = 'https://raw.githubusercontent.com/leaningtech/javafiddle/0d847f83f11607623187340e4d12efb494f64e80/static/tools.jar';
 
   /* ---- tiny DOM helper: h('div', {class:'x'}, child, child) ------------- */
   function h(tag, props, ...kids) {
@@ -487,6 +508,335 @@ __results
     }
   }
 
+  /* ========================================================================
+   * Java: real javac + JVM via CheerpJ (WASM), inside a hidden same-origin
+   * iframe this engine owns. The iframe isolates CheerpJ's globals and its
+   * #console stdout target from the page, and gives the kill-timer a real
+   * weapon: destroying the iframe destroys a wedged JVM, and the next run
+   * boots a fresh one.
+   * ====================================================================== */
+  let javaFrame = null, javaBooting = null, javaJarBuf = null;
+
+  /* CheerpJ runs in its own iframe realm, and its Uint8Array `instanceof`
+   * check fails for arrays built with the PARENT page's constructor (it then
+   * silently stringifies them, corrupting binary data) — so every byte array
+   * handed to cheerpjAddStringFile must be built with the FRAME's Uint8Array. */
+  function frameBytes(win, data) {
+    if (typeof data === 'string') data = new TextEncoder().encode(data);
+    const out = new win.Uint8Array(data.length);
+    out.set(data);
+    return out;
+  }
+
+  function destroyJavaRuntime() {
+    if (javaFrame) { try { javaFrame.remove(); } catch (e) { /* ignore */ } }
+    javaFrame = null; javaBooting = null;
+  }
+
+  /* tools.jar is ~18 MB — fetch it once, keep it in Cache Storage so revisits
+   * (even after a browser restart) never re-download it. */
+  async function fetchToolsJar() {
+    if (javaJarBuf) return javaJarBuf;
+    let resp = null;
+    try {
+      const cache = await caches.open('dlh-java-runtime');
+      resp = await cache.match(JAVA_TOOLS_JAR);
+      if (!resp) {
+        resp = await fetch(JAVA_TOOLS_JAR);
+        if (!resp.ok) throw new Error('tools.jar HTTP ' + resp.status);
+        await cache.put(JAVA_TOOLS_JAR, resp.clone());
+      }
+    } catch (e) {
+      resp = await fetch(JAVA_TOOLS_JAR); /* Cache Storage unavailable (e.g. file://) */
+      if (!resp.ok) throw new Error('tools.jar HTTP ' + resp.status);
+    }
+    javaJarBuf = new Uint8Array(await resp.arrayBuffer());
+    return javaJarBuf;
+  }
+
+  function bootJava(status) {
+    if (javaFrame) return Promise.resolve(javaFrame);
+    if (javaBooting) return javaBooting;
+    javaBooting = (async () => {
+      const frame = document.createElement('iframe');
+      frame.style.display = 'none';
+      frame.setAttribute('aria-hidden', 'true');
+      frame.srcdoc = '<!doctype html><meta charset="utf-8"><body><pre id="console"></pre></body>';
+      document.body.appendChild(frame);
+      await new Promise(r => { frame.onload = r; });
+      const win = frame.contentWindow, doc = frame.contentDocument;
+      if (status) status('downloading the Java runtime (first run ~40 MB — cached after)…');
+      const loaderP = new Promise((res, rej) => {
+        const s = doc.createElement('script');
+        s.src = CHEERPJ_LOADER;
+        s.onload = res;
+        s.onerror = () => rej(new Error('offline — could not load the Java runtime'));
+        doc.head.appendChild(s);
+      });
+      const [jarBytes] = await Promise.all([fetchToolsJar(), loaderP]);
+      if (status) status('booting the JVM…');
+      await win.cheerpjInit({ status: 'none' });
+      win.cheerpjAddStringFile('/str/tools.jar', frameBytes(win, jarBytes));
+      javaFrame = frame;
+      javaBooting = null;
+      return frame;
+    })();
+    javaBooting.catch(() => { javaBooting = null; });
+    return javaBooting;
+  }
+
+  /* a run that exceeds its budget gets its whole JVM torn down — a fresh one
+   * boots on the next Run click (tools.jar stays cached, so that's cheap-ish) */
+  function javaDeadline(promise, ms, what) {
+    return new Promise((resolve, reject) => {
+      const t = setTimeout(() => {
+        destroyJavaRuntime();
+        reject(new Error('Stopped after ' + (ms / 1000) + 's while ' + what + ' — infinite loop?'));
+      }, ms);
+      promise.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
+    });
+  }
+
+  /* ---- JSON test data -> typed Java literals ----------------------------- */
+  function jChar(c) {
+    const s = String(c);
+    return "'" + (s === "'" ? "\\'" : s === '\\' ? '\\\\' : s) + "'";
+  }
+  function jLit(type, v, nested) {
+    if (v === null || v === undefined) return 'null';
+    if (type && type.endsWith('[]')) {
+      const inner = type.slice(0, -2);
+      const items = (inner === 'char' && typeof v === 'string')
+        ? v.split('').map(jChar)
+        : v.map(x => jLit(inner, x, true));
+      const body = '{' + items.join(',') + '}';
+      return nested ? body : 'new ' + type + body;
+    }
+    switch (type) {
+      case 'int': case 'Integer': return String(v);
+      case 'long': return String(v) + 'L';
+      case 'double': { const s = String(v); return (s.includes('.') || s.includes('e') || s.includes('E')) ? s : s + '.0'; }
+      case 'boolean': return String(v);
+      case 'char': return jChar(v);
+      case 'String': return JSON.stringify(String(v)); /* JSON escapes are valid Java string escapes */
+      default: throw new Error('devhub-codegrade: unsupported javaTypes entry "' + type + '"');
+    }
+  }
+  function inferJavaType(v) {
+    if (typeof v === 'number') return Number.isInteger(v) ? 'int' : 'double';
+    if (typeof v === 'string') return 'String';
+    if (typeof v === 'boolean') return 'boolean';
+    if (Array.isArray(v)) {
+      const el = v.find(x => x !== null);
+      if (el === undefined) return 'int[]';
+      return inferJavaType(el) + '[]';
+    }
+    throw new Error('devhub-codegrade: cannot infer a Java type — declare javaTypes on this exercise');
+  }
+  function javaArgExpr(ex, argIndex, value) {
+    const shape = ex.argShapes && ex.argShapes[argIndex];
+    if (shape === 'list') return 'buildList(' + jLit('int[]', value) + ')';
+    if (shape === 'list-with-cycle') return 'buildListWithCycle(' + jLit('int[]', value.values) + ', ' + value.pos + ')';
+    if (shape === 'tree') return 'buildTree(' + jLit('Integer[]', value) + ')';
+    const type = (ex.javaTypes && ex.javaTypes[argIndex]) || inferJavaType(value);
+    return jLit(type, value);
+  }
+
+  /* ---- generate Harness.java for one exercise ---------------------------- */
+  function buildJavaHarness(ex) {
+    const fn = ex.functionName.java;
+    const wrap = ex.resultShape === 'list' ? 'listToArray' : ex.resultShape === 'tree' ? 'treeToArray' : '';
+    const calls = ex.tests.map(t => {
+      const args = t.args.map((a, i) => javaArgExpr(ex, i, a)).join(', ');
+      const invoke = 's.' + fn + '(' + args + ')';
+      return [
+        '        try {',
+        '            Object got = ' + (wrap ? wrap + '(' + invoke + ')' : invoke) + ';',
+        '            System.out.println("@@CG@@{\\"got\\":" + toJson(got) + "}");',
+        '        } catch (Throwable t) {',
+        '            System.out.println("@@CG@@{\\"error\\":" + jsonStr(String.valueOf(t)) + "}");',
+        '        }'
+      ].join('\n');
+    }).join('\n');
+    return [
+      'import java.util.*;',
+      '',
+      'public class Harness {',
+      '    static ListNode buildList(int[] a) {',
+      '        ListNode head = null, tail = null;',
+      '        for (int v : a) {',
+      '            ListNode n = new ListNode(v);',
+      '            if (head == null) { head = n; tail = n; } else { tail.next = n; tail = n; }',
+      '        }',
+      '        return head;',
+      '    }',
+      '    static ListNode buildListWithCycle(int[] a, int pos) {',
+      '        if (a.length == 0) return null;',
+      '        ListNode[] nodes = new ListNode[a.length];',
+      '        for (int i = 0; i < a.length; i++) nodes[i] = new ListNode(a[i]);',
+      '        for (int i = 0; i < a.length - 1; i++) nodes[i].next = nodes[i + 1];',
+      '        if (pos >= 0) nodes[a.length - 1].next = nodes[pos];',
+      '        return nodes[0];',
+      '    }',
+      '    static TreeNode buildTree(Integer[] a) {',
+      '        if (a.length == 0 || a[0] == null) return null;',
+      '        TreeNode root = new TreeNode(a[0]);',
+      '        LinkedList<TreeNode> q = new LinkedList<>();',
+      '        q.add(root);',
+      '        int i = 1;',
+      '        while (!q.isEmpty() && i < a.length) {',
+      '            TreeNode node = q.poll();',
+      '            if (i < a.length) { Integer lv = a[i++]; if (lv != null) { node.left = new TreeNode(lv); q.add(node.left); } }',
+      '            if (i < a.length) { Integer rv = a[i++]; if (rv != null) { node.right = new TreeNode(rv); q.add(node.right); } }',
+      '        }',
+      '        return root;',
+      '    }',
+      '    static List<Integer> listToArray(Object o) {',
+      '        List<Integer> out = new ArrayList<>();',
+      '        ListNode n = (ListNode) o;',
+      '        int guard = 0;',
+      '        while (n != null && guard++ < 100000) { out.add(n.val); n = n.next; }',
+      '        return out;',
+      '    }',
+      '    static List<Object> treeToArray(Object o) {',
+      '        List<Object> out = new ArrayList<>();',
+      '        TreeNode root = (TreeNode) o;',
+      '        if (root == null) return out;',
+      '        LinkedList<TreeNode> q = new LinkedList<>();',
+      '        q.add(root);',
+      '        while (!q.isEmpty()) {',
+      '            TreeNode node = q.poll();',
+      '            if (node != null) { out.add(node.val); q.add(node.left); q.add(node.right); }',
+      '            else out.add(null);',
+      '        }',
+      '        while (!out.isEmpty() && out.get(out.size() - 1) == null) out.remove(out.size() - 1);',
+      '        return out;',
+      '    }',
+      '    static String jsonStr(String s) {',
+      '        StringBuilder b = new StringBuilder("\\"");',
+      '        for (int i = 0; i < s.length(); i++) {',
+      '            char c = s.charAt(i);',
+      '            if (c == \'"\' || c == \'\\\\\') b.append(\'\\\\\').append(c);',
+      '            else if (c == \'\\n\') b.append("\\\\n");',
+      '            else if (c == \'\\r\') b.append("\\\\r");',
+      '            else if (c == \'\\t\') b.append("\\\\t");',
+      '            else if (c < 32) b.append(String.format("\\\\u%04x", (int) c));',
+      '            else b.append(c);',
+      '        }',
+      '        return b.append(\'"\').toString();',
+      '    }',
+      '    static String toJson(Object o) {',
+      '        if (o == null) return "null";',
+      '        if (o instanceof String) return jsonStr((String) o);',
+      '        if (o instanceof Character) return jsonStr(String.valueOf((char) (Character) o));',
+      '        if (o instanceof Double || o instanceof Float) {',
+      '            double d = ((Number) o).doubleValue();',
+      '            if (d == Math.floor(d) && !Double.isInfinite(d) && !Double.isNaN(d)) return String.valueOf((long) d);',
+      '            return String.valueOf(d);',
+      '        }',
+      '        if (o instanceof Number || o instanceof Boolean) return String.valueOf(o);',
+      '        if (o instanceof int[]) { int[] a = (int[]) o; StringBuilder b = new StringBuilder("["); for (int i = 0; i < a.length; i++) { if (i > 0) b.append(\',\'); b.append(a[i]); } return b.append(\']\').toString(); }',
+      '        if (o instanceof long[]) { long[] a = (long[]) o; StringBuilder b = new StringBuilder("["); for (int i = 0; i < a.length; i++) { if (i > 0) b.append(\',\'); b.append(a[i]); } return b.append(\']\').toString(); }',
+      '        if (o instanceof double[]) { double[] a = (double[]) o; StringBuilder b = new StringBuilder("["); for (int i = 0; i < a.length; i++) { if (i > 0) b.append(\',\'); b.append(toJson(a[i])); } return b.append(\']\').toString(); }',
+      '        if (o instanceof boolean[]) { boolean[] a = (boolean[]) o; StringBuilder b = new StringBuilder("["); for (int i = 0; i < a.length; i++) { if (i > 0) b.append(\',\'); b.append(a[i]); } return b.append(\']\').toString(); }',
+      '        if (o instanceof char[]) return jsonStr(new String((char[]) o));',
+      '        if (o instanceof Object[]) { Object[] a = (Object[]) o; StringBuilder b = new StringBuilder("["); for (int i = 0; i < a.length; i++) { if (i > 0) b.append(\',\'); b.append(toJson(a[i])); } return b.append(\']\').toString(); }',
+      '        if (o instanceof Iterable) { StringBuilder b = new StringBuilder("["); boolean first = true; for (Object x : (Iterable<?>) o) { if (!first) b.append(\',\'); first = false; b.append(toJson(x)); } return b.append(\']\').toString(); }',
+      '        if (o instanceof ListNode) return toJson(listToArray(o));',
+      '        if (o instanceof TreeNode) return toJson(treeToArray(o));',
+      '        return jsonStr(String.valueOf(o));',
+      '    }',
+      '    public static void main(String[] args) {',
+      '        Solution s = new Solution();',
+      calls,
+      '    }',
+      '}'
+    ].join('\n');
+  }
+
+  /* the node types user code may reference — provided as their own compilation
+   * unit so exercise starters never (re)declare them */
+  const JAVA_NODES_SRC = [
+    'class ListNode {',
+    '    int val;',
+    '    ListNode next;',
+    '    ListNode() {}',
+    '    ListNode(int val) { this.val = val; }',
+    '    ListNode(int val, ListNode next) { this.val = val; this.next = next; }',
+    '}',
+    'class TreeNode {',
+    '    int val;',
+    '    TreeNode left, right;',
+    '    TreeNode() {}',
+    '    TreeNode(int val) { this.val = val; }',
+    '    TreeNode(int val, TreeNode left, TreeNode right) { this.val = val; this.left = left; this.right = right; }',
+    '}'
+  ].join('\n');
+
+  /* page-side deep-equal, mirroring the sandbox harness's __eq exactly */
+  function deepEq(a, b) {
+    if (a === b) return true;
+    if (typeof a === 'number' && typeof b === 'number' && Number.isNaN(a) && Number.isNaN(b)) return true;
+    if (typeof a !== typeof b || a === null || b === null) return false;
+    if (Array.isArray(a) !== Array.isArray(b)) return false;
+    if (Array.isArray(a)) {
+      if (a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i++) if (!deepEq(a[i], b[i])) return false;
+      return true;
+    }
+    if (typeof a === 'object') {
+      const ka = Object.keys(a), kb = Object.keys(b);
+      if (ka.length !== kb.length) return false;
+      for (const k of ka) if (!deepEq(a[k], b[k])) return false;
+      return true;
+    }
+    return false;
+  }
+
+  async function runJava(code, ex, status) {
+    const frame = await javaDeadline(bootJava(status), 180000, 'downloading/booting the Java runtime');
+    const win = frame.contentWindow, doc = frame.contentDocument;
+    const consoleEl = doc.getElementById('console');
+    const cp = '/str/tools.jar:/files/';
+    win.cheerpjAddStringFile('/str/Solution.java', frameBytes(win, code));
+    win.cheerpjAddStringFile('/str/Nodes.java', frameBytes(win, JAVA_NODES_SRC));
+    win.cheerpjAddStringFile('/str/Harness.java', frameBytes(win, buildJavaHarness(ex)));
+
+    consoleEl.innerHTML = '';
+    if (status) status('compiling with javac…');
+    const compileExit = await javaDeadline(
+      win.cheerpjRunMain('com.sun.tools.javac.Main', cp,
+        '/str/Solution.java', '/str/Nodes.java', '/str/Harness.java', '-d', '/files/', '-nowarn'),
+      90000, 'compiling');
+    if (compileExit !== 0) {
+      const diag = consoleEl.innerText.replace(/\/str\//g, '').trim();
+      return { error: 'Compile error:\n' + (diag || ('javac exited with code ' + compileExit)) };
+    }
+
+    consoleEl.innerHTML = '';
+    if (status) status('running on the JVM…');
+    const runExit = await javaDeadline(win.cheerpjRunMain('Harness', cp), 30000, 'running your code');
+    const text = consoleEl.innerText;
+    const lines = text.split('\n').filter(l => l.startsWith('@@CG@@'));
+    if (!lines.length) {
+      return { error: 'The JVM produced no results' + (runExit !== 0 ? ' (exit code ' + runExit + ')' : '') + (text.trim() ? ':\n' + text.trim() : '.') };
+    }
+    const results = lines.map((l, i) => {
+      let parsed;
+      try { parsed = JSON.parse(l.slice(6)); } catch (e) { return { pass: false, error: 'unreadable result from the JVM' }; }
+      if ('error' in parsed) return { pass: false, error: parsed.error };
+      const t = ex.tests[i];
+      let pass;
+      if (t && t.unordered && Array.isArray(parsed.got) && Array.isArray(t.expected)) {
+        pass = deepEq(parsed.got.slice().sort(), t.expected.slice().sort());
+      } else {
+        pass = t ? deepEq(parsed.got, t.expected) : false;
+      }
+      return { pass, got: parsed.got };
+    });
+    return { results };
+  }
+
   /* ---- render one exercise's editor+results panel ------------------------ */
   function renderExercise(root, bank, ex, progress, onSolved) {
     const langs = Object.keys(ex.starter);
@@ -533,7 +883,7 @@ __results
       statusEl.textContent = solved ? '✓ solved previously' : '';
     }
     langs.forEach(l => {
-      const label = l === 'javascript' ? 'JavaScript' : l === 'typescript' ? 'TypeScript' : l === 'python' ? 'Python' : l;
+      const label = l === 'javascript' ? 'JavaScript' : l === 'typescript' ? 'TypeScript' : l === 'python' ? 'Python' : l === 'java' ? 'Java' : l;
       tabsEl.appendChild(h('button', { class: 'cg-tab', 'data-lang': l, onclick: () => loadLang(l) }, label));
     });
 
@@ -548,7 +898,7 @@ __results
     ta.addEventListener('keydown', e => {
       if (e.key === 'Tab') {
         e.preventDefault();
-        const unit = lang === 'python' ? '    ' : '  ';
+        const unit = (lang === 'python' || lang === 'java') ? '    ' : '  ';
         const s = ta.selectionStart, en = ta.selectionEnd;
         ta.value = ta.value.slice(0, s) + unit + ta.value.slice(en);
         ta.selectionStart = ta.selectionEnd = s + unit.length;
@@ -566,6 +916,8 @@ __results
       try {
         if (lang === 'python') {
           outcome = await runPython(ta.value, ex.functionName.python, ex.tests, ex.argShapes, ex.resultShape);
+        } else if (lang === 'java') {
+          outcome = await runJava(ta.value, ex, msg => { statusEl.textContent = msg; });
         } else {
           let code = ta.value, fnName = ex.functionName[lang];
           if (lang === 'typescript') {
@@ -690,5 +1042,10 @@ __results
     selectExercise(current);
   }
 
-  global.DevHubCodeGrade = { render: render };
+  global.DevHubCodeGrade = {
+    render: render,
+    /* exposed for the offline verification scripts (tmp_java_verify.mjs) so they
+     * exercise the REAL harness generator, not a drift-prone copy */
+    __test: { buildJavaHarness: buildJavaHarness, JAVA_NODES_SRC: JAVA_NODES_SRC, deepEq: deepEq }
+  };
 })(window);

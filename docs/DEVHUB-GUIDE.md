@@ -50,7 +50,7 @@ Or jump straight to any file linked below.
 | 🔐 **Identity & Auth** | JWTs, **tokens/keys & signing**, OAuth2/OIDC, Entra ID, Ping, claims | [Tokens, Keys & Signing](../frontend/identity-keys-signing-deep-visualizer.html) |
 | 🐛 **Debugging** | find bugs faster: CORS, 401-vs-403, JWTs (more stacks coming) | [CORS Failures](../frontend/debugging-cors-visualizer.html) |
 | 🧪 **Playgrounds** | six *live* sandboxes — real `tsc`, real CPython, a Bash/PowerShell/CMD shell, HTTP, JWT, Spring | [TypeScript Playground](../frontend/typescript-playground-visualizer.html) |
-| 🧑‍💻 **Coding Practice (IDE)** | write real JS/TS/Python, run it in-browser, pass/fail against hidden tests — 9 topics, 54 exercises (Arrays & Strings, Linked Lists, Trees, Graphs, Stacks & Queues, Hashmaps & Sets, Sorting & Searching, Dynamic Programming, Backtracking) | [Arrays & Strings](../frontend/practice-arrays-strings.html) |
+| 🧑‍💻 **Coding Practice (IDE)** | write real JS/TS/Python/Java, run it in-browser, pass/fail against hidden tests — 9 topics, 54 exercises (Arrays & Strings, Linked Lists, Trees, Graphs, Stacks & Queues, Hashmaps & Sets, Sorting & Searching, Dynamic Programming, Backtracking); Java compiles with the real `javac` on a WASM JVM (CheerpJ), first run downloads the runtime once then it's cached | [Arrays & Strings](../frontend/practice-arrays-strings.html) |
 | 🐍 **Python** | fundamentals, functions/scope, **decorators, generators, exceptions**, OOP, type hints, asyncio, **FastAPI · Django · Flask** | [Python Fundamentals](../frontend/python-fundamentals-visualizer.html) |
 | ⚛️ **React** | JSX/Fiber, hooks, state management, Router v6, forms, performance | [React Fundamentals](../frontend/react-fundamentals-visualizer.html) |
 | 🟢 **Node.js & TypeScript Backend** | the single-threaded event loop & runtime, Express, **NestJS** (Spring-style DI), Fastify, **JWT/sessions auth** (401 vs 403) | [Node.js Runtime & the Event Loop](../frontend/node-fundamentals-visualizer.html) |
@@ -355,6 +355,26 @@ visualizers).
   `DevHubFlash.loadBoxes/saveBoxes` (exported for this reason), so "mastered"
   means the same thing in the notebook as it does in the exam-prep flashcard
   decks.
+- [`frontend/devhub-codegrade.js`](../frontend/devhub-codegrade.js) — the
+  **Coding Practice (IDE) engine**: `DevHubCodeGrade.render(rootEl, bank)`
+  renders the exercise list, per-language editor tabs, Run Tests, and pass/fail
+  results for the nine `practice-*.html` pages. All four languages execute for
+  real, client-side: JS/TS in a sandboxed iframe (TS via the real `typescript`
+  compiler), Python via Pyodide, and **Java via CheerpJ** — a WASM JVM booted in
+  a hidden engine-owned iframe where the user's `Solution.java` is compiled by
+  the actual `javac` (`com.sun.tools.javac.Main`, classpath = a tools.jar
+  fetched once into Cache Storage) and graded by a generated `Harness.java`
+  that prints one sentinel-marked JSON result per hidden test. Exercises
+  declare `javaTypes` (the Java type of each arg) so plain JSON test data can
+  be rendered as typed literals; `ListNode`/`TreeNode` are provided by the
+  grader as a separate compilation unit. Gotcha for future work: anything
+  passed to `cheerpjAddStringFile` must be built with the *iframe's own*
+  `Uint8Array` (see `frameBytes()`) — a parent-realm array fails CheerpJ's
+  `instanceof` check and gets silently stringified, corrupting binary data.
+  After editing any exercise bank or the Java layer, re-run
+  `node tmp_java_verify.mjs` from `frontend/` — it compiles + grades reference
+  solutions for all 54 exercises (from `tmp_java_data.mjs`) through the
+  engine's real harness generator with the local JDK.
 - [`frontend/devhub-transitions.js`](../frontend/devhub-transitions.js) —
   sitewide **click feedback + page-fade transitions**, on all 527 pages via
   one `<script>` tag (no per-page markup). A pointer-position ripple on every
@@ -369,7 +389,10 @@ visualizers).
 
 ---
 
-*This guide is updated as new tracks and deep-dives land. **Newest pass — ROADMAP's remaining gaps closed (2026-08-28):**
+*This guide is updated as new tracks and deep-dives land. **Newest pass — Java joins the Coding Practice IDE (2026-08-29):**
+All 54 graded exercises across the nine `practice-*.html` topics are now solvable in **Java** alongside JS/TS/Python — real `javac` compile errors, a real JVM run, LeetCode-style `class Solution` starters, `ListNode`/`TreeNode` provided by the grader. Execution stays 100% client-side via CheerpJ (WASM JVM, CDN loader — the same "CDN dependency accepted for real engines" precedent as Pyodide); the ~18 MB compiler jar downloads once into Cache Storage. Every exercise's Java reference solution was verified through the engine's own harness generator with a local JDK (`frontend/tmp_java_verify.mjs`, 54/54), and the flow was browser-verified end to end (pass, wrong-answer, compile-error, list/tree shapes, ops-replay design problems). See the `devhub-codegrade.js` entry above for the architecture and the cross-realm `Uint8Array` gotcha.
+
+**Previous pass — ROADMAP's remaining gaps closed (2026-08-28):**
 The last three near-term gaps from ROADMAP.md's sitewide depth audit are closed: [Deployment Strategies](../frontend/devops-deployment-strategies-visualizer.html) (blue-green, canary with an automated metrics-gated abort, feature flags, and GitOps — contrasted against the rolling-deployment baseline already covered on the Kubernetes/ECS pages; registered under DevOps & CI/CD's Delivery section), [From git push to Production](../frontend/production-deployment-visualizer.html) (a capstone walking a Spring Boot API to Kubernetes, an Angular SPA to a CDN, a function to Lambda, and a monolith to a PaaS, ending on an incident-rollback scenario — registered under Full-Stack Stacks' Putting It Together section), and [gRPC & Protocol Buffers (Spring)](../frontend/spring-boot-grpc-visualizer.html) (unary/server-stream/client-stream/bidi-stream RPC shapes plus a metadata-based JWT auth interceptor, contrasted against REST and GraphQL — registered under Spring Boot's APIs & Communication section, cross-linked from the existing Go gRPC page). Only GCP coverage remains, explicitly deferred per Bobby's own stated phasing.
 
 **Previous pass — sitewide depth-audit gaps closed (2026-08-28):**

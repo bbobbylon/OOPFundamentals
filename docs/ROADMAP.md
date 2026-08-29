@@ -48,7 +48,7 @@ to set `.dh-leaving` and navigate, and the hub's iframe confirmed to report
 
 ---
 
-## Coding Practice Exercises (in-page IDE) — Phase 1 pilot LANDED (2026-08-29)
+## Coding Practice Exercises (in-page IDE) — Phase 1 (JS/TS/Python) + Phase 2 (Java) LANDED (2026-08-29)
 
 **The gap:** every existing track teaches *concepts* (visualizers, walkthroughs, quizzes,
 flashcards) but nothing grades a learner's own code against test cases the way LeetCode/
@@ -133,17 +133,33 @@ suite and having to make it pass, under a clock.
   `Language.java`) was evaluated but intentionally NOT used, to keep this feature dependency-free
   like the rest of the site.
 
+**Phase 2 — Java support, DONE (2026-08-29):** Bobby picked the in-browser WASM-JVM option
+(CheerpJ 4.3, CDN loader — same "CDN dependency accepted for real engines" precedent as
+Pyodide) over reusing the server-side `/api/run/*` backend, keeping practice pages 100%
+client-side. All 54 exercises across the 9 topics now have a **Java** tab: LeetCode-style
+`class Solution` starters, real `javac` compile errors (diagnostics surfaced verbatim), a
+real JVM run, `ListNode`/`TreeNode` provided by the grader as a separate compilation unit.
+Mechanics in `devhub-codegrade.js`: a hidden engine-owned iframe boots CheerpJ; user code →
+`/str/Solution.java`; a generated `Harness.java` renders each exercise's JSON test data as
+*typed* Java literals (new per-exercise `javaTypes` field) and prints sentinel-marked JSON
+results the page grades with the same deep-equal as the other languages; the ~18 MB
+compiler jar (pinned to a commit SHA of JavaFiddle's `static/tools.jar`) is fetched once
+into Cache Storage; kill-timers destroy the whole JVM iframe on runaway code. Verified two
+ways: offline, every exercise's Java reference solution graded 54/54 through the engine's
+real harness generator with the local JDK (`frontend/tmp_java_verify.mjs` +
+`tmp_java_data.mjs` — re-run after any bank edit); and live in-browser (pass, wrong-answer,
+compile-error, list/cycle/tree shapes, Min Stack ops-replay, plus a JS regression run).
+One real bug found and fixed during browser verification: byte arrays handed to
+`cheerpjAddStringFile` must be constructed with the *iframe's own* `Uint8Array` (see
+`frameBytes()`) — a parent-realm array fails CheerpJ's `instanceof` check and gets
+stringified, which corrupted the 18 MB jar into 57 MB of comma-separated decimals.
+
 **What's still open / not built:**
-- All planned DSA topics with a natural JS/TS/Python fit are now covered (Arrays & Strings,
-  Linked Lists, Trees, Graphs, Stacks & Queues, Hashmaps & Sets, Sorting & Searching, Dynamic
-  Programming, Backtracking). Remaining `interview-*-visualizer.html` topics (System Design,
-  Spring/Angular Q&A, Java-specific OOP/Concurrency) aren't natural fits for a graded-function
-  format and would need a different exercise shape if ever tackled.
-- **Open architectural question, unchanged — surface to Bobby before deciding:** Java/C#/Go/Rust/
-  PHP/Ruby have no real in-browser runtime in this repo. Either a WASM JVM/etc. (CheerpJ, TeaVM)
-  or reusing the existing `/api/run/*` backend (adding a `JAVA` case to `Language.java`) is a real
-  new-infra decision (sandboxing, resource/timeout limits, hosting cost) and should not be taken
-  on silently.
+- Remaining `interview-*-visualizer.html` topics (System Design, Spring/Angular Q&A,
+  Java-specific OOP/Concurrency) aren't natural fits for a graded-function format and would
+  need a different exercise shape if ever tackled.
+- C#/Go/Rust/PHP/Ruby in the practice IDE remain unbuilt — each needs its own real
+  in-browser runtime decision; none should be taken on silently.
 
 **What already exists to build on** (real execution engines, not simulations):
 - `python-playground-visualizer.html` — real CPython 3.12 via Pyodide (WASM), stdout captured.
@@ -156,27 +172,11 @@ suite and having to make it pass, under a clock.
 - None of these are LeetCode-style yet: they're free-form REPLs with preset buttons, not
   "here's a spec + hidden tests + a pass/fail bar."
 
-**Open architectural question — how far execution can reasonably go:**
-- **JS/TS/Python are cheap** — real, already-proven in-browser engines exist in this repo today.
-  A grading harness (user function + hidden `assert`/`expect`-style test cases + pass/fail per
-  case + diff on failure) is realistic to build with **zero new infra** — same offline,
-  no-server, no-build-step model as every other page.
-- **Java/C#/Go/Rust/PHP/Ruby are the hard case.** No real in-browser runtime for these exists
-  in this repo (WASM JVMs like CheerpJ/TeaVM, or a server-side sandboxed execution service like
-  Judge0, are the only real options) — either is a genuine new-infra decision (security
-  sandboxing, resource/timeout limits, hosting cost) and should NOT be taken on silently; surface
-  it to Bobby explicitly before building rather than picking a direction here.
-- **Recommended phased approach:** Phase 1 — JS, TS, and Python exercises only, reusing the
-  existing Pyodide/TS-compiler engines, a lightweight in-browser code editor (CodeMirror 6 via
-  CDN — same "CDN dependency accepted for real engines" precedent as Pyodide), and a small
-  dependency-free grading widget (`devhub-codegrade.js`, mirroring the `devhub-quiz.js` /
-  `devhub-flashcards.js` shape: call `.render(rootEl, exerciseBank)`). Track progress the same way
-  quiz/flashcard history is tracked (localStorage + the existing progress-sync backend hook).
-  Phase 2 (later, explicitly gated on a Bobby decision) — real execution for compiled/typed
-  languages once the WASM-runtime-vs-backend-sandbox tradeoff is decided.
-
-**Not started. Next session: scope Phase 1 concretely (how many exercises, which DSA topics
-first, editor library choice) before writing any code.**
+**How far execution goes (resolved):** JS/TS/Python shipped in Phase 1 with zero new infra;
+Java shipped in Phase 2 via CheerpJ (see above). The original phased plan and the
+WASM-vs-backend tradeoff writeup are in git history; the standing rule that survives them:
+any further compiled language (C#/Go/Rust/PHP/Ruby) is its own runtime decision — surface it
+to Bobby explicitly before building.
 
 ---
 
