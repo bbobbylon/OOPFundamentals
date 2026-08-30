@@ -77,9 +77,52 @@ caps (~72ch lead / 78ch gist / 88ch callout — no more edge-to-edge paragraphs)
 - Cards that cram real code into narrow columns: move the code to a shared full-width block.
 
 ### 7. More interaction/navigation animation polish
-The ripple + page fade landed; Bobby wants continued "fancy" motion. Candidates: hub card
-hover-lift with shadow/tilt, sidebar section expand/collapse spring, staggered card entrance on
-hub pages, animated progress rings on track cards, hover-reveal on lesson chips.
+2026-08-30: the fill-ripple is RETIRED (Bobby: "right idea, horrible execution") — replaced by
+an accent **press-pulse ring** (animated box-shadow blooming from the control's own outline;
+cannot misalign or affect layout) plus a hover micro-lift + brightness on every control.
+Remaining candidates if Bobby wants more: staggered card entrance on hub pages, sidebar
+expand/collapse spring, animated progress rings on track cards.
+
+### 8. Design-system v2 — mockup-driven page sweep (system SHIPPED, sweep pending)
+Bobby supplied a reference mockup of the Decorator page ("what it might look like, but 10x
+better") and the shared system now matches it: editorial near-white titles (accent reserved
+for kickers/labels), clean borderless h2s, editor-window chrome on code blocks (traffic-light
+dots + optional `data-file="Main.java"` filename), `.hf-kicker` badge pills, `.hf-receipt`
+running-total receipts, `.hf-chain` wrapper-chain chips, light-theme fixes (thin 22% marker
+band, readable inline code). **`head-first-decorator-visualizer.html` is the rebuilt reference
+implementation — clone its intro structure on every page sweep.** The sweep itself (per page):
+kill page-inline h1/h2/pre styles that fight the system, break up wall-of-text intros, pull
+long inline-code expressions onto their own `pre data-file` lines, swap prose chains for
+`.hf-chain`, and use `.hf-receipt` wherever a cost/total builds up.
+
+### 9. IDE mastery track — VS Code, IntelliJ IDEA, Spring tooling (NEW, build after the design sweep)
+Bobby: teach each IDE and how to maximize every feature — added here because the design/UI
+work comes first. Official learning resources to build from (verify links when building):
+- **VS Code** — code.visualstudio.com/docs (Getting Started + user guide), the built-in
+  **Tips and Tricks** doc, per-OS keyboard-shortcut reference PDFs, and the Java-in-VS-Code
+  guides (code.visualstudio.com/docs/java) incl. the Spring Boot Extension Pack docs.
+- **IntelliJ IDEA** — the official help (jetbrains.com/help/idea), the **JetBrains Guide**
+  (jetbrains.com/guide — bite-size tutorials/tips, ideal source material), the default-keymap
+  reference card PDF, and the in-IDE **Features Trainer** plugin's lesson list as a syllabus.
+- **Spring tooling** — Spring Tools 4 (spring.io/tools) for VS Code/Eclipse, IntelliJ
+  Ultimate's Spring support docs (bean navigation, endpoints tool window), start.spring.io,
+  Spring Boot DevTools live-reload docs.
+Page plan per IDE: guided tour → navigate-anywhere shortcuts → refactoring moves → debugger
+mastery (breakpoint types, evaluate, conditional/logging breakpoints, hot swap) → run
+configurations → git integration → Spring-specific tooling. Same visual bar as everything
+else: animated walkthroughs of the IDE surfaces, not screenshots-with-captions.
+
+---
+
+## Done — design-system v2 + press pulse (landed 2026-08-30)
+
+Bobby's second review round ("it should be hip, should be poppin, should be electric"), with a
+reference mockup of the Decorator page. Landed: the full shared-system half of backlog #8
+(see that item for the class list and conventions), the press-pulse ring replacing the ripple
+(backlog #7), and `head-first-decorator-visualizer.html` rebuilt as the reference page —
+kicker pill, editorial title, receipt + code-window + chain-chips intro, three short cards
+with chip chains instead of code crammed into columns. Browser-verified against the mockup in
+dark theme and spot-checked in light.
 
 ---
 

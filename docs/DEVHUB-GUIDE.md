@@ -400,19 +400,22 @@ visualizers).
   validate every page has exactly one widget + one script tag.
 - [`frontend/devhub-transitions.js`](../frontend/devhub-transitions.js) —
   sitewide **click feedback + page-fade transitions**, on all 527 pages via
-  one `<script>` tag (no per-page markup). A pointer-position ripple on every
-  real `button`/`.tab`/`[role="button"]`/`.page-link`/`.track-card`/`.tc-dot`,
-  plus a fade-in on load and a fade-out before leaving to another DevHub page.
-  The ripple's critical CSS is **injected by the script itself** (id
-  `dh-ripple-css`) and the pressed control gets `position:relative` +
-  `overflow:hidden` forced at press time — 14 index/landing pages don't link
-  `devhub.css`, and relying on it produced a giant unstyled in-flow bubble
-  that shoved sibling buttons aside (fixed 2026-08-29). The fade-out layer
-  only ever runs for a real top-level document navigation — it's a no-op
-  inside `app.html`'s `#viewer` iframe, where several pages already
-  `postMessage` a `dlh-navigate` event to the parent hub instead of following
-  the link directly (grep `dlh-navigate` if touching that pattern).
-  Everything here is inert under `prefers-reduced-motion: reduce`.
+  one `<script>` tag (no per-page markup). Press feedback is an accent
+  **pulse ring** (2026-08-30): pointerdown toggles `.dh-press` on the nearest
+  `button`/`.tab`/`[role="button"]`/`.page-link`/`.track-card`/`.tc-dot`/
+  `a.card`, whose animated box-shadow blooms outward from the control's own
+  outline — box-shadow follows the element's exact border-radius, so it can
+  never misalign, overflow, or affect layout (the two retired fill-ripple
+  implementations got exactly those wrong). devhub.css also adds a hover
+  micro-lift + brightness on the same selectors. The pulse's critical CSS is
+  **injected by the script itself** (id `dh-press-css`, mirror copy in
+  devhub.css — keep in sync) because 14 index/landing pages don't link
+  `devhub.css`. The fade-out layer only ever runs for a real top-level
+  document navigation — it's a no-op inside `app.html`'s `#viewer` iframe,
+  where several pages already `postMessage` a `dlh-navigate` event to the
+  parent hub instead of following the link directly (grep `dlh-navigate` if
+  touching that pattern). Everything here is inert under
+  `prefers-reduced-motion: reduce`.
 - [`frontend/devhub-syntax.js`](../frontend/devhub-syntax.js) — sitewide
   **IDE-style syntax highlighting** for static code, on all 231 pages that
   contain `<pre>` blocks. Auto-runs on DOMContentLoaded: any static,
@@ -437,13 +440,24 @@ visualizers).
   `.hf-vs` (❌/✅ exaggerated contrast grid), `.hf-mark[.g/.r/.b]`
   (marker-pen phrase highlight), `.hf-g/r/a/v/c` (colored prose spans).
   Sitewide auto-effect: `<b>/<strong>` inside intro cards get an
-  accent-tinted marker sweep with zero markup changes. Pilot pages:
-  abstraction, angular-binding, sorting; full rollout tracked in ROADMAP's
-  ACTIVE BACKLOG.
+  accent-tinted marker sweep with zero markup changes. **Wave 2 (2026-08-30,
+  from Bobby's reference mockup):** `.hf-kicker` (accent badge pill above
+  titles), `.hf-receipt` (thermal-paper running total — rows + `.total`),
+  `.hf-chain` (wrapper-chain chips `.n` joined by arrows `.a`), plus
+  design-system changes: editorial near-white `h1` (accent reserved for
+  labels), borderless bold `h2`, editor-window chrome on highlighted code
+  blocks (traffic-light dots; `data-file="Main.java"` shows a filename),
+  light-theme marker/inline-code fixes. **Reference implementation:**
+  [`head-first-decorator-visualizer.html`](../frontend/head-first-decorator-visualizer.html)
+  — clone its intro structure when sweeping pages. Full rollout tracked in
+  ROADMAP's ACTIVE BACKLOG (items 1 & 8).
 
 ---
 
-*This guide is updated as new tracks and deep-dives land. **Newest pass — feedback fixes: syntax coloring everywhere + the Head First kit (2026-08-29, evening):**
+*This guide is updated as new tracks and deep-dives land. **Newest pass — design-system v2 + press pulse (2026-08-30):**
+Bobby's second review round came with a reference mockup of the Decorator page; the shared design system now matches it — editorial titles, restrained accent, editor-window code blocks, `.hf-kicker`/`.hf-receipt`/`.hf-chain` components, light-theme fixes — and the fill-ripple is retired in favor of an accent press-pulse ring plus hover micro-lift (see the `devhub-transitions.js` entry). `head-first-decorator-visualizer.html` was rebuilt as the reference page. The per-page sweep (kill inline styles that fight the system, break up text walls, pull long expressions out of prose) is ROADMAP backlog #8; a new IDE-mastery track (VS Code / IntelliJ / Spring tooling, with official-doc sources) is backlog #9.
+
+**Previous pass — feedback fixes: syntax coloring everywhere + the Head First kit (2026-08-29, evening):**
 Three sitewide upgrades from Bobby's review: (1) the click-ripple bug on index/landing pages is fixed — `devhub-transitions.js` is now fully self-contained (see its entry above for the root cause; the rule "shared engines inject their own critical CSS" is now in `CLAUDE.md`); (2) new `devhub-syntax.js` gives every static code block on 231 pages IDE-grade token coloring automatically (entry above); (3) `devhub.css` gained the Head First kit — sticky notes, annotation arrows, Brain Power boxes, marker highlights, big-type mnemonics, ❌/✅ contrast panels — plus an automatic marker sweep on the 8,000+ bold phrases inside existing intro cards. Piloted on three pages; the full ~500-page rollout, the line-by-line annotation sweep, the Monaco-editor upgrade path, and the "Code With Me" coach are specced in ROADMAP's ACTIVE BACKLOG.
 
 **Previous pass — Try It Live: an embedded IDE on every core lesson (2026-08-29):**

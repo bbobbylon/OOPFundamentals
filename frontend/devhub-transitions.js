@@ -5,10 +5,12 @@
  * reached via <a href>, not a client-side router) — see app.html's TRACKS
  * hub, which loads pages into an iframe instead. That split matters here:
  *
- *   1. Ripple — on pointerdown, drops a short-lived .dh-ripple span (styled
- *      in devhub.css) at the pointer position on the nearest button/tab/
- *      clickable-card. Runs everywhere, including inside app.html's iframe,
- *      since it never touches navigation.
+ *   1. Press pulse — on pointerdown, the nearest button/tab/clickable-card
+ *      fires an accent-colored ring that expands outward from the control's
+ *      own outline (an animated box-shadow, so it follows the element's exact
+ *      border-radius — it can never misalign, overflow, or affect layout,
+ *      which is how the old fill-ripple went wrong twice). Runs everywhere,
+ *      including inside app.html's iframe, since it never touches navigation.
  *
  *   2. Page fade-out on navigate-away — intercepts a plain click on a real
  *      <a href> that points at another DevHub page, plays a short fade
@@ -33,63 +35,42 @@
 
   var reduceMotion = global.matchMedia && global.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  // ── 1. Ripple ─────────────────────────────────────────────────────────────
+  // ── 1. Press pulse ────────────────────────────────────────────────────────
+  // An accent ring that blooms outward from the control's own outline. It is
+  // a pure box-shadow animation on the element itself: no injected child, no
+  // positioning math, no overflow clipping — the three things the old
+  // fill-ripple needed and twice got wrong (unstyled in-flow span on pages
+  // without devhub.css; unclipped blob on .tc-dot). box-shadow follows the
+  // element's exact border-radius, so pills, circles, and cards all pulse in
+  // their own shape.
   if (!reduceMotion) {
-    var RIPPLE_SELECTOR = 'button, .tab, [role="button"], .page-link, .track-card, .tc-dot';
+    var PRESS_SELECTOR = 'button, .tab, [role="button"], .page-link, .track-card, .tc-dot, a.card';
 
-    // The ripple's critical styles ship here, not (only) in devhub.css: some
-    // pages (the track index/landing pages) load this script without that
-    // stylesheet, and an unstyled .dh-ripple span is an in-flow inline element
-    // — it joined the button's layout as a giant bubble and shoved its
-    // siblings aside. Appended after any <link> so these rules win ties.
-    if (!doc.getElementById('dh-ripple-css')) {
-      var rippleCss = doc.createElement('style');
-      rippleCss.id = 'dh-ripple-css';
-      rippleCss.textContent =
-        '.dh-ripple{position:absolute;border-radius:50%;pointer-events:none;' +
-        'background:radial-gradient(circle, rgba(255,255,255,.22) 0%, rgba(255,255,255,.10) 55%, rgba(255,255,255,0) 72%);' +
-        'transform:translate(-50%,-50%) scale(0);opacity:1;' +
-        'animation:dhRipple .45s cubic-bezier(.22,.61,.36,1) forwards}' +
-        '@keyframes dhRipple{to{transform:translate(-50%,-50%) scale(1);opacity:0}}';
-      (doc.head || doc.documentElement).appendChild(rippleCss);
+    // Critical CSS ships here, not (only) in devhub.css — some pages (the
+    // track index/landing pages) load this script without that stylesheet.
+    if (!doc.getElementById('dh-press-css')) {
+      var pressCss = doc.createElement('style');
+      pressCss.id = 'dh-press-css';
+      pressCss.textContent =
+        '.dh-press{animation:dhPress .42s cubic-bezier(.22,.61,.36,1)}' +
+        '@keyframes dhPress{' +
+        '0%{box-shadow:0 0 0 0 rgba(167,139,250,.55)}' + // fallback if color-mix unsupported
+        '0.1%{box-shadow:0 0 0 0 color-mix(in srgb, var(--accent, #a78bfa) 60%, transparent)}' +
+        '100%{box-shadow:0 0 0 12px transparent}}';
+      (doc.head || doc.documentElement).appendChild(pressCss);
     }
 
     doc.addEventListener('pointerdown', function (e) {
       if (e.button !== 0) return; // left/primary press only
-      var el = e.target.closest && e.target.closest(RIPPLE_SELECTOR);
+      var el = e.target.closest && e.target.closest(PRESS_SELECTOR);
       if (!el || el.disabled) return;
-
-      // Containment guard for pages without devhub.css: the ripple must be
-      // positioned against the button and clipped to its box, or it spills
-      // far outside the control.
-      var cs = global.getComputedStyle(el);
-      if (cs.position === 'static') el.style.position = 'relative';
-      if (cs.overflow !== 'hidden' && cs.overflow !== 'clip') el.style.overflow = 'hidden';
-
-      // Size the circle so that at scale(1) its edge just reaches the corner of
-      // the control farthest from the pointer — the Material sizing rule. The
-      // old `max(width, height) * 1.4` then animating to `scale(2.6)` produced a
-      // circle ~3.6x the control's longest side: on a 180x30 tab that is a
-      // ~650px wash, which reads as a huge misaligned blob rather than a press.
-      // Computing the exact radius here is also what lets the keyframe stop at
-      // scale(1), so wide controls and small icon buttons feel identical.
-      var rect = el.getBoundingClientRect();
-      var x = e.clientX - rect.left;
-      var y = e.clientY - rect.top;
-      var radius = Math.hypot(Math.max(x, rect.width - x), Math.max(y, rect.height - y));
-      var size = radius * 2;
-      var span = doc.createElement('span');
-      span.className = 'dh-ripple';
-      span.style.width = size + 'px';
-      span.style.height = size + 'px';
-      span.style.left = x + 'px';
-      span.style.top = y + 'px';
-      el.appendChild(span);
-      span.addEventListener('animationend', function () { span.remove(); });
-      // Belt-and-suspenders cleanup in case animationend never fires (e.g. the
-      // element gets removed/re-rendered mid-animation, as app.html's sidebar
-      // sometimes does).
-      setTimeout(function () { if (span.parentNode) span.remove(); }, 700);
+      // Restart the animation cleanly on rapid re-presses.
+      el.classList.remove('dh-press');
+      void el.offsetWidth; // force reflow so the animation restarts
+      el.classList.add('dh-press');
+      el.addEventListener('animationend', function h(ev) {
+        if (ev.animationName === 'dhPress') { el.classList.remove('dh-press'); el.removeEventListener('animationend', h); }
+      });
     }, { passive: true });
   }
 
