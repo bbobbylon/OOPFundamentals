@@ -137,6 +137,18 @@ Hub](#deploying-the-dev-learning-hub-devhub) below); opening `index.html` now
 redirects there. Individual visualizer files also open standalone — **just
 double-click**, no server needed.
 
+**🧪 Try It Live — an embedded mini-IDE on 119 lesson pages.** Every lesson in
+the Java, Python, TypeScript, JS-fundamentals, and DSA tracks now opens with a
+runnable code editor (`devhub-tryit.js`) right after its intro card: a
+predict-first prompt ("what will this print?"), an editable Head First-style
+example, and a **▶ Run** button that executes the code *for real* in your
+browser — JS/TS in a sandboxed iframe (TS transpiled by the real `typescript`
+compiler), Python on real CPython via Pyodide, and Java compiled by the actual
+`javac` on a WASM JVM (CheerpJ). Output lines animate in one at a time so you
+can follow the trace; edits persist per page, and ↺ Reset restores the
+original example. This is the *exploratory* twin of the graded Coding-Practice
+IDE (`devhub-codegrade.js`) — no tests, just "change it and see".
+
 | Visualizer | What it shows |
 |---|---|
 | [`app.html`](frontend/app.html) | The full Dev Hub — searchable, progress, **513 pages across 34 tracks grouped into categories** (incl. 🍳 *Common Recipes* — practical how-tos like API→form, batch upload, password complexity — the 🟢 *Cloud — GCP*, 🌐 *Web Fundamentals*, 📊 *Data Science & ML*, 🧠 *AI/LLM Engineering*, and 🤖 *AI-Assisted Development* tracks — and 🧑‍💻 *Coding Practice (IDE)*, a real graded-exercise track: write JS/TS/Python/**Java**, run it for real in your browser — Java compiles with the actual `javac` on a WASM JVM (CheerpJ) — pass/fail against hidden tests) (serve it; `index.html` redirects here) |

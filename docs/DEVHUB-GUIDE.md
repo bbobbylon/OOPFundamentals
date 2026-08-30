@@ -375,6 +375,29 @@ visualizers).
   `node tmp_java_verify.mjs` from `frontend/` — it compiles + grades reference
   solutions for all 54 exercises (from `tmp_java_data.mjs`) through the
   engine's real harness generator with the local JDK.
+- [`frontend/devhub-tryit.js`](../frontend/devhub-tryit.js) — the **Try It
+  Live embedded mini-IDE** on 119 lesson pages (Java, Python, TypeScript,
+  JS-fundamentals, and DSA tracks): the *exploratory* twin of
+  `devhub-codegrade.js` — same real execution engines (JS/TS sandboxed iframe
+  with the real `typescript` compiler, Python via Pyodide, Java via CheerpJ's
+  WASM `javac`, sharing the same Cache Storage tools.jar bucket), but no
+  grading — just an editable Head First-style example, a predict-first prompt
+  that flips to "did the output match your prediction?" after the first run,
+  and a ▶ Run button. Declarative markup: a `.tryit` div with
+  `data-lang`/`data-title`/`data-predict` wrapping a
+  `<script type="text/plain">` code block (so examples can contain `<`/`>`
+  unescaped); `DevHubTryIt.attachAll()` upgrades them on DOMContentLoaded.
+  Output lines animate in with a burst-aware stagger (lines arriving <150 ms
+  apart get stepped delays, capped ~1 s; inert under reduced-motion). Edits
+  persist per widget in localStorage (`dlh-tryit:<page>:<n>`); ↺ Reset
+  restores the shipped example. **Java examples must be Java 8** (CheerpJ's
+  JVM): no `List.of`, `var`, records, text blocks, `String.repeat`, or
+  `Stream.toList` — and Java threads run cooperatively in-browser, so race
+  demos must say so honestly. Mass-rollout generators live in the session
+  scratchpad pattern `gen_tryit_*.mjs`: author examples → verify each with
+  the real local toolchain (javac/CPython/typescript.js+node) → lint for
+  banned syntax → insert after the intro card (`intro-ciam` anchor regex) →
+  validate every page has exactly one widget + one script tag.
 - [`frontend/devhub-transitions.js`](../frontend/devhub-transitions.js) —
   sitewide **click feedback + page-fade transitions**, on all 527 pages via
   one `<script>` tag (no per-page markup). A pointer-position ripple on every
@@ -389,7 +412,10 @@ visualizers).
 
 ---
 
-*This guide is updated as new tracks and deep-dives land. **Newest pass — Java joins the Coding Practice IDE (2026-08-29):**
+*This guide is updated as new tracks and deep-dives land. **Newest pass — Try It Live: an embedded IDE on every core lesson (2026-08-29):**
+119 lesson pages across five tracks (Java 44, TypeScript 30, Python 23, DSA 20, JS-fundamentals 3 — the two remaining web-fundamentals pages are HTML/CSS-only) now open with a runnable, editable, predict-first code example via the new `devhub-tryit.js` widget (see its entry above). Every example was authored Head First-style — trace-style prints, "now change X and re-run" provocations, honest captions where the browser runtime differs from the real thing (cooperative threads on CheerpJ, type erasure in TS) — and every one was verified offline against the real toolchain before insertion (local `javac`+`java` for all 42 generated Java examples, local CPython for all 23 Python, the same-version `typescript` compiler + node for all 33 TS/JS, node for all 20 DSA). Output lines animate in one at a time (burst-aware stagger) so printed traces read as steps, not a wall. Likely next candidates if the pattern extends: Node track (hand-rolled JS minis), Angular (TS minis), Spring Boot (plain-Java minis — no Spring runtime on CheerpJ).
+
+**Previous pass — Java joins the Coding Practice IDE (2026-08-29):**
 All 54 graded exercises across the nine `practice-*.html` topics are now solvable in **Java** alongside JS/TS/Python — real `javac` compile errors, a real JVM run, LeetCode-style `class Solution` starters, `ListNode`/`TreeNode` provided by the grader. Execution stays 100% client-side via CheerpJ (WASM JVM, CDN loader — the same "CDN dependency accepted for real engines" precedent as Pyodide); the ~18 MB compiler jar downloads once into Cache Storage. Every exercise's Java reference solution was verified through the engine's own harness generator with a local JDK (`frontend/tmp_java_verify.mjs`, 54/54), and the flow was browser-verified end to end (pass, wrong-answer, compile-error, list/tree shapes, ops-replay design problems). See the `devhub-codegrade.js` entry above for the architecture and the cross-realm `Uint8Array` gotcha.
 
 **Previous pass — ROADMAP's remaining gaps closed (2026-08-28):**

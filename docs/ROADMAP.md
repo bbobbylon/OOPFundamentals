@@ -10,6 +10,28 @@ page/track counts in `README.md` and `DEVHUB-GUIDE.md`, then delete the item fro
 
 ---
 
+## Done — "Try It Live" embedded mini-IDE on every core lesson (requested + landed 2026-08-29)
+
+Bobby: "shouldn't it have a coding ide/terminal for all lessons? i think we need to add that."
+Landed as **[`frontend/devhub-tryit.js`](../frontend/devhub-tryit.js)** — the exploratory
+(ungraded) twin of the Coding-Practice engine, now on **119 lesson pages**: Java track (44 incl.
+all 12 Head First design-pattern pages), TypeScript (30), Python (23), DSA (20), JS web
+fundamentals (3). Each widget = predict-first prompt → editable Head First-style example → ▶ Run
+with real execution (sandboxed-iframe JS, real `typescript` compiler, Pyodide CPython, CheerpJ
+WASM `javac` sharing the practice IDE's Cache Storage jar). Output lines stagger in one at a
+time (the "learning animations" ask, reaching all 119 pages at once; reduced-motion safe).
+Every example verified offline against the real toolchain before insertion. Full architecture +
+the Java-8/cooperative-threads constraints: see the `devhub-tryit.js` entry in
+[DEVHUB-GUIDE.md](DEVHUB-GUIDE.md).
+
+**Not yet covered (next candidates if Bobby wants the pattern extended):** Node track (hand-rolled
+JS minis — no `require`/`fs` in the sandbox, so examples must simulate), Angular track (TS minis —
+no Angular runtime, so decorators/DI must be taught by hand-rolling them), Spring Boot track
+(plain-Java minis — no Spring on CheerpJ, so the IoC container / proxies would be hand-rolled
+mini-implementations, which is arguably the best way to teach them anyway).
+
+---
+
 ## Done — sitewide UI animations & transitions (requested + landed 2026-08-29)
 
 Bobby wanted "fancy" motion on the app's own chrome — not the content-visualizer animations that
