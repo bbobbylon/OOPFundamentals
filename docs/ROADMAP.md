@@ -10,6 +10,99 @@ page/track counts in `README.md` and `DEVHUB-GUIDE.md`, then delete the item fro
 
 ---
 
+## ★ ACTIVE BACKLOG — Bobby's feedback pass (2026-08-29, evening)
+
+Bobby reviewed the site and gave a big feedback batch. Items below are ordered by his emphasis.
+Rules of engagement he restated (also codified in `CLAUDE.md` + memory so he never has to
+repeat them): every code snippet explained line-by-line in depth (never a one-liner), IDE-grade
+syntax coloring on ALL code, the Head First brain-friendly aesthetic on ALL subjects (not just
+the Java patterns pages), colored/manipulated text as a deliberate memory device.
+
+### 1. Head First aesthetic — FULL sitewide rollout (kit landed, sweep pending)
+The visual kit shipped this session (see Done section below): marker highlights, sticky notes
+(`.hf-note`), annotation arrows (`.hf-arrow`), Brain Power boxes (`.hf-brain`), no-dumb-questions
+Q&As (`.hf-qa`), big-type mnemonics (`.hf-big`), exaggerated contrast panels (`.hf-vs`), colored
+prose spans (`.hf-g/r/a/v/c`, `.hf-mark`). **3 pilot pages** done: abstraction, angular-binding,
+sorting. **Remaining: apply to all ~500 lesson pages**, tranche by track. Per-page bar: ≥1
+`.hf-big` mnemonic, ≥1 sticky-note memory hook, ≥1 Brain Power predict-first box, arrows pointing
+into code, `.hf-vs` where a before/after contrast exists. Also add images/diagrams where a
+picture beats prose (the book uses pictures constantly — we lean on the animated visualizers,
+but static annotated diagrams between sections are still missing on most pages).
+
+### 2. Line-by-line code annotation audit (Bobby has asked "many many many times")
+Every static code snippet must teach each line — via the Code Walkthrough widget, an adjacent
+per-line annotation column, or inline `.hf-arrow` notes. A one-sentence intro above a 20-line
+block fails the bar. Sweep all 231 pages with `<pre>` blocks; convert or annotate. The
+bottom-of-page codewalks are "pretty good" per Bobby but should get MORE depth too.
+
+### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
+Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
+- **StackBlitz WebContainers** (`@webcontainer/api`) — real Node.js in the browser. Needs
+  cross-origin-isolation headers (COOP/COEP) on our hosting, and a **commercial license for
+  production use**. The only option that gives true npm/Node.
+- **Sandpack** (`@codesandbox/sandpack-react`) — CodeSandbox's open-source embedded IDE;
+  bundles JS/TS/React in-browser, MIT-ish, but React-oriented and brings its own UI.
+- **Monaco Editor** (`monaco-editor`) — VS Code's actual editor component. No runner of its
+  own, but we ALREADY have real runners (CheerpJ javac, Pyodide, real tsc, sandboxed JS).
+- **Recommendation:** Monaco + our existing runners = StackBlitz-feel (IntelliSense,
+  minimap, real editor UX) without licensing or header constraints; consider WebContainers
+  later only for the Node track where real `npm install` matters.
+
+### 4. "Code With Me" guided-coding sections (new feature)
+Pair-programming simulation on top of the graded IDE: as the student types, checkpoint-based
+hints ("do you really want a nested loop here? An index Map would make this O(n)"), encouragement,
+and alternative-route suggestions — like coding alongside a senior. Design: extend
+`devhub-codegrade.js` with per-exercise checkpoint rules (regex/AST triggers → coach messages).
+
+### 5. Thin tracks — audit results (counts from `tracks-data.js`, 2026-08-29)
+PHP & Laravel **2**, Ruby & Rails **2**, Rust **2**, MuleSoft **2**, Full-Stack Stacks **3**,
+DevOps & CI/CD **3**, AI-Assisted Dev **3**, Shell **4**, Node.js & TS Backend **5**, C#/.NET
+**5**, Kubernetes **6** (vs Python 23, TypeScript 30, Angular 75). Universal concepts (OOP,
+async, HTTP) ARE covered in the big tracks, but the thin language tracks lack language-specific
+depth. Priority by Bobby's CIAM job relevance: **Node.js backend, DevOps/CI-CD, Kubernetes**
+first; Ruby/PHP/Rust/MuleSoft expansions (~8-10 lessons each) when he confirms he wants them
+beyond taster depth.
+
+### 6. Page-styling critique — content-level remainder (CSS half SHIPPED same session)
+Bobby's design review of the lesson pages. Fixed sitewide in `devhub.css` already: 3-tier
+container contrast (page bg darkened a step; cards lifted with shadow; code stays near-black
+terminal tone), quieter inline `code` (no more bordered pill on every identifier), line-length
+caps (~72ch lead / 78ch gist / 88ch callout — no more edge-to-edge paragraphs), code-bearing
+`.intro-mini` cards now span full width (`:has(pre)`), and header-attached vertical rhythm
+(42px above h2, 12px below). **Still needs a content sweep, page by page:**
+- Pull long inline-code expressions (e.g. `new Mocha(new Whip(...))`) out of prose into their
+  own block code line — inline highlighting is for single symbols/short identifiers only.
+- Narrow each page's accent color to 1-2 anchor uses (title + section labels); let the syntax
+  palette do the code coloring — emphasis and syntax should not share one hue.
+- Cards that cram real code into narrow columns: move the code to a shared full-width block.
+
+### 7. More interaction/navigation animation polish
+The ripple + page fade landed; Bobby wants continued "fancy" motion. Candidates: hub card
+hover-lift with shadow/tilt, sidebar section expand/collapse spring, staggered card entrance on
+hub pages, animated progress rings on track cards, hover-reveal on lesson chips.
+
+---
+
+## Done — feedback-pass fixes & foundations (landed 2026-08-29, evening)
+
+Same session as the backlog above; the immediately-fixable parts landed at once:
+- **Ripple bug fixed** (Bobby: "huge oblong bubble… pushes other buttons to the side"). Cause:
+  14 index/landing pages load `devhub-transitions.js` without `devhub.css`, so the injected
+  `.dh-ripple` span had no `position:absolute` and joined normal layout. Fix: the script now
+  injects its own critical ripple CSS (id-guarded) and force-sets `position:relative` +
+  `overflow:hidden` on the pressed control — self-contained regardless of page stylesheets.
+- **Sitewide IDE-style syntax highlighting** — new `frontend/devhub-syntax.js` auto-colorizes
+  every static, code-looking `<pre>` (same single-pass tokenizer design as the codewalk widget,
+  same token classes as devhub.css's palette + new `.type`). Rolled onto all **231** pages with
+  `<pre>` blocks; skips hand-annotated blocks, dynamic inspector panes, widget-owned pres, and
+  ASCII diagrams. Opt-out: `<pre data-nohl>`.
+- **Head First visual kit** — the `hf-*` component family appended to `devhub.css` (see backlog
+  item 1 for the class list), plus a zero-markup sitewide win: `<b>/<strong>` inside intro cards
+  (8,000+ tags across ~500 pages) now get an accent-tinted marker-pen sweep automatically.
+  Pilots: `abstraction-visualizer.html`, `angular-binding-visualizer.html`, `sorting-visualizer.html`.
+
+---
+
 ## Done — "Try It Live" embedded mini-IDE on every core lesson (requested + landed 2026-08-29)
 
 Bobby: "shouldn't it have a coding ide/terminal for all lessons? i think we need to add that."

@@ -149,6 +149,16 @@ can follow the trace; edits persist per page, and ↺ Reset restores the
 original example. This is the *exploratory* twin of the graded Coding-Practice
 IDE (`devhub-codegrade.js`) — no tests, just "change it and see".
 
+**🎨 IDE-grade syntax coloring + the Head First look, sitewide.** Every static
+code block on the site is now token-colored automatically (`devhub-syntax.js`,
+231 pages — keywords, strings, types, calls, comments in the same palette an
+IDE uses), and `devhub.css` ships a **Head First kit**: handwritten sticky
+notes, annotation arrows pointing into code, ⚡ Brain Power predict-first
+boxes, marker-pen highlights, big-type mnemonics, and ❌/✅ exaggerated
+contrast panels — the *Head First Design Patterns* brain-friendly vocabulary
+as drop-in classes, tinted per track. Bold phrases in every lesson's intro
+card get a marker sweep automatically.
+
 | Visualizer | What it shows |
 |---|---|
 | [`app.html`](frontend/app.html) | The full Dev Hub — searchable, progress, **513 pages across 34 tracks grouped into categories** (incl. 🍳 *Common Recipes* — practical how-tos like API→form, batch upload, password complexity — the 🟢 *Cloud — GCP*, 🌐 *Web Fundamentals*, 📊 *Data Science & ML*, 🧠 *AI/LLM Engineering*, and 🤖 *AI-Assisted Development* tracks — and 🧑‍💻 *Coding Practice (IDE)*, a real graded-exercise track: write JS/TS/Python/**Java**, run it for real in your browser — Java compiles with the actual `javac` on a WASM JVM (CheerpJ) — pass/fail against hidden tests) (serve it; `index.html` redirects here) |

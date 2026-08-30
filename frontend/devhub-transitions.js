@@ -37,19 +37,53 @@
   if (!reduceMotion) {
     var RIPPLE_SELECTOR = 'button, .tab, [role="button"], .page-link, .track-card, .tc-dot';
 
+    // The ripple's critical styles ship here, not (only) in devhub.css: some
+    // pages (the track index/landing pages) load this script without that
+    // stylesheet, and an unstyled .dh-ripple span is an in-flow inline element
+    // — it joined the button's layout as a giant bubble and shoved its
+    // siblings aside. Appended after any <link> so these rules win ties.
+    if (!doc.getElementById('dh-ripple-css')) {
+      var rippleCss = doc.createElement('style');
+      rippleCss.id = 'dh-ripple-css';
+      rippleCss.textContent =
+        '.dh-ripple{position:absolute;border-radius:50%;pointer-events:none;' +
+        'background:radial-gradient(circle, rgba(255,255,255,.22) 0%, rgba(255,255,255,.10) 55%, rgba(255,255,255,0) 72%);' +
+        'transform:translate(-50%,-50%) scale(0);opacity:1;' +
+        'animation:dhRipple .45s cubic-bezier(.22,.61,.36,1) forwards}' +
+        '@keyframes dhRipple{to{transform:translate(-50%,-50%) scale(1);opacity:0}}';
+      (doc.head || doc.documentElement).appendChild(rippleCss);
+    }
+
     doc.addEventListener('pointerdown', function (e) {
       if (e.button !== 0) return; // left/primary press only
       var el = e.target.closest && e.target.closest(RIPPLE_SELECTOR);
       if (!el || el.disabled) return;
 
+      // Containment guard for pages without devhub.css: the ripple must be
+      // positioned against the button and clipped to its box, or it spills
+      // far outside the control.
+      var cs = global.getComputedStyle(el);
+      if (cs.position === 'static') el.style.position = 'relative';
+      if (cs.overflow !== 'hidden' && cs.overflow !== 'clip') el.style.overflow = 'hidden';
+
+      // Size the circle so that at scale(1) its edge just reaches the corner of
+      // the control farthest from the pointer — the Material sizing rule. The
+      // old `max(width, height) * 1.4` then animating to `scale(2.6)` produced a
+      // circle ~3.6x the control's longest side: on a 180x30 tab that is a
+      // ~650px wash, which reads as a huge misaligned blob rather than a press.
+      // Computing the exact radius here is also what lets the keyframe stop at
+      // scale(1), so wide controls and small icon buttons feel identical.
       var rect = el.getBoundingClientRect();
-      var size = Math.max(rect.width, rect.height) * 1.4;
+      var x = e.clientX - rect.left;
+      var y = e.clientY - rect.top;
+      var radius = Math.hypot(Math.max(x, rect.width - x), Math.max(y, rect.height - y));
+      var size = radius * 2;
       var span = doc.createElement('span');
       span.className = 'dh-ripple';
       span.style.width = size + 'px';
       span.style.height = size + 'px';
-      span.style.left = (e.clientX - rect.left) + 'px';
-      span.style.top = (e.clientY - rect.top) + 'px';
+      span.style.left = x + 'px';
+      span.style.top = y + 'px';
       el.appendChild(span);
       span.addEventListener('animationend', function () { span.remove(); });
       // Belt-and-suspenders cleanup in case animationend never fires (e.g. the

@@ -401,18 +401,52 @@ visualizers).
 - [`frontend/devhub-transitions.js`](../frontend/devhub-transitions.js) —
   sitewide **click feedback + page-fade transitions**, on all 527 pages via
   one `<script>` tag (no per-page markup). A pointer-position ripple on every
-  real `button`/`.tab`/`[role="button"]`/`.page-link`/`.track-card`/`.tc-dot`
-  (styled in `devhub.css`'s `.dh-ripple`), plus a fade-in on load and a
-  fade-out before leaving to another DevHub page. The fade-out layer only
-  ever runs for a real top-level document navigation — it's a no-op inside
-  `app.html`'s `#viewer` iframe, where several pages already `postMessage` a
-  `dlh-navigate` event to the parent hub instead of following the link
-  directly (grep `dlh-navigate` if touching that pattern). Everything here
-  is inert under `prefers-reduced-motion: reduce`.
+  real `button`/`.tab`/`[role="button"]`/`.page-link`/`.track-card`/`.tc-dot`,
+  plus a fade-in on load and a fade-out before leaving to another DevHub page.
+  The ripple's critical CSS is **injected by the script itself** (id
+  `dh-ripple-css`) and the pressed control gets `position:relative` +
+  `overflow:hidden` forced at press time — 14 index/landing pages don't link
+  `devhub.css`, and relying on it produced a giant unstyled in-flow bubble
+  that shoved sibling buttons aside (fixed 2026-08-29). The fade-out layer
+  only ever runs for a real top-level document navigation — it's a no-op
+  inside `app.html`'s `#viewer` iframe, where several pages already
+  `postMessage` a `dlh-navigate` event to the parent hub instead of following
+  the link directly (grep `dlh-navigate` if touching that pattern).
+  Everything here is inert under `prefers-reduced-motion: reduce`.
+- [`frontend/devhub-syntax.js`](../frontend/devhub-syntax.js) — sitewide
+  **IDE-style syntax highlighting** for static code, on all 231 pages that
+  contain `<pre>` blocks. Auto-runs on DOMContentLoaded: any static,
+  code-looking `<pre>` is tokenized (single-pass ordered alternation, same
+  design as the codewalk widget's `hl()` — comment/string matches consume
+  their region first) into the token classes `devhub.css` has always styled
+  (`kw`/`str`/`cm`/`dec`/`num`/`fn` + new `type`), so hand-annotated and
+  auto-highlighted blocks look identical. Skips: pres with an `id` (dynamic
+  inspector panes), pres with element children (already annotated), pres
+  inside widget roots (`.cw`,`.dlh-tryit`,`.cg`,`.dq`,`.df`,`.dnb`), and
+  anything failing a looks-like-code gate (ASCII diagrams/file trees stay
+  plain). Opt-out per block: `<pre data-nohl>`. Injects its own token colors
+  (id `dh-syntax-css`) so pages without `devhub.css` still get full color.
+  API: `DevHubSyntax.highlight(text)`, `DevHubSyntax.apply(root)` for
+  late-added nodes. Include on every new page that shows code.
+- **Head First kit** (in [`frontend/devhub.css`](../frontend/devhub.css),
+  final section) — the book's visual vocabulary as drop-in classes, all
+  tinted by the track's `--accent`: `.hf-big` (gradient big-type mnemonic),
+  `.hf-note[.pink/.blue/.green]` (handwritten sticky notes), `.hf-arrow[.up]`
+  (scribbled annotation arrows pointing into code), `.hf-brain` (⚡ Brain
+  Power predict-first box), `.hf-qa` ("there are no Dumb Questions" `<dl>`),
+  `.hf-vs` (❌/✅ exaggerated contrast grid), `.hf-mark[.g/.r/.b]`
+  (marker-pen phrase highlight), `.hf-g/r/a/v/c` (colored prose spans).
+  Sitewide auto-effect: `<b>/<strong>` inside intro cards get an
+  accent-tinted marker sweep with zero markup changes. Pilot pages:
+  abstraction, angular-binding, sorting; full rollout tracked in ROADMAP's
+  ACTIVE BACKLOG.
 
 ---
 
-*This guide is updated as new tracks and deep-dives land. **Newest pass — Try It Live: an embedded IDE on every core lesson (2026-08-29):**
+*This guide is updated as new tracks and deep-dives land. **Newest pass — feedback fixes: syntax coloring everywhere + the Head First kit (2026-08-29, evening):**
+Three sitewide upgrades from Bobby's review: (1) the click-ripple bug on index/landing pages is fixed — `devhub-transitions.js` is now fully self-contained (see its entry above for the root cause; the rule "shared engines inject their own critical CSS" is now in `CLAUDE.md`); (2) new `devhub-syntax.js` gives every static code block on 231 pages IDE-grade token coloring automatically (entry above); (3) `devhub.css` gained the Head First kit — sticky notes, annotation arrows, Brain Power boxes, marker highlights, big-type mnemonics, ❌/✅ contrast panels — plus an automatic marker sweep on the 8,000+ bold phrases inside existing intro cards. Piloted on three pages; the full ~500-page rollout, the line-by-line annotation sweep, the Monaco-editor upgrade path, and the "Code With Me" coach are specced in ROADMAP's ACTIVE BACKLOG.
+
+**Previous pass — Try It Live: an embedded IDE on every core lesson (2026-08-29):**
 119 lesson pages across five tracks (Java 44, TypeScript 30, Python 23, DSA 20, JS-fundamentals 3 — the two remaining web-fundamentals pages are HTML/CSS-only) now open with a runnable, editable, predict-first code example via the new `devhub-tryit.js` widget (see its entry above). Every example was authored Head First-style — trace-style prints, "now change X and re-run" provocations, honest captions where the browser runtime differs from the real thing (cooperative threads on CheerpJ, type erasure in TS) — and every one was verified offline against the real toolchain before insertion (local `javac`+`java` for all 42 generated Java examples, local CPython for all 23 Python, the same-version `typescript` compiler + node for all 33 TS/JS, node for all 20 DSA). Output lines animate in one at a time (burst-aware stagger) so printed traces read as steps, not a wall. Likely next candidates if the pattern extends: Node track (hand-rolled JS minis), Angular (TS minis), Spring Boot (plain-Java minis — no Spring runtime on CheerpJ).
 
 **Previous pass — Java joins the Coding Practice IDE (2026-08-29):**

@@ -32,10 +32,23 @@ and add whatever is missing:
    card before any interactive part, `DevHubCodeWalk` line-by-line for code blocks, ~800ms
    animation pacing, live inspector showing real per-step data, difficulty theming.
 
+7. **Every code snippet explained line-by-line, in depth.** Bobby has asked "many many many
+   times": a one-sentence intro above a code block fails the bar. Each line gets explained —
+   via `DevHubCodeWalk`, a per-line annotation column, or `.hf-arrow` notes into the code.
+   Never assume the student knows what they're looking at.
+8. **IDE-grade syntax coloring on ALL code.** No plain white-text code blocks anywhere.
+   `frontend/devhub-syntax.js` auto-colorizes static `<pre>` blocks — include it on every
+   page that shows code (it's on all 231 pre-bearing pages; add it to new ones).
+9. **Colored / manipulated text as a memory device.** Use the Head First kit in `devhub.css`
+   (`.hf-big` mnemonics, `.hf-note` sticky notes, `.hf-arrow` annotations, `.hf-brain` boxes,
+   `.hf-qa`, `.hf-vs` contrast panels, `.hf-mark` marker highlights, `.hf-g/r/a/v/c` colored
+   spans). Bold text inside intro cards gets a marker sweep automatically.
+
 **Periodic audit directive:** when Bobby asks to "make the app better" or on any sweep,
 scan for thin lessons — pages that teach a concept only one way, have no memory hooks, or
 read like documentation instead of teaching — and bring them up to this bar. This is a
-standing goal, not a one-time task.
+standing goal, not a one-time task. The full Head First rollout state lives in
+`docs/ROADMAP.md` ("ACTIVE BACKLOG — Bobby's feedback pass").
 
 ## Key conventions (see docs/DEVHUB-GUIDE.md for the full map)
 
@@ -52,3 +65,6 @@ standing goal, not a one-time task.
   end. Never prefix git commands with `cd`.
 - Bobby's environment sometimes shadow-edits `app.html`/docs mid-session — re-Read before
   Edit.
+- Shared JS engines must be SELF-CONTAINED: inject their own critical CSS (id-guarded
+  `<style>`) instead of assuming `devhub.css` is linked — 14 index/landing pages don't link
+  it, which is exactly how the giant-ripple layout bug happened.
