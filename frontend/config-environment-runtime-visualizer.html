@@ -1,7 +1,8 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-hf>
 <head>
   <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Environment &amp; Runtime Config — Angular Visualizer</title>
   <style>
     :root{
@@ -118,6 +119,7 @@
     .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
   </style>
   <link rel="stylesheet" href="devhub.css" />
+  <link rel="stylesheet" href="devhub-hf.css"/>
 </head>
 <body class="track-config">
 
@@ -161,6 +163,162 @@
     <span class="tag">In CIAM / Context:</span>
     <span>The CIAM Angular app uses runtime config: one build artifact, /assets/config.json served by nginx/S3 per environment. The config contains Ping issuer URL, API base URL, and feature flags. APP_INITIALIZER loads it before any component renders. The ConfigService exposes an InjectionToken so services can inject APP_CONFIG rather than importing environment.ts — making unit tests clean (inject testConfig, no mocking of imports).</span>
   </div>
+</div>
+
+
+<p class="hf-deck">or, why "just rebuild it for staging" is the answer that costs you a release</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">A build-time constant is a promise you made before you knew the answer.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The IdP URL baked into the bundle</div>
+  <p><code>environment.prod.ts</code> holds the production IdP URL, so the value is inlined
+  into the JavaScript at build time. Change it and there is nothing to edit — only something
+  to rebuild.</p>
+  <div class="hf-scatter">
+    <span>ng build --configuration=production</span>
+    <span>URL inlined into main.js</span>
+    <span>one artifact per environment ⚠</span>
+    <span>staging bundle ≠ prod bundle ⚠</span>
+    <span>rotate the URL → full release ⚠</span>
+  </div>
+  <p class="hf-foot">And the artifact you tested in staging is now, by definition, not the
+  artifact you shipped — which quietly removes the point of having a staging environment.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Build once, configure at start</div>
+  <div class="hf-ladder">
+    <b>ONE bundle, promoted unchanged through every environment</b>
+    <i>↓ it fetches its config before bootstrap</i>
+    <b>GET /assets/config.json — served per environment</b>
+    <i>↓ provided as an injection token</i>
+    <b>the same JS, told where it is running</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Build-time config chooses what the code IS. Runtime config chooses what it TALKS TO.</b>
+  Anything that differs per environment but not per build — URLs, tenant ids, feature flags —
+  belongs in the second group, and putting it in the first is what turns a config change into
+  a deployment.
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">Your CI pipeline</span>
+    <p>I built the artifact once and promoted the exact bytes from staging to prod. That is
+    the entire value of a pipeline.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">environment.prod.ts</span>
+    <p>Then I broke it. I am replaced at BUILD time, so your prod artifact had to be built
+    separately — and was never the thing you tested.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">config.json</span>
+    <p>Whereas I am fetched at startup. Same bundle everywhere; the environment supplies me.
+    And rotating a URL is a file edit, not a release.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">The config has to arrive before anything asks for it.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li class="open"><span>index.html loads the ONE bundle</span><span class="tag">identical everywhere</span></li>
+    <li><span>an initializer fetches <code>/assets/config.json</code></span><span class="tag">before bootstrap</span></li>
+    <li><span>the result is provided as an <code>InjectionToken&lt;AppConfig&gt;</code></span><span class="tag">a dependency</span></li>
+    <li><span>services inject it — no service ever fetches it itself</span><span class="tag">one source</span></li>
+    <li><span>the server serves a different file per environment</span><span class="tag">the only difference</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is the whole trick and the whole risk: it must complete BEFORE
+  anything injects the config. In Angular that is <code>provideAppInitializer</code> (or the
+  older <code>APP_INITIALIZER</code>), which blocks bootstrap on the returned promise. Skip it
+  and you get a race that passes locally on a warm cache and fails in production on a cold
+  one.</p>
+</div>
+
+<p><b>Nothing in a browser bundle is secret, in either model.</b> Runtime config is fetched
+over the network and readable in devtools; build-time config is inlined and readable in the
+bundle. Neither hides anything, so the rule is the same for both: a client-side config file
+holds URLs, tenant ids and feature flags — never a client secret, never an API key that
+grants anything. If a value must stay secret, only a server may ever hold it.</p>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Your CIAM app must point at a different IdP in dev, staging and prod, and
+  security wants the exact tested artifact promoted to production. Which approach?</p>
+  <button type="button">environment.ts files — Angular's built-in, one per environment</button>
+  <button type="button">Read <code>process.env</code> at runtime in the browser</button>
+  <button type="button">One bundle + a per-environment <code>config.json</code> fetched by an app initializer</button>
+  <p class="why" data-for="0">This is the built-in path and it fails the second requirement
+  outright: file replacement happens at BUILD time, so each environment gets a different
+  artifact and "promote the tested bytes" becomes impossible.</p>
+  <p class="why" data-for="1"><code>process.env</code> does not exist in a browser. Build
+  tools that appear to support it are doing a static text substitution at build time — which
+  is the same trap as option 0 wearing Node's clothes.</p>
+  <p class="why" data-for="2">Right. One artifact, promoted unchanged; the environment
+  supplies the config file; the initializer guarantees it has landed before any service asks
+  for it. Rotating the IdP URL becomes a file edit rather than a rebuild and a re-test.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Every platform has solved this, usually twice.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring profiles</h4>
+    <p><code>application-prod.yml</code> plus <code>SPRING_PROFILES_ACTIVE</code> is the same
+    idea done properly: one jar, told at startup which environment it is in. The jar is
+    identical across environments — which is exactly what config.json buys the frontend.</p>
+    <div class="hf-scatter"><span>one jar, many envs</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Twelve-Factor III</h4>
+    <p>"Store config in the environment" — the principle behind both. The test it proposes:
+    could you open-source this repo right now without leaking credentials?</p>
+    <div class="hf-scatter"><span>config ≠ code</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Kubernetes ConfigMap</h4>
+    <p>Mount a different <code>config.json</code> into the same container image per
+    environment — the deployment-level expression of exactly this pattern, and why the
+    fetch-at-startup shape fits container platforms so naturally.</p>
+    <div class="hf-scatter"><span>same image</span><span>different ConfigMap</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Doesn't the extra fetch slow down startup?</p>
+  <p class="a">By one small same-origin request, once, on a file you control the cache headers
+  for. Weigh that against a broken promotion pipeline and a rebuild for every URL change.
+  If it genuinely matters, inline the JSON into <code>index.html</code> at deploy time — you
+  keep one bundle and lose the round trip.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Can I keep using environment.ts for anything?</p>
+  <p class="a">Yes, for things that really are build-time decisions: <code>production: true</code>
+  gating dev-only tooling, or a flag that must be tree-shaken out of the bundle entirely. The
+  test is simple — if changing the value should NOT produce a different artifact, it is
+  runtime config.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">How do I stop the config file being cached forever?</p>
+  <p class="a">Serve it with <code>Cache-Control: no-cache</code> so the browser revalidates.
+  Do not hash its filename the way you hash bundles: the whole point is that it is the one
+  file the deployment can change without touching the artifact, and a hashed name puts it
+  back inside the build.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you run it.</p>
+<div class="hf-napkin">
+  A service injects your <code>APP_CONFIG</code> token in its constructor, and the config
+  fetch is started in the constructor of a component instead of an app initializer. What does
+  the service see on a cold load, and why does it usually work on your machine?
 </div>
 
 <!-- ── EXTREME-VIZ HERO ── -->
@@ -1156,8 +1314,12 @@ renderCfg();
   reset2();
 })();
 </script>
+<script src="tracks-data.js"></script>
+<script src="devhub-chapters.js"></script>
+<script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

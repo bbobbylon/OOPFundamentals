@@ -1,7 +1,8 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-hf>
 <head>
   <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>app.config.ts — Config Visualizer</title>
   <style>
     :root{
@@ -58,6 +59,7 @@
     .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
   </style>
   <link rel="stylesheet" href="devhub.css" />
+  <link rel="stylesheet" href="devhub-hf.css"/>
 </head>
 <body class="track-config">
 
@@ -140,6 +142,160 @@
   <span class="who-badge who-RESOLVE">RESOLVE — nearest-injector-wins lookup</span>
   <span class="who-badge who-ACCUM">ACCUM — multi providers collect, don't replace</span>
   <span class="who-badge who-RUNTIME">RUNTIME — what the injected instance actually is</span>
+</div>
+
+
+<p class="hf-deck">or, the one file that decides what every other file is allowed to ask for</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">A missing provider is not a compile error. It is a 2am error.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The failure that looks like a typo</div>
+  <p>Your component injects <code>HttpClient</code>, TypeScript is perfectly happy, the build
+  passes — and the app dies at runtime the first time that component is created.</p>
+  <div class="hf-scatter">
+    <span>NullInjectorError ⚠</span>
+    <span>No provider for HttpClient!</span>
+    <span>tsc: no errors</span>
+    <span>only on the route nobody opened ⚠</span>
+  </div>
+  <p class="hf-foot">The type system cannot help here: <code>inject(HttpClient)</code> is
+  correct code. Whether a provider EXISTS is a runtime fact, decided by this one file.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">One object that answers "what exists?"</div>
+  <div class="hf-ladder">
+    <b>bootstrapApplication(App, appConfig)</b>
+    <i>↓ appConfig.providers builds the ROOT injector</i>
+    <b>provideRouter() · provideHttpClient() · your own tokens</b>
+    <i>↓ every inject() in the app resolves against it</i>
+    <b>anything not listed here does not exist</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b><code>app.config.ts</code> is not configuration. It is the root injector's contents,
+  written down.</b> Read it as "the list of everything this application can be asked for" and
+  <code>NullInjectorError</code> stops being mysterious — you asked for something that is not
+  on the list.
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">A component</span>
+    <p>I'd like an <code>HttpClient</code>, please.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The root injector</span>
+    <p>Let me check the list <code>appConfig.providers</code> gave me at bootstrap. Not there?
+    Then I throw — and I only find out when someone actually constructs you.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The old AppModule</span>
+    <p>I did the same job with <code>imports</code> and <code>providers</code>. The difference
+    is that I was a class you decorated; they are functions you call, so tree-shaking can
+    finally drop the ones you never invoked.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Injectors nest, and the nearest one wins.</p>
+
+<div class="hf-card hf-nest">
+  <p class="note">resolution walks OUTWARD ↘</p>
+  <div class="ring"><span class="lbl">root — appConfig.providers + providedIn:'root'</span>
+    <div class="ring"><span class="lbl">route — a lazy route's providers</span>
+      <div class="ring"><span class="lbl">component — providers: [] on @Component</span>
+        <div class="core">inject(X)<small>asks HERE first, then climbs</small></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<p><b>That outward walk is the whole model, and it explains both of the confusing cases.</b>
+Provide a service on a component and every instance of that component gets its OWN — which
+is what you want for per-form state and a disaster for a shared cache. Provide it on a lazy
+route and it is a singleton for that feature but invisible outside it. And the reason
+<code>providedIn: 'root'</code> is the default advice is that it is tree-shakeable: if nothing
+injects the service, it never reaches the bundle at all — which a provider listed in
+<code>app.config.ts</code> cannot do, because listing it IS a reference.</p>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A <code>TokenCache</code> is listed in <code>providers</code> on your
+  <code>&lt;user-row&gt;</code> component, which the table renders 50 times. How many caches
+  exist?</p>
+  <button type="button">One — providers are deduplicated by token</button>
+  <button type="button">One per route, since the row belongs to a routed component</button>
+  <button type="button">Fifty — a component-level provider creates one instance per component instance</button>
+  <p class="why" data-for="0">Deduplication happens per INJECTOR, not per token globally. Each
+  component instance gets its own injector, so each one creates its own.</p>
+  <p class="why" data-for="1">That is what <code>providers</code> on a lazy ROUTE gives you —
+  a singleton scoped to that feature. A component-level provider is narrower.</p>
+  <p class="why" data-for="2">Right, and this is the classic cache bug: fifty independent
+  caches, none of them sharing a hit, all of them looking like the cache "isn't working".
+  Move it to <code>providedIn: 'root'</code> or the route, and keep component-level providers
+  for state that genuinely belongs to one instance.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">The same list, three other names.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring's application context</h4>
+    <p>Identical idea: a container built at startup holding everything injectable, and a
+    failure at boot or first use when something is missing. Angular's
+    <code>NullInjectorError</code> is Spring's <code>NoSuchBeanDefinitionException</code>.</p>
+    <div class="hf-scatter"><span>@Configuration</span><span>= appConfig</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Testing overrides</h4>
+    <p><code>TestBed.configureTestingModule({ providers: [...] })</code> is the same list with
+    fakes swapped in — the payoff for never calling <code>new</code> in a component.</p>
+    <div class="hf-scatter"><span>{ provide: Api, useClass: FakeApi }</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A CIAM environment switch</h4>
+    <p>One <code>InjectionToken&lt;AuthConfig&gt;</code> provided here means the IdP URL is a
+    dependency rather than an import — dev, staging and prod differ by one provider instead of
+    a branch inside a service.</p>
+    <div class="hf-scatter"><span>new InjectionToken()</span><span>useValue</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q"><code>providedIn: 'root'</code> or list it in <code>app.config.ts</code>?</p>
+  <p class="a">Prefer <code>providedIn: 'root'</code> for your own services — it is
+  tree-shakeable, and it keeps the service's registration next to the service. Use
+  <code>app.config.ts</code> when you cannot annotate the class (a third-party type, an
+  <code>InjectionToken</code>) or when you need a specific <code>useClass</code>/
+  <code>useValue</code>/<code>useFactory</code> wiring.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why is it <code>provideHttpClient()</code> and not an import?</p>
+  <p class="a">Because a function call can be tree-shaken and composed with features —
+  <code>provideHttpClient(withInterceptors([authInterceptor]), withFetch())</code>. The old
+  <code>HttpClientModule</code> was all-or-nothing: importing it dragged in every feature
+  whether you used it or not.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Can I inject something INTO app.config.ts?</p>
+  <p class="a">Inside a <code>useFactory</code>, yes — list its <code>deps</code>, or call
+  <code>inject()</code> directly in the factory body, which runs in an injection context.
+  What you cannot do is call <code>inject()</code> at the top level of the file: there is no
+  injector yet, which is what <code>NG0203</code> is telling you when it fires.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you run it.</p>
+<div class="hf-napkin">
+  A <code>Logger</code> is provided in <code>app.config.ts</code> AND in a lazy route's
+  <code>providers</code> AND on one component. A method in that component calls
+  <code>inject(Logger)</code>. Which of the three does it get, and how many Logger instances
+  exist in the running app?
 </div>
 
 <!-- ===== ANATOMY ===== -->
@@ -817,8 +973,12 @@ function show(id, el) {
   reset2();
 })();
 </script>
+<script src="tracks-data.js"></script>
+<script src="devhub-chapters.js"></script>
+<script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

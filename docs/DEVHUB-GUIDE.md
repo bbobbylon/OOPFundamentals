@@ -1,7 +1,7 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 513 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 512 pages.** Pick a *path* below and follow it.
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
@@ -431,6 +431,51 @@ visualizers).
   (id `dh-syntax-css`) so pages without `devhub.css` still get full color.
   API: `DevHubSyntax.highlight(text)`, `DevHubSyntax.apply(root)` for
   late-added nodes. Include on every new page that shows code.
+- **Validation gates** (`frontend/tmp_*.mjs`, run from `frontend/`) — `tmp_vcheck.mjs`
+  is the CI gate (`deploy.yml` blocks the Pages deploy on it): encoding, registry
+  both ways, required shared scripts, internal links, duplicate registrations,
+  inline-`<script>` parse, and CSS theme-selector shape. `tmp_smoke.mjs` opens
+  every page in Chromium at 320px and reports uncaught errors and horizontal
+  overflow (network-only failures listed separately — a sandbox with no CDN fails
+  every CDN load). `tmp_assetcheck.mjs <ref>` fails on any LOSS of a teaching asset
+  versus a git ref. `tmp_contrast.mjs` measures text contrast in a theme
+  (`--theme=cream|dark`, `--inject=candidate.css` to try a fix without editing the
+  site); it composites translucent backgrounds and exempts `aria-hidden` ornament
+  and gradient-clipped headings, because an earlier version did neither and
+  invented ~1860 phantom failures. `tmp_shot.mjs` screenshots any page at phone and
+  desktop; `tmp_hfapply.mjs` opts a page into the kit.
+- **Head First bar audit** (`frontend/tmp_hfaudit.mjs`) — scores every lesson
+  page against CLAUDE.md's nine-point teaching standard and ranks the thinnest
+  first, so the standing "scan for thin lessons" directive is a command rather
+  than a reading marathon. Weights follow CLAUDE.md's own emphasis: line-by-line
+  code explanation and active recall carry most. It reads markup, not meaning —
+  it finds pages that lack the ingredients (no memory hooks, no recall beat, one
+  explanation and out), which is exactly what "thin" means; it cannot tell a
+  brilliant analogy from a limp one.
+- **Cream contrast repair** (in
+  [`frontend/devhub-hf-theme.js`](../frontend/devhub-hf-theme.js)) — the part CSS
+  structurally cannot reach. 513 pages carry their own `<style>` block that
+  hardcodes a dark ground and lets text inherit `var(--text)`; under cream that
+  ink turns dark and the box goes black-on-black. CSS has no way to ask "is this
+  element's computed background dark?", and the class names are invented per page,
+  so there is nothing shared to name — but the browser knows the answer exactly.
+  Runs ONLY under cream (0 elements touched in dark), composites the background
+  stack, and moves the text's LIGHTNESS while keeping its HUE, so green still
+  reads as "the fix" and red as "the bug". First pass is synchronous so the page
+  never paints unreadable text and then corrects itself; later passes are
+  idle-scheduled for subtrees the scenario/CodeWalk engines add after load. Every
+  change records what it replaced, so switching back to dark restores the page
+  exactly. Costs ~7ms per page.
+- **Cream repair layer** (end of [`frontend/devhub-hf.css`](../frontend/devhub-hf.css))
+  — the cream theme's token block is enough for anything token-driven, but
+  `devhub.css` also hardcodes several hundred literal colours picked against the
+  navy dark theme and repairs them only under `[data-theme="light"]`. This layer
+  repairs them for cream, in both directions: dark-theme near-whites and neons
+  landing on a pale card, and cream's dark ink inherited into the code panels that
+  stay dark in both themes. Every selector is written
+  `:is([data-theme="cream"],[data-theme="light"])[data-hf] …` — the comma form
+  splits into a bare root selector plus a light-only rule and silently matches
+  nothing; vcheck fails the build if it reappears.
 - **Head First kit** (in [`frontend/devhub.css`](../frontend/devhub.css),
   final section) — the book's visual vocabulary as drop-in classes, all
   tinted by the track's `--accent`: `.hf-big` (gradient big-type mnemonic),

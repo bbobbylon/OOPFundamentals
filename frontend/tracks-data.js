@@ -241,7 +241,6 @@ window.DEVHUB_TRACKS = [
         { title: 'HTTP Interceptors',       file: 'angular-interceptors-advanced-visualizer.html',level: 'advanced' },
         { title: 'Error Handling (E2E)',    file: 'angular-error-handling-deep-visualizer.html', level: 'advanced' },
         { title: 'OpenAPI → Typed Client',  file: 'angular-openapi-client-deep-visualizer.html', level: 'advanced' },
-        { title: 'Full-Stack Round-Trip',   file: 'fullstack-request-roundtrip-deep-visualizer.html', level: 'advanced' },
         { title: 'Change Detection',        file: 'angular-change-detection-visualizer.html',    level: 'advanced' },
         { title: 'Change Detection Internals', file: 'angular-change-detection-deep-visualizer.html', level: 'advanced' },
         { title: 'Performance',             file: 'angular-performance-visualizer.html',         level: 'advanced' },

@@ -1,7 +1,8 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-hf>
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Signals Deep Dive — Angular Visualizer</title>
   <style>
     :root {
@@ -93,6 +94,7 @@
     .counter-box .effect-count { color: var(--eff); font-size: 11px; margin-top: 4px; font-family: monospace; }
   </style>
   <link rel="stylesheet" href="devhub.css" />
+  <link rel="stylesheet" href="devhub-hf.css"/>
   <style>
     .who-SIG   { background: #22d3ee22; border-color: #22d3ee; color: #22d3ee; }
     .who-COMP  { background: #a78bfa22; border-color: #a78bfa; color: #a78bfa; }
@@ -136,6 +138,163 @@
     <div class="intro-ciam">
       <span class="tag">In CIAM:</span>the auth store — <code>user = signal&lt;User|null&gt;(null)</code>, <code>isAuthenticated = computed(() =&gt; user() !== null)</code>, <code>roles = computed(() =&gt; user()?.roles ?? [])</code> — and every guard, interceptor, and nav bar reads the same reactive derivations with no subscriptions to manage.
     </div>
+  </div>
+
+
+  <p class="hf-deck">or, how a value knows who is listening without anyone subscribing</p>
+
+  <div class="hf-kick">The problem</div>
+  <p class="hf-say">Zone.js never knew WHAT changed. Only that something might have.</p>
+
+  <div class="hf-card bad">
+    <div class="hf-cardtitle">Change detection by suspicion</div>
+    <p>Zone.js monkey-patches every async API in the browser. When any of them fires, Angular
+    has no idea which value moved, so it re-checks the component tree and asks every binding
+    whether it is still correct.</p>
+    <div class="hf-scatter">
+      <span>a setTimeout anywhere ⚠</span>
+      <span>→ check the WHOLE tree</span>
+      <span>a mousemove handler ⚠</span>
+      <span>→ check it again</span>
+      <span>OnPush everywhere as damage control</span>
+    </div>
+    <p class="hf-foot">This is why Angular apps get mysteriously slow at scale: the cost is not
+    in your change, it is in the search for your change.</p>
+  </div>
+
+  <div class="hf-card good">
+    <div class="hf-cardtitle">Let the value tell you</div>
+    <div class="hf-ladder">
+      <b>count = signal(0)</b>
+      <i>↓ reading it inside a reactive context RECORDS the reader</i>
+      <b>the signal now knows its dependents</b>
+      <i>↓ count.set(1) marks exactly those dirty</i>
+      <b>only what actually depends on count is re-checked</b>
+    </div>
+  </div>
+
+  <div class="principle" style="text-align:left">
+    <b>A signal is a value that keeps a list of who read it.</b> Everything else — computed,
+    effects, zoneless change detection — falls out of that one fact. There is no subscription
+    to remember and none to leak, because reading IS subscribing.
+  </div>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">A template binding</span>
+      <p>I read <code>count()</code> while rendering. That's it — nobody called subscribe.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">count</span>
+      <p>And I wrote you down. When I change I mark you dirty. When you are destroyed the edge
+      goes with you — which is why there is no <code>ngOnDestroy</code> here.</p>
+    </div>
+    <div class="hf-bub">
+      <span class="who">computed()</span>
+      <p>Careful with me though. I am LAZY — I do not recompute when my source changes. I mark
+      myself stale and do the work only when somebody actually reads me.</p>
+    </div>
+  </div>
+
+  <div class="hf-kick">The mechanism</div>
+  <p class="hf-say">Push the dirt, pull the value.</p>
+
+  <div class="hf-card">
+    <ol class="hf-steps">
+      <li class="open"><span>read <code>count()</code> inside a computed or template</span><span class="tag">tracking</span></li>
+      <li><span>an edge is recorded: count → that consumer</span><span class="tag">the graph</span></li>
+      <li><span><code>count.set(1)</code> marks dependents STALE — it does not run them</span><span class="tag">push</span></li>
+      <li><span>someone reads the computed; only now does it recompute</span><span class="tag">pull</span></li>
+      <li><span>if the new value is <code>Object.is</code>-equal, propagation STOPS</span><span class="tag">the cutoff</span></li>
+    </ol>
+    <p class="hf-annot">Step 5 is the one that saves you and the one that bites you.
+    <code>set()</code> with an equal value costs nothing. But <code>set()</code> with the SAME
+    array object you just mutated is also "equal" — so the graph never fires and your view
+    silently does not update.</p>
+  </div>
+
+  <p><b>That is the whole mutation trap, and it is the number one signals bug.</b>
+  <code>items().push(x)</code> then <code>items.set(items())</code> changes nothing as far as
+  the graph is concerned: same reference, <code>Object.is</code> says equal, propagation stops.
+  Use <code>update(list =&gt; [...list, x])</code> and produce a NEW array. It is exactly the
+  same discipline OnPush always demanded — signals just made the consequence immediate instead
+  of mysterious.</p>
+
+  <div class="hf-check" data-answer="2">
+    <p class="q">A <code>computed()</code> derives a total from a signal. You call
+    <code>set()</code> on the source five times in a row, and nothing ever reads the computed.
+    How many times does the computed's function run?</p>
+    <button type="button">Five — once per source change</button>
+    <button type="button">One — changes are batched into a single recomputation</button>
+    <button type="button">Zero — a computed is lazy and only runs when something reads it</button>
+    <p class="why" data-for="0">That is the eager/push model (an <code>effect</code>, or an
+    RxJS subscription). A computed is not that: a set only MARKS it stale.</p>
+    <p class="why" data-for="1">Closer in spirit — the end result is a single recomputation
+    rather than five — but only once someone reads it. With no reader there is no
+    recomputation at all.</p>
+    <p class="why" data-for="2">Right. Push-dirty, pull-value: <code>set()</code> marks
+    dependents stale and stops. The work happens on read, which is why an expensive computed
+    that nothing displays is genuinely free — and why putting a side effect inside a computed
+    is a bug, since you cannot predict when or whether it runs.</p>
+  </div>
+
+  <div class="hf-kick">Where you've seen this before</div>
+  <p class="hf-say">This idea is older and more widespread than Angular.</p>
+
+  <div class="hf-terms">
+    <div class="hf-card hf-taped">
+      <h4>A spreadsheet</h4>
+      <p>The original reactive graph. <code>=A1+B1</code> recalculates when A1 changes because
+      the cell recorded what it read. Nobody ever wired up a subscription in Excel.</p>
+      <div class="hf-scatter"><span>=SUM(A1:A9)</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>RxJS, and when to keep it</h4>
+      <p>Signals model STATE — a value that always has one. Observables model EVENTS over
+      time, with operators for debounce, retry and cancellation that signals have no answer
+      for. A typeahead is still RxJS; the resulting list is a signal.</p>
+      <div class="hf-scatter"><span>toSignal()</span><span>debounceTime ⇒ RxJS</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>A CIAM permission check</h4>
+      <p><code>canEdit = computed(() =&gt; user().roles.includes('ADMIN') &amp;&amp; !locked())</code>
+      re-evaluates when either input moves, is cached between reads, and never goes stale
+      behind your back.</p>
+      <div class="hf-scatter"><span>computed(() =&gt; …)</span></div>
+    </div>
+  </div>
+
+  <div class="hf-kick">Questions from the back row</div>
+  <div class="hf-ask">
+    <p class="q">Do signals mean I can delete Zone.js?</p>
+    <p class="a">Eventually, and that is the goal — but going zoneless means every source of
+    change must be one Angular can see. A signal, an event binding, or an explicit
+    <code>markForCheck</code>. Code that quietly relied on Zone noticing a
+    <code>setTimeout</code> or a third-party callback is what breaks, and finding those is the
+    real migration work, not the syntax.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Why shouldn't I write to a signal inside an <code>effect</code>?</p>
+    <p class="a">Because you are creating a cycle in a graph designed to be acyclic — the
+    effect reads a signal, writes another, which can re-trigger it. Angular will complain
+    about writes in effects by default for exactly this reason. If you need "derived but
+    writable", that is <code>linkedSignal()</code>; if you need "derived", that is
+    <code>computed()</code>.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Is <code>signal()</code> just a <code>BehaviorSubject</code> with nicer syntax?</p>
+    <p class="a">They both hold a current value, but the difference is glass-clear in the
+    template: a signal read is tracked automatically and needs no <code>async</code> pipe, no
+    unsubscribe, and no manual change detection. A BehaviorSubject also has no equivalent of
+    the equality cutoff — it re-emits an identical value to every subscriber.</p>
+  </div>
+
+  <div class="hf-kick">Grab a napkin</div>
+  <p class="hf-say">Predict it before you run it.</p>
+  <div class="hf-napkin">
+    <code>const items = signal([1,2,3])</code>. You run
+    <code>items().push(4); items.set(items());</code> and the template still shows three
+    items. Why — and what one-line change fixes it?
   </div>
 
   <!-- ═══ EXTREME-VIZ HERO ═══ -->
@@ -864,8 +1023,12 @@ $i('run').addEventListener('click',run);
 renderNodes(cur);
 })();
 </script>
+<script src="tracks-data.js"></script>
+<script src="devhub-chapters.js"></script>
+<script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>
