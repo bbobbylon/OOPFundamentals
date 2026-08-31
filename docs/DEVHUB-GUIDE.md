@@ -1,7 +1,7 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 513 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 512 pages.** Pick a *path* below and follow it.
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 

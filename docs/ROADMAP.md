@@ -112,6 +112,343 @@ mastery (breakpoint types, evaluate, conditional/logging breakpoints, hot swap) 
 configurations → git integration → Spring-specific tooling. Same visual bar as everything
 else: animated walkthroughs of the IDE surfaces, not screenshots-with-captions.
 
+### 10. CI/CD — validation gate ✅ LANDED (2026-08-31)
+
+`frontend/tmp_vcheck.mjs` exists for real now (CLAUDE.md had pointed every session at it, and
+at a `tmp_audit.mjs`, for months — neither existed, so the documented validation step silently
+passed). Zero dependencies, scans all 527 pages in ~0.4s, and
+`.github/workflows/deploy.yml` gates the Pages deploy on it.
+
+**Checks:** UTF-8 + no stray control bytes · registry integrity both directions (every
+`file:` resolves, every page is registered or allowlisted) · required shared scripts
+(`<pre>` implies devhub-syntax.js; rt-* markup implies devhub.css) · internal links ·
+duplicate registrations.
+
+**Getting it green surfaced four real defects, all fixed:**
+1. `java-variables-types-visualizer.html` carried a literal NUL byte — a raw `0x00` sitting in
+   a Java `char` sample instead of the `\u0000` escape. It is why `file` reported that page as
+   `data`. Replaced with the escape text.
+2. `spring-boot-resilience4j-visualizer.html:912` ended in `</di` instead of `</div>`, so the
+   `.two-col` grid never closed and the following comment was swallowed as attribute soup.
+3. `fullstack-request-roundtrip-deep-visualizer.html` was registered in TWO sections, which
+   makes the chapter rail's "next" ambiguous and double-lists it in the hub. Kept in
+   Full-Stack Stacks (its capstone, a 3-page track); dropped the Angular copy.
+4. `tmp_tryit_test.html` was an unreferenced test fixture being published. Deleted.
+   (`index-legacy.html` looked like an orphan but is linked from `index.html` — allowlisted.)
+
+**Link-check design note:** the first version produced false positives on pages that TEACH
+HTML — `&lt;link href="styles.css"&gt;` in an Angular index.html walkthrough is content, not a
+link. The checker now strips HTML-escaped markup, and hard-fails only on `.html` targets and
+the shared `devhub-*` assets; anything else is a warning. A gate with false positives is a
+gate people learn to ignore.
+
+**deploy.yml also fixed two things unrelated to the gate:** `cancel-in-progress` is now
+`false` (GitHub's own guidance — cancelling mid-publish can leave the site half-updated), and
+the artifact is rsync-staged into `_site/` so the public site no longer serves `devserver.py`,
+`__pycache__/`, or the `tmp_*.mjs` scripts. It previously uploaded `frontend/` wholesale.
+
+**Size, settled:** the 24MB is a repo number, not a user number — the average page gzips to
+about 13KB, the 1GB Pages ceiling is ~44x away, and the 10-builds/hour limit does not apply to
+custom Actions workflows. Do NOT minify: inline `<style>` is 0.5% after gzip, and the 11.3MB
+of inline `<script>` is bespoke per-page animation code that is not safely minifiable in bulk.
+
+### 10b. Sitewide viewport fix ✅ LANDED (2026-08-31)
+**410 of 527 pages had no `<meta name="viewport">`**, so phones laid them out at 980px and
+scaled down — on a site Bobby reads primarily on a phone. All 527 now have it.
+
+The tag alone is NOT the fix, and the estimate that called it "a one-line sed" was wrong:
+making the phone layout real EXPOSES overflow the 980px scaling was hiding (a fixed-px h1
+running off the edge, a wide `<pre>` pushing the whole document sideways). Verified by
+before/after screenshot. A mobile safety net now lives at the end of `devhub.css` — clamped
+heading sizes, `overflow-wrap`, single-column grids under 680px, and `pre`/`table` scrolling
+themselves rather than the page. Scoped to a phone media query so desktop is untouched.
+
+### 11. Design-review screenshots + the model-switch checkpoint (NEW, 2026-08-31)
+
+**`frontend/tmp_shot.mjs`** — shoots any page in Chromium at phone (390x844) and desktop
+(1440x900), because Bobby reviews on a phone and builds on a desktop. Serves `frontend/` over
+http rather than `file://` so the shared `devhub-*.js` engines and any `fetch()` actually run,
+waits for network-idle + a settle delay (pages pace scenario walks at ~800ms/step), and reports
+console errors per shot. `--full` for full-page, `--theme=light`, `--out=DIR`, `--settle=MS`,
+and `--inject=palette.css` to **preview a token swap sitewide without editing a single page**.
+Bobby wants a screenshot alongside each design change from here on — use this, don't hand-wave.
+
+**What the first run already proved (2026-08-31), shooting `head-first-decorator-visualizer.html`:**
+- The existing dark page is **already structurally identical** to Bobby's new Claude Design
+  prototype: same `HEAD FIRST · DESIGN PATTERNS · CH. 3` kicker, same title, same intro prose,
+  the same receipt with the same numbers ($0.89 / $0.99 / $1.09 / $1.29), the same
+  `new Mocha(new Whip(new Soy(new HouseBlend())))` in `data-file="Order.java"` editor chrome,
+  the same open/closed callout, the same "three places you already use it" section. **The
+  prototype is a warm light recolor of a page that already ships** — the delta is palette hues
+  plus a display font, not structure and not content.
+- **A naive token swap does NOT just work.** Injecting the prototype's warm palette
+  (`--bg:#f5ead8`, `--accent:#c67139`) leaves the h1, body prose, and section headings
+  illegible near-white, because they use hardcoded hex rather than tokens. `devhub.css`
+  carries **200 hex literals vs 153 `var()` references** — token coverage is only ~43%, and
+  that gap is the actual blocker for any one-file reskin.
+- **Bug found:** under the existing `data-theme="light"`, the `.hf-receipt` rows (House Blend /
+  + Soy / + Whip / + Mocha) render washed-out grey and are effectively unreadable; only the
+  `Total` row survives. The light-theme override block at `devhub.css:441` never got a
+  counterpart for the receipt row color. Fix before any light-mode rollout.
+
+**★ MODEL-SWITCH CHECKPOINT — stop and ask Bobby before proceeding.**
+Agreed 2026-08-31: stay on **Opus** for the architecture work (palette/token migration, the
+codemod for the 153 pages that redeclare `:root`, the CI validate job, the chapter-rail
+component, and the reference page). These are low-volume and high-blast-radius — one mistake
+propagates to 528 pages.
+
+**When backlog item #1 (the ~500-page Head First content sweep) is ready to start, STOP and
+prompt Bobby to switch models** — that is the only genuinely high-volume phase, and by then an
+Opus-authored exemplar page plus the written per-page bar will exist, which is the setup Sonnet
+handles well. Do not silently continue on Opus into the sweep, and do not switch on your own.
+Suggested at that checkpoint: run one 10-page tranche on Sonnet and one on Opus against the
+same exemplar and diff the quality before committing to the cheaper tier for ~500 pages.
+
+### 12. Head First design language — `devhub-hf.css` LANDED, sweep pending (2026-08-31)
+
+Bobby's verdict on the first attempt was blunt and correct: *"I don't like how it looks at all…
+The problem you aren't seeing is that it's not just the color I care about."* A palette swap
+(`devhub-warm.css`, kept for the cream variant) is NOT the ask. The ask is the whole design
+language — roundness, playful type, and components that make a page feel like the book.
+
+**Colorway decision (revised):** dark **mocha/espresso** now (`--hf-bg:#17120f`), cream later.
+Bobby's screenshots are the dark variant; cream is a token re-statement on top, not a rebuild.
+
+**`frontend/devhub-hf.css`** — opt in with `<html data-hf>`, load after devhub.css. Contains:
+- **Type:** Playfair Display (display serif) + Dancing Script (the hand, for decks, "you are
+  here", "psst —", code annotations), self-hosted latin-subset variable woff2, one file each.
+- **Chapter rail** — dots + dashed connector + `aria-current`, with the giant ghosted chapter
+  numeral behind it. Renders from a plain `<ol>`, so any chapter count works.
+- **Kicker + statement rhythm** — `.hf-kick` ("— THE PROBLEM") followed by `.hf-say`, the big
+  serif line. This pairing is the page's spine and should repeat per section.
+- **`.hf-card.bad` / `.hf-card.good`** — the reddish-brown problem card and olive fix card.
+- **`.hf-scatter`** — mono class chips at deliberate jaunty angles (the class explosion should
+  *look* out of control; that's the teaching point).
+- **`.hf-taped`** — the gold caution-tape tab with the orange bead, pure CSS.
+- **`.hf-talk` / `.hf-bub`** — objects talking to each other, speaker name in the hand.
+- **`.hf-nest`** — nested dotted wrapper rings around a tan core, nested by DOM depth.
+- **`.hf-napkin`** — the predict-first note with a torn dashed edge and a "psst —" in script.
+- **`.hf-ask`** — Q&A with serif italic Q/A marks on a blue rail.
+- **`.hf-terms`**, **`.hf-ladder`**, **`.hf-annot`**, **`.hf-reveal`**.
+
+Selectors are `[data-hf] …`, which outranks a page's own inline `:root`/element rules on
+**specificity** — so the kit reskins pages without editing their inline CSS. Per-page cost stays
+two lines. Note the trap this already caused: an unscoped `.hf-rail span` rule beat
+`.hf-chapnum` on specificity and silently shrank the numeral to 10.5px. Scope kit-internal
+rules to the element that owns them.
+
+`head-first-decorator-visualizer.html` is the reference implementation. Its presentation layer
+was rebuilt into the kicker/statement rhythm; **every deep section was kept** — the 4-scene
+animated visualizer, DevHubCodeWalk, the CheerpJ Java runner, Acts 1-3, the definition and
+real-world sections all still render, verified by screenshot with zero console errors.
+
+**Still to do:** the order-builder interactive from the prototype (34 lines of vanilla JS, no
+framework); wire the rail to `tracks-data.js` instead of the hand-written `<ol>`; the cream
+token block; then the sweep, track by track. Per Bobby: *"each page/concept doesn't have to have
+exactly everything in the screenshots but it should be close depending on what concept is being
+taught"* — so the kit is a palette to draw from, not a fixed template.
+
+**TRANCHE 1 LANDED (2026-08-31): all 12 Head First pattern pages.**
+`tmp_hfapply.mjs` makes the opt-in mechanical and idempotent (`--check` dry-runs, `--revert`
+undoes): adds `data-hf`, links `devhub-hf.css` after devhub.css, wires the rail, and adds a
+viewport meta if missing. Per-page cost really is those four edits — no content was touched.
+
+`devhub-chapters.js` renders the rail from `tracks-data.js`, so no page hand-writes its chapter
+list. The Decorator page's hand-written rail had been **wrong** — it showed 5 chapters for a
+section that has 14. The rail windows to current ±2 with an "N of M" count, and skips sections
+with fewer than 2 pages. A slim generated `chapter-index.js` was tried and dropped: it saved
+only 2.8KB gzipped over `tracks-data.js` and added a file that could silently drift.
+
+**Three bugs the tranche exposed, all fixed in the shared kit rather than per page:**
+1. The kit originally defined only `--hf-*` tokens, so `.intro`/`.panel`/`.rt-*` stayed slate
+   blue on a mocha page — devhub.css builds them from `var(--panel)`/`var(--border)`. The token
+   block now **remaps DevHub's existing token names** onto the mocha ramp, which repaints every
+   token-driven component for free. This is the single change that makes the rollout cheap.
+2. Rail labels collided when one ellipsised; the current label then overflowed its cell
+   entirely ("Compound+MVC", "Iterator+Composite" have no space to wrap at). Fixed with
+   horizontal padding plus `overflow-wrap:anywhere` on the current label.
+3. All 12 pages carried a hand-rolled `<div style="…">🦆 HEAD FIRST · …</div>` badge that now
+   duplicates the rail's kicker. Removed (backups in the session scratchpad). Note these were
+   **inline style attributes**, which beat any stylesheet — the only fix is deleting them, which
+   is exactly the 419-page inline-style problem the scoping pass flagged.
+
+**What tranche 1 did NOT do:** the kicker/statement rhythm, problem-and-fix cards, speech
+bubbles, nested diagrams and napkins are per-concept AUTHORING and exist only on Decorator so
+far. Tranche 1 landed the free part — colorway, type, roundness, rail, mobile. That split is
+the honest shape of the whole rollout.
+
+**TRANCHE 2 + AUTHORING (2026-08-31, later).** OOP Core (encapsulation, inheritance,
+polymorphism, abstraction, SOLID) took the kit — chosen deliberately to prove it works outside
+the Head First family before any bigger sweep. It did, with no new breakage class.
+
+**Decorator, Strategy and Observer are now fully AUTHORED** (kicker/statement rhythm, problem
+and fix cards, speech bubbles, mechanism diagram, three real-world instances, key terms,
+back-row Q&A, predict-first napkin). The other 14 kit pages have the colorway, type, roundness,
+rail and mobile fixes but not yet the authored rhythm — that split is the honest state.
+
+**Each pattern needed its OWN mechanism diagram, and that is the real lesson for the sweep:**
+Decorator NESTS (`.hf-nest`, dotted rings round a core), Strategy COMPOSES (`.hf-slot`, a
+context with a pluggable slot and the active implementation ringed), Observer BROADCASTS
+(`.hf-cast`, one subject fanning out to wrapping observers). Reusing one diagram for all three
+would have taught the wrong shape. Budget a new diagram component per *concept family*, not per
+page — three so far, and they will cover most of the pattern track.
+
+Also landed: the Decorator order-builder (~40 lines of vanilla JS, driven end-to-end in
+Chromium — totals track the page's canonical numbers, undo/reset/cap all behave).
+
+**QUICK KNOWLEDGE CHECKS + STATS DASHBOARD (2026-08-31, later still).**
+
+`devhub-hf-check.js` + `.hf-check` — inline active recall placed MIDWAY through a lesson, per
+Bobby's reference. One question about what was just explained, one tap, and the reasoning
+revealed for the chosen option AND the correct one, because *why the tempting wrong answer is
+wrong* is where the learning is. No score, no gating, retryable. Declarative markup
+(`data-answer` = index, `.why[data-for]` per option) so a page adds one with no JS of its own.
+Six chapters have one. Driven in Chromium: wrong pick marks both and shows two explanations,
+right pick shows one, `role="status"` announces the verdict.
+
+`stats.html` — the personal dashboard, built from Bobby's screenshot of a design he liked.
+**Every number is real**, computed from this browser's own localStorage: `dlh_progress_v1`
+(concepts done, per-track completion), `dlh_streak_v1` (streak), `dlh-quiz:<bank>` (quiz
+accuracy across stored attempts), `dlh_recent_v1` (pick up where you left off). Handles the
+empty state deliberately — a new learner sees honest zeros and what to do, not a blank grid.
+
+**One tile from the reference is deliberately absent: "minutes studied".** Nothing in DevHub
+records time on page, so that chart would be invented numbers. If Bobby wants it, the work is
+a small session-timer writing dated totals — say so rather than shipping a fake chart.
+
+Chart colours were **validated, not eyeballed** (the `dataviz` skill's checker). The first
+palette failed on CVD separation and chroma; the shipped pair (`#ef7a45` / `#a8d17a`, with a
+neutral for "not started") passes at ΔE 10.2 deutan. The bar chart is single-hue on purpose —
+one series measuring magnitude needs no categorical palette and no legend — and the donut is a
+status palette where every slice carries a swatch, a label AND a count, so identity is never
+colour alone.
+
+Note the dashboard is in the DARK colorway to match the rest of the site; Bobby's reference
+screenshot is the cream variant, which arrives with the theme flip.
+
+**ALL 12 PATTERN CHAPTERS NOW AUTHORED (2026-08-31, final pass).** Every one has the deck,
+the kicker/statement rhythm, problem-and-fix cards, object dialogue, a mechanism diagram, three
+real-world instances, key terms, back-row Q&A, a predict-first napkin, and a mid-page quick
+knowledge check. Verified structurally (a per-page audit of deck/kick/check/diagram/tryit) and
+by screenshot at 390px with zero console errors.
+
+**Six mechanism-diagram components now exist, one per SHAPE — this is the reusable result:**
+`.hf-nest` (Decorator, Composite — nesting) · `.hf-slot` (Strategy, Factory, Proxy, Adapter,
+MVC's controller leg — a context with a pluggable slot) · `.hf-cast` (Observer, Facade, MVC's
+model leg — one-to-many broadcast) · `.hf-one` (Singleton — many callers converging, which also
+makes the thread race visible) · `.hf-steps` (Template Method — a skeleton with locked and open
+steps) · `.hf-cycle` (State — transitions as rows, because a node-and-edge graph is unreadable
+on a phone). Later tracks should reuse these before inventing more.
+
+**A REGRESSION I CAUSED AND FIXED — worth remembering for the sweep.** The first Decorator
+splice replaced everything from `<div class="container">` down to the visualizer comment, which
+silently deleted the `.tryit` widget (the real CheerpJ Java runner) sitting inside that range.
+I had reported that nothing was removed; that was wrong. Found by a structural audit, recovered
+from `master`, and re-placed after the napkin where it teaches best. Every other chapter spliced
+at `<div class="intro">`, which is safely above the deep content.
+
+**The lesson: splice at a narrow anchor, and audit teaching assets against `master` afterwards
+rather than trusting the intent of the edit.** A master-vs-working comparison of tryit /
+CodeWalk / rt-stage / quiz counts across all 12 now shows parity, and that comparison should be
+run after every authoring tranche.
+
+**SITE-WIDE ROLLOUT + CREAM VARIANT + 5 DEAD PAGES REVIVED (2026-08-31, final).**
+
+**The kit is now on all 513 registered pages.** Applied with `tmp_hfapply.mjs` (4 mechanical
+edits each, no content touched), then every kit page was loaded in Chromium at 390px and checked
+for console errors, horizontal overflow, a present theme toggle, and the expected background.
+**Zero overflow, zero missing toggles, zero wrong backgrounds.** 13 pages reported console
+errors — all 13 reproduce IDENTICALLY on `master`, verified by serving the master copies from a
+scratch directory, so the rollout introduced none of them.
+
+**CREAM VARIANT LANDED** (`<html data-hf data-theme="cream">`) — the light colorway Bobby
+originally chose, shipped as promised "later". It is a pure token re-statement plus ~20 rules
+for wells that were dark-on-dark and must become light-on-light; **no component rule and no page
+changed.** That is the payoff of building the kit token-first. Code panels stay dark in both
+themes (the terminal convention), which retires the whole syntax-contrast problem.
+`devhub-hf-theme.js` is the switch — dark stays the default (no stored choice = no attribute),
+the choice persists in `localStorage`, and it sits bottom-LEFT because app.html pins its
+`#dlh-mark-pill` bottom-right at z-index 9999. Verified: toggles, persists across navigation,
+toggles back.
+
+**FIVE GENUINELY DEAD PAGES, FOUND AND FIXED.** The browser sweep surfaced pre-existing
+JavaScript that never parsed, so those pages' interactive sections had simply never worked:
+- `go-http-server` and `go-interfaces` closed a step object with `)` instead of `}`
+- `go-error-handling` had one brace too many, closing the object before its `ins:` key
+- `github-copilot` had an unescaped apostrophe in a single-quoted string (`Copilot's`)
+- `angular-ssr-hydration` contained a literal `</script>` inside a JS string, which ends the
+  block right there and kills everything after it
+All five now load clean with working interactive nodes.
+
+**vcheck gained check #6: every inline `<script>` must parse.** None of those five bugs is
+visible by eye, none breaks the HTML, and none was catchable by any static check the project
+had. This one is ~20 lines and would have caught all five. **The general lesson: a page that
+renders is not a page that works** — the gate needs to execute, or at least parse, what it ships.
+
+**OOP CORE AUTHORED + AN ASSET-LOSS GUARD (2026-08-31, continued).**
+
+**`frontend/tmp_assetcheck.mjs`** — the codified version of the Decorator regression. It
+compares every page against a git ref and FAILS if a page has fewer `.tryit` widgets,
+CodeWalks, `rt-stage` engines, quizzes, flashcards or notebook hooks than it used to. Additions
+are always fine. Proven by simulating the exact bug (deleting Strategy's tryit): it catches it
+and exits 1. Wired into `deploy.yml`'s validate job on pull requests, where a base branch exists
+to compare against — with `fetch-depth: 0`, because a shallow clone has no base to diff.
+
+**vcheck cannot do this job** — it has no notion of "before". That is the general point: a
+validator that only sees the current state cannot catch deletion, and deletion is exactly what
+a careless bulk edit does.
+
+**All five OOP Core pages authored** (encapsulation, inheritance, polymorphism, abstraction,
+SOLID) — the foundation of the zero-to-hero path. **They needed no new diagram components**,
+which is the first real evidence the six shapes generalise: encapsulation reuses `.hf-nest`
+(the access-level wall IS nesting), polymorphism and abstraction reuse `.hf-slot`, inheritance
+uses `.hf-ladder` plus `.hf-slot`, and SOLID uses `.hf-steps` with `.hf-terms`.
+
+**A bug worth recording, because it will recur.** The anchor regex
+`<(?:div class="intro"|h2)\b` never matched the intro card — `\b` after `intro"` requires a
+word character, and `"` and `>` are both non-word — so it silently fell through to the first
+`<h2>` and three pages got their authored block placed AFTER the intro card instead of before
+it. Nothing errored; only reading the rendered order caught it. **When an anchor regex has an
+alternation, verify which branch actually matched** rather than trusting that it matched at all.
+
+Authored pages now: 12 pattern chapters + 5 OOP Core = **17**. The other ~496 carry the kit
+(colorway, type, roundness, rail, mobile, theme switch) but not the authored rhythm.
+
+**THEME INTEGRATION — TWO SYSTEMS MERGED INTO ONE (2026-08-31).**
+
+Found while checking the kit against the hub rather than in isolation: **app.html already owned
+a theme**, and the kit's switch was about to fight it. app.html stores `devhub-theme`
+('dark'|'light'), applies it before first paint, AND pushes it into the lesson **iframe** it
+renders pages in (`toggleTheme()` writes `viewer.contentDocument`'s `data-theme`).
+
+Three concrete bugs that would have produced:
+1. The kit's switch used its own key and REMOVED `data-theme` when unset — so opening any
+   lesson silently cleared the hub's stored light preference.
+2. Viewing a lesson through the hub showed TWO toggles, disagreeing.
+3. The hub pushing `light` into a kit page hit devhub.css's cool blue-grey theme, which was
+   built for the old design and reads as a different site under the Head First kit.
+
+Fixed by making them one system rather than two:
+- The kit reuses the **same key and attribute**, adding only the value `cream`.
+- `light` is treated AS cream on kit pages (`[data-theme="light"][data-hf]` matches every cream
+  rule), so the hub's existing button keeps working and stays coherent.
+- A `MutationObserver` re-normalises when the hub writes `light` directly into the frame.
+- The floating switch **hides itself inside an iframe** — there the hub's header control is in
+  charge.
+- app.html renders a stored `cream` as its own `light` (it has no cream palette), and its
+  toggle now reads the APPLIED value rather than rewriting the user's stored word.
+
+Verified end to end: choose cream on a lesson → stored `cream` → the hub opens light → the hub's
+toggle returns both to dark. In-frame: no second toggle, and `light` pushed in renders cream.
+
+**The lesson: test a shared component against the thing it will live next to, not on its own.**
+Every one of these bugs is invisible when the kit page is opened directly, which is exactly how
+it had been verified 513 times.
+
+**Note on the uploads:** all three `Decorator_Pattern_Standalone.html` uploads are byte-identical
+and contain the *cream single-screen* export, not the richer dark design in the screenshots. The
+screenshots are the real spec. If Bobby can re-export the dark version, match it exactly.
+
 ---
 
 ## Done — design-system v2 + press pulse (landed 2026-08-30)

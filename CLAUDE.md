@@ -58,7 +58,13 @@ standing goal, not a one-time task. The full Head First rollout state lives in
   `frontend/app.html`; update page/track counts in `README.md` + `docs/DEVHUB-GUIDE.md`.
 - Exams: length-bracketed choices, no position/length tells — audit with
   `frontend/tmp_examtell_audit.mjs` after any bank edit.
-- Validate pages with `frontend/tmp_vcheck.mjs` + `tmp_audit.mjs`.
+- Validate pages with `node frontend/tmp_vcheck.mjs` (encoding, registry both ways,
+  required shared scripts, internal links, duplicate registrations — under a second for
+  the whole site). `.github/workflows/deploy.yml` gates the Pages deploy on it, so a red
+  vcheck blocks the deploy. There is no `tmp_audit.mjs`; that reference was stale.
+- Screenshot design changes with `node frontend/tmp_shot.mjs <page.html>` (phone + desktop).
+- Opt a page into the Head First kit with `node frontend/tmp_hfapply.mjs <page.html>`
+  (`--check` dry-runs, `--revert` undoes).
 - Docs are a first-class deliverable: update `README.md` + `docs/DEVHUB-GUIDE.md` +
   `docs/ROADMAP.md` with the code, same commit.
 - During long build runs: don't commit per batch — build continuously, commit once at the

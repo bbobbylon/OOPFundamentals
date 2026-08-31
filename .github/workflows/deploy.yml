@@ -3,6 +3,8 @@ name: Deploy to GitHub Pages
 on:
   push:
     branches: [master]
+  pull_request:
+    paths: ['frontend/**']      # validate PRs too; only master actually deploys
   workflow_dispatch:
 
 permissions:
@@ -12,10 +14,50 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  # NOT cancel-in-progress. GitHub's own guidance for Pages is to let a
+  # running deployment finish — cancelling mid-publish can leave the site
+  # serving a half-updated artifact.
+  cancel-in-progress: false
 
 jobs:
+  # ── gate ────────────────────────────────────────────────────────────────
+  # Nothing validated this site before: a broken page shipped straight to
+  # Pages on every push. tmp_vcheck.mjs is zero-dependency and scans all 527
+  # pages in well under a second, so there is no reason not to gate on it.
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # tmp_assetcheck.mjs diffs against the base branch, which a shallow
+          # clone does not have.
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Validate site
+        run: node tmp_vcheck.mjs
+        working-directory: frontend
+
+      # Only meaningful on a PR, where there IS a base to compare against.
+      # On master the branch has already merged, so "before" is itself.
+      - name: Check no teaching content was silently deleted
+        if: github.event_name == 'pull_request'
+        run: node tmp_assetcheck.mjs origin/${{ github.base_ref }}
+        working-directory: frontend
+
+      - name: Check chapter rail data is loadable
+        run: node -e "const w={};new Function('window',require('fs').readFileSync('tracks-data.js','utf8'))(w);if(!Array.isArray(w.DEVHUB_TRACKS))throw new Error('DEVHUB_TRACKS missing');console.log('tracks-data.js OK:',w.DEVHUB_TRACKS.length,'tracks')"
+        working-directory: frontend
+
+  # ── deploy ──────────────────────────────────────────────────────────────
   deploy:
+    needs: validate
+    if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -32,10 +74,25 @@ jobs:
           # pages:write + id-token:write permissions above (already granted).
           enablement: true
 
-      - name: Upload frontend as Pages artifact
+      # Stage only what the public site needs. The previous version uploaded
+      # frontend/ wholesale, which published the dev server, its __pycache__,
+      # and every tmp_*.mjs build/validation script.
+      - name: Stage publishable content
+        run: |
+          mkdir -p _site
+          rsync -a --delete \
+            --exclude='devserver.py' \
+            --exclude='__pycache__/' \
+            --exclude='tmp_*.mjs' \
+            --exclude='tmp_shots/' \
+            frontend/ _site/
+          touch _site/.nojekyll
+          echo "staged $(find _site -type f | wc -l) files, $(du -sh _site | cut -f1)"
+
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          path: frontend
+          path: _site
 
       - name: Deploy to GitHub Pages
         id: deployment
