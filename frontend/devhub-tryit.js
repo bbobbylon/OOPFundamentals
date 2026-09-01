@@ -71,8 +71,20 @@
 .dlh-tryit-predict b{color:#facc15}
 .dlh-tryit-predict.done{opacity:.55}
 .dlh-tryit-predict.done b{color:#4ade80}
-.dlh-tryit-ed{display:block;width:100%;min-height:120px;resize:vertical;background:#090e1a;color:#e2e8f0;border:none;border-top:none;padding:12px 14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.7;tab-size:4;white-space:pre;overflow-x:auto;outline:none;margin:10px 14px 0;width:calc(100% - 28px);border-radius:8px;border:1px solid #1c2942}
+.dlh-tryit-edwrap{position:relative;margin:10px 14px 0}
+.dlh-tryit-ed{display:block;position:relative;z-index:2;width:100%;min-height:120px;resize:vertical;background:transparent;color:transparent;caret-color:#e2e8f0;border:1px solid #1c2942;padding:12px 14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.7;tab-size:4;white-space:pre;overflow:auto;outline:none;margin:0;border-radius:8px}
 .dlh-tryit-ed:focus{border-color:var(--accent,#22d3ee)}
+.dlh-tryit-ed::selection{background:rgba(56,189,248,.28);color:transparent}
+/* the syntax layer behind the transparent textarea — identical box metrics
+   (same font, padding, and a same-width transparent border) so glyphs align
+   pixel-perfectly; scroll is mirrored from the textarea in JS.
+   Selector is deliberately (0,3,0): devhub-hf.css styles ALL pre on kit pages
+   at up to (0,2,1) ("[data-hf] pre", ":is(cream,light)[data-hf] pre"), and any
+   restyle of this layer breaks its pixel alignment with the textarea. */
+.dlh-tryit .dlh-tryit-edwrap .dlh-tryit-hl{position:absolute;inset:0;z-index:1;margin:0;background:#090e1a;color:#e2e8f0;border:1px solid transparent;border-radius:8px;padding:12px 14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.7;tab-size:4;white-space:pre;overflow:hidden;pointer-events:none}
+/* no highlighter on this page → the textarea shows its own text again */
+.dlh-tryit-edwrap.plain .dlh-tryit-ed{background:#090e1a;color:#e2e8f0}
+.dlh-tryit-edwrap.plain .dlh-tryit-hl{display:none}
 .dlh-tryit-bar{display:flex;align-items:center;gap:8px;padding:10px 14px;flex-wrap:wrap}
 .dlh-tryit-run{padding:7px 18px;background:var(--accent,#22d3ee);color:#0f172a;border:none;border-radius:8px;cursor:pointer;font-weight:800;font-size:13px}
 .dlh-tryit-run:disabled{opacity:.5;cursor:wait}
@@ -354,7 +366,7 @@ window.addEventListener('unhandledrejection', e=>{ __send('line',{text:'Unhandle
         <span class="dlh-tryit-badge" style="background:${meta.badge};color:${meta.dark ? '#1a1a1a' : '#fff'}">${meta.label}</span>
       </div>
       ${opts.predict ? `<div class="dlh-tryit-predict"><b>🤔 Predict first:</b> ${esc(opts.predict)} <span class="after" hidden>— <b>did the output match your prediction?</b></span></div>` : ''}
-      <textarea class="dlh-tryit-ed" spellcheck="false" aria-label="code editor"></textarea>
+      <div class="dlh-tryit-edwrap"><pre class="dlh-tryit-hl" aria-hidden="true"></pre><textarea class="dlh-tryit-ed" spellcheck="false" aria-label="code editor"></textarea></div>
       <div class="dlh-tryit-bar">
         <button class="dlh-tryit-run">▶ Run</button>
         <button class="dlh-tryit-reset" title="restore the lesson's original example">↺ Reset</button>
@@ -370,10 +382,29 @@ window.addEventListener('unhandledrejection', e=>{ __send('line',{text:'Unhandle
     const out = box.querySelector('.dlh-tryit-out');
     const predictEl = box.querySelector('.dlh-tryit-predict');
 
+    /* IDE-grade coloring: the textarea's text is transparent and a synced
+       <pre> behind it carries the DevHubSyntax-colored copy (the standard
+       overlay trick — the caret and selection still belong to the textarea).
+       Pages without devhub-syntax.js fall back to the plain editor. */
+    const hlPre = box.querySelector('.dlh-tryit-hl');
+    const edwrap = box.querySelector('.dlh-tryit-edwrap');
+    const canHl = !!(global.DevHubSyntax && global.DevHubSyntax.highlight);
+    if (!canHl) edwrap.classList.add('plain');
+    function syncHl() {
+      if (!canHl) return;
+      // trailing \n so the last line keeps its height while the caret is on it
+      hlPre.innerHTML = global.DevHubSyntax.highlight(ed.value) + '\n';
+    }
+    ed.addEventListener('scroll', () => {
+      hlPre.scrollTop = ed.scrollTop;
+      hlPre.scrollLeft = ed.scrollLeft;
+    });
+
     let saved = null;
     try { saved = localStorage.getItem(lsKey); } catch (e) { /* ignore */ }
     ed.value = saved != null ? saved : original;
     autosize();
+    syncHl();
 
     function autosize() {
       const lines = ed.value.split('\n').length;
@@ -382,6 +413,7 @@ window.addEventListener('unhandledrejection', e=>{ __send('line',{text:'Unhandle
     ed.addEventListener('input', () => {
       try { localStorage.setItem(lsKey, ed.value); } catch (e) { /* ignore */ }
       autosize();
+      syncHl();
     });
     ed.addEventListener('keydown', e => {
       if (e.key !== 'Tab') return;
@@ -391,6 +423,7 @@ window.addEventListener('unhandledrejection', e=>{ __send('line',{text:'Unhandle
       ed.value = ed.value.slice(0, s) + pad + ed.value.slice(epos);
       ed.selectionStart = ed.selectionEnd = s + pad.length;
       try { localStorage.setItem(lsKey, ed.value); } catch (err) { /* ignore */ }
+      syncHl();
     });
 
     resetBtn.addEventListener('click', () => {
@@ -400,6 +433,7 @@ window.addEventListener('unhandledrejection', e=>{ __send('line',{text:'Unhandle
       out.innerHTML = '';
       statusEl.textContent = '';
       autosize();
+      syncHl();
     });
 
     /* Lines that arrive in the same burst (Python/Java dump output at once)

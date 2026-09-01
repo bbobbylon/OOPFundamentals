@@ -32,16 +32,29 @@ import { extname, join, basename, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-// playwright is installed globally, not in this repo — resolve it from there.
-const GLOBAL_MODULES = '/opt/node22/lib/node_modules';
+// playwright is not installed in this repo — resolve it from wherever this
+// machine has it: a local/global install, $PW_MODULE (an absolute path to a
+// playwright or playwright-core package), or a bare playwright-core.
+// playwright-core ships no browsers, so pair it with the system Chrome/Edge
+// (see the executable candidates at launch below).
+const PW_CANDIDATES = [
+  'playwright',
+  '/opt/node22/lib/node_modules/playwright',      // the cloud sandbox's global
+  process.env.PW_MODULE,                          // e.g. <scratch>/node_modules/playwright-core
+  'playwright-core',
+].filter(Boolean);
 let chromium;
-try {
-  ({ chromium } = require('playwright'));
-} catch {
-  ({ chromium } = require(join(GLOBAL_MODULES, 'playwright')));
+for (const cand of PW_CANDIDATES) {
+  try { ({ chromium } = require(cand)); break; } catch { /* next */ }
+}
+if (!chromium) {
+  console.error('playwright not found — npm i playwright-core somewhere and set PW_MODULE to it');
+  process.exit(1);
 }
 
-const ROOT = resolve(new URL('.', import.meta.url).pathname); // frontend/
+// fileURLToPath, not URL.pathname: the latter yields "/B:/…" on Windows.
+const { fileURLToPath } = await import('node:url');
+const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url))); // frontend/
 
 const WIDTHS = {
   phone: { width: 390, height: 844, deviceScaleFactor: 2, isMobile: true },
@@ -100,10 +113,17 @@ const port = server.address().port;
 
 await mkdir(outDir, { recursive: true });
 
+// First existing browser wins: the sandbox chromium, $CHROME_PATH, then the
+// standard Windows Chrome/Edge locations. undefined = playwright's own download.
+const EXE_CANDIDATES = [
+  '/opt/pw-browsers/chromium/chrome-linux/chrome',
+  process.env.CHROME_PATH,
+  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+].filter(Boolean);
 const browser = await chromium.launch({
-  executablePath: existsSync('/opt/pw-browsers/chromium/chrome-linux/chrome')
-    ? '/opt/pw-browsers/chromium/chrome-linux/chrome'
-    : undefined,
+  executablePath: EXE_CANDIDATES.find((p) => existsSync(p)),
 });
 
 const written = [];

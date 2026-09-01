@@ -10,6 +10,51 @@ page/track counts in `README.md` and `DEVHUB-GUIDE.md`, then delete the item fro
 
 ---
 
+## ★ ROUND 3 — Bobby's cream-mockup review (2026-09-01)
+
+Bobby's verdict on the state so far: the new animations/onclick visualizers are "much better",
+but overall "what we have now, still sucks… need to make it much better." He supplied a new
+**cream reference mockup** (a "Dev Hub / CLI Basics" lesson: meta badges, an orange framing
+question, THE IDEA/MOTIVATION kickers, 01–04 numbered benefit cards, a clickable
+[ls][-la][/var/log] command anatomy, a grouped 12-commands reference grid, exit-code chips,
+no-dumb-questions, quiz cards, and a numbered reveal-output terminal walkthrough) and said
+**"ok lets do the sweep now"** — which RESOLVES the model-switch checkpoint in item #11: the
+sweep proceeds on the current model, no further pause needed.
+
+**Decisions + what landed this session:**
+- **NO framework migration.** Bobby asked whether to port to React/Angular for centralized
+  styling. Answer: no — 513 self-contained pages would become a multi-week rewrite that breaks
+  the one-file-per-lesson property, and the site already gets the framework benefit through its
+  declarative shared engines (devhub-hf.css components, devhub-hf-check.js, devhub-chapters.js,
+  devhub-lesson.js): change a component once, every page updates. Rationale recorded in
+  `devhub-lesson.js`'s header.
+- **Cream is now the DEFAULT colorway** (Bobby's praised mockup is cream). Flip = one line in
+  `devhub-hf-theme.js` (`normalise`: only a stored 'dark' keeps espresso) + app.html defaulting
+  to `light` with a new warm-cream hub palette (`--bg:#f5ead8`, accent `#c15c30`, gold
+  `#8a6b16`, warm `--title-grad`) replacing the cool violet light theme. Dark stays one tap away.
+- **Try It editor is now IDE-colored** (Bobby's screenshot-1 complaint): transparent textarea
+  over a live DevHubSyntax-highlighted `<pre>` with identical metrics, scroll-mirrored,
+  `.plain` fallback when the highlighter is absent (`devhub-tryit.js`).
+- **Mockup component vocabulary added to the kit:** `.hf-meta`/`.hf-badge`, `.hf-question`,
+  `.hf-numcards`, `.hf-refhead`/`.hf-refgrid`, `.hf-chip-vs` (static, in devhub-hf.css) plus
+  `devhub-lesson.js` for the two interactive ones — `.hf-walk` (numbered terminal walkthrough
+  with predict-first "Reveal output" buttons) and `.hf-anatomy` (clickable command tokens).
+- **`shell-cli-basics-visualizer.html` rebuilt as the sweep's authored exemplar** in exactly the
+  mockup's structure (all pre-existing assets kept: the 4-scenario rt-* engine, CodeWalk, the
+  three-shells table). Clone THIS page's shape for beginner/tooling lessons; the Decorator page
+  remains the exemplar for pattern chapters.
+- **Decorator tryit sample now has a comment on essentially every line**, and the three
+  narrow-card snippets got per-line comments too.
+- **Backlog confirmed/added (Bobby's side note):** the IDE-mastery track is item #9 below
+  (re-confirmed 2026-09-01 — "with all their special features"); NEW item: **cloud-CLI
+  lessons** for the existing ⌨️ Shell track — `aws` CLI, `az` CLI, `gcloud` (bash/PowerShell/
+  CMD/CLI-basics already exist; the cloud CLIs are the missing pieces Bobby asked about).
+
+**The sweep itself (~496 pages to author) is now IN PROGRESS** — exemplars: shell-cli-basics
+(tooling/beginner shape) + head-first-decorator (pattern shape). Per-tranche: splice at narrow
+anchors, verify regex alternation branches, run `tmp_vcheck.mjs` + `tmp_assetcheck.mjs` vs
+master, screenshot with `tmp_shot.mjs` in BOTH themes.
+
 ## ★ ACTIVE BACKLOG — Bobby's feedback pass (2026-08-29, evening)
 
 Bobby reviewed the site and gave a big feedback batch. Items below are ordered by his emphasis.
@@ -191,7 +236,9 @@ Bobby wants a screenshot alongside each design change from here on — use this,
   `Total` row survives. The light-theme override block at `devhub.css:441` never got a
   counterpart for the receipt row color. Fix before any light-mode rollout.
 
-**★ MODEL-SWITCH CHECKPOINT — stop and ask Bobby before proceeding.**
+**★ MODEL-SWITCH CHECKPOINT — RESOLVED 2026-09-01: Bobby said "ok lets do the sweep now",
+which answers this checkpoint; the sweep proceeds on the current model (Fable). Kept below for
+the record.**
 Agreed 2026-08-31: stay on **Opus** for the architecture work (palette/token migration, the
 codemod for the 153 pages that redeclare `:root`, the CI validate job, the chapter-rail
 component, and the reference page). These are low-volume and high-blast-radius — one mistake
@@ -366,10 +413,10 @@ originally chose, shipped as promised "later". It is a pure token re-statement p
 for wells that were dark-on-dark and must become light-on-light; **no component rule and no page
 changed.** That is the payoff of building the kit token-first. Code panels stay dark in both
 themes (the terminal convention), which retires the whole syntax-contrast problem.
-`devhub-hf-theme.js` is the switch — dark stays the default (no stored choice = no attribute),
-the choice persists in `localStorage`, and it sits bottom-LEFT because app.html pins its
-`#dlh-mark-pill` bottom-right at z-index 9999. Verified: toggles, persists across navigation,
-toggles back.
+`devhub-hf-theme.js` is the switch — the choice persists in `localStorage`, and it sits
+bottom-LEFT because app.html pins its `#dlh-mark-pill` bottom-right at z-index 9999. Verified:
+toggles, persists across navigation, toggles back. *(2026-09-01 update: cream is now the
+DEFAULT — only a stored 'dark' keeps espresso; see the Round 3 section at the top.)*
 
 **FIVE GENUINELY DEAD PAGES, FOUND AND FIXED.** The browser sweep surfaced pre-existing
 JavaScript that never parsed, so those pages' interactive sections had simply never worked:

@@ -149,6 +149,19 @@ can follow the trace; edits persist per page, and ↺ Reset restores the
 original example. This is the *exploratory* twin of the graded Coding-Practice
 IDE (`devhub-codegrade.js`) — no tests, just "change it and see".
 
+**📖 The Head First design language, sitewide — cream by default.** All 513
+registered pages carry the full book-style design system (`devhub-hf.css` via
+`<html data-hf>`): a warm **cream** colorway by default (dark espresso one tap
+away — the toggle is shared with the hub, one stored preference), Playfair
+Display headlines with the kicker/statement rhythm, the chapter rail, and a
+component vocabulary from Bobby's reference mockups — meta badges, framing
+questions, numbered benefit cards, reference grids, speech bubbles, six
+mechanism diagrams, predict-first napkins, inline knowledge checks
+(`devhub-hf-check.js`), clickable command anatomy and reveal-output terminal
+walkthroughs (`devhub-lesson.js`). The Try It editor renders IDE-colored code
+while you type. Authored exemplars: the Decorator chapter and CLI Basics; the
+site-wide authored sweep is in progress (see `docs/ROADMAP.md`).
+
 **🎨 IDE-grade syntax coloring + the Head First look, sitewide.** Every static
 code block on the site is now token-colored automatically (`devhub-syntax.js`,
 231 pages — keywords, strings, types, calls, comments in the same palette an

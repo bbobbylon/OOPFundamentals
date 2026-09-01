@@ -451,10 +451,32 @@ visualizers).
   [`head-first-decorator-visualizer.html`](../frontend/head-first-decorator-visualizer.html)
   — clone its intro structure when sweeping pages. Full rollout tracked in
   ROADMAP's ACTIVE BACKLOG (items 1 & 8).
+- **Head First design language** ([`frontend/devhub-hf.css`](../frontend/devhub-hf.css)) —
+  the full book-style reskin, on ALL 513 registered pages via `<html data-hf>` + a stylesheet
+  link after `devhub.css`. Two colorways from one token block: **cream (default since
+  2026-09-01** — Bobby's reference mockup) and dark espresso, with code panels staying dark in
+  both. Component vocabulary: `.hf-deck`, `.hf-kick`/`.hf-say` (the page's spine), `.hf-card`
+  good/bad, `.hf-talk`/`.hf-bub`, six mechanism diagrams (`.hf-nest`/`.hf-slot`/`.hf-cast`/
+  `.hf-one`/`.hf-steps`/`.hf-cycle`), `.hf-napkin`, `.hf-ask`, `.hf-terms`, and the 2026-09-01
+  mockup wave: `.hf-meta`/`.hf-badge`, `.hf-question`, `.hf-numcards`, `.hf-refhead`/
+  `.hf-refgrid`, `.hf-chip-vs`. Companions:
+  [`devhub-chapters.js`](../frontend/devhub-chapters.js) (chapter rail from `tracks-data.js`),
+  [`devhub-hf-theme.js`](../frontend/devhub-hf-theme.js) (the dark⇄cream switch — SAME
+  `devhub-theme` key as app.html, one theme system),
+  [`devhub-hf-check.js`](../frontend/devhub-hf-check.js) (declarative mid-lesson knowledge
+  checks, `data-answer` + `.why[data-for]`), and
+  [`devhub-lesson.js`](../frontend/devhub-lesson.js) (`.hf-walk` numbered reveal-output
+  terminal walkthrough + `.hf-anatomy` clickable command tokens). **Authored exemplars to
+  clone:** `head-first-decorator-visualizer.html` (pattern chapters) and
+  [`shell-cli-basics-visualizer.html`](../frontend/shell-cli-basics-visualizer.html)
+  (beginner/tooling lessons, rebuilt 2026-09-01 to Bobby's cream mockup).
 
 ---
 
-*This guide is updated as new tracks and deep-dives land. **Newest pass — design-system v2 + press pulse (2026-08-30):**
+*This guide is updated as new tracks and deep-dives land. **Newest pass — cream default + the authored sweep begins (2026-09-01):**
+Bobby's round-3 review supplied a cream reference mockup and green-lit the ~500-page authored sweep. Landed: cream is now the site's default colorway (hub included — app.html's light theme was restyled from cool violet to warm cream, and `devhub-hf-theme.js` defaults to cream when nothing is stored); the Try It editor finally renders IDE-colored code (transparent textarea over a live-highlighted `<pre>` in `devhub-tryit.js`); the kit gained the mockup's components (`.hf-meta`/`.hf-question`/`.hf-numcards`/`.hf-refgrid`/`.hf-chip-vs` in `devhub-hf.css`, `.hf-walk`/`.hf-anatomy` in the new `devhub-lesson.js`); `shell-cli-basics-visualizer.html` was rebuilt as the sweep's second authored exemplar; and the Decorator page's code samples now carry a comment on essentially every line. Decision of record: NO React/Angular migration — the declarative shared-engine layer already centralizes styling/behavior without breaking the one-file-per-lesson property. New backlog: cloud-CLI lessons (aws/az/gcloud) for the Shell track; the IDE-mastery track re-confirmed.
+
+**Previous pass — design-system v2 + press pulse (2026-08-30):**
 Bobby's second review round came with a reference mockup of the Decorator page; the shared design system now matches it — editorial titles, restrained accent, editor-window code blocks, `.hf-kicker`/`.hf-receipt`/`.hf-chain` components, light-theme fixes — and the fill-ripple is retired in favor of an accent press-pulse ring plus hover micro-lift (see the `devhub-transitions.js` entry). `head-first-decorator-visualizer.html` was rebuilt as the reference page. The per-page sweep (kill inline styles that fight the system, break up text walls, pull long expressions out of prose) is ROADMAP backlog #8; a new IDE-mastery track (VS Code / IntelliJ / Spring tooling, with official-doc sources) is backlog #9.
 
 **Previous pass — feedback fixes: syntax coloring everywhere + the Head First kit (2026-08-29, evening):**

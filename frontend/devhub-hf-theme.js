@@ -12,8 +12,8 @@
  * script deliberately reuses the SAME key and the same attribute, and only
  * adds one value:
  *
- *     dark   → the espresso kit  (default; what the hub already means by dark)
- *     cream  → the cream kit
+ *     dark   → the espresso kit  (what the hub already means by dark)
+ *     cream  → the cream kit     (DEFAULT when nothing is stored)
  *     light  → treated AS cream on kit pages
  *
  * That last mapping matters. devhub.css's `light` is a cool blue-grey built
@@ -40,7 +40,9 @@
   }
 
   // 'light' is the hub's word for "not dark"; on a kit page that means cream.
-  function normalise(v) { return (v === 'cream' || v === 'light') ? 'cream' : 'dark'; }
+  // CREAM IS THE DEFAULT (Bobby's 2026-09-01 reference mockup is cream): only
+  // an explicitly stored 'dark' keeps the espresso colorway.
+  function normalise(v) { return v === 'dark' ? 'dark' : 'cream'; }
 
   function apply(v) { root.setAttribute('data-theme', normalise(v)); }
 
