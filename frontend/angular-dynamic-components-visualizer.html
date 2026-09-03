@@ -272,6 +272,194 @@
     </div>
   </div>
 
+  <p class="hf-deck">or, you didn't render a component — you adopted one</p>
+
+  <div class="hf-kick">The problem</div>
+  <p class="hf-say">Nothing in Angular will clean up a component you created by hand.</p>
+
+  <div class="hf-card bad">
+    <div class="hf-cardtitle">open() with no matching close()</div>
+    <p>Your <code>ModalService</code> holds the root <code>ViewContainerRef</code> and calls
+    <code>createComponent(Dialog)</code>. The dialog closes itself by hiding
+    its own overlay. It looks perfect. In one support session an admin opens the confirm-delete
+    dialog thirty times, and you now have <b>thirty live components</b> — thirty subscriptions to
+    the user store, thirty <code>document</code> keydown listeners, thirty views Angular
+    dutifully checks on every tick.</p>
+    <div class="hf-scatter">
+      <span>vcr.createComponent(C)</span>
+      <span>ref.destroy() — never called ⚠</span>
+      <span>30 dialogs alive, 1 visible ⚠</span>
+      <span>ngOnDestroy never runs ⚠</span>
+      <span>keydown listener × 30 ⚠</span>
+    </div>
+    <p class="hf-foot">Nothing throws. Nothing logs. The tab just gets heavier until someone
+    files "Angular is slow" and you spend a Thursday in the heap profiler.</p>
+  </div>
+
+  <div class="hf-card good">
+    <div class="hf-cardtitle">Create it, feed it, bury it</div>
+    <div class="hf-ladder">
+      <b>const ref = vcr.createComponent(C)</b>
+      <i>↓ you called the constructor, so the funeral is yours too</i>
+      <b>ref.setInput('user', u) — not ref.instance.user = u</b>
+      <i>↓ setInput goes through the input pipeline; a raw assignment sneaks past it</i>
+      <b>ref.instance.confirmed — subscribe(ok =&gt; …)</b>
+      <i>↓ and that subscription dies only when the component does</i>
+      <b>ref.destroy();</b>
+      <i>↓ ngOnDestroy runs, the DOM node goes, change detection lets go</i>
+      <b>this.ref = undefined;</b>
+    </div>
+  </div>
+
+  <div class="principle" style="text-align:left">
+    <b>createComponent() is <code>new</code> with a DOM node attached.</b> Angular garbage-collects
+    views it created for you — the ones your template declared. It will never collect one you
+    created yourself. Every <code>createComponent</code> in your codebase should have a
+    <code>destroy()</code> you can point to with your finger.
+  </div>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">ViewContainerRef</span>
+      <p>You handed me a class. I built it, dropped its host element into the DOM right after my
+      anchor, and wired it into change detection. My job is finished.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">ComponentRef</span>
+      <p>And I am the only handle to it. Let me fall out of scope in a local variable and that
+      component runs forever with nobody left who can stop it.</p>
+    </div>
+    <div class="hf-bub">
+      <span class="who">ngOnDestroy</span>
+      <p>Still waiting, by the way. I run when somebody calls <code>destroy()</code>. Not when the
+      overlay fades. Not when the route changes — your anchor is the <i>root</i> component, and the
+      root outlives every page the user will ever visit.</p>
+    </div>
+  </div>
+
+  <div class="hf-kick">The mechanism</div>
+  <p class="hf-say">The anchor picks the address. You only pick the tenant.</p>
+
+  <div class="hf-card">
+    <div class="hf-slot">
+      <div class="ctx">ViewContainerRef<small>an &lt;ng-container #anchor&gt; sitting in some component's template</small></div>
+      <div class="arrow">createComponent(C) →</div>
+      <div class="opts">
+        <span class="on">OtpStepComponent — what the server asked for</span>
+        <span>PushApprovalComponent</span>
+        <span>WebAuthnStepComponent</span>
+      </div>
+    </div>
+    <p class="hf-annot">Here is the part everyone re-learns the hard way: the component is created
+    in the <b>anchor's</b> injector and the <b>anchor's</b> DOM position — not the caller's. Your
+    <code>MfaJourneyService</code> can fire <code>createComponent</code> from anywhere in the app,
+    but the new component resolves <code>inject(...)</code> where that
+    <code>&lt;ng-container&gt;</code> lives, and its host element lands next to it, inside whatever
+    <code>overflow:hidden</code> that template happened to be wearing.</p>
+  </div>
+
+  <p><b>Now the input trap.</b> <code>ref.instance.message = 'Session expiring'</code> compiles,
+  runs, and really does change the field — which is exactly what makes it dangerous. Angular's
+  input machinery never sees it: <code>ngOnChanges</code> is not called, no
+  <code>SimpleChanges</code> arrives, and on an <code>OnPush</code> component the view is never
+  marked dirty, so the template happily renders the old string until something unrelated elsewhere
+  in the app triggers a check — which is why the bug reproduces "only sometimes". With a signal
+  <code>input()</code> it is worse than useless: <code>message</code> <em>is</em> an
+  <code>InputSignal</code> function, so assigning a string over it means the template's
+  <code>message()</code> call throws. <b><code>setInput()</code> is not nicer syntax for
+  assignment — it is the only door into the input pipeline.</b></p>
+
+  <div class="hf-check" data-answer="0">
+    <p class="q">Your <code>ModalService</code> is <code>providedIn: 'root'</code> and holds the
+    <b>root</b> component's <code>ViewContainerRef</code>. A user opens the confirm-delete dialog,
+    then clicks a nav link and routes to another page. What happens to the dialog component?</p>
+    <button type="button">It stays alive on screen — the root's view container was never destroyed, so nothing ran destroy()</button>
+    <button type="button">Angular destroys it during navigation, because the router tears down the outgoing view</button>
+    <button type="button">It leaves the DOM, and ngOnDestroy runs a bit later when the object is garbage-collected</button>
+    <p class="why" data-for="0">Right — and it is the classic modal-service leak. The router only
+    destroys what lives inside <code>&lt;router-outlet&gt;</code>; your dialog lives in the root's
+    container, deliberately, so it can cover the whole app. It sits on top of the new page, still
+    subscribed, until someone calls <code>ref.destroy()</code>. Fix it by keeping the ref in the
+    service and destroying it on <code>NavigationStart</code> (or on the next <code>open()</code>).</p>
+    <p class="why" data-for="1">That is true when the anchor belongs to a <i>routed</i> component:
+    its host view goes down and takes every view in its container with it. But a modal service
+    anchors at the root on purpose, and the root component is never destroyed while the app is
+    running.</p>
+    <p class="why" data-for="2">JavaScript's garbage collector does not call framework hooks —
+    there is no finaliser. <code>ngOnDestroy</code> runs when <em>Angular</em> destroys the view and
+    at no other time. And the object cannot even be collected while your service still holds the
+    <code>ComponentRef</code>.</p>
+  </div>
+
+  <div class="hf-kick">Where you've seen this before</div>
+  <p class="hf-say">You have been using this API since your first Angular tutorial.</p>
+
+  <div class="hf-terms">
+    <div class="hf-card hf-taped">
+      <h4>@if and @for</h4>
+      <p>Structural directives are this page, shipped. <code>@if</code> true calls
+      <code>createEmbeddedView(tpl)</code> on a container; false calls <code>clear()</code>. That is
+      why a toggled block loses its state — it was destroyed, not hidden.</p>
+      <div class="hf-scatter"><span>createEmbeddedView(tpl)</span><span>vcr.clear()</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>MatDialog</h4>
+      <p>Angular Material's <code>dialog.open(Confirm)</code> is exactly this code with a
+      backdrop, a focus trap and a CDK overlay bolted on. <code>afterClosed()</code> is the
+      <code>destroy()</code> somebody else remembered to write for you.</p>
+      <div class="hf-scatter"><span>MatDialogRef.close(x)</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>An MFA step you can't name at compile time</h4>
+      <p>Spring answers <code>/api/mfa/challenge</code> with <code>{"factor":"PUSH"}</code>. The
+      journey host maps that string to a component class and creates it. Adding TOTP later is a new
+      component plus one map entry — nobody edits a template.</p>
+      <div class="hf-scatter"><span>factor → Type&lt;any&gt;</span><span>clear() between steps</span></div>
+    </div>
+  </div>
+
+  <div class="hf-kick">Questions from the back row</div>
+  <div class="hf-ask">
+    <p class="q">Do I really have to call destroy(), if the host component gets destroyed anyway?</p>
+    <p class="a">A view container destroys everything it holds when its own host view is destroyed
+    — so a component created in a routed component's <code>ViewContainerRef</code> genuinely does go
+    down with the page. The leak lives one level up: a <code>providedIn: 'root'</code> service
+    holding the <i>root</i> container is anchored to something that never dies. Rule of thumb: if
+    the anchor can die, you are covered; if the anchor is the application itself, the funeral is
+    yours.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Why not assign straight to <code>ref.instance.x</code>? Every blog post did that.</p>
+    <p class="a">Because every blog post predates <code>setInput()</code> (Angular 14.1). Assignment
+    works for a plain component that gets swept up in the next global check — and quietly fails for
+    <code>OnPush</code> (never marked dirty), for <code>ngOnChanges</code> (never called), and for
+    signal inputs (you overwrite the <code>InputSignal</code> itself). One of those three is in
+    every codebase you will touch, so just use <code>setInput</code> and stop thinking about it.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Where does the created component actually land in the DOM?</p>
+    <p class="a">As a <b>sibling right after the anchor</b>, not inside it —
+    <code>&lt;ng-container&gt;</code> renders a comment node, and your component's host element is
+    inserted next to that comment. That is why a dialog created inside a card with
+    <code>overflow:hidden</code> gets clipped, and why one created under a parent with
+    <code>transform</code> or <code>z-index</code> refuses to sit above the rest of the app: it
+    inherited a stacking context you never chose. Anchor overlays at the root, or let the CDK
+    overlay append to <code>&lt;body&gt;</code> for you.</p>
+  </div>
+
+  <div class="hf-kick">Grab a napkin</div>
+  <p class="hf-say">Predict it before you run it.</p>
+  <div class="hf-napkin">
+    Your <code>ToastService</code> calls <code>createComponent(Toast)</code> and then
+    <code>setTimeout(() =&gt; ref.destroy(), 3000)</code>. A failing save fires the same error toast
+    <b>five times in one second</b>, and the user navigates away 200 ms later. Each
+    <code>ToastComponent</code> starts a <code>setInterval</code> in <code>ngOnInit</code> for its
+    countdown bar, and nobody clears it in <code>ngOnDestroy</code>. (1) How many
+    <code>ToastComponent</code> instances exist at t = 1 s, and how many at t = 4 s? (2) After every
+    toast has been destroyed, how many intervals are still ticking — and what does that tell you
+    about who is responsible for cleanup once you take over creation?
+  </div>
+
   <!-- ═══ EXTREME-VIZ HERO ═══ -->
   <div class="rt-hero">
     <div class="rt-ctlbar">
@@ -1059,6 +1247,7 @@ renderNodes(cur);
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
