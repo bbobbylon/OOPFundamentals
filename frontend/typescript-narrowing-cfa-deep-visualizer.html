@@ -94,6 +94,165 @@
     <div class="intro-ciam"><span class="tag">CIAM / Angular:</span> <code>getClaim()</code> throws when a claim isn't a string, and CFA narrows the return to <code>string</code>. An <code>AuthService.getUser()</code> that throws when <code>currentUser</code> is null returns a narrowed <code>UserDto</code>. But inside a <code>.subscribe(() =&gt; this.currentUser!.name)</code> callback the narrowing is gone (a closure runs later) — the fix is <code>const user = this.currentUser; if (user) { …subscribe(() =&gt; user.name) }</code>, safe because <code>const</code> can't be reassigned.</div>
   </div>
 
+
+  <p class="hf-deck">or, the compiler reads your <code>if</code> statements and believes them</p>
+
+  <div class="hf-kick">The problem</div>
+  <p class="hf-say">You checked it. The type didn't notice.</p>
+
+  <div class="hf-card bad">
+    <div class="hf-cardtitle">The check that gets forgotten</div>
+    <p>You guard against <code>null</code>, then reach for the value inside a callback — and
+    the compiler has quietly thrown your check away.</p>
+    <div class="hf-scatter">
+      <span>if (!user) return;</span>
+      <span>setTimeout(() =&gt; user.name) ⚠</span>
+      <span>'user' is possibly 'null'</span>
+      <span>so you write user! and move on ⚠</span>
+    </div>
+    <p class="hf-foot">The <code>!</code> makes the error go away and makes the bug
+    permanent: you have told the compiler to stop checking the exact thing it was right
+    about.</p>
+  </div>
+
+  <div class="hf-card good">
+    <div class="hf-cardtitle">Narrow into a value the compiler can keep</div>
+    <div class="hf-ladder">
+      <b>if (!user) return;</b>
+      <i>↓ narrowed here, and only here</i>
+      <b>const u = user;   // now a const, so it cannot change</b>
+      <i>↓ the closure captures a value that is provably not null</i>
+      <b>setTimeout(() =&gt; u.name)   // no assertion needed</b>
+    </div>
+  </div>
+
+  <div class="principle" style="text-align:left">
+    <b>Narrowing is a fact about a place in the code, not about a variable.</b> The compiler
+    holds it only as long as it can prove nothing invalidated it — and a callback runs later,
+    where that proof no longer holds.
+  </div>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">You</span>
+      <p>I checked for null two lines ago.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">Control flow analysis</span>
+      <p>In THIS flow, yes. Your arrow function runs after this function returns — I cannot
+      prove <code>user</code> is still the same thing by then, because it is a
+      <code>let</code> and anyone could reassign it.</p>
+    </div>
+    <div class="hf-bub">
+      <span class="who">A const</span>
+      <p>Which is why copying into me fixes it honestly. Nobody can reassign me, so the
+      narrowing survives into the closure.</p>
+    </div>
+  </div>
+
+  <div class="hf-kick">The mechanism</div>
+  <p class="hf-say">Every branch is a fork in what the compiler knows.</p>
+
+  <div class="hf-card">
+    <ol class="hf-steps">
+      <li class="open"><span><code>let x: string | number | null</code></span><span class="tag">3 possibilities</span></li>
+      <li><span><code>if (x === null) return;</code> — the early return removes one</span><span class="tag">string | number</span></li>
+      <li><span><code>if (typeof x === "string")</code> — inside, one remains</span><span class="tag">string</span></li>
+      <li><span>the <code>else</code> gets the complement, not "the rest of the union"</span><span class="tag">number</span></li>
+      <li><span>a function call, a reassignment, or a closure boundary RESETS it</span><span class="tag">back to 3</span></li>
+    </ol>
+    <p class="hf-annot">Step 4 is the part worth internalising: the <code>else</code> branch is
+    narrowed too, automatically, which is what makes an exhaustive <code>switch</code> work.
+    Step 5 is why the same expression can be an error one line after it was fine.</p>
+  </div>
+
+  <p><b>The most useful narrowing tool is a discriminated union, because it needs no runtime
+  cleverness at all.</b> Give every member a shared literal field —
+  <code>{ kind: "ok", data: T } | { kind: "err", error: E }</code> — and
+  <code>switch (r.kind)</code> narrows each branch exactly. Add
+  <code>const _never: never = r</code> in the default and the compiler will refuse to build
+  the day someone adds a third variant without handling it. That is exhaustiveness checking,
+  and it is three words of code.</p>
+
+  <div class="hf-check" data-answer="1">
+    <p class="q">You write <code>if (!user) return;</code> then
+    <code>btn.onclick = () =&gt; console.log(user.name)</code>, and TS says <code>user</code>
+    may be null. Best fix?</p>
+    <button type="button">Add <code>user!</code> — you already proved it above</button>
+    <button type="button">Copy into a <code>const u = user</code> after the guard and close over that</button>
+    <button type="button">Re-check inside the callback with another <code>if (!user) return</code></button>
+    <p class="why" data-for="0">This silences the compiler about the one thing it is right
+    about. <code>user</code> is a mutable binding; between the guard and the click, anything
+    could reassign it — and then <code>!</code> turns a caught error into a runtime crash.</p>
+    <p class="why" data-for="1">Right. A <code>const</code> cannot be reassigned, so the
+    narrowing the guard established is still provable inside the closure. No assertion, and
+    the compiler is doing real work rather than being told to look away.</p>
+    <p class="why" data-for="2">This works and it is honest, but it is a runtime check for a
+    situation the type system can settle at compile time — and it forces you to invent
+    something to do in a branch that should be impossible.</p>
+  </div>
+
+  <div class="hf-kick">Where you've seen this before</div>
+  <p class="hf-say">Three places narrowing quietly decides your day.</p>
+
+  <div class="hf-terms">
+    <div class="hf-card hf-taped">
+      <h4>Angular templates</h4>
+      <p><code>@if (user(); as u)</code> exists for exactly this: it binds the narrowed value
+      to a new name so the template body can use it without re-checking or asserting.</p>
+      <div class="hf-scatter"><span>@if (x; as y)</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>A CIAM auth result</h4>
+      <p><code>{ status: "ok" } | { status: "mfa" } | { status: "locked" }</code> plus a
+      <code>never</code> check means adding "password_expired" later breaks the build in every
+      place that must handle it.</p>
+      <div class="hf-scatter"><span>switch (r.status)</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>Type predicates</h4>
+      <p>When a check is too clever for the compiler, <code>function isUser(x): x is User</code>
+      lets you TEACH it — and puts the burden on you to make the body actually match the
+      claim, because nothing verifies it.</p>
+      <div class="hf-scatter"><span>x is User</span></div>
+    </div>
+  </div>
+
+  <div class="hf-kick">Questions from the back row</div>
+  <div class="hf-ask">
+    <p class="q">Why does narrowing vanish after I call a function?</p>
+    <p class="a">Because the compiler cannot see what that function did. If the narrowed thing
+    is a mutable property like <code>this.user</code>, any call might have reassigned it, so
+    the assumption is dropped. Local <code>const</code>s survive; object properties and
+    <code>let</code>s do not. Copying to a local before the call is the standard fix, and it
+    is not a workaround — it is you telling the truth about what is immutable.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Is <code>as</code> ever safe?</p>
+    <p class="a"><code>as</code> and <code>!</code> both mean "stop checking, I promise". They
+    are appropriate at a boundary you genuinely know more about than the compiler does —
+    a parsed JSON payload you have just validated, a DOM query you control. They are not
+    appropriate as a way to make an error message go away, which is where most of them come
+    from. A type predicate is the honest version of the same intent.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">What is <code>never</code> actually for?</p>
+    <p class="a">It is the empty type — no value has it — so it means "this cannot happen".
+    That makes it the perfect exhaustiveness tool: if narrowing has eliminated every case, the
+    remainder is <code>never</code>, and assigning a non-<code>never</code> to it is a compile
+    error naming the case you forgot. Seeing <code>never</code> in an error is usually good
+    news badly phrased.</p>
+  </div>
+
+  <div class="hf-kick">Grab a napkin</div>
+  <p class="hf-say">Predict it before you run it.</p>
+  <div class="hf-napkin">
+    A class has <code>private user: User | null</code>. A method does
+    <code>if (!this.user) return;</code>, calls <code>this.refresh()</code>, then reads
+    <code>this.user.name</code>. Does it compile — and would it if <code>user</code> were a
+    local <code>const</code> instead?
+  </div>
+
   <!-- ── TRY IT LIVE ── -->
   <div class="tryit" data-lang="ts"
        data-title="🧪 Try it: the checker follows your control flow line by line"
@@ -691,5 +850,6 @@ render();
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>
