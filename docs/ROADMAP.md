@@ -100,11 +100,18 @@ local branch/tag `backup/local-before-merge-20260904` / `backup-local-20260904`.
   `devhub-hf-theme.js` wholesale had silently reverted Bobby's `2260122` cream work. The
   **cream palette is restored** in `app.html` (`:root[data-theme="light"]` — pure CSS, warm
   `#f5ead8` ground, `#c15c30` accent, no JS involved, so the race below cannot touch it).
-  The **default stays dark**: cream-by-default would put every fresh visitor into the colorway
-  with the unfixed legibility race at the top of this file, and it matches Bobby's earlier
-  "keep the dark colorway, add mocha/cream later". Two one-line changes flip it once
-  `tmp_creamrace.mjs` is green on a slow machine — `|| 'dark'` in `app.html`, and
-  `normalise()` in `devhub-hf-theme.js` (local's form: `v === 'dark' ? 'dark' : 'cream'`).
+  The **default stays dark for now** — but the reason it was held back is gone. It was held
+  because cream-by-default would have put every fresh visitor into the colorway with the
+  then-unfixed legibility race; `26be77b` fixed that race (`transition: all .3s` meant the
+  repair was measuring mid-animation values). Re-verified here after merging it: the same
+  page went **2.93:1 → 4.92:1**, above WCAG AA, 6 of 6 runs, and `repairMeasuredGroundL` is
+  no longer a stale reading at all. `tmp_creamrace.mjs` exits 0.
+
+  So this is now purely **Bobby's call, not a blocker** — his `2260122` made cream default;
+  the older note in this file said "keep the dark colorway, add mocha/cream later". Two
+  one-line changes flip it: `|| 'dark'` → `|| 'light'` in `app.html`, and `normalise()` in
+  `devhub-hf-theme.js` → local's form `v === 'dark' ? 'dark' : 'cream'`. Worth widening
+  `tmp_creamrace.mjs` past its single page before flipping, since the fix is fresh.
 - **Tooling is portable again.** New `frontend/tmp_pw.mjs` is the single place that resolves
   Playwright and a browser binary; `tmp_shot` / `tmp_smoke` / `tmp_contrast` / `tmp_creamrace`
   all import it instead of carrying four copies, three of which were cloud-sandbox-only. On a
