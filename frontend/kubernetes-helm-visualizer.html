@@ -49,6 +49,178 @@
     <div class="intro-ciam"><span class="tag">CIAM Helm chart:</span> One chart bundles the Deployment, Service, Ingress (TLS + path routing), ConfigMap (per-env Ping URLs), ServiceAccount + RBAC, HPA, and a PodDisruptionBudget (<code>minAvailable: 2</code>). Dev values set <code>replicaCount: 1</code>/512Mi/DEBUG; prod sets <code>6</code>/2Gi/INFO. The ADO pipeline runs <code>helm upgrade --install ciam-auth ./helm/ciam-auth --values values-$(environment).yaml --set image.tag=$(Build.BuildId)</code> — the BuildId tag rolls out a versioned image per build, with <code>helm rollback</code> if smoke tests fail.</div>
   </div>
 
+
+  <p class="hf-deck">or, how to ship four hundred lines of YAML that nobody has ever read</p>
+
+  <div class="hf-kick">The problem</div>
+  <p class="hf-say">The cluster read your manifests. You didn't.</p>
+
+  <div class="hf-card bad">
+    <div class="hf-cardtitle">Push the button and find out in prod</div>
+    <p>The pipeline runs <code>helm upgrade --install</code> with a values file, three
+    <code>--set</code> flags and a variable from 2023, and the first human being to see the
+    actual YAML is you, in <code>kubectl describe pod</code>, at 02:40, reading a
+    <code>CrashLoopBackOff</code>.</p>
+    <div class="hf-scatter">
+      <span>--set beats the reviewed file</span>
+      <span>replicaCout: 6 &mdash; typo, no error</span>
+      <span>a stray space broke the YAML</span>
+      <span>first read = kubectl describe</span>
+    </div>
+    <p class="hf-foot">Helm will never tell you that <code>--set replicaCout=6</code> matched
+    nothing. It cheerfully adds a key no template reads, renders your default of
+    <b>2</b>, prints <code>STATUS: deployed</code>, and leaves you swearing at a flag that
+    worked perfectly.</p>
+  </div>
+
+  <div class="hf-card good">
+    <div class="hf-cardtitle">Render it, read it, then apply it</div>
+    <div class="hf-ladder">
+      <b>helm template ./chart -f prod.yaml</b>
+      <i>&darr; prints the exact YAML &mdash; contacts no cluster, changes nothing</i>
+      <b>read the diff, in the PR</b>
+      <i>&darr; now a human has seen what the API server is about to see</i>
+      <b>helm upgrade --install --atomic</b>
+    </div>
+  </div>
+
+  <div class="principle" style="text-align:left">
+    <b>Helm is a text templating engine wearing a package manager's coat.</b> Templates plus
+    merged values go in, plain Kubernetes YAML comes out, and <em>that</em> is all the cluster
+    ever sees. Nothing in etcd has heard of a chart, a value or a <code>{{ if }}</code>.
+  </div>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">values-prod.yaml</span>
+      <p>Six replicas. It's in git, it's on line 3, and two people approved it in a PR.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">--set replicaCount=3</span>
+      <p>Adorable. I'm last on the command line, so I win &mdash; and I live in a pipeline
+      variable nobody has opened since the person who wrote it left.</p>
+    </div>
+    <div class="hf-bub">
+      <span class="who">The cluster</span>
+      <p>I got <code>replicas: 3</code>. I have no idea either of you exists. All that ever
+      reached me was finished YAML.</p>
+    </div>
+  </div>
+
+  <div class="hf-kick">The mechanism</div>
+  <p class="hf-say">Render, then apply. Only one of those two verbs touches Kubernetes.</p>
+
+  <div class="hf-card">
+    <ol class="hf-steps">
+      <li><span>Helm loads <code>Chart.yaml</code>, <code>values.yaml</code> and everything under <code>templates/</code></span><span class="tag">still just files on your laptop</span></li>
+      <li class="open"><span>Values merge: chart defaults, then a parent chart's values, then each <code>-f</code> file in order, then <code>--set</code></span><span class="tag">last one wins, and says nothing</span></li>
+      <li><span>Go's <code>text/template</code> runs over every template file</span><span class="tag">text in, text out &mdash; it cannot see your cluster</span></li>
+      <li class="open"><span>The rendered text is finally parsed as YAML</span><span class="tag">a bad <code>{{-</code> becomes an error HERE</span></li>
+      <li><span>The manifests go to the API server as an ordinary apply</span><span class="tag">byte for byte, what kubectl would send</span></li>
+      <li class="open"><span>Helm stores the rendered manifests in a Secret in that namespace, one per revision &mdash; <code>sh.helm.release.v1.ciam-auth.v3</code></span><span class="tag">the release lives IN the cluster</span></li>
+      <li><span><code>helm rollback</code> re-applies the text out of an older Secret</span><span class="tag">which is why it is fast, and dumb</span></li>
+    </ol>
+    <p class="hf-annot">Steps 1 to 4 never contact Kubernetes. That is the entire point of
+    <code>helm template</code>: it stops at step 4 and prints. Everyone re-learns this the day
+    they try to debug a template by deploying it.</p>
+  </div>
+
+  <p>Step 6 is the one that surprises people. <b>Helm has no database and no memory of its
+  own</b> &mdash; a release is a gzipped blob of rendered YAML sitting in a Secret in the
+  release's namespace, which is why <code>helm history</code> is just a listing of those
+  Secrets, why <code>helm rollback</code> works from any laptop with kubeconfig, and why
+  deleting the namespace deletes your rollback history along with it. It is also why hand-editing
+  a live resource is a time bomb: Helm's stored copy still says what the chart said, and the
+  next upgrade will quietly settle the argument in the chart's favour.</p>
+
+  <div class="hf-check" data-answer="1">
+    <p class="q">During an incident you ran <code>kubectl scale --replicas=6</code> on the CIAM
+    auth Deployment. A week later a colleague runs <code>helm upgrade</code> with the same
+    values file, only to ship a new <code>image.tag</code>. What happens to your six pods?</p>
+    <button type="button">Nothing &mdash; Helm only patches the fields whose rendered value changed</button>
+    <button type="button">They drop back to 2 &mdash; the three-way merge sees your drift and the chart wins</button>
+    <button type="button">The upgrade fails &mdash; Helm refuses to run when live state has drifted</button>
+    <p class="why" data-for="0">That was Helm <b>2</b>, and it is exactly the assumption that
+    gets people. A two-way patch compared old manifest to new manifest, saw
+    <code>replicas: 2</code> in both, and left your hand-scaled 6 alone.</p>
+    <p class="why" data-for="1">Right. Helm 3 builds a <b>three-way</b> strategic merge patch:
+    old manifest, <em>live state</em>, new manifest. It notices live (6) disagrees with what it
+    last applied (2), decides that was not its doing, and puts it back. Your incident fix
+    survived a whole week and then died to an unrelated image bump &mdash; which is the argument
+    for putting the 6 in the values file the same afternoon you typed it.</p>
+    <p class="why" data-for="2">Helm does not block on drift; nothing warns you. It reconciles
+    silently, which is precisely why this one hurts.</p>
+  </div>
+
+  <div class="hf-kick">Where you've seen this before</div>
+  <p class="hf-say">You already fight this ladder in the other half of your stack.</p>
+
+  <div class="hf-terms">
+    <div class="hf-card hf-taped">
+      <h4>Spring's own precedence ladder</h4>
+      <p><code>application.yml</code>, then <code>application-prod.yml</code>, then an env var,
+      then a command-line arg. Same shape, same last-wins rule, same afternoon lost to "but
+      the yml clearly says <code>issuer-uri</code>".</p>
+      <div class="hf-scatter"><span>--spring.profiles.active</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>The secret that got into git</h4>
+      <p>A Ping client secret pasted into <code>values-dev.yaml</code> "just to unblock
+      someone" is now in every clone forever. Keep it in a real Secret store and let the chart
+      reference it &mdash; charts template <em>names</em>, not credentials.</p>
+      <div class="hf-scatter"><span>secretRef, not value</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>ArgoCD saying OutOfSync</h4>
+      <p>Same drift, different messenger. Your 3am <code>kubectl edit</code> shows up as a red
+      diff against git, and the sync puts it back &mdash; only this time something told you
+      first.</p>
+      <div class="hf-scatter"><span>git is the chart's memory</span></div>
+    </div>
+  </div>
+
+  <div class="hf-kick">Questions from the back row</div>
+  <div class="hf-ask">
+    <p class="q">If <code>helm install</code> renders the templates anyway, why bother with
+    <code>helm template</code>?</p>
+    <p class="a">Because <code>install</code> renders <em>and applies</em> in one breath, and
+    you only get to review one of those. <code>helm template</code> stops after rendering and
+    prints to stdout, so it fits in a pipe, a diff, a CI job or a PR comment &mdash; no cluster,
+    no credentials, no consequences. Its one blind spot: it does not know the live state, so
+    for "what will actually change" reach for <code>helm diff upgrade</code> or
+    <code>helm upgrade --dry-run</code>, which do talk to the API server.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Why did adding a newline break my chart? What is <code>{{-</code> for?</p>
+    <p class="a">Go templating emits every character you did not explicitly remove, and YAML
+    is a whitespace-significant language reading the result. <code>{{-</code> chomps the
+    whitespace <em>before</em> the action, including the newline; <code>-}}</code> chomps what
+    comes after. So <code>{{- if .Values.ingress.enabled }}</code> on its own line disappears
+    cleanly, while <code>{{ if ... }}</code> leaves a blank line that a <code>range</code>
+    inside a list will happily indent into nonsense. Related trap:
+    <code>{{ toYaml .Values.resources | nindent 12 }}</code> uses <b>nindent</b>, which adds a
+    newline first &mdash; use <code>indent</code> there and you weld the map onto the key
+    above it.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Do I still need Tiller, or a Helm server, to make rollback work?</p>
+    <p class="a">No &mdash; Helm 3 deleted Tiller entirely. The client is the whole product: it
+    renders locally, applies with your kubeconfig and your RBAC, and writes the result into a
+    Secret. Two consequences worth remembering: Helm can do exactly what <em>you</em> are
+    allowed to do and nothing more, and only the last <code>--history-max</code> revisions
+    (default 10) are kept, so revision 1 is not waiting for you forever.</p>
+  </div>
+
+  <div class="hf-kick">Grab a napkin</div>
+  <p class="hf-say">Predict it before you run it.</p>
+  <div class="hf-napkin">
+    <code>values.yaml</code> says <code>replicaCount: 2</code>. <code>values-prod.yaml</code>
+    says <code>replicaCount: 6</code>. The release pipeline runs
+    <code>helm upgrade ciam-auth ./chart -f values-prod.yaml --set replicaCount=3</code>.
+    Two answers: how many pods does prod end up with &mdash; and which file would a reviewer
+    have to open to find that out?
+  </div>
+
 <div class="rt-ctlbar">
   <span class="lbl">scenario:</span>
   <span class="userseg" id="khScen">
@@ -304,5 +476,6 @@ $('Run').addEventListener('click',run);renderNodes();chip();
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

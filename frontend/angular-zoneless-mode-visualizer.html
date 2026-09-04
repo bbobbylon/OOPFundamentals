@@ -173,6 +173,180 @@
   </div>
 </div>
 
+<!-- ══ HEAD FIRST BLOCK — the teaching rhythm, inserted after .intro ══ -->
+<div class="hf-block" style="max-width:1100px;margin:0 auto;padding:0 28px;">
+<p class="hf-deck">or, how Angular stopped guessing that something changed and started being told</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Angular has never known what you changed — so for a decade it re-checked everything, just in case.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Patch every async API in the browser and hope</div>
+  <p>Before your first line of code runs, <code>zone.js</code> swaps out <code>setTimeout</code>,
+  <code>addEventListener</code>, <code>Promise.then</code> and <code>fetch</code> for wrapped copies.
+  When any of them finishes, it tells Angular the one sentence it has ever been able to say:
+  <b>"something, somewhere, might have changed."</b> Angular has no idea what, so it walks the whole
+  component tree and diffs every binding.</p>
+  <div class="hf-scatter">
+    <span>a mousemove</span><span>a tooltip's timer ⚠</span>
+    <span>a poll that returned identical JSON ⚠</span><span>+18KB gzipped</span>
+  </div>
+  <p class="hf-foot">Type one character into a search box: <code>keydown</code>, <code>input</code>,
+  <code>keyup</code> — three full passes. In a 200-component admin console that is 600 binding
+  comparisons to render one letter, and 597 of them found precisely nothing.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make the app say out loud what moved</div>
+  <div class="hf-ladder">
+    <b>selectedId.set(42)</b>
+    <i>↓ because the signal knows which templates read it</i>
+    <b>those views + ancestors → dirty</b>
+    <i>↓ because one microtask coalesces every write you just did</i>
+    <b>4 views checked · 196 skipped</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left"><b>Zoneless does not make change detection faster.
+It stops Angular from running change detection when nothing changed.</b> The pass that does run is
+the same pass it always was — there are just thousands fewer of them per minute.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">zone.js</span>
+    <p>A promise resolved. I don't know whose, or whether it touched a single thing you render.
+    Check all 200 components.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Angular</span>
+    <p>That was a tooltip's timer. Before that, a mousemove. Before that, a poll that came back
+    byte-identical to the last one.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">a signal</span>
+    <p>I can name the four templates that read the value that actually moved. Check those.
+    Everybody else goes back to sleep.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Nothing renders until something says so.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li class="open"><span>something <b>notifies</b> the scheduler — a signal read by a template
+    changes, an <code>async</code> pipe emits, a template <code>(click)</code> fires, or you call
+    <code>markForCheck()</code></span><span class="tag">the trigger</span></li>
+    <li><span>that view and every ancestor up to the root get flagged dirty</span><span class="tag">dirty path</span></li>
+    <li><span>the scheduler queues <b>one</b> pass on a microtask — fifty writes in a loop still buy
+    you exactly one</span><span class="tag">coalesced</span></li>
+    <li><span><code>tick()</code> walks from the root, but only refreshes views sitting on a dirty
+    path</span><span class="tag">the pass</span></li>
+    <li><span>changed bindings are written to the DOM; the other 196 components are never even
+    read</span><span class="tag">paint</span></li>
+  </ol>
+  <p class="hf-annot">Step 1 <em>is</em> the migration. <code>this.user.name = 'Ada'</code> is a
+  perfectly legal assignment that notifies nobody: no signal, no event binding, no error, no warning.
+  Steps 2–5 never happen, so the value is right in memory and wrong on the screen.</p>
+</div>
+
+<p><b>OnPush was zoneless with training wheels, and nobody noticed.</b> An <code>OnPush</code>
+component already said "re-check me only when an input reference changed, an event fired inside my
+template, or someone called <code>markForCheck()</code>" — which is, item for item, the zoneless
+notification list. The difference is that zone.js kept starting the pass anyway, so a component you
+had wired wrong still got swept up eventually and you never learned it was broken. Delete zone.js and
+that safety net goes with it: <b>if your app is already OnPush-clean, going zoneless is a one-line
+provider swap; if it isn't, it's a bug hunt with no stack trace and no failing test.</b> Which is
+exactly why the migration order is OnPush first, signals second, and
+<code>provideZonelessChangeDetection()</code> last — not the other way round.</p>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">You've gone zoneless. In a <code>(click)</code> handler you write
+  <code>this.label = 'Saved'</code> and the screen updates — great. So you move that exact line into
+  <code>setTimeout(() =&gt; this.label = 'Saved', 1000)</code>. A second later, what do you see?</p>
+  <button type="button">The label updates — it's the identical assignment either way</button>
+  <button type="button">Nothing on screen changes, and <code>label</code> really is 'Saved'</button>
+  <button type="button">Angular throws NG0100, the expression-changed-after-checked error</button>
+  <p class="why" data-for="0">The assignment is identical; what differs is who told Angular. The click
+  worked because Angular's own template listener notified the scheduler — what you wrote inside the
+  handler was irrelevant. Inside <code>setTimeout</code> there is no listener and no zone.js patch, so
+  nobody notifies anybody.</p>
+  <p class="why" data-for="1">Right — and this is the migration bug every single team hits.
+  <code>label</code> genuinely is <code>'Saved'</code>, the DOM still shows the old text, and the
+  console is spotless. Make the write itself the notification: <code>label = signal('')</code>, then
+  <code>this.label.set('Saved')</code>.</p>
+  <p class="why" data-for="2">NG0100 is the opposite failure — a value changing <em>after</em> a pass
+  already read it. Here no pass runs at all, which is exactly why this is so nasty: a thrown error
+  would have been a kindness.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">The same "diff everything" versus "just tell me" switch, three places in your week.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Your session countdown</h4>
+    <p>A <code>setInterval</code> ticks once a second so the header can say "session expires in 4:59".
+    Under zone.js that timer re-checked your 500-row user table sixty times a minute. Zoneless, it
+    re-checks nothing — until the counter is a signal, and then it re-renders one header.</p>
+    <div class="hf-scatter"><span>60 passes/min</span><span>→ 1 header</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Hibernate's dirty checking</h4>
+    <p>At flush time, Hibernate compares every loaded entity against a snapshot to work out which
+    UPDATE to send: diff everything, because nobody told it. <code>repository.save(user)</code> is the
+    signal write — explicit, cheap, and it touches only what you named.</p>
+    <div class="hf-scatter"><span>flush → diff all</span><span>save → one row</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An identity SDK callback</h4>
+    <p>The hosted-login popup closes and the vendor's SDK calls your callback from its own code.
+    zone.js used to catch that for you. Zoneless, your <code>isAuthenticated</code> flips to true and
+    the login screen just sits there, smiling.</p>
+    <div class="hf-scatter"><span>popup returns</span><span>screen frozen ⚠</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">I went zoneless and my plain <code>this.count++</code> in a click handler still
+  updates the view. Did I imagine the whole problem?</p>
+  <p class="a">No — you got lucky, structurally. Angular registers the listener for every template
+  <code>(click)</code>, and that listener notifies the scheduler on its own. A pass runs, re-reads
+  your template, and finds the new number. Move the same line into a <code>setTimeout</code>, a
+  WebSocket <code>onmessage</code>, or a third-party promise, and there is no notifier at all. The
+  click was doing you a favour you cannot rely on.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">So are signals actually mandatory in zoneless mode?</p>
+  <p class="a">No. Anything on the notification list works: an <code>async</code> pipe emitting, a
+  template or host event listener firing, <code>ChangeDetectorRef.markForCheck()</code>,
+  <code>ComponentRef.setInput()</code>. Signals just mean you can never <em>forget</em> to notify,
+  because the write and the notification are the same keystroke. A mutated plain object is the one
+  thing on nobody's list.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Zoneless is on. Do I still bother setting <code>OnPush</code> everywhere?</p>
+  <p class="a">Yes. Zoneless removes the <em>trigger</em>, not the traversal. When some other part of
+  the app schedules a pass, <code>tick()</code> still walks from the root, and a
+  <code>Default</code>-strategy component in its path is checked every single time. OnPush is what
+  makes the walk skip you. That is also why v19+ scaffolds new components as OnPush and stops
+  pretending it's an optimisation.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you run it.</p>
+<div class="hf-napkin">
+  A zoneless dashboard: 500 user rows, plus a header showing <code>secondsLeft</code>, updated by a
+  <code>setInterval</code> that assigns to a plain number field once a second. You leave the tab open
+  for a minute. Two answers, please: how many component checks did that interval cause — and what
+  number is on the screen at the end of the minute?
+</div>
+</div>
+<!-- ══ END HEAD FIRST BLOCK ══ -->
+
+
+
 <!-- ═══ EXTREME-VIZ HERO ═══ -->
 <div class="rt-hero">
   <div class="rt-ctlbar">
@@ -1117,5 +1291,6 @@ renderNodes(cur);
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>
