@@ -10,6 +10,92 @@ page/track counts in `README.md` and `DEVHUB-GUIDE.md`, then delete the item fro
 
 ---
 
+## 🐞 KNOWN BUG — cream theme legibility race (found 2026-09-04, NOT fixed)
+
+**Reproduce:** `node frontend/tmp_creamrace.mjs` — loads one page fresh six times
+in cream and reports each run's text contrast. Typically **3-5 of 6 runs render
+text at 1.05-1.68:1** against a 0.734-luminance ground, i.e. invisible, and the
+rest at 10-13:1. Nothing about the page changes between runs. Worst known case:
+
+```
+node frontend/tmp_creamrace.mjs angular-dynamic-components-visualizer.html '.body div.desc'
+```
+
+**Cause.** `devhub-hf-theme.js`'s repair pass runs from `boot()` at
+`DOMContentLoaded`. That does not wait for linked CSS to paint, so `groundOf()`
+can measure the *inner* grounds (`.step`, `.panel` — per-page `<style>` classes
+whose colour comes from remapped tokens) while they are still the dark theme's.
+The repair then picks ink for a surface that will not exist a moment later, and
+which way it errs is decided by one threshold in `relight()`'s fallback:
+
+```js
+fixed = bgL < 0.18 ? [242,232,219] /* light ink */ : [32,30,29] /* dark ink */;
+```
+
+A stale ground reading 0.12 → light ink → invisible once cream lands. A stale
+0.21 → dark ink → correct *by accident*. That is the whole coin flip.
+
+Nothing corrects it afterwards: the ground changes because **CSS finished
+applying**, which is not a DOM mutation, so neither MutationObserver in that
+file fires. The re-derive guard
+(`if (done && Math.abs(hfcBg - bgL) <= 0.03) continue`) is sound and simply
+never gets a later pass to run in.
+
+**Two fixes attempted and reverted — do not just retry these:**
+
+1. A guaranteed extra pass on `window.load` plus a double `requestAnimationFrame`.
+   Improved it (1/6 → 4/6 readable) but stayed flaky, because `load` still is not
+   late enough for the inner grounds on every run.
+2. Gating `run()` on `document.body`'s luminance being > 0.5. Made it **worse**
+   (4/6 failing): `body` already carries cream while `.step` / `.panel` do not, so
+   the guard passes at exactly the wrong moment.
+
+**Likely real fix** (unverified): stop inferring readiness from a timer or from
+`body`, and make the repair idempotent against a *late* ground change — e.g.
+re-run once `document.styleSheets` are all loaded, or store the measured ground
+per element and re-derive on the first pass where it moves, without the 0.03
+early-out short-circuiting the very first correction. Whoever picks this up:
+`tmp_creamrace.mjs` is the failing test, so fix it until that script exits 0.
+
+**Scope.** Cream only — dark is unaffected. Seen on pages whose per-page
+`<style>` block defines its own panel grounds; `tmp_contrast.mjs` catches it only
+intermittently *for the same reason the bug exists*, which is why the repeat-load
+script had to be written.
+
+---
+
+## ⚠ Branch state (2026-09-04) — read before touching git
+
+`claude/app-redesign-scope-cicd-9xi362` is the working branch and PR #1 is open against
+`master`.
+
+- **`legacy`** and **`oldmasterbranch`** both exist at `9e4de0a` — two names for the same
+  pre-overhaul master commit, preserved so master can be overwritten safely. They are
+  byte-identical snapshots; keep whichever name you prefer and delete the other
+  (`git push origin --delete legacy`). Neither is a working branch — do not commit to them.
+- **master is an ANCESTOR of the branch** (29+ ahead, 0 behind) and GitHub computes a clean
+  merge ref. There is nothing to merge *from* master, and master is the old format — do not
+  merge it in.
+- **Never force-push this branch.** Eight amend+force-pushes earlier rewrote it under Bobby's
+  clone and his next `git pull` conflicted across ~555 files. Ordinary fast-forward commits
+  only; his one-commit requirement is satisfied by **squash-merging** the PR at the end.
+- **One commit is stranded on Bobby's machine** — `2260122`, from session
+  `session_01BoEsHjQmczbCEB7dnjGVyT` (a *bridge* session running on his computer, not the
+  cloud; unreachable since 2026-09-01). It is on no remote ref. Recovering it, in this order:
+
+  ```
+  git push origin HEAD:claude/local-session-work    # 1. SAVE first, under a NEW name
+  git fetch origin                                  # 2. then repair the clone
+  git reset --hard origin/claude/app-redesign-scope-cicd-9xi362
+  ```
+
+  Order matters — step 3 destroys the commit if step 1 has not happened. It cannot push to the
+  same branch name; that push would be rejected.
+- **Open question: which colorway is default.** Bobby's local session made cream default; this
+  branch keeps dark, per his earlier "keep the dark colorway, add mocha/cream later".
+
+---
+
 ## ★ ACTIVE BACKLOG — Bobby's feedback pass (2026-08-29, evening)
 
 Bobby reviewed the site and gave a big feedback batch. Items below are ordered by his emphasis.
@@ -18,22 +104,58 @@ repeat them): every code snippet explained line-by-line in depth (never a one-li
 syntax coloring on ALL code, the Head First brain-friendly aesthetic on ALL subjects (not just
 the Java patterns pages), colored/manipulated text as a deliberate memory device.
 
-### 1. Head First aesthetic — FULL sitewide rollout (kit landed, sweep pending)
-The visual kit shipped this session (see Done section below): marker highlights, sticky notes
-(`.hf-note`), annotation arrows (`.hf-arrow`), Brain Power boxes (`.hf-brain`), no-dumb-questions
-Q&As (`.hf-qa`), big-type mnemonics (`.hf-big`), exaggerated contrast panels (`.hf-vs`), colored
-prose spans (`.hf-g/r/a/v/c`, `.hf-mark`). **3 pilot pages** done: abstraction, angular-binding,
-sorting. **Remaining: apply to all ~500 lesson pages**, tranche by track. Per-page bar: ≥1
-`.hf-big` mnemonic, ≥1 sticky-note memory hook, ≥1 Brain Power predict-first box, arrows pointing
-into code, `.hf-vs` where a before/after contrast exists. Also add images/diagrams where a
-picture beats prose (the book uses pictures constantly — we lean on the animated visualizers,
-but static annotated diagrams between sections are still missing on most pages).
+### 1. Head First rhythm — sitewide rollout (design landed, ~363 pages still to author)
+The design language shipped and is opted into on **513 of 528 pages** (`<html data-hf>`), and
+**102 pages are authored to the full nine-point rhythm**: deck line, problem/fix cards, a
+"one thing to remember" principle callout, a three-way dialogue, ONE shape-matched mechanism
+diagram, a knowledge check, "where you've seen this before", back-row Q&A, napkin predict-note.
+
+Current state (`node frontend/tmp_hfaudit.mjs`):
+
+| band | pages |
+|---|---|
+| under 40 (thin) | **0** — was 69 |
+| 40–60 (design, not yet the rhythm) | ~363 |
+| 60–75 | ~5 |
+| 75+ (at the bar) | ~97 |
+
+**Remaining: the ~363 in the 40–60 band.** Bobby gated this sweep on the model-switch
+checkpoint — do not start it unilaterally. Diagram choice is by SHAPE, never at random:
+`.hf-nest` contains, `.hf-slot` plugs, `.hf-cast` fans out, `.hf-one` funnels, `.hf-steps`
+gates, `.hf-cycle` returns.
+
+Still genuinely missing sitewide: **static annotated diagrams between sections**. The animated
+visualizers carry most of the visual load, and `visual` is the weakest dimension after
+`explain`.
 
 ### 2. Line-by-line code annotation audit (Bobby has asked "many many many times")
 Every static code snippet must teach each line — via the Code Walkthrough widget, an adjacent
 per-line annotation column, or inline `.hf-arrow` notes. A one-sentence intro above a 20-line
-block fails the bar. Sweep all 231 pages with `<pre>` blocks; convert or annotate. The
-bottom-of-page codewalks are "pretty good" per Bobby but should get MORE depth too.
+block fails the bar. The bottom-of-page codewalks are "pretty good" per Bobby but should get
+MORE depth too.
+
+**Scoped properly (2026-09-04).** "Sweep all 231 pages with `<pre>` blocks" was the wrong
+target, and so is `tmp_hfaudit.mjs`'s `explain` score — it divides by `<pre>` count, so a page
+of one-line snippets is punished as though they were unexplained programs (`streams` scores
+25/100 with exactly ONE substantial block; `typescript-fundamentals` scores worst on the site
+with 7 bare blocks out of 32). Measure instead: blocks of **6+ lines** with no CodeWalk or
+annotation nearby AND under 25% comment density. Verified against the rendered DOM, not just
+static markup.
+
+Real worklist across the 97 at-bar pages:
+
+- 278 snippets under 6 lines — already carried by the prose above them, leave alone
+- 781 substantial blocks
+- **~353 genuinely bare, across ~72 pages**
+
+Worst first (bare / substantial): `angular-standalone-migration` 18/26 ·
+`angular-material-cdk` 15/19 · `angular-content-projection` 13/21 · `config-pom-xml` 13/17 ·
+`config-environment-runtime` 13/16 · `angular-custom-directives` 13/15. None of these led the
+score-ranked list.
+
+A worked sample of the treatment is on `angular-standalone-migration-visualizer.html` (commit
+`b823165`): inline comments carrying the per-line meaning, plus an `.hf-arrow up` note tying
+the block to the idea underneath it. Awaiting Bobby's go-ahead on the volume.
 
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
@@ -111,6 +233,737 @@ Page plan per IDE: guided tour → navigate-anywhere shortcuts → refactoring m
 mastery (breakpoint types, evaluate, conditional/logging breakpoints, hot swap) → run
 configurations → git integration → Spring-specific tooling. Same visual bar as everything
 else: animated walkthroughs of the IDE surfaces, not screenshots-with-captions.
+
+### 10. CI/CD — validation gate ✅ LANDED (2026-08-31)
+
+`frontend/tmp_vcheck.mjs` exists for real now (CLAUDE.md had pointed every session at it, and
+at a `tmp_audit.mjs`, for months — neither existed, so the documented validation step silently
+passed). Zero dependencies, scans all 527 pages in ~0.4s, and
+`.github/workflows/deploy.yml` gates the Pages deploy on it.
+
+**Checks:** UTF-8 + no stray control bytes · registry integrity both directions (every
+`file:` resolves, every page is registered or allowlisted) · required shared scripts
+(`<pre>` implies devhub-syntax.js; rt-* markup implies devhub.css) · internal links ·
+duplicate registrations.
+
+**Getting it green surfaced four real defects, all fixed:**
+1. `java-variables-types-visualizer.html` carried a literal NUL byte — a raw `0x00` sitting in
+   a Java `char` sample instead of the `\u0000` escape. It is why `file` reported that page as
+   `data`. Replaced with the escape text.
+2. `spring-boot-resilience4j-visualizer.html:912` ended in `</di` instead of `</div>`, so the
+   `.two-col` grid never closed and the following comment was swallowed as attribute soup.
+3. `fullstack-request-roundtrip-deep-visualizer.html` was registered in TWO sections, which
+   makes the chapter rail's "next" ambiguous and double-lists it in the hub. Kept in
+   Full-Stack Stacks (its capstone, a 3-page track); dropped the Angular copy.
+4. `tmp_tryit_test.html` was an unreferenced test fixture being published. Deleted.
+   (`index-legacy.html` looked like an orphan but is linked from `index.html` — allowlisted.)
+
+**Link-check design note:** the first version produced false positives on pages that TEACH
+HTML — `&lt;link href="styles.css"&gt;` in an Angular index.html walkthrough is content, not a
+link. The checker now strips HTML-escaped markup, and hard-fails only on `.html` targets and
+the shared `devhub-*` assets; anything else is a warning. A gate with false positives is a
+gate people learn to ignore.
+
+**deploy.yml also fixed two things unrelated to the gate:** `cancel-in-progress` is now
+`false` (GitHub's own guidance — cancelling mid-publish can leave the site half-updated), and
+the artifact is rsync-staged into `_site/` so the public site no longer serves `devserver.py`,
+`__pycache__/`, or the `tmp_*.mjs` scripts. It previously uploaded `frontend/` wholesale.
+
+**Size, settled:** the 24MB is a repo number, not a user number — the average page gzips to
+about 13KB, the 1GB Pages ceiling is ~44x away, and the 10-builds/hour limit does not apply to
+custom Actions workflows. Do NOT minify: inline `<style>` is 0.5% after gzip, and the 11.3MB
+of inline `<script>` is bespoke per-page animation code that is not safely minifiable in bulk.
+
+### 10b. Sitewide viewport fix ✅ LANDED (2026-08-31)
+**410 of 527 pages had no `<meta name="viewport">`**, so phones laid them out at 980px and
+scaled down — on a site Bobby reads primarily on a phone. All 527 now have it.
+
+The tag alone is NOT the fix, and the estimate that called it "a one-line sed" was wrong:
+making the phone layout real EXPOSES overflow the 980px scaling was hiding (a fixed-px h1
+running off the edge, a wide `<pre>` pushing the whole document sideways). Verified by
+before/after screenshot. A mobile safety net now lives at the end of `devhub.css` — clamped
+heading sizes, `overflow-wrap`, single-column grids under 680px, and `pre`/`table` scrolling
+themselves rather than the page. Scoped to a phone media query so desktop is untouched.
+
+### 11. Design-review screenshots + the model-switch checkpoint (NEW, 2026-08-31)
+
+**`frontend/tmp_shot.mjs`** — shoots any page in Chromium at phone (390x844) and desktop
+(1440x900), because Bobby reviews on a phone and builds on a desktop. Serves `frontend/` over
+http rather than `file://` so the shared `devhub-*.js` engines and any `fetch()` actually run,
+waits for network-idle + a settle delay (pages pace scenario walks at ~800ms/step), and reports
+console errors per shot. `--full` for full-page, `--theme=light`, `--out=DIR`, `--settle=MS`,
+and `--inject=palette.css` to **preview a token swap sitewide without editing a single page**.
+Bobby wants a screenshot alongside each design change from here on — use this, don't hand-wave.
+
+**What the first run already proved (2026-08-31), shooting `head-first-decorator-visualizer.html`:**
+- The existing dark page is **already structurally identical** to Bobby's new Claude Design
+  prototype: same `HEAD FIRST · DESIGN PATTERNS · CH. 3` kicker, same title, same intro prose,
+  the same receipt with the same numbers ($0.89 / $0.99 / $1.09 / $1.29), the same
+  `new Mocha(new Whip(new Soy(new HouseBlend())))` in `data-file="Order.java"` editor chrome,
+  the same open/closed callout, the same "three places you already use it" section. **The
+  prototype is a warm light recolor of a page that already ships** — the delta is palette hues
+  plus a display font, not structure and not content.
+- **A naive token swap does NOT just work.** Injecting the prototype's warm palette
+  (`--bg:#f5ead8`, `--accent:#c67139`) leaves the h1, body prose, and section headings
+  illegible near-white, because they use hardcoded hex rather than tokens. `devhub.css`
+  carries **200 hex literals vs 153 `var()` references** — token coverage is only ~43%, and
+  that gap is the actual blocker for any one-file reskin.
+- **Bug found:** under the existing `data-theme="light"`, the `.hf-receipt` rows (House Blend /
+  + Soy / + Whip / + Mocha) render washed-out grey and are effectively unreadable; only the
+  `Total` row survives. The light-theme override block at `devhub.css:441` never got a
+  counterpart for the receipt row color. Fix before any light-mode rollout.
+
+**★ MODEL-SWITCH CHECKPOINT — stop and ask Bobby before proceeding.**
+Agreed 2026-08-31: stay on **Opus** for the architecture work (palette/token migration, the
+codemod for the 153 pages that redeclare `:root`, the CI validate job, the chapter-rail
+component, and the reference page). These are low-volume and high-blast-radius — one mistake
+propagates to 528 pages.
+
+**When backlog item #1 (the ~500-page Head First content sweep) is ready to start, STOP and
+prompt Bobby to switch models** — that is the only genuinely high-volume phase, and by then an
+Opus-authored exemplar page plus the written per-page bar will exist, which is the setup Sonnet
+handles well. Do not silently continue on Opus into the sweep, and do not switch on your own.
+Suggested at that checkpoint: run one 10-page tranche on Sonnet and one on Opus against the
+same exemplar and diff the quality before committing to the cheaper tier for ~500 pages.
+
+### 12. Head First design language — `devhub-hf.css` LANDED, sweep pending (2026-08-31)
+
+Bobby's verdict on the first attempt was blunt and correct: *"I don't like how it looks at all…
+The problem you aren't seeing is that it's not just the color I care about."* A palette swap
+(`devhub-warm.css`, kept for the cream variant) is NOT the ask. The ask is the whole design
+language — roundness, playful type, and components that make a page feel like the book.
+
+**Colorway decision (revised):** dark **mocha/espresso** now (`--hf-bg:#17120f`), cream later.
+Bobby's screenshots are the dark variant; cream is a token re-statement on top, not a rebuild.
+
+**`frontend/devhub-hf.css`** — opt in with `<html data-hf>`, load after devhub.css. Contains:
+- **Type:** Playfair Display (display serif) + Dancing Script (the hand, for decks, "you are
+  here", "psst —", code annotations), self-hosted latin-subset variable woff2, one file each.
+- **Chapter rail** — dots + dashed connector + `aria-current`, with the giant ghosted chapter
+  numeral behind it. Renders from a plain `<ol>`, so any chapter count works.
+- **Kicker + statement rhythm** — `.hf-kick` ("— THE PROBLEM") followed by `.hf-say`, the big
+  serif line. This pairing is the page's spine and should repeat per section.
+- **`.hf-card.bad` / `.hf-card.good`** — the reddish-brown problem card and olive fix card.
+- **`.hf-scatter`** — mono class chips at deliberate jaunty angles (the class explosion should
+  *look* out of control; that's the teaching point).
+- **`.hf-taped`** — the gold caution-tape tab with the orange bead, pure CSS.
+- **`.hf-talk` / `.hf-bub`** — objects talking to each other, speaker name in the hand.
+- **`.hf-nest`** — nested dotted wrapper rings around a tan core, nested by DOM depth.
+- **`.hf-napkin`** — the predict-first note with a torn dashed edge and a "psst —" in script.
+- **`.hf-ask`** — Q&A with serif italic Q/A marks on a blue rail.
+- **`.hf-terms`**, **`.hf-ladder`**, **`.hf-annot`**, **`.hf-reveal`**.
+
+Selectors are `[data-hf] …`, which outranks a page's own inline `:root`/element rules on
+**specificity** — so the kit reskins pages without editing their inline CSS. Per-page cost stays
+two lines. Note the trap this already caused: an unscoped `.hf-rail span` rule beat
+`.hf-chapnum` on specificity and silently shrank the numeral to 10.5px. Scope kit-internal
+rules to the element that owns them.
+
+`head-first-decorator-visualizer.html` is the reference implementation. Its presentation layer
+was rebuilt into the kicker/statement rhythm; **every deep section was kept** — the 4-scene
+animated visualizer, DevHubCodeWalk, the CheerpJ Java runner, Acts 1-3, the definition and
+real-world sections all still render, verified by screenshot with zero console errors.
+
+**Still to do:** the order-builder interactive from the prototype (34 lines of vanilla JS, no
+framework); wire the rail to `tracks-data.js` instead of the hand-written `<ol>`; the cream
+token block; then the sweep, track by track. Per Bobby: *"each page/concept doesn't have to have
+exactly everything in the screenshots but it should be close depending on what concept is being
+taught"* — so the kit is a palette to draw from, not a fixed template.
+
+**TRANCHE 1 LANDED (2026-08-31): all 12 Head First pattern pages.**
+`tmp_hfapply.mjs` makes the opt-in mechanical and idempotent (`--check` dry-runs, `--revert`
+undoes): adds `data-hf`, links `devhub-hf.css` after devhub.css, wires the rail, and adds a
+viewport meta if missing. Per-page cost really is those four edits — no content was touched.
+
+`devhub-chapters.js` renders the rail from `tracks-data.js`, so no page hand-writes its chapter
+list. The Decorator page's hand-written rail had been **wrong** — it showed 5 chapters for a
+section that has 14. The rail windows to current ±2 with an "N of M" count, and skips sections
+with fewer than 2 pages. A slim generated `chapter-index.js` was tried and dropped: it saved
+only 2.8KB gzipped over `tracks-data.js` and added a file that could silently drift.
+
+**Three bugs the tranche exposed, all fixed in the shared kit rather than per page:**
+1. The kit originally defined only `--hf-*` tokens, so `.intro`/`.panel`/`.rt-*` stayed slate
+   blue on a mocha page — devhub.css builds them from `var(--panel)`/`var(--border)`. The token
+   block now **remaps DevHub's existing token names** onto the mocha ramp, which repaints every
+   token-driven component for free. This is the single change that makes the rollout cheap.
+2. Rail labels collided when one ellipsised; the current label then overflowed its cell
+   entirely ("Compound+MVC", "Iterator+Composite" have no space to wrap at). Fixed with
+   horizontal padding plus `overflow-wrap:anywhere` on the current label.
+3. All 12 pages carried a hand-rolled `<div style="…">🦆 HEAD FIRST · …</div>` badge that now
+   duplicates the rail's kicker. Removed (backups in the session scratchpad). Note these were
+   **inline style attributes**, which beat any stylesheet — the only fix is deleting them, which
+   is exactly the 419-page inline-style problem the scoping pass flagged.
+
+**What tranche 1 did NOT do:** the kicker/statement rhythm, problem-and-fix cards, speech
+bubbles, nested diagrams and napkins are per-concept AUTHORING and exist only on Decorator so
+far. Tranche 1 landed the free part — colorway, type, roundness, rail, mobile. That split is
+the honest shape of the whole rollout.
+
+**TRANCHE 2 + AUTHORING (2026-08-31, later).** OOP Core (encapsulation, inheritance,
+polymorphism, abstraction, SOLID) took the kit — chosen deliberately to prove it works outside
+the Head First family before any bigger sweep. It did, with no new breakage class.
+
+**Decorator, Strategy and Observer are now fully AUTHORED** (kicker/statement rhythm, problem
+and fix cards, speech bubbles, mechanism diagram, three real-world instances, key terms,
+back-row Q&A, predict-first napkin). The other 14 kit pages have the colorway, type, roundness,
+rail and mobile fixes but not yet the authored rhythm — that split is the honest state.
+
+**Each pattern needed its OWN mechanism diagram, and that is the real lesson for the sweep:**
+Decorator NESTS (`.hf-nest`, dotted rings round a core), Strategy COMPOSES (`.hf-slot`, a
+context with a pluggable slot and the active implementation ringed), Observer BROADCASTS
+(`.hf-cast`, one subject fanning out to wrapping observers). Reusing one diagram for all three
+would have taught the wrong shape. Budget a new diagram component per *concept family*, not per
+page — three so far, and they will cover most of the pattern track.
+
+Also landed: the Decorator order-builder (~40 lines of vanilla JS, driven end-to-end in
+Chromium — totals track the page's canonical numbers, undo/reset/cap all behave).
+
+**QUICK KNOWLEDGE CHECKS + STATS DASHBOARD (2026-08-31, later still).**
+
+`devhub-hf-check.js` + `.hf-check` — inline active recall placed MIDWAY through a lesson, per
+Bobby's reference. One question about what was just explained, one tap, and the reasoning
+revealed for the chosen option AND the correct one, because *why the tempting wrong answer is
+wrong* is where the learning is. No score, no gating, retryable. Declarative markup
+(`data-answer` = index, `.why[data-for]` per option) so a page adds one with no JS of its own.
+Six chapters have one. Driven in Chromium: wrong pick marks both and shows two explanations,
+right pick shows one, `role="status"` announces the verdict.
+
+`stats.html` — the personal dashboard, built from Bobby's screenshot of a design he liked.
+**Every number is real**, computed from this browser's own localStorage: `dlh_progress_v1`
+(concepts done, per-track completion), `dlh_streak_v1` (streak), `dlh-quiz:<bank>` (quiz
+accuracy across stored attempts), `dlh_recent_v1` (pick up where you left off). Handles the
+empty state deliberately — a new learner sees honest zeros and what to do, not a blank grid.
+
+**One tile from the reference is deliberately absent: "minutes studied".** Nothing in DevHub
+records time on page, so that chart would be invented numbers. If Bobby wants it, the work is
+a small session-timer writing dated totals — say so rather than shipping a fake chart.
+
+Chart colours were **validated, not eyeballed** (the `dataviz` skill's checker). The first
+palette failed on CVD separation and chroma; the shipped pair (`#ef7a45` / `#a8d17a`, with a
+neutral for "not started") passes at ΔE 10.2 deutan. The bar chart is single-hue on purpose —
+one series measuring magnitude needs no categorical palette and no legend — and the donut is a
+status palette where every slice carries a swatch, a label AND a count, so identity is never
+colour alone.
+
+Note the dashboard is in the DARK colorway to match the rest of the site; Bobby's reference
+screenshot is the cream variant, which arrives with the theme flip.
+
+**ALL 12 PATTERN CHAPTERS NOW AUTHORED (2026-08-31, final pass).** Every one has the deck,
+the kicker/statement rhythm, problem-and-fix cards, object dialogue, a mechanism diagram, three
+real-world instances, key terms, back-row Q&A, a predict-first napkin, and a mid-page quick
+knowledge check. Verified structurally (a per-page audit of deck/kick/check/diagram/tryit) and
+by screenshot at 390px with zero console errors.
+
+**Six mechanism-diagram components now exist, one per SHAPE — this is the reusable result:**
+`.hf-nest` (Decorator, Composite — nesting) · `.hf-slot` (Strategy, Factory, Proxy, Adapter,
+MVC's controller leg — a context with a pluggable slot) · `.hf-cast` (Observer, Facade, MVC's
+model leg — one-to-many broadcast) · `.hf-one` (Singleton — many callers converging, which also
+makes the thread race visible) · `.hf-steps` (Template Method — a skeleton with locked and open
+steps) · `.hf-cycle` (State — transitions as rows, because a node-and-edge graph is unreadable
+on a phone). Later tracks should reuse these before inventing more.
+
+**A REGRESSION I CAUSED AND FIXED — worth remembering for the sweep.** The first Decorator
+splice replaced everything from `<div class="container">` down to the visualizer comment, which
+silently deleted the `.tryit` widget (the real CheerpJ Java runner) sitting inside that range.
+I had reported that nothing was removed; that was wrong. Found by a structural audit, recovered
+from `master`, and re-placed after the napkin where it teaches best. Every other chapter spliced
+at `<div class="intro">`, which is safely above the deep content.
+
+**The lesson: splice at a narrow anchor, and audit teaching assets against `master` afterwards
+rather than trusting the intent of the edit.** A master-vs-working comparison of tryit /
+CodeWalk / rt-stage / quiz counts across all 12 now shows parity, and that comparison should be
+run after every authoring tranche.
+
+**SITE-WIDE ROLLOUT + CREAM VARIANT + 5 DEAD PAGES REVIVED (2026-08-31, final).**
+
+**The kit is now on all 513 registered pages.** Applied with `tmp_hfapply.mjs` (4 mechanical
+edits each, no content touched), then every kit page was loaded in Chromium at 390px and checked
+for console errors, horizontal overflow, a present theme toggle, and the expected background.
+**Zero overflow, zero missing toggles, zero wrong backgrounds.** 13 pages reported console
+errors — all 13 reproduce IDENTICALLY on `master`, verified by serving the master copies from a
+scratch directory, so the rollout introduced none of them.
+
+**CREAM VARIANT LANDED** (`<html data-hf data-theme="cream">`) — the light colorway Bobby
+originally chose, shipped as promised "later". It is a pure token re-statement plus ~20 rules
+for wells that were dark-on-dark and must become light-on-light; **no component rule and no page
+changed.** That is the payoff of building the kit token-first. Code panels stay dark in both
+themes (the terminal convention), which retires the whole syntax-contrast problem.
+`devhub-hf-theme.js` is the switch — dark stays the default (no stored choice = no attribute),
+the choice persists in `localStorage`, and it sits bottom-LEFT because app.html pins its
+`#dlh-mark-pill` bottom-right at z-index 9999. Verified: toggles, persists across navigation,
+toggles back.
+
+**FIVE GENUINELY DEAD PAGES, FOUND AND FIXED.** The browser sweep surfaced pre-existing
+JavaScript that never parsed, so those pages' interactive sections had simply never worked:
+- `go-http-server` and `go-interfaces` closed a step object with `)` instead of `}`
+- `go-error-handling` had one brace too many, closing the object before its `ins:` key
+- `github-copilot` had an unescaped apostrophe in a single-quoted string (`Copilot's`)
+- `angular-ssr-hydration` contained a literal `</script>` inside a JS string, which ends the
+  block right there and kills everything after it
+All five now load clean with working interactive nodes.
+
+**vcheck gained check #6: every inline `<script>` must parse.** None of those five bugs is
+visible by eye, none breaks the HTML, and none was catchable by any static check the project
+had. This one is ~20 lines and would have caught all five. **The general lesson: a page that
+renders is not a page that works** — the gate needs to execute, or at least parse, what it ships.
+
+**OOP CORE AUTHORED + AN ASSET-LOSS GUARD (2026-08-31, continued).**
+
+**`frontend/tmp_assetcheck.mjs`** — the codified version of the Decorator regression. It
+compares every page against a git ref and FAILS if a page has fewer `.tryit` widgets,
+CodeWalks, `rt-stage` engines, quizzes, flashcards or notebook hooks than it used to. Additions
+are always fine. Proven by simulating the exact bug (deleting Strategy's tryit): it catches it
+and exits 1. Wired into `deploy.yml`'s validate job on pull requests, where a base branch exists
+to compare against — with `fetch-depth: 0`, because a shallow clone has no base to diff.
+
+**vcheck cannot do this job** — it has no notion of "before". That is the general point: a
+validator that only sees the current state cannot catch deletion, and deletion is exactly what
+a careless bulk edit does.
+
+**All five OOP Core pages authored** (encapsulation, inheritance, polymorphism, abstraction,
+SOLID) — the foundation of the zero-to-hero path. **They needed no new diagram components**,
+which is the first real evidence the six shapes generalise: encapsulation reuses `.hf-nest`
+(the access-level wall IS nesting), polymorphism and abstraction reuse `.hf-slot`, inheritance
+uses `.hf-ladder` plus `.hf-slot`, and SOLID uses `.hf-steps` with `.hf-terms`.
+
+**A bug worth recording, because it will recur.** The anchor regex
+`<(?:div class="intro"|h2)\b` never matched the intro card — `\b` after `intro"` requires a
+word character, and `"` and `>` are both non-word — so it silently fell through to the first
+`<h2>` and three pages got their authored block placed AFTER the intro card instead of before
+it. Nothing errored; only reading the rendered order caught it. **When an anchor regex has an
+alternation, verify which branch actually matched** rather than trusting that it matched at all.
+
+Authored pages now: 12 pattern chapters + 5 OOP Core = **17**. The other ~496 carry the kit
+(colorway, type, roundness, rail, mobile, theme switch) but not the authored rhythm.
+
+**THEME INTEGRATION — TWO SYSTEMS MERGED INTO ONE (2026-08-31).**
+
+Found while checking the kit against the hub rather than in isolation: **app.html already owned
+a theme**, and the kit's switch was about to fight it. app.html stores `devhub-theme`
+('dark'|'light'), applies it before first paint, AND pushes it into the lesson **iframe** it
+renders pages in (`toggleTheme()` writes `viewer.contentDocument`'s `data-theme`).
+
+Three concrete bugs that would have produced:
+1. The kit's switch used its own key and REMOVED `data-theme` when unset — so opening any
+   lesson silently cleared the hub's stored light preference.
+2. Viewing a lesson through the hub showed TWO toggles, disagreeing.
+3. The hub pushing `light` into a kit page hit devhub.css's cool blue-grey theme, which was
+   built for the old design and reads as a different site under the Head First kit.
+
+Fixed by making them one system rather than two:
+- The kit reuses the **same key and attribute**, adding only the value `cream`.
+- `light` is treated AS cream on kit pages (`[data-theme="light"][data-hf]` matches every cream
+  rule), so the hub's existing button keeps working and stays coherent.
+- A `MutationObserver` re-normalises when the hub writes `light` directly into the frame.
+- The floating switch **hides itself inside an iframe** — there the hub's header control is in
+  charge.
+- app.html renders a stored `cream` as its own `light` (it has no cream palette), and its
+  toggle now reads the APPLIED value rather than rewriting the user's stored word.
+
+Verified end to end: choose cream on a lesson → stored `cream` → the hub opens light → the hub's
+toggle returns both to dark. In-frame: no second toggle, and `light` pushed in renders cream.
+
+**The lesson: test a shared component against the thing it will live next to, not on its own.**
+Every one of these bugs is invisible when the kit page is opened directly, which is exactly how
+it had been verified 513 times.
+
+**THE LAST TWO BROKEN PAGES + A BROWSER SMOKE TEST (2026-08-31).**
+
+The two remaining runtime errors were real bugs, not sandbox noise, and both killed their
+page's interactive engine:
+- `react-fundamentals` had `{type:Button, …}` in its scene data — a BARE identifier where a
+  string was meant. It describes a React element's type; there is no `Button` component on the
+  page. Now `type:'Button'`.
+- `spring-boot-async-scheduling` had `"${app.cleanup.cron}"` inside a **JS template literal**,
+  so JavaScript tried to evaluate the Spring property placeholder. Escaped to `\${`. Checked
+  first that every other `${…}` on that page is genuine interpolation — only this one was a
+  Spring placeholder.
+
+That makes **all seven pre-existing broken pages fixed** (five parse errors, two runtime).
+
+**`frontend/tmp_smoke.mjs`** — loads every page in Chromium and reports uncaught exceptions,
+console errors, horizontal overflow at phone width, and pages that rendered nothing. ~95s for
+528 pages. It reports NETWORK-only failures separately, because a sandbox with no outbound
+access fails every CDN load and folding those in with real bugs is how a report becomes noise
+people ignore.
+
+**Deliberately NOT wired into deploy.yml** — a browser download is a heavy dependency for a
+gate that runs on every push. vcheck (static, ~0.4s, zero deps) gates CI; this is the
+before-merge / after-bulk-edit check.
+
+**Why both are needed:** vcheck proved every inline script PARSES. Neither of the two bugs
+above is a parse error — one is an undefined identifier, the other is valid interpolation of a
+thing that does not exist. Static analysis cannot see either. **Parsing is not running.**
+
+Current smoke state: 528/528 clean, 6 network-only (all pre-existing sandbox isolation).
+
+**WEB FUNDAMENTALS AUTHORED (5 of 7) + TWO INJECTION BUGS MY OWN GATES CAUGHT (2026-08-31).**
+
+Authored: JS fundamentals, CSS fundamentals, DOM & events, async JS, browser rendering — the
+zero-starting-point track. Again **no new diagram components**: async reuses `.hf-cast`
+(one stack, two queues), DOM events and CSS box model reuse `.hf-nest` (capture/bubble and the
+four rings both ARE nesting), browser rendering reuses `.hf-steps`.
+
+**Two bugs in my own injection logic, both caught by the checks added earlier this session:**
+
+1. **vcheck (inline-JS parse) caught it immediately.** The script tag was injected before the
+   FIRST `</body>` — which on `web-browser-rendering` is inside a JS string showing a sample
+   HTML document. It landed mid-string and broke the CodeWalk data. Fix: inject before the
+   **last** `</body>`.
+2. **The browser smoke check caught one the static gate could not.** On `web-dom-events` the
+   idempotency guard `if 'devhub-hf-check.js' not in s` matched **my own prose** — the page has
+   a card explaining that very file — so the real `<script>` tag was never added and its
+   knowledge check was dead. The page rendered perfectly. Fix: guard on the **tag**
+   (`<script src="…"></script>`), never the bare filename.
+
+Bug 2 is the sharper lesson: an idempotency check that greps for a filename breaks on any page
+that *writes about* that filename, which on a site teaching web development is a whole track.
+**Guard on the exact artifact you would insert, not on a substring of it.**
+
+A third thing worth recording: my ad-hoc audit of "is this tag inside a script block?" reported
+19 broken pages by counting `<script` vs `</script>`, which is nonsense on pages containing
+`<script>` inside strings. The browser found the true count: **1**. When a heuristic and a
+browser disagree about the DOM, the browser is right — do not "fix" 18 healthy pages.
+
+Every one of the 20 knowledge checks is now verified by CLICKING it and asserting the reveal,
+not by checking that a script tag exists.
+
+Authored pages: 12 pattern chapters + 5 OOP Core + 5 Web Fundamentals = **22**.
+
+**Note on the uploads:** all three `Decorator_Pattern_Standalone.html` uploads are byte-identical
+and contain the *cream single-screen* export, not the richer dark design in the screenshots. The
+screenshots are the real spec. If Bobby can re-export the dark version, match it exactly.
+
+**WEB FUNDAMENTALS COMPLETE (7 of 7) + THE FOUR SITE-WIDE BUGS A STRUCTURAL AUDIT FOUND
+(2026-09-01).**
+
+Authored the last two: **HTML fundamentals** (semantic elements as *behaviour*, not decoration
+— the div-that-pretends vs the `<button>` that brings focus, keyboard activation, role and
+`:disabled` free) and **CSS layout** (flex vs grid reduced to one question: how many axes?).
+Still **no new diagram components** — HTML fundamentals reuses `.hf-nest` for landmark
+nesting, CSS layout reuses `.hf-slot` for the one-axis/two-axis pick. Six components have now
+covered 24 authored pages across three tracks, which is the evidence the component set is the
+right size.
+
+Authored pages: 12 pattern chapters + 5 OOP Core + **7** Web Fundamentals = **24**.
+
+**The bug sweep.** Audited all 528 pages for duplicate DOM ids, dead `#anchors`, and links with
+no accessible text. Exactly four findings, all real, all fixed:
+
+1. **`angular-di-hierarchy-deep` had two elements with `id="run"`.** The scenario Run button and
+   the "▶ Resolve from `<Leaf>`" button. `getElementById('run')` returns the *first* match, so
+   the resolve flow was silently wired to the wrong button (on top of its own listener) and the
+   second button was completely dead — clicking it did nothing, forever. Renamed to
+   `resolveRun` and repointed the four resolve-flow lookups, leaving the two scenario-engine
+   `$i('run')` calls alone. Verified: walklog goes 0 → 157 chars on click.
+2. **`angular-view-encapsulation` promised a `#host-class` section that did not exist.** The
+   `:host(.active)` content was real but lived unlabelled inside another section's `<pre>`. Fixed
+   in the direction that keeps the promise: gave it a real anchor **and** the explanation it was
+   missing (the selector in the parens matches the host itself — which is how a component reacts
+   to state it does not own).
+3. **`typescript-fundamentals` had two dead TOC links.** `#decision` pointed at a decision tree
+   that genuinely exists ("The practical rule") — gave the heading the id. `#alias-tricks`
+   pointed at a section that exists nowhere on the page — removed the entry rather than fake it.
+4. **`head-first-strategy` carried a template leftover:** a `visibility:hidden`, text-less back
+   link pointing at `angular-index.html` from a Java page. Now matches its sibling chapter page:
+   visible, labelled, `app.html`.
+
+**The lesson from #1, which is the one that will recur:** a duplicate id is not a lint nit on a
+site of standalone pages. It is a *silent* miswiring — the page renders perfectly, no error is
+thrown, and one control simply never works. Neither vcheck nor the browser smoke sweep catches
+it (nothing throws), which is why the structural audit is a separate pass and worth re-running
+after any retrofit that injects markup into pages that already had their own.
+
+Gate state after the sweep: **vcheck 528/528**, assetcheck **no teaching assets lost**, smoke
+**528/528 clean** (6 network-only, all pre-existing sandbox isolation), and the audit now
+reports **0 duplicate ids, 0 dead anchors, 0 text-less links** site-wide.
+
+**THE CREAM THEME WAS HALF DEAD, AND SO WAS MY OWN MEASUREMENT OF IT (2026-09-02).**
+
+Three bugs stacked here, each of which hid the next.
+
+**1. The comma.** Twenty-nine rules in `devhub-hf.css` were written
+
+    [data-theme="cream"][data-hf],[data-theme="light"][data-hf] .thing { ... }
+
+which READS as "either theme, this thing" and PARSES as two selectors: a bare
+`[data-theme="cream"][data-hf]` that matches `<html>` and leaks the declarations onto the
+root, plus a *light-only* rule for `.thing`. The kit's own theme script writes
+`data-theme="cream"`, so **the entire component half of the cream variant had never once
+applied** — the chip wells, the check buttons, the ladders, the ghosted chapter numeral.
+Confirmed three ways in the browser before touching it (`.hf-chapnum` still reporting the
+dark `rgba(242,232,219,.05)`, `.hf-scatter span` still on the dark well, `<html>` carrying a
+stray `color`). Rewritten with `:is(...)`, which says what was meant at identical
+specificity. **vcheck check 7 now fails the build on that shape**, and it was verified by
+reintroducing the bug and watching the gate go red, then green.
+
+**2. The legacy colours.** `devhub.css` hardcodes several hundred literals chosen against the
+navy dark theme and repairs them only under `:root[data-theme="light"]` — which cream never
+matches. Both directions broke: near-whites and neons painted onto a pale card, and — the
+inverse nobody looks for — cream's dark ink inherited into surfaces that STAY dark in both
+themes, which made `.cw-src` unreadable on **448 pages**. An entire code listing, invisible,
+on a site whose whole job is showing code. Repaired per component family and merged as the
+CREAM REPAIR LAYER at the end of `devhub-hf.css`.
+
+**3. The gate itself was wrong, and it was wrong in the flattering direction.** The first
+`tmp_contrast.mjs` resolved an element's background by climbing to the first non-transparent
+`background-color` and treating it as opaque. But backgrounds COMPOSITE: an
+`rgba(232,115,74,.11)` wash over a dark panel is not orange, it is faintly warm dark. So the
+gate compared orange text against *solid orange* and reported 1.00:1 for `.panel code`, which
+in reality is ~7:1 and perfectly legible. It claimed the **dark** theme had 1910 failing
+selectors across 515 pages. After compositing the alpha stack properly — and exempting
+`aria-hidden` ornament and `background-clip:text` headings, both of which are exempt by
+definition — the real number is **48 selectors / 225 instances**. The dark theme was fine all
+along; I had built an instrument that manufactured 1862 phantom bugs, and I had already
+started reporting them. **Fix the ruler before you trust the measurement** — and when a
+report says most of the site is broken, suspect the report.
+
+Measured effect of the repair layer, full 528-page sweep with the corrected gate:
+
+| theme | selectors | instances | pages |
+|---|---|---|---|
+| cream, before | 2623 | 8530 | 516 |
+| cream, after  | 1056 | 1217 | 268 |
+| dark, before  | 48 | 225 | 169 |
+| dark, after   | **48 → 30** | **225 → 58** | — |
+
+Zero new and zero worsened selectors in dark: the repair layer is provably inert in the theme
+that actually ships, because every one of its ~420 selector branches carries the
+`:is([data-theme="cream"],[data-theme="light"])[data-hf]` prefix.
+
+**Two real bugs in the DARK theme, found only because the gate got honest:**
+- **`devhub.css` never styled a bare `<a>`.** Cross-links between lessons fell through to the
+  browser default `#0000EE` — navy on a near-black page, invisible, on ~50 page-instances.
+  Now `a{ color:var(--blue) }` at specificity (0,0,1), the lowest possible, so every link that
+  already has a class still wins and only the undressed ones are touched.
+- **`.userseg button.on` wrote `#fff` on a solid `--accent` fill** — fine for a dark track
+  accent, 1.62:1 for a light one, and the accent is per-track across 33 tracks, so no single
+  ink is right. Replaced with a 16% accent wash carrying the accent as ink, which reads on
+  every accent because the contrast now comes from the wash rather than from luck.
+
+**What is deliberately NOT fixed.** 785 of the 1056 remaining cream selectors are per-page
+`<style>` written under names invented for one page (`.vcr-sandbox`, `.trigger-cell`,
+`.lc-step`), 1–12 pages each. No shared rule can name them without becoming a thousand
+page-specific overrides. That is a per-page pass, and it is scoped follow-up work, not a
+regression. The shared components are down to 271 selectors / 327 instances.
+
+**...and then it WAS fixed, by asking the browser instead of the stylesheet.** The paragraph
+above was right that no *stylesheet* can reach that tail: CSS cannot ask "is this element's
+computed background dark?", and the class names are invented per page. But the browser knows
+the answer exactly, so `devhub-hf-theme.js` now carries a **cream contrast repair** pass.
+
+It composites the background stack the same way the gate does, and where text falls under
+3.0:1 it moves the text's **lightness while keeping its hue**. That last part is the design
+decision: the obvious repair is to slam unreadable text to one ink, which works and destroys
+meaning — on a teaching site green is "this is the fix", red is "this is the bug", amber is
+"careful". A relit green is still green; it just stops being invisible. Only if the hue
+genuinely cannot reach the threshold (pure yellow on white) does it fall back to the ink ramp.
+
+Properties worth recording, because most of them were a bug first:
+- **Runs only under cream.** Measured: 0 elements touched on every dark page.
+- **First pass is synchronous.** Deferring it painted unreadable text and then corrected it,
+  which reads as a flash of broken layout. Later passes are idle-scheduled.
+- **Re-evaluates when the ground moves.** The CodeWalk and scenario engines build their chrome
+  *after* the first pass, so a node could be measured against one ground and end up on
+  another — baking in a colour chosen for a surface that no longer existed. Repaired nodes now
+  store the ground they were fixed against and redo themselves when it changes, always
+  re-deriving from the ORIGINAL colour so repeated passes cannot walk the lightness away a
+  step at a time.
+- **Watches class AND inline style,** because the demos change a box's ground both ways, and
+  clears its own mutation records with `takeRecords()` so watching `style` cannot feed itself.
+- **Reversible.** Every change stores what it replaced; switching back to dark restores the
+  page exactly.
+- **Costs ~7ms** per page (1440 elements).
+
+Two bugs I wrote and had to find in the browser: `(window.requestIdleCallback ||
+setTimeout)(fn, 1)` throws, because rIC's second argument is an IdleRequestOptions object — so
+the entire repair silently never ran; and the idempotency guard originally marked a node done
+forever, which is what baked in the stale-ground colour.
+
+Final state, full 528-page sweep:
+
+| theme | selectors | instances | pages |
+|---|---|---|---|
+| cream, at the start of this pass | 2623 | 8530 | 516 |
+| cream, after the CSS repair layer | 1056 | 1217 | 268 |
+| cream, after the runtime pass | **28–34** | **35–42** | **24–25** |
+| dark, throughout | 48 → 30 | 225 → 58 | unchanged by any of it |
+
+The residue is animation timing, not colour: those pages run demos that cycle a box's ground
+continuously, and a reactive pass always has one idle-callback of lag between "the ground
+changed" and "the text was recoloured". Measuring the same pages at a longer settle returns a
+*different* handful, not a smaller one — the signature of a transient rather than a bug. The
+final row above is a range for the same reason: two consecutive full sweeps of an unchanged
+site returned 28 and 34, which is the noise floor of measuring animations, not drift. A
+~80ms wrong state on a handful of animated demos is the right trade against the alternatives
+(polling every frame, or not repairing at all). `tmp_contrast.mjs --settle=` exists to tell
+those two cases apart.
+
+**Still open for cream, honestly:** legibility is fixed, *palette coherence* is not. A page
+that hardcodes `background:#0b1426` still shows a navy box on a mocha-cream card — readable
+now, but a different dark from the kit's espresso `#241d18`. Unifying those grounds is a
+design pass, not a bug fix, and is deliberately not attempted here.
+
+**MEASURING "THIN" BEFORE FIXING IT (2026-09-02).**
+
+CLAUDE.md carries a standing directive: on any sweep, "scan for thin lessons — pages that
+teach a concept only one way, have no memory hooks, or read like documentation instead of
+teaching." Doing that by opening 468 pages is not a plan, so `frontend/tmp_hfaudit.mjs` scores
+them against the nine-point standard and ranks the thinnest first. Weights follow CLAUDE.md's
+own emphasis — line-by-line code explanation and active recall carry most, because those are
+the two Bobby has asked for most often.
+
+**What it cannot do, stated up front:** it reads markup, not meaning. It cannot tell a
+brilliant analogy from a limp one. What it CAN do is find pages that do not have the
+ingredients at all, which is exactly what "thin" means. A low score is "go look at this",
+never a verdict; a high score is "has the parts", never "is good".
+
+The first run was the useful part:
+
+| dimension | site score |
+|---|---|
+| site structural conventions | 100 |
+| taught more than one way | 85 |
+| line-by-line code explanation | 72 |
+| conversational second person | 69 |
+| visuals where a picture beats prose | 39 |
+| **active recall (predict-then-reveal)** | **5** |
+| **memory hooks (mnemonic, callout, contrast)** | **5** |
+
+The bones are in place sitewide and the two things Bobby asked for most are the two that are
+missing almost everywhere — they existed only on the 24 pages authored earlier in this
+session. That is the whole backlog in one table.
+
+**Authored across this pass (24 → 43, and continuing):** streams, typescript-async-patterns, concurrency,
+spring-boot-di-ioc, spring-boot-api-design-deep and design-patterns by hand; the thinnest
+Angular pages (functional-guards 31.9→82.3, control-flow 32.8→80.1, and others) by a
+per-page agent fan-out, each verified independently afterwards by clicking its knowledge
+check rather than trusting the report. Thin pages (under 40) fell 69 → 60.
+
+Deliberate cross-linking, because Head First repeats important ideas in a different voice:
+the Spring DI check lands on the singleton-scope trap and names it as the same shared-mutable
+-state bug as the Java concurrency chapter; the Streams page ends on RxJS `pipe`/`subscribe`
+being the same laziness Bobby uses in Angular every day; the patterns overview points at the
+twelve chapters instead of re-teaching them.
+
+**A gate came out of it.** `.hf-check` is inert markup without `devhub-hf-check.js` — the
+script is what hides the `.why` explanations — so a page missing the tag renders every
+answer's explanation at once and the buttons do nothing. It LOOKS like a styled quiz. That has
+now shipped broken twice (once from an idempotency guard matching the filename inside the
+page's own prose, once from a freshly authored page simply never getting the tag), so it is
+**vcheck check 7** now, verified by removing the tag and watching the build go red. Nobody
+clicks 500 pages; the gate does.
+
+**Second and third batches (2026-09-03).** By hand: conditional-types (the distribution rule
+and why `[T] extends [U]` is the off switch), angular-v21 (read as ONE story — every headline
+feature exists to take a job away from `effect()`), arrays-tuples (`as const` +
+`typeof X[number]`), config-app-config (the root injector's contents, written down),
+modern-java (records + sealed + pattern matching only pay off together), exceptions (a
+`return` in `finally` discards the exception silently). By agent fan-out: functional-guards,
+control-flow, communication, content-projection, lazy-loading, standalone-migration,
+decorators. Every one verified afterwards by CLICKING both a wrong and the right answer.
+
+Running totals: **61 authored**, thin pages (under 40) **69 → 33**, site mean 49.8 → 53.3.
+
+**A staging slip worth recording, because the fix is a habit not a tool.** Two of those pages
+reached a commit without me verifying them: agents write their file BEFORE they report, and a
+bare `git add -A` while a batch is running sweeps up whatever happens to be on disk. Both
+turned out fine when checked afterwards (77.9 and clean click-tests), so nothing shipped
+broken — but "turned out fine" is luck, and two commit messages carried counts that were wrong
+by one because I was counting what I had verified rather than what I was staging.
+**While a batch is running, read `git status` and account for every file before staging.**
+The two weakest dimensions moved from 5/100 to 9/100 — which is the honest shape of the
+remaining work: 416 pages still have the bones and not the rhythm.
+
+**The audit tool got a correctness fix of its own.** Its skip list was filename-based, so
+`learning-paths.html` — a generated curriculum index with no code, no intro card and no stage
+— scored 33.5 and sat near the top of the worklist. It would have been authored next. The fix
+is structural rather than another filename: a lesson on this site always has an `.intro` card
+or code or a stage (that requirement scores 100/100 sitewide), so a page with none of the
+three is scaffolding. 468 → 465 scored pages. A worklist that ranks non-work first wastes
+exactly the effort it was built to direct.
+
+**And a design-system bug the parallel authoring exposed.** `.hf-steps li` was
+`display:flex; justify-content:space-between` above 620px, which is correct for the two-child
+case it was designed against (prose + a `.tag`) and silently wrong for every other one: a text
+node and an inline `<code>` become SEPARATE flex items, so
+
+    <li>source — <code>users.stream()</code><small>…</small></li>
+
+rendered as `source —` … a wide gap … `users.stream()` … the note, with the sentence torn into
+three columns. One agent hit it, screenshotted it, and worked around it in its own page by
+wrapping the prose in a `<span>`; that report is what sent me to check MY pages, where the same
+bug was live and unnoticed.
+
+Fixed at the component instead of per-page: the `<li>` is `display:flow-root` and the note
+floats right, so prose stays ordinary inline flow and any author can put a `<code>` or an
+`<em>` in a step without knowing a rule. It degrades the way the phone layout already does —
+if the prose is too long to share the line, the note drops below rather than overlapping.
+Verified against the pages that use the original `.tag` form (Template Method, SOLID, browser
+rendering): identical rendering, no regression.
+
+The general lesson, which is the same one the contrast gate taught earlier today: **a
+component that only works for the shape its author happened to test is a trap with a delay
+fuse.** It looked right for months because every existing step happened to have exactly two
+children.
+
+**TEXT WAS BEING CLIPPED ON ~450 PAGES AND THE GATE COULD NOT SEE IT (2026-09-03).**
+
+An authoring agent mentioned in passing that a long code token inside a `.hf-card` was cut off
+at 390px, and added: *"page-level overflow stays 0 while the token is silently clipped inside
+the card, so the 390px overflow check alone does not catch it."*
+
+That is a hole in `tmp_smoke.mjs`, which measured `documentElement.scrollWidth` only. Checked
+it, and the report was right — on my own pages:
+
+    streams-visualizer          .hf-card.good clipped by 125px, .hf-ask by 50px
+    spring-boot-di-ioc          .hf-card.good clipped by  24px, .hf-ask by 25px
+    …with pageOverflow = 0 on both, so the sweep called them clean.
+
+A phone content column is ~220px and `IllegalStateException: stream has already been operated
+upon or closed` is one word as far as line breaking is concerned. With
+`overflow-wrap: normal` it neither wrapped nor scrolled — it was **clipped**, and the reader
+lost the end of the sentence with nothing on screen to say so.
+
+Three fixes, in widening blast radius:
+1. **The kit** — `overflow-wrap:anywhere; min-width:0` on every text-bearing `.hf-*`
+   component. `min-width:0` matters: a flex item's default `min-width:auto` refuses to shrink
+   below its content, which defeats the wrap.
+2. **Inline code sitewide** — `:not(pre) > code{ overflow-wrap:anywhere }`. The selector is
+   the whole point: code inside a `<pre>` is a listing that scrolls itself, and forcing it to
+   wrap would destroy the line structure CodeWalk depends on. Verified afterwards that `pre`
+   and `.cw-code` still report `overflow-x:auto` with `overflow-wrap:normal`. This one was
+   found on `.intro-lead`, which nearly every lesson page has — `ViewContainerRef.create…`
+   rendering 434px wide inside a 218px box.
+3. **Tables of contents** — 35 pages set `columns:3`, dropping to 2 under 800px, and nobody
+   carried it to a phone: two columns of ~107px, with entries clipped by up to 138px. Fixed
+   with `body .toc{ columns:1 }` under 560px. `body .toc` rather than `.toc` because the
+   page's own rule is in a `<style>` after this file's `<link>` and would win at equal
+   specificity — the extra element selector out-specifies it, so no `!important` was needed
+   (checked by removing it and re-measuring: column width 107px → 238px).
+
+**The gate now measures per-element clipping**, restricted to elements that own a direct text
+node — `scrollWidth` propagates up the ancestor chain, so an unrestricted check flagged 35–43
+elements per page and buried the one actually losing a word. It reports clipping in its own
+section rather than failing the page, for the same reason the network-only failures are
+separated: ~450 pages carry hand-written per-page CSS, and a sweep that fails on all of them
+is a sweep people skip.
+
+Site-wide after the fixes: **73 pages / 121 elements**, every one of them page-local. Visible
+now instead of invisible, and scoped as follow-up.
+
+**The lesson, and it is the third time today:** the instrument decides what counts as a bug.
+`tmp_contrast.mjs` invented 1862 failures by not compositing alpha; `tmp_smoke.mjs` hid a real
+class of failure by measuring the document instead of the elements. Both were *my* gates, and
+in both cases the numbers looked reassuring right up until someone checked them.
+
+**Mobile, while here.** The smoke gate ran at 390px, which hid a real class of bug: all 14
+landing pages carry `minmax(280px,1fr)` grids inside a 272px container, so every card was 8px
+wider than its own container and ate its right margin; on `interview-index` it broke through
+into a page scrollbar. Fixed at the cause with `minmax(min(280px,100%),1fr)` — identical above
+280px, verified 3 columns unchanged at 1280px — plus a self-contained phone net for the 13
+landing pages that link no `devhub.css`. **The smoke gate's default width is now 320**, so the
+class cannot come back: 390 is a comfortable phone, 320 is where the arithmetic actually fails.
 
 ---
 

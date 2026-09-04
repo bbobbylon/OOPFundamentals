@@ -1,7 +1,8 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-hf>
 <head>
 <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Spring Boot on Kubernetes — DevHub</title>
 <style>
 .who-JAR{background:rgba(109,179,63,.22);color:#a6e07f}
@@ -11,6 +12,7 @@
 .who-POD{background:rgba(74,222,128,.18);color:#86efac}
 </style>
 <link rel="stylesheet" href="devhub.css"/>
+  <link rel="stylesheet" href="devhub-hf.css"/>
 </head>
 <body class="track-kubernetes">
 <div class="page">
@@ -70,6 +72,162 @@
 </div>
 <div class="rt-legend">
   <span>JAR → Docker Image → Deployment → Health Probe → Pod Running</span>
+</div>
+
+
+<p class="hf-deck">or, the two probes that mean opposite things and get the same URL</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Kubernetes killed your pod because your app was doing its job.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Both probes pointed at /actuator/health</div>
+  <p>A JVM takes 30 seconds to warm up. The liveness probe starts checking at 10, gets no
+  answer, and concludes the app is dead — so it restarts it. Which takes 30 seconds.</p>
+  <div class="hf-scatter">
+    <span>livenessProbe: /actuator/health</span>
+    <span>readinessProbe: /actuator/health</span>
+    <span>initialDelaySeconds: 10 ⚠</span>
+    <span>CrashLoopBackOff ⚠</span>
+    <span>a boot loop that never converges ⚠</span>
+  </div>
+  <p class="hf-foot">The app was never broken. The probe was asking the wrong question, and a
+  slow DB connection at startup is enough to trigger it forever.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Two different questions, two different endpoints</div>
+  <div class="hf-ladder">
+    <b>liveness — "are you ALIVE?"  → /actuator/health/liveness</b>
+    <i>↓ if no: RESTART the pod. This is a big hammer.</i>
+    <b>readiness — "can you take TRAFFIC?" → /actuator/health/readiness</b>
+    <i>↓ if no: remove from the Service. Pod keeps running.</i>
+    <b>startup — "have you finished booting?" → protects a slow JVM from both</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Liveness failing restarts you. Readiness failing just takes you out of the load
+  balancer.</b> Point liveness at anything that can be temporarily unhappy — a database, a
+  downstream API — and a brief outage in a dependency becomes a restart storm across every
+  replica you own.
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">The readiness probe</span>
+    <p>Your DB connection pool is exhausted. I will stop sending you requests until it
+    recovers. You keep running.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The liveness probe</span>
+    <p>And if I were checking the same thing, I would have killed you instead — losing your
+    in-flight requests and your warm JIT, and making the pool problem worse for everyone
+    else.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The startup probe</span>
+    <p>Which is why I exist: I hold the other two off entirely until the JVM has actually
+    finished booting.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Shutdown is a conversation, and the order matters.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li class="open"><span>you <code>kubectl delete</code> — or a rollout replaces the pod</span><span class="tag">t=0</span></li>
+    <li><span>the pod is marked Terminating and REMOVED from the Service endpoints</span><span class="tag">stop new traffic</span></li>
+    <li><span>SIGTERM is sent to PID 1 — Spring begins graceful shutdown</span><span class="tag">SIGTERM</span></li>
+    <li><span>in-flight requests finish, up to <code>spring.lifecycle.timeout-per-shutdown-phase</code></span><span class="tag">drain</span></li>
+    <li><span>after <code>terminationGracePeriodSeconds</code> (default 30) — SIGKILL, no mercy</span><span class="tag">SIGKILL</span></li>
+  </ol>
+  <p class="hf-annot">Steps 2 and 3 race. Endpoint removal propagates through kube-proxy on
+  every node asynchronously, so requests can still arrive for a second or two AFTER SIGTERM.
+  That is why a <code>preStop</code> sleep of a few seconds is standard practice — it is not
+  superstition, it is waiting for the cluster to catch up with a decision it already made.</p>
+</div>
+
+<p><b>The JVM's other Kubernetes surprise is memory.</b> Set a container memory limit and
+forget the heap, and the JVM sizes itself against what it thinks the machine has — then the
+kernel OOM-kills the container with exit code 137 and no Java stack trace, because the JVM
+never saw it coming. Modern JVMs are container-aware
+(<code>-XX:MaxRAMPercentage=75</code>), but the limit still has to leave room for
+metaspace, thread stacks and native buffers, which live outside the heap. A pod that dies at
+137 with no exception in the log is almost always this.</p>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Your CIAM API's database goes down for 40 seconds. Liveness and readiness both
+  point at <code>/actuator/health</code>, which reports the DB. What happens?</p>
+  <button type="button">Nothing — pods are removed from the Service and rejoin when the DB returns</button>
+  <button type="button">Traffic keeps flowing and requests fail with 500s until the DB recovers</button>
+  <button type="button">Every replica is restarted, and the restarts continue until the DB is back</button>
+  <p class="why" data-for="0">That is what happens if only READINESS reports the DB — which is
+  the configuration you want. Here liveness reports it too.</p>
+  <p class="why" data-for="1">Readiness failing does remove the pods from the Service, so
+  traffic stops rather than erroring. But that is not the end of it, because liveness is
+  failing at the same time.</p>
+  <p class="why" data-for="2">Right, and it is the worst outcome. Liveness failing means
+  RESTART, so every replica is killed and restarted — each one taking 30 seconds to boot into
+  a database that is still down, and failing again. A dependency outage became a full outage
+  of your own service. Liveness must only test the process itself.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">The same distinction, three other places.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring Boot's own groups</h4>
+    <p>Actuator ships <code>liveness</code> and <code>readiness</code> groups precisely
+    because the distinction matters — you choose which health indicators go in which group,
+    and the DB belongs in readiness only.</p>
+    <div class="hf-scatter"><span>management.endpoint.health.group.*</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A load balancer health check</h4>
+    <p>Same idea a layer out: an unhealthy target is drained, not terminated. Kubernetes just
+    gave you a second probe that DOES terminate, and made it easy to confuse them.</p>
+    <div class="hf-scatter"><span>drain ≠ kill</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Circuit breakers</h4>
+    <p>Resilience4j opening a breaker on a failing dependency is the same instinct at method
+    scope: degrade the path that is broken instead of taking down the caller.</p>
+    <div class="hf-scatter"><span>degrade, don't die</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Do I need a startup probe if I already set <code>initialDelaySeconds</code>?</p>
+  <p class="a">A startup probe is better, because a delay is a guess you have to make twice —
+  too short and you restart a healthy boot, too long and a genuinely hung process sits there
+  unnoticed. A startup probe polls until success and only then hands over to liveness, so slow
+  boots are tolerated without making liveness sluggish forever after.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why does my container exit 137 with nothing in the log?</p>
+  <p class="a">137 is 128+9 — SIGKILL, and almost always the kernel OOM killer. The JVM does
+  not get to write a stack trace because it is not asked. Check whether heap plus metaspace
+  plus thread stacks plus native memory fits inside the container limit, not just the heap.
+  It is the single most common "Spring works locally, dies in the cluster" cause.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Are requests really lost during a rolling update?</p>
+  <p class="a">They can be, and it is usually this: the app stops accepting connections the
+  instant SIGTERM lands, while endpoint removal is still propagating. Graceful shutdown plus a
+  short <code>preStop</code> sleep closes the window. If you see a handful of 502s on every
+  deploy and nowhere else, that is what you are looking at.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you run it.</p>
+<div class="hf-napkin">
+  Your pod has <code>terminationGracePeriodSeconds: 30</code> and Spring's shutdown timeout is
+  60s. A deploy starts while a 45-second report is generating. What happens to that request,
+  and which of the two numbers is actually in charge?
 </div>
 
 <section>
@@ -298,8 +456,12 @@ document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.addEventListener('
 $('Run').addEventListener('click',run);renderNodes();chip();
 })();
 </script>
+<script src="tracks-data.js"></script>
+<script src="devhub-chapters.js"></script>
+<script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

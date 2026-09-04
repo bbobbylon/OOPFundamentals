@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-hf>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -67,6 +67,7 @@
     .who-res{background:#f59e0b;color:#000}
   </style>
   <link rel="stylesheet" href="devhub.css" />
+  <link rel="stylesheet" href="devhub-hf.css"/>
 <style>
 .who-CTRL{background:#0ea5e9;color:#fff;}
 .who-GRP{background:#a855f7;color:#fff;}
@@ -111,6 +112,183 @@
       <span class="tag">In CIAM:</span>a profile-update form does <code>form.getRawValue()</code> → JSON to <code>PATCH /api/users/{id}</code>; a profile-photo upload builds <code>FormData</code> from the <code>&lt;input type="file"&gt;</code> + <code>userId</code>, POSTed to <code>/api/users/{id}/avatar</code> where Spring reads <code>@RequestParam MultipartFile avatar</code>.
     </div>
   </div>
+
+
+<p class="hf-deck">or, the one word that quietly does three different things to your request body</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You disabled a field. You also deleted it from the payload.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The form is not the request</div>
+  <p>Everyone reads <code>form.value</code> as "what I am about to send." It is not — it is a
+  projection of the form's <i>state</i>, and a disabled control is simply <b>absent</b> from
+  it. No warning, no <code>undefined</code>, no key at all. Your <code>PATCH</code> body ships
+  short, and what happens next is entirely up to how the server reads a missing field.</p>
+  <div class="hf-scatter">
+    <span>form looks complete on screen ✓</span>
+    <span>form.valid === true ⚠</span>
+    <span>email missing from the body ⚠</span>
+    <span>server sets it to null ⚠</span>
+  </div>
+  <p class="hf-foot">The bug report says "editing my display name wiped my email address," and
+  nothing in the diff mentions email.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Decide which of the three you actually wanted</div>
+  <div class="hf-ladder">
+    <b>Not editable, but still sent → <code>readonly</code> on the input</b>
+    <i>↓ the control stays enabled, so it validates and serialises normally</i>
+    <b>Sent, but you disabled it for UI reasons → <code>getRawValue()</code></b>
+    <i>↓ that is the only read that includes disabled controls</i>
+    <b>Genuinely must not be set by this caller → check it on the SERVER</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b><code>disabled</code> does three things at once: not editable, not validated, not
+  submitted.</b> You almost never want all three, and the two you did not ask for fail
+  silently — one produces a form that reports <code>valid</code> while a required value is
+  empty, the other produces a request body with a field missing.
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I disabled the email field so the user can't edit it while the account is unverified.
+    That's a UI decision.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">FormGroup</span>
+    <p>To me it is three decisions. I stopped accepting input, I stopped running its
+    validators, and I stopped including it in <code>value</code>. You got all three for one
+    word.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The API</span>
+    <p>And I received a body with no <code>email</code> key. Whether that means "leave it
+    alone" or "set it to null" depends on my mapper, not on your intent — and on a
+    <code>PUT</code> it almost certainly means null.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One flag on one control, three separate consequences.</p>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">control.disable()<small>or new FormControl({ value, disabled:true })</small></div>
+    <div class="fan">↓ one call, three unrelated systems change behaviour</div>
+    <div class="obs">
+      <span>input becomes non-interactive</span>
+      <span>validators stop running → status "DISABLED"</span>
+      <span class="new">omitted from form.value → and from your request body</span>
+    </div>
+  </div>
+  <p class="hf-annot">The one on the right is the one that reaches production. The other two are
+  visible while you are looking at the screen; that one is only visible in the Network tab, and
+  only if you thought to look. Note the second one too — a disabled control's status is
+  <code>DISABLED</code>, not <code>INVALID</code>, so <code>form.valid</code> happily returns
+  <code>true</code> for a form whose required field is empty.</p>
+</div>
+
+<p><b>And none of the three is a security control.</b> <code>disabled</code> is a property of a
+DOM element and an object in your JavaScript heap — both of which the person filling in the
+form owns completely. A disabled <code>role</code> select is one DevTools toggle from being
+enabled, and even that is the slow way: the actual request is a <code>fetch</code> call anyone
+can issue directly with whatever body they like. Client-side form state decides what is
+<i>convenient</i> to submit. The server decides what is <i>permitted</i> to be applied, and it
+has to decide that for every field, on every request, without reference to what the form
+looked like.</p>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">Your profile form has a required <code>email</code> control that you disabled
+  because the account is unverified. The user fills in their name and clicks Save. What is
+  <code>form.valid</code>, and what does <code>form.value</code> contain?</p>
+  <button type="button"><code>true</code>, and <code>value</code> has no <code>email</code> key at all</button>
+  <button type="button"><code>false</code>, and <code>value</code> has <code>email: null</code> — required still fails</button>
+  <button type="button"><code>true</code>, and <code>value</code> has <code>email</code> with its original value</button>
+  <p class="why" data-for="0">Right, and both halves are traps. <code>valid</code> is
+  <code>true</code> because disabled controls are excluded from the aggregate status entirely.
+  And the key is <i>absent</i> — not null, not empty string, gone — so a server doing
+  <code>if (dto.email != null)</code> skips it and a server mapping a whole DTO writes null
+  over it. Use <code>form.getRawValue()</code> when you need the value regardless of state.</p>
+  <p class="why" data-for="1">This is the intuitive answer and it is wrong on both halves. A
+  disabled control's status is <code>DISABLED</code>, which is a third state alongside
+  <code>VALID</code> and <code>INVALID</code> — its validators are not run at all, so
+  <code>required</code> has nothing to fail.</p>
+  <p class="why" data-for="2">That is what <code>getRawValue()</code> gives you, and it is
+  usually what you meant — but it is not what <code>.value</code> does. The distinction exists
+  precisely because "the value the control holds" and "the value this form is submitting" are
+  different questions.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three other places a silently-absent field costs you.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4><code>PATCH</code> vs <code>PUT</code></h4>
+    <p>The same ambiguity, one tier up: does a missing key mean "unchanged" or "clear it"?
+    <code>PATCH</code> semantics say unchanged, <code>PUT</code> says the body is the whole
+    resource. Send a short body to a <code>PUT</code> and you have asked for a wipe.</p>
+    <div class="hf-scatter"><span>absent ≠ unchanged, on PUT</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Jackson on the Spring side</h4>
+    <p><code>@JsonInclude(NON_NULL)</code> on the way out and a plain DTO on the way in mean
+    absent and null arrive identically. If "clear this field" is a real operation, you need
+    <code>Optional</code> or <code>JsonNullable</code> to tell them apart.</p>
+    <div class="hf-scatter"><span>null and missing are different facts</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A CIAM role selector</h4>
+    <p>Disabling the role dropdown for non-admins is good UX and zero security.
+    <code>@PreAuthorize</code> on the endpoint plus an explicit check that this caller may set
+    <i>this</i> field is what actually stops privilege escalation.</p>
+    <div class="hf-scatter"><span>the form is a suggestion</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">So should I just always use <code>getRawValue()</code>?</p>
+  <p class="a">For building a request body from a form with disabled controls, usually yes — it
+  is the read that matches what people expect <code>.value</code> to do. But be deliberate: if
+  you disabled a control precisely <i>because</i> its value must not be submitted, then
+  <code>.value</code> was doing you a favour and <code>getRawValue()</code> just re-introduced
+  the field. The rule is to know which of the two you want, not to prefer one blindly. Also
+  note the typing differs — <code>getRawValue()</code> returns the full shape, while
+  <code>.value</code> on a typed form is <code>Partial</code>, and that is the compiler telling
+  you exactly this.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why does <code>&lt;input type="number"&gt;</code> give me a string?</p>
+  <p class="a">Because <code>DefaultValueAccessor</code> reads <code>element.value</code>, which
+  the DOM defines as a string for every input type. Angular does not coerce it for you unless
+  you use the number-specific accessor, so <code>"42"</code> is what lands in your control and
+  what gets serialised. Typed forms will happily declare it <code>number</code> and be wrong,
+  because the type says what you promised, not what the DOM handed over.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why can't I set <code>Content-Type</code> on a <code>FormData</code> upload?</p>
+  <p class="a">You can, and it will break. <code>multipart/form-data</code> requires a
+  <code>boundary</code> parameter — a random delimiter the browser generates and uses to
+  separate the parts. Set the header by hand and you send the media type without the boundary
+  the body actually used, so the server has no way to split it. Omit the header entirely; the
+  browser fills it in correctly with the boundary attached.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you run it.</p>
+<div class="hf-napkin">
+  A form has <code>name</code> (enabled, filled in) and <code>email</code> (disabled, holding
+  <code>"a@b.com"</code>, marked <code>required</code>). You submit
+  <code>form.value</code> to <code>PUT /api/users/42</code>. What is in the body, what does the
+  server most likely do to the stored email — and which single word in your submit handler
+  changes the answer?
+</div>
 
   <!-- ── EXTREME-VIZ HERO: Angular Forms & FormData ── -->
   <div style="margin:0 0 28px">
@@ -763,6 +941,10 @@ renderNodes(cur);
   reset2();
 })();
 </script>
+<script src="tracks-data.js"></script>
+<script src="devhub-chapters.js"></script>
+<script src="devhub-hf-check.js"></script>
+<script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>

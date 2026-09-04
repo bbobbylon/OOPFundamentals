@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-hf>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -69,6 +69,7 @@
     .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
   </style>
   <link rel="stylesheet" href="devhub.css" />
+  <link rel="stylesheet" href="devhub-hf.css"/>
 </head>
 <body class="track-ts">
 <div class="page">
@@ -103,6 +104,179 @@
       </div>
     </div>
     <div class="intro-ciam"><span class="tag">CIAM / Spring / Angular:</span> Session caches keyed by <code>token.sub</code> (Map), deduplicating permission lists (Set), per-request auth context in middleware (WeakMap), and tracking processed event IDs to prevent replays (Set).</div>
+  </div>
+
+  <!-- ── HEAD FIRST BEAT: the pain, the mechanism, the recall ── -->
+  <p class="hf-deck">or, why <code>{}</code> quietly renames every key you hand it</p>
+
+  <div class="hf-kick">The problem</div>
+  <p class="hf-say">A plain object does not store your key. It stores a rumour about your key.</p>
+
+  <div class="hf-card bad">
+    <div class="hf-cardtitle">The permission check that shipped last sprint</div>
+    <p>You cached each user's permissions in a plain object and checked membership with
+    <code>perms.includes(required)</code>, because that is what was already in the file. It passed
+    review. It passed the three-permission test fixture. Then an enterprise tenant with
+    <b>10,000 permissions</b> signed in, and your Angular guard started walking all ten thousand
+    strings <em>on every route change and every keystroke in the admin filter box</em>.</p>
+    <div class="hf-scatter">
+      <span>obj[1] and obj["1"] are ONE key ⚠</span>
+      <span>obj[user] → "[object Object]" ⚠</span>
+      <span>includes() = O(n), every time ⚠</span>
+      <span>Object.keys(obj).length just to count</span>
+      <span>a toString key you never wrote ⚠</span>
+    </div>
+    <p class="hf-foot">Nothing threw. Nothing logged. That is the whole horror of it: two different
+    things became <em>one</em> key, and the object cheerfully served the second one when you asked
+    for the first.</p>
+  </div>
+
+  <div class="hf-card good">
+    <div class="hf-cardtitle">Pick the collection by the question you are actually asking</div>
+    <div class="hf-ladder">
+      <b>"is this value in the pile?" → Set</b>
+      <i>↓ .has() is one hash probe, not ten thousand string comparisons</i>
+      <b>"what is attached to THIS key?" → Map</b>
+      <i>↓ keys are compared by identity, so an object gets to stay itself</i>
+      <b>"metadata that must die when the object dies" → WeakMap</b>
+      <i>↓ nobody else references the key, so the entry evaporates with it</i>
+      <b>"known shape, going over the wire" → still a plain object</b>
+    </div>
+  </div>
+
+  <div class="principle" style="text-align:left">
+    <b>Object keys are strings. Map keys are values.</b> That one line explains every difference on
+    this page — the coercion, the object-key clobber, the free <code>.size</code>, the guaranteed
+    order. <code>Map</code> is not "the new object". It is the collection that was finally allowed
+    to keep your key exactly as you handed it over.
+  </div>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">Your plain object</span>
+      <p>You gave me the number <code>1</code> and the string <code>"1"</code>. I filed both under
+      <code>"1"</code>. You are welcome.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">Map</span>
+      <p>I kept them apart. <code>m.get(1)</code> and <code>m.get("1")</code> are two different
+      questions, so they get two different answers, and my <code>size</code> says <code>2</code>.</p>
+    </div>
+    <div class="hf-bub">
+      <span class="who">Your plain object</span>
+      <p>Also — that user object you used as a key? I called <code>String()</code> on it. It is
+      <code>"[object Object]"</code> now. So is every other user you will ever cache.</p>
+    </div>
+  </div>
+
+  <div class="hf-kick">The mechanism</div>
+  <p class="hf-say">Every object key goes down the same funnel, and only one thing comes out.</p>
+
+  <div class="hf-card">
+    <div class="hf-one">
+      <div class="callers">
+        <span>obj[alice]</span><span>obj[bobby]</span><span>obj[carol]</span><span>obj[{}]</span>
+      </div>
+      <div class="funnel">String(key) ↓ every plain object stringifies identically</div>
+      <div class="instance">"[object Object]"<small>one slot · last write wins · length: 1</small></div>
+    </div>
+    <p class="hf-annot">This is the part everyone re-learns at 2am: the object did not reject your
+    key, it <em>renamed</em> it — and now three users share one cache entry, with the last login
+    overwriting the other two.</p>
+  </div>
+
+  <p><b>Map compares keys by identity, not by rendering them as text.</b> Under the hood it uses
+  the SameValueZero rule — the same one <code>Set</code> uses — which is <code>===</code> with two
+  small mercies: <code>NaN</code> counts as equal to itself (so
+  <code>new Set([NaN, NaN]).size</code> is <code>1</code>, even though <code>NaN === NaN</code> is
+  <code>false</code>), and <code>+0</code> and <code>-0</code> are the same key. Everything else is
+  reference equality, which is exactly why <code>m.set({id:1},"x")</code> followed by
+  <code>m.get({id:1})</code> hands you <code>undefined</code>: two object literals that look
+  identical are two different objects. Keep the reference, or key on something primitive like
+  <code>token.sub</code>.</p>
+
+  <div class="hf-check" data-answer="1">
+    <p class="q">Your Spring gateway returns a tenant admin's 8,000 permission strings. An Angular
+    guard runs <code>perms.includes('billing:write')</code> on every route change, and the admin
+    search box re-runs it on every keystroke. You change <code>perms</code> from an array to a
+    <code>Set&lt;string&gt;</code> built once when the profile loads. What actually changes?</p>
+    <button type="button">Nothing measurable — <code>Set.has()</code> also walks the collection, it just reads better</button>
+    <button type="button">Each check drops from scanning up to 8,000 strings to a single hash probe — same answer, in roughly constant time</button>
+    <button type="button">It only gets faster after the first call, because the Set caches the lookup it just answered</button>
+    <p class="why" data-for="0"><code>Array.includes()</code> compares element by element and, for a
+    permission the user does not have, compares <em>all</em> 8,000 of them. <code>Set.has()</code>
+    hashes the string and looks in one bucket. That is not nicer syntax — it is a different
+    algorithm.</p>
+    <p class="why" data-for="1">Right. You pay O(n) exactly once, when you build the Set. After that
+    every guard run and every keystroke costs the same whether the tenant has 8 permissions or
+    80,000 — that is the whole trade, and it is why <code>Set</code> exists.</p>
+    <p class="why" data-for="2">No cache is involved anywhere. A <code>Set</code> is fast on the
+    <em>first</em> lookup and on the millionth; the speed comes from hashing the value, not from
+    remembering the previous question.</p>
+  </div>
+
+  <div class="hf-kick">Where you've seen this before</div>
+  <p class="hf-say">Three places in your own stack where the wrong collection already bit someone.</p>
+
+  <div class="hf-terms">
+    <div class="hf-card hf-taped">
+      <h4>The Angular route guard</h4>
+      <p>Build <code>new Set(profile.permissions)</code> once when the token is decoded, hand the
+      Set to the guard, and membership stops caring how big the tenant is. The array version is
+      fine in dev — your dev user has four permissions.</p>
+      <div class="hf-scatter"><span>perms.has('billing:write')</span><span>O(1) forever</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>Per-request auth context</h4>
+      <p>A filter that stashes decoded-claims-per-request in a module-level <code>Map</code> keyed
+      by the request object is a leak: the Map holds the request alive forever. A
+      <code>WeakMap</code> holds the key weakly, so the entry vanishes the moment the request is
+      done being referenced.</p>
+      <div class="hf-scatter"><span>Map = leak ⚠</span><span>WeakMap = evaporates</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>The Map you tried to cache</h4>
+      <p><code>JSON.stringify(myMap)</code> does not throw. It returns <code>"{}"</code>. You write
+      that to <code>localStorage</code>, reload, and your session cache is empty with no error
+      anywhere. Serialize with <code>JSON.stringify([...myMap])</code> and revive with
+      <code>new Map(parsed)</code>.</p>
+      <div class="hf-scatter"><span>stringify(map) → "{}" ⚠</span><span>[...map] survives</span></div>
+    </div>
+  </div>
+
+  <div class="hf-kick">Questions from the back row</div>
+  <div class="hf-ask">
+    <p class="q">So should I just use Map everywhere and never write <code>{}</code> again?</p>
+    <p class="a">No. A plain object is still the right answer for known-shape data — DTOs, config,
+    anything crossing a JSON boundary, anything you want to destructure or spread. Reach for
+    <code>Map</code> when the keys are <em>runtime data</em>: user IDs, tokens, DOM nodes, things
+    you add and delete constantly. "Fields I typed out myself" → object. "Keys I discovered at
+    runtime" → Map.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">If WeakMap entries can vanish, how do I check that mine is still there?</p>
+    <p class="a">You cannot enumerate one, and that is the point rather than a missing feature. To
+    ask a WeakMap anything you must already be holding the key object — and if you are holding it,
+    it has a strong reference and cannot have been collected. The entry can only disappear once
+    nobody, including you, could have asked about it.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Is <code>Set.has()</code> genuinely O(1), or is that a comfortable lie?</p>
+    <p class="a">It is amortized constant, not free: hashing a string still costs something
+    proportional to the string's length. What it does not cost is anything proportional to the
+    <em>collection's</em> size, which is the whole point. The honest bookkeeping is O(n) once to
+    build the Set, then O(1) per question — so it wins the moment you ask more than a couple of
+    questions about the same pile.</p>
+  </div>
+
+  <div class="hf-kick">Grab a napkin</div>
+  <p class="hf-say">Predict it before you run it.</p>
+  <div class="hf-napkin">
+    <code>const o = {}; o[1] = "a"; o["1"] = "b";</code> and
+    <code>const m = new Map(); m.set(1, "a"); m.set("1", "b");</code>.
+    Write two numbers down first: <code>Object.keys(o).length</code> and <code>m.size</code>. Then
+    the half that actually tests you — what comes back from <code>o[1]</code>, and what comes back
+    from <code>m.get(1)</code>?
   </div>
 
   <!-- ── TRY IT LIVE ── -->
@@ -1199,9 +1373,13 @@ calcSets();
   reset2();
 })();
 </script>
+<script src="tracks-data.js"></script>
+<script src="devhub-chapters.js"></script>
+<script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

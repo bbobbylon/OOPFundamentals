@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-hf>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -63,6 +63,7 @@
     .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
   </style>
   <link rel="stylesheet" href="devhub.css" />
+  <link rel="stylesheet" href="devhub-hf.css"/>
 </head>
 <body class="track-ts">
 <div class="page">
@@ -98,6 +99,180 @@
     </div>
     <div class="intro-ciam"><span class="tag">CIAM / Angular:</span> Service overloads — <code>getUserClaims(token: string): Observable&lt;JwtClaims&gt;</code> for Ping and <code>getUserClaims(oid: string, tenantId: string): Observable&lt;EntraClaims&gt;</code> for Entra — over one implementation <code>(tokenOrOid: string, tenantId?: string)</code> that routes internally. Typing <code>this</code> on a handler (<code>onUsersLoaded(this: UserListComponent, users)</code>) turns the classic "lost <code>this</code> when passed as a callback" runtime crash into a compile error.</div>
   </div>
+
+
+<p class="hf-deck">or, the signature you wrote is the one nobody can call</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Your implementation accepts <code>string | number</code>. Passing a <code>string | number</code> is an error.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Two lists of signatures, and only one of them is real to callers</div>
+  <p>You wrote three lines: two overloads and an implementation. The implementation's parameter
+  list looks like the honest summary of what the function handles — and callers cannot see it at
+  all. Hold a value that is genuinely <code>string | number</code>, pass it in, and you get
+  <code>TS2769: No overload matches this call</code> against a function whose body was written
+  for exactly that.</p>
+  <div class="hf-scatter">
+    <span>impl: (x: string | number) ✓</span>
+    <span>fmt(u) where u: string|number ⚠</span>
+    <span>TS2769: No overload matches ⚠</span>
+    <span>the body would have worked fine ⚠</span>
+  </div>
+  <p class="hf-foot">You end up adding a third overload that duplicates the implementation
+  signature, which works, and nobody remembers why it is there six months later.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Ask first whether you needed overloads at all</div>
+  <div class="hf-ladder">
+    <b>Does the RETURN type depend on which argument you passed?</b>
+    <i>↓ no → you wanted a union parameter, and a union is simpler and safer</i>
+    <b>Yes → overloads, ordered most specific FIRST</b>
+    <i>↓ because resolution takes the first match and stops looking</i>
+    <b>And add the union case explicitly if callers may hold a union</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The overload list is the public API. The implementation signature is private, and
+  unverified.</b> TypeScript checks that callers match one of the overloads — it does not check
+  that your body honours what those overloads promised.
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>The implementation takes <code>string | number</code>. Why can't I pass one?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">tsc</span>
+    <p>Because that line is not part of the function's type. I match your call against the
+    overload list only — <code>(x: string)</code>, then <code>(x: number)</code> — and a
+    <code>string | number</code> satisfies neither. The implementation signature exists so I can
+    check the <i>body</i>, not so callers can use it.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Your body</span>
+    <p>And nobody checks that I keep the promises up there. I can be declared to return
+    <code>number</code> for a numeric argument and return a string. That compiles.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Resolution walks the list top to bottom and stops at the first match.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>You call <code>fmt(value)</code>. The compiler collects the overload signatures <b>in source order</b></span><span class="tag">order is part of the meaning</span></li>
+    <li class="open"><span>Try <code>(x: string): string</code>. If the argument is assignable, this overload wins and the search <b>stops</b></span><span class="tag">first match, not best match</span></li>
+    <li><span>Otherwise try <code>(x: number): number</code>, and so on down the list</span><span class="tag">in order, every time</span></li>
+    <li class="open"><span>The implementation signature is <b>never</b> tried — it is not in the list. No match means <code>TS2769</code></span><span class="tag">private to the body</span></li>
+    <li><span>Separately, the body is type-checked against the implementation signature alone — never against the promises above it</span><span class="tag">nothing cross-checks the two</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 explains a bug that looks like magic: put a broad signature first
+  and it shadows every specific one below it, because resolution takes the <i>first</i> match
+  rather than the best one. Declare <code>pick(x: unknown): 'first'</code> above
+  <code>pick(x: string): 'second'</code> and <code>pick('hello')</code> returns
+  <code>'first'</code> — the string overload is unreachable, and nothing warns you it is dead
+  code. Most specific first, always.</p>
+</div>
+
+<p><b>And step 5 is the one to be genuinely careful about, because it makes overloads an
+assertion.</b> Write <code>function bad(x: number): number</code> as an overload over an
+implementation typed <code>(x: any): any</code> that returns a string, and it compiles cleanly —
+then <code>const n: number = bad(1)</code> compiles too, and holds a string at runtime. The
+<code>any</code> in the implementation switched off the only check that could have caught it. So
+type the implementation as narrowly as it will allow (<code>string | number</code>, not
+<code>any</code>), and treat every overload as a claim you are personally responsible for — the
+same posture as a type predicate, for the same reason.</p>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Given
+  <code>function fmt(x: string): string;</code>
+  <code>function fmt(x: number): number;</code>
+  <code>function fmt(x: string | number): string | number { … }</code>
+  — and <code>const u: string | number</code>, what does <code>fmt(u)</code> do?</p>
+  <button type="button">Returns <code>string | number</code>, matching the implementation signature</button>
+  <button type="button">Picks the first overload and returns <code>string</code>, since <code>u</code> might be one</button>
+  <button type="button">Fails to compile — <code>TS2769</code>, because neither overload accepts a union</button>
+  <p class="why" data-for="0">The implementation signature is not callable. It exists so the
+  compiler can check the body; it is deliberately excluded from the overload list, so callers
+  never see it however sensible it looks.</p>
+  <p class="why" data-for="1">"Might be" is not assignable. An argument has to satisfy an
+  overload's parameter type completely, and a <code>string | number</code> could be a
+  <code>number</code> — so it fails the string overload, then fails the number overload for the
+  mirror-image reason.</p>
+  <p class="why" data-for="2">Right, and the error is worth reading in full: it lists each
+  overload and why each one rejected the argument. The fix is to add
+  <code>function fmt(x: string | number): string | number;</code> as a third overload — you have
+  to state the union case publicly, because the implementation stating it does not count.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three neighbours worth comparing.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's overloads are a different thing entirely</h4>
+    <p>There, each overload is a real, separate method chosen at compile time by argument types,
+    and each has its own body the compiler checks. TypeScript has <b>one</b> function with
+    several declared faces — which is why the "implementation must handle every case" burden
+    lands on you rather than on the language.</p>
+    <div class="hf-scatter"><span>one function, several faces</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A type predicate</h4>
+    <p>Same species of unchecked promise: <code>x is User</code> declares what a boolean means
+    and nothing audits the body. Both are places TypeScript hands you the pen and takes your
+    word for it.</p>
+    <div class="hf-scatter"><span>declared, not derived</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A CIAM claims getter</h4>
+    <p><code>getUserClaims(token)</code> for Ping and <code>getUserClaims(oid, tenantId)</code>
+    for Entra returning different claim shapes is a genuine overload — the return type depends
+    on the arity. Two <i>differently named</i> methods are often the better answer, and worth
+    considering before reaching for this.</p>
+    <div class="hf-scatter"><span>different return → real overload</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">When is a union parameter better than overloads?</p>
+  <p class="a">Whenever the return type does not change with the argument. If
+  <code>format(x: string | number): string</code> says everything true about the function, that
+  one line beats three — it accepts unions from callers (which overloads pointedly do not), it
+  needs no ordering decision, and the body's narrowing is checked normally. Overloads earn their
+  complexity only when the <i>relationship</i> between argument and return type is the thing you
+  need to express.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">What does typing <code>this</code> as a first parameter do?</p>
+  <p class="a">It declares what <code>this</code> must be, and is erased from the emitted
+  JavaScript entirely — it is not a real parameter and callers do not pass it. Write
+  <code>onLoaded(this: UserListComponent, users: User[])</code> and passing that method as a
+  bare callback becomes a compile error rather than a runtime <code>Cannot read properties of
+  undefined</code>. It turns the oldest bug in JavaScript into a build failure, for the cost of
+  one annotation.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Are overloads on an interface or a class different?</p>
+  <p class="a">The declaration form differs but the resolution rule is identical: signatures in
+  source order, first match wins. On an interface you simply list the call signatures with no
+  implementation at all, which is common in <code>.d.ts</code> files describing a library. On a
+  class the overload signatures sit directly above the single method implementation, exactly as
+  with a function — and the implementation is just as invisible to callers.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you run it.</p>
+<div class="hf-napkin">
+  <code>function p(x: unknown): 'A';</code> then <code>function p(x: string): 'B';</code> over one
+  implementation. What does <code>p('hello')</code> return — and what would you change to get the
+  other answer, without deleting either signature?
+</div>
 
   <!-- ── TRY IT LIVE ── -->
   <div class="tryit" data-lang="ts"
@@ -621,6 +796,10 @@ resetSim();
   reset2();
 })();
 </script>
+<script src="tracks-data.js"></script>
+<script src="devhub-chapters.js"></script>
+<script src="devhub-hf-check.js"></script>
+<script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>

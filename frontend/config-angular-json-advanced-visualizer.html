@@ -1,7 +1,8 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-hf>
 <head>
   <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>angular.json — Deep Dive: Builders, Budgets &amp; Build Optimization</title>
   <style>
     :root{
@@ -83,6 +84,7 @@
     .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
   </style>
   <link rel="stylesheet" href="devhub.css" />
+  <link rel="stylesheet" href="devhub-hf.css"/>
 </head>
 <body class="track-config">
 
@@ -127,6 +129,157 @@
     <span class="tag">In CIAM / Context:</span>
     <span>The CIAM Angular app uses the esbuild builder with budgets set to 400KB warning / 700KB error for the initial bundle. The ADO CI pipeline fails on budget violations, preventing bundle bloat from silently reaching users. Output hashing + CloudFront 1-year cache-control means deployed assets load instantly for returning users. Each environment (dev/staging/prod) swaps the Ping issuer URL and API base URL via file replacements.</span>
   </div>
+</div>
+
+
+<p class="hf-deck">or, the file where "it works locally" goes to die</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Dev and prod are different builds, and only one of them is tested.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A configuration nobody ran until release day</div>
+  <p><code>ng serve</code> uses the <code>development</code> configuration. Your CI builds
+  <code>production</code>. They differ in optimisation, budgets, file replacements and source
+  maps — and the first time anyone runs the second one in anger is the deploy.</p>
+  <div class="hf-scatter">
+    <span>ng serve → development</span>
+    <span>ng build → production ⚠</span>
+    <span>different fileReplacements ⚠</span>
+    <span>budgets only enforced in prod ⚠</span>
+    <span>first real run = release ⚠</span>
+  </div>
+  <p class="hf-foot">The classic version: a budget you have exceeded for weeks fails the build
+  on the afternoon you needed to ship, and the commit that caused it was twenty commits ago.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make the difference small, and run it early</div>
+  <div class="hf-ladder">
+    <b>defaults live in the target's own <code>options</code></b>
+    <i>↓ each configuration only OVERRIDES what differs</i>
+    <b>configurations: { production: {…}, development: {…} }</b>
+    <i>↓ and CI builds production on every PR, not on release day</i>
+    <b>the deploy build is one you have already run a hundred times</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A configuration is a patch, not a copy.</b> Everything a configuration does not mention
+  it inherits from <code>options</code> — so the right way to read one is "what is different
+  here", and the right way to write one is to keep that list as short as you can defend.
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">ng serve</span>
+    <p>I used the development configuration. Fast rebuilds, source maps, no optimisation.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">ng build</span>
+    <p>And I used production, which optimises, hashes filenames, enforces budgets and swaps
+    your environment file. Nothing you observed about me was observed about you.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Your CI</span>
+    <p>Which is why I build production on every pull request. The point is not the artifact —
+    it is finding out today rather than on release day.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Options first, then the named patch on top.</p>
+
+<div class="hf-card hf-nest">
+  <p class="note">each layer overrides the one outside it ↘</p>
+  <div class="ring"><span class="lbl">architect.build.options — the defaults</span>
+    <div class="ring"><span class="lbl">configurations.production — only what differs</span>
+      <div class="ring"><span class="lbl">--configuration=production on the CLI</span>
+        <div class="core">the build<small>one merged set of options</small></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<p><b>The setting most worth understanding is <code>fileReplacements</code></b>, because it is
+the one that makes your environments genuinely different artifacts. It swaps
+<code>environment.ts</code> for <code>environment.prod.ts</code> AT BUILD TIME — which is why
+a value in there cannot be changed without a rebuild, and why the runtime-config pattern
+exists as the alternative. If security asks you to promote the exact tested artifact from
+staging to production, <code>fileReplacements</code> is the thing standing in the way.</p>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Your <code>production</code> configuration sets only <code>"optimization": true</code>.
+  Where do <code>outputPath</code> and <code>index</code> come from?</p>
+  <button type="button">They're required in every configuration — the build fails without them</button>
+  <button type="button">From Angular's built-in defaults, ignoring the target's options</button>
+  <button type="button">From the target's <code>options</code> block, which every configuration inherits</button>
+  <p class="why" data-for="0">That would make configurations copies rather than patches, and
+  every one of them would duplicate the whole build setup — which is exactly the drift this
+  design avoids.</p>
+  <p class="why" data-for="1">There are CLI defaults for some values, but they do not replace
+  your own <code>options</code>. Your target's options win over the tool's defaults.</p>
+  <p class="why" data-for="2">Right — a configuration is merged ON TOP of <code>options</code>,
+  so it only needs to state what differs. Read one as a diff and it stops looking arbitrary.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Layered configuration, three other names.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring profiles</h4>
+    <p><code>application.yml</code> plus <code>application-prod.yml</code> is the identical
+    shape: a base and a named patch merged over it. Same reading rule — the profile file is a
+    diff, not a config.</p>
+    <div class="hf-scatter"><span>base + profile</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Docker Compose overrides</h4>
+    <p><code>docker-compose.override.yml</code> layers onto the base file. Same idea, same
+    trap: the override you forgot about is the one that behaves differently in CI.</p>
+    <div class="hf-scatter"><span>compose + override</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Budgets as a CI gate</h4>
+    <p>A bundle budget only helps if it runs before merge. Set to error rather than warn and
+    run in the PR build, it turns a slow regression into a failing check on the commit that
+    caused it.</p>
+    <div class="hf-scatter"><span>type: bundle</span><span>maximumError</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Should I add a <code>staging</code> configuration?</p>
+  <p class="a">Only if it genuinely differs in something the BUILD controls. If staging differs
+  by an API URL, a third configuration means a third artifact and one more build that nobody
+  runs — the runtime-config pattern serves that better. Add a configuration when the
+  difference is optimisation, budgets or source maps; use runtime config when it is a value.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">What actually goes in <code>assets</code> versus <code>styles</code>?</p>
+  <p class="a"><code>assets</code> are copied verbatim to the output — images, fonts, your
+  <code>config.json</code>. <code>styles</code> and <code>scripts</code> are BUNDLED, so they
+  are processed, hashed and tree-shaken where possible. Putting a file in the wrong one is why
+  a stylesheet sometimes ships unminified, or an asset arrives with a hashed name nothing can
+  find.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why is my <code>ng serve</code> fast and my build slow?</p>
+  <p class="a">Because they are different configurations doing different work: serve skips
+  optimisation, minification and budget checks, and keeps a warm incremental cache. That gap
+  is by design — but it also means serve tells you almost nothing about your production bundle
+  size, which is what budgets are for.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you run it.</p>
+<div class="hf-napkin">
+  Your <code>production</code> configuration sets <code>"sourceMap": false</code> and your
+  <code>options</code> block sets <code>"sourceMap": true</code>. You run
+  <code>ng build --configuration=production --source-map</code>. Which wins, and what is the
+  precedence order of those three?
 </div>
 
 <!-- ── EXTREME-VIZ HERO ── -->
@@ -1005,8 +1158,12 @@ buildTree(TREE_DATA, document.getElementById('tree-root'));
   reset2();
 })();
 </script>
+<script src="tracks-data.js"></script>
+<script src="devhub-chapters.js"></script>
+<script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

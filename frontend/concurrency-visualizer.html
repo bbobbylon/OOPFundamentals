@@ -1,7 +1,8 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-hf>
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Concurrency — OOP Fundamentals</title>
   <style>
     :root {
@@ -107,6 +108,7 @@
     .legend span i { display: inline-block; width: 14px; height: 14px; border-radius: 3px; vertical-align: middle; margin-right: 6px; }
   </style>
   <link rel="stylesheet" href="devhub.css" />
+  <link rel="stylesheet" href="devhub-hf.css"/>
 </head>
 <body class="track-java">
   <div class="container">
@@ -142,6 +144,160 @@
       </div>
       <div class="intro-ciam"><span class="tag">Spring Boot / CIAM:</span> Tomcat runs ~200 request threads, all sharing your <code>@Bean</code> singletons — so any singleton with mutable state (a cache <code>Map</code>, a counter) must be thread-safe (<code>ConcurrentHashMap</code>, <code>AtomicInteger</code>). <code>SecurityContextHolder</code> is <code>ThreadLocal</code>, which is exactly why <code>@Async</code> loses the security context (new thread, empty ThreadLocal) — fix with a <code>DelegatingSecurityContextExecutor</code>.</div>
     </div>
+
+
+  <p class="hf-deck">or, the bug that passes every test you write for it</p>
+
+  <div class="hf-kick">The problem</div>
+  <p class="hf-say"><code>counter++</code> is not one thing. It is three.</p>
+
+  <div class="hf-card bad">
+    <div class="hf-cardtitle">Two threads, 10,000 increments each</div>
+    <p>You expect 20,000. You get 13,847. Run it again: 17,902. Again: 20,000 — and that last
+    one is the dangerous result, because it is the one your test run gets.</p>
+    <div class="hf-scatter">
+      <span>read counter → 5</span>
+      <span>other thread reads 5 too ⚠</span>
+      <span>both add 1 → 6</span>
+      <span>both write 6</span>
+      <span>two increments, one result</span>
+    </div>
+    <p class="hf-foot">Nothing threw. Nothing logged. The number is just quietly wrong, and
+    it is wrong by a different amount every time — which is why "it worked on my machine"
+    is not a joke here, it is the literal failure mode.</p>
+  </div>
+
+  <div class="hf-card good">
+    <div class="hf-cardtitle">Two separate problems, two separate fixes</div>
+    <div class="hf-ladder">
+      <b>ATOMICITY — can another thread interleave?</b>
+      <i>↓ fixed by synchronized, a Lock, or AtomicInteger</i>
+      <b>VISIBILITY — will another thread even SEE my write?</b>
+      <i>↓ fixed by volatile, or by the same synchronized</i>
+      <b>Both, or you have fixed half a bug</b>
+    </div>
+  </div>
+
+  <div class="principle" style="text-align:left">
+    <b>Atomicity and visibility are different problems.</b> <code>volatile</code> buys you
+    visibility and nothing else. <code>synchronized</code> buys you both. Almost every
+    confidently-wrong concurrency fix on the internet is someone applying the first one to a
+    problem that needed the second.
+  </div>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">Thread A</span>
+      <p>I read counter. It's 5.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">Thread B</span>
+      <p>Same. 5. The scheduler put me here between your read and your write — that gap is
+      not an edge case, it is most of the instruction.</p>
+    </div>
+    <div class="hf-bub">
+      <span class="who">Your CPU cache</span>
+      <p>And even after A writes 6, I might hold it in a core-local cache for a while. B can
+      keep reading 5 long after A "finished". That is the half nobody debugs.</p>
+    </div>
+  </div>
+
+  <div class="hf-kick">The mechanism</div>
+  <p class="hf-say">Where the other thread gets in.</p>
+
+  <div class="hf-card">
+    <ol class="hf-steps">
+      <li class="open">READ the field into a register<small>getfield — thread B can be scheduled right here</small></li>
+      <li>ADD one<small>iadd — and here</small></li>
+      <li>WRITE it back<small>putfield — B's write is now overwritten by yours</small></li>
+    </ol>
+    <p class="hf-annot">Three bytecodes, two gaps. A lost update needs the scheduler to land
+    in one of those gaps, which on a loaded server happens constantly and on your laptop
+    during a unit test happens rarely — the exact inversion you do not want.</p>
+  </div>
+
+  <p><b>The reason this survives code review</b> is that the broken version looks like one
+  statement, and Java gives you no syntax that distinguishes "one statement" from "one atomic
+  operation". <code>AtomicInteger.incrementAndGet()</code> is the same three steps done as a
+  single CPU compare-and-swap; the value is that the atomicity is now visible in the code
+  you read.</p>
+
+  <div class="hf-check" data-answer="0">
+    <p class="q">Two threads run <code>counter++</code> 10,000 times each on a shared field.
+    You mark the field <code>volatile</code>. Is the count now correct?</p>
+    <button type="button">No — <code>volatile</code> fixes visibility, but <code>counter++</code> is still three steps</button>
+    <button type="button">Yes — <code>volatile</code> makes reads and writes atomic</button>
+    <button type="button">Yes, as long as both threads share the same object instance</button>
+    <p class="why" data-for="0">Right. You have fixed the half of the problem you did not
+    have. Both threads now reliably read a fresh 5, both add 1, both write 6 — the lost update
+    is untouched. Use <code>AtomicInteger</code>, or <code>synchronized</code>, which covers
+    both.</p>
+    <p class="why" data-for="1">This is the single most common concurrency misconception.
+    <code>volatile</code> guarantees that a write is <em>seen</em> by other threads — it says
+    nothing about whether another thread can interleave between your read and your write.</p>
+    <p class="why" data-for="2">Sharing the instance is what creates the race in the first
+    place, not what fixes it. Two threads on two different objects would have no problem at
+    all.</p>
+  </div>
+
+  <div class="hf-kick">Where you've seen this before</div>
+  <p class="hf-say">Every one of these is a real production incident somewhere.</p>
+
+  <div class="hf-terms">
+    <div class="hf-card hf-taped">
+      <h4>A field on a Spring <code>@Service</code></h4>
+      <p>Spring beans are <b>singletons</b> and your controller is hit by many request threads
+      at once. Any mutable field on a <code>@Service</code> is shared mutable state — this
+      whole page — which is why stateless services is a rule and not a style.</p>
+      <div class="hf-scatter"><span>private int count;  ⚠</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4><code>SimpleDateFormat</code> as a static</h4>
+      <p>The textbook example: not thread-safe, kept as a shared constant because it felt
+      like a utility, and it silently produces wrong dates under load.
+      <code>DateTimeFormatter</code> is immutable and safe.</p>
+      <div class="hf-scatter"><span>static final SimpleDateFormat ⚠</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>A CIAM token cache</h4>
+      <p>A <code>HashMap</code> cache on a shared bean does not just lose entries — a
+      concurrent resize can spin a lookup forever. <code>ConcurrentHashMap</code> fixes the
+      structure; it does not fix check-then-act on top of it.</p>
+      <div class="hf-scatter"><span>ConcurrentHashMap</span><span>computeIfAbsent</span></div>
+    </div>
+  </div>
+
+  <div class="hf-kick">Questions from the back row</div>
+  <div class="hf-ask">
+    <p class="q">My tests pass. Doesn't that mean it's fine?</p>
+    <p class="a">It means the scheduler did not land in the gap during your run. A race is a
+    <em>probability</em>, not a branch, and a unit test on an idle laptop is close to the
+    best case. Raise the odds deliberately: many threads, many iterations, and assert the
+    total. The page's 10,000× section below does exactly that, and it is the only kind of
+    test that has anything to say here.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">If I use <code>ConcurrentHashMap</code>, am I done?</p>
+    <p class="a">Only for single operations. <code>if (!map.containsKey(k)) map.put(k, v)</code>
+    is two thread-safe calls with a race between them — another thread can insert in that gap.
+    That is what <code>putIfAbsent</code> and <code>computeIfAbsent</code> are for: they make
+    the check and the act one operation.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Why is synchronizing on a <code>String</code> literal a bad idea?</p>
+    <p class="a">Because interned literals are shared across the whole JVM, so unrelated code
+    that happens to lock on the same text is now serialised with yours — and can deadlock with
+    you. Same for boxed <code>Integer</code> values in the cache range. Lock on a
+    <code>private final Object</code> you own.</p>
+  </div>
+
+  <div class="hf-kick">Grab a napkin</div>
+  <p class="hf-say">Predict it before you run it.</p>
+  <div class="hf-napkin">
+    A worker loops on <code>while (!stopped) { … }</code> and another thread sets
+    <code>stopped = true</code>. The field is a plain <code>boolean</code>. What can happen —
+    and which one word changes it?
+  </div>
 
   <!-- ── TRY IT LIVE ── -->
   <div class="tryit" data-lang="java"
@@ -734,9 +890,13 @@ DevHubCodeWalk.mount('#cw-conc',{
       document.getElementById('s-atomic-lost').textContent = '0';
     });
   </script>
+<script src="tracks-data.js"></script>
+<script src="devhub-chapters.js"></script>
+<script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

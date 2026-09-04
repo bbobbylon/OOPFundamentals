@@ -1,7 +1,8 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-hf>
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Angular Build System — esbuild, Application Builder & Bundle Optimization</title>
   <style>
     :root {
@@ -97,6 +98,7 @@
     .who-SRC{background:#0ea5e9;color:#fff;} .who-ESB{background:#f59e0b;color:#000;} .who-TREE{background:#22c55e;color:#fff;} .who-CHUN{background:#a855f7;color:#fff;} .who-HSET{background:#f97316;color:#fff;} .who-BAD{background:#ef4444;color:#fff;}
   </style>
   <link rel="stylesheet" href="devhub.css" />
+  <link rel="stylesheet" href="devhub-hf.css"/>
 </head>
 <body class="track-angular">
 <div class="container">
@@ -132,6 +134,156 @@
     <div class="intro-ciam">
       <span class="tag">In CIAM:</span>a typical split — login/callback (small, fast), user-management (medium), admin (large: audit logs + charts). Keep the login initial chunk under ~200 KB. If <code>ng build</code> warns "budget exceeded," use <code>--stats-json</code> to find the culprit — often a date lib or icon set that wasn't tree-shaken because of a namespace import.
     </div>
+  </div>
+
+
+  <p class="hf-deck">or, why the build got 10× faster by doing less, not by trying harder</p>
+
+  <div class="hf-kick">The problem</div>
+  <p class="hf-say">Ninety seconds to find out you missed a semicolon.</p>
+
+  <div class="hf-card bad">
+    <div class="hf-cardtitle">A build slow enough to break your concentration</div>
+    <p>The old webpack pipeline did full type-checking, transpiling and bundling in one
+    JavaScript-threaded pass. Every save paid for all of it.</p>
+    <div class="hf-scatter">
+      <span>cold build ~90s</span>
+      <span>rebuild ~8s on save</span>
+      <span>single-threaded JS ⚠</span>
+      <span>you tab away and lose the thread ⚠</span>
+    </div>
+    <p class="hf-foot">The real cost was never the seconds. It was that eight seconds is long
+    enough to check Slack, and then the change you were reasoning about is gone.</p>
+  </div>
+
+  <div class="hf-card good">
+    <div class="hf-cardtitle">Split the job, then parallelise it</div>
+    <div class="hf-ladder">
+      <b>esbuild — Go, compiled, many cores at once</b>
+      <i>↓ but it does NOT type-check</i>
+      <b>tsc runs type-checking separately, in parallel</b>
+      <i>↓ so a rebuild is not blocked on it</i>
+      <b>cold ~9s, rebuild under a second</b>
+    </div>
+  </div>
+
+  <div class="principle" style="text-align:left">
+    <b>esbuild is fast partly because it refuses to do the expensive thing.</b> It strips types
+    rather than checking them. Your types are still checked — by <code>tsc</code>, alongside —
+    but the bundler never waits for it, which is where most of the wall-clock went.
+  </div>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">esbuild</span>
+      <p>I do not type-check. I delete the types and bundle what is left, in Go, across every
+      core you have.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">tsc</span>
+      <p>And I check them, on my own schedule. Your editor already showed you the error before
+      the bundle finished.</p>
+    </div>
+    <div class="hf-bub">
+      <span class="who">Your CI</span>
+      <p>Which is why I still run <code>tsc --noEmit</code> as its own step. A green
+      <code>ng build</code> alone is not proof the types are sound.</p>
+    </div>
+  </div>
+
+  <div class="hf-kick">The mechanism</div>
+  <p class="hf-say">Two passes, and only one of them blocks you.</p>
+
+  <div class="hf-card">
+    <ol class="hf-steps">
+      <li class="open"><span>resolve the graph from <code>main.ts</code> — imports only</span><span class="tag">what is reachable</span></li>
+      <li><span>Angular compiles templates and decorators (AOT)</span><span class="tag">ngtsc</span></li>
+      <li><span>esbuild strips types and bundles, in parallel across cores</span><span class="tag">fast path</span></li>
+      <li><span>tree-shaking drops what nothing imported</span><span class="tag">smaller</span></li>
+      <li><span>hashed filenames — <code>main.a3f9.js</code> — for cache busting</span><span class="tag">ship</span></li>
+    </ol>
+    <p class="hf-annot">Step 4 is why <code>provideHttpClient(withFetch())</code> beats
+    importing a module: a function call the bundler can see is unused disappears, while an
+    imported NgModule pulled in everything it declared whether you used it or not.</p>
+  </div>
+
+  <p><b>Tree-shaking only works on what the bundler can PROVE is unreachable</b>, and side
+  effects are what break the proof. A module that runs code at import time — patching a
+  prototype, registering a locale, touching <code>window</code> — cannot be dropped, because
+  removing it would change behaviour. That is what <code>"sideEffects": false</code> in a
+  package.json is: a promise to the bundler that importing this file does nothing observable,
+  so unused exports are safe to delete. Get that promise wrong and you ship a bundle missing
+  code you needed.</p>
+
+  <div class="hf-check" data-answer="0">
+    <p class="q">Your <code>ng build</code> succeeds. Does that mean your TypeScript types are
+    sound?</p>
+    <button type="button">No — esbuild strips types without checking them; you need <code>tsc --noEmit</code> in CI</button>
+    <button type="button">Yes — the build compiles TypeScript, so it must have type-checked it</button>
+    <button type="button">Yes, but only in production mode; dev builds skip checking</button>
+    <p class="why" data-for="0">Right, and it changes what CI has to do. The Angular CLI does
+    run type-checking alongside, but the bundler itself does not gate on it, and a build
+    pipeline that only runs <code>ng build</code> can let a type error through. An explicit
+    <code>tsc --noEmit</code> step is the check that actually fails.</p>
+    <p class="why" data-for="1">This was true of the old webpack + ts-loader pipeline, and it
+    is the assumption people carry forward. Transpiling and type-checking are separate jobs,
+    and esbuild only does the first.</p>
+    <p class="why" data-for="2">The split is not about mode. esbuild never type-checks, in any
+    configuration — that is the design decision that makes it fast.</p>
+  </div>
+
+  <div class="hf-kick">Where you've seen this before</div>
+  <p class="hf-say">The same trade, three other places.</p>
+
+  <div class="hf-terms">
+    <div class="hf-card hf-taped">
+      <h4>Babel, years earlier</h4>
+      <p><code>@babel/preset-typescript</code> made the same bargain: strip types, never check
+      them, be fast. esbuild industrialised it by writing the whole thing in Go.</p>
+      <div class="hf-scatter"><span>strip ≠ check</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>Vite's dev server</h4>
+      <p>Same instinct one step further: in dev it does not bundle at all, serving native ES
+      modules and letting the browser resolve them. Doing less is the whole strategy.</p>
+      <div class="hf-scatter"><span>no bundle in dev</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>Your CIAM pipeline</h4>
+      <p>Lint, type-check and build as separate parallel CI jobs finish sooner than one serial
+      step, and tell you WHICH thing failed instead of just that something did.</p>
+      <div class="hf-scatter"><span>tsc --noEmit</span><span>ng build</span></div>
+    </div>
+  </div>
+
+  <div class="hf-kick">Questions from the back row</div>
+  <div class="hf-ask">
+    <p class="q">Why did my bundle grow after adding one small import?</p>
+    <p class="a">Usually a barrel file. Importing one symbol from an <code>index.ts</code> that
+    re-exports fifty modules can pull the whole barrel in if any of it has side effects the
+    bundler cannot see past. Import from the specific path and watch the number drop —
+    <code>--stats-json</code> plus a bundle analyser will show you which import did it.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">What is a budget for, really?</p>
+    <p class="a">To make a slow regression fail loudly instead of arriving one commit at a
+    time. Bundle size creeps: nobody adds 400KB, everyone adds 8KB. A budget in
+    <code>angular.json</code> turns the twentieth 8KB into a build failure, which is the only
+    moment anyone will look.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Source maps in production — yes or no?</p>
+    <p class="a">Generate them always; whether you SERVE them is the real question. Uploading
+    them to your error tracker gives readable stack traces without publishing your source to
+    anyone who opens devtools. Serving them publicly is the version people regret.</p>
+  </div>
+
+  <div class="hf-kick">Grab a napkin</div>
+  <p class="hf-say">Predict it before you run it.</p>
+  <div class="hf-napkin">
+    A utility file exports ten functions; you import one. Then someone adds
+    <code>console.log('loaded')</code> at the top level of that file. What happens to the other
+    nine in your bundle, and why?
   </div>
 
   <!-- ── EXTREME-VIZ HERO: esbuild Pipeline Flow ── -->
@@ -775,8 +927,12 @@ DevHubCodeWalk.mount('#cw-esbuild',{
   reset();
 })();
 </script>
+<script src="tracks-data.js"></script>
+<script src="devhub-chapters.js"></script>
+<script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

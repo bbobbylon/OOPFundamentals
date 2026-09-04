@@ -1,7 +1,8 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-hf>
 <head>
 <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>SQL Transactions &amp; ACID — DevHub</title>
 <style>
 .who-TXN{background:rgba(204,102,0,.22);color:#fcd34d}
@@ -11,6 +12,7 @@
 .who-DB{background:rgba(167,139,250,.18);color:#c4b5fd}
 </style>
 <link rel="stylesheet" href="devhub.css"/>
+  <link rel="stylesheet" href="devhub-hf.css"/>
 </head>
 <body class="track-sql">
 <div class="page">
@@ -45,6 +47,191 @@
       </div>
     </div>
     <div class="intro-ciam"><span class="tag">CIAM transaction patterns:</span> User provisioning must be atomic — create user + assign default role + write audit event, all in one <code>@Transactional</code> method so a failure leaves no orphaned user. A concurrent-login race (two OAuth callbacks for the same subject) is fixed by a unique constraint on <code>(idp_type, external_id)</code> + catching <code>DataIntegrityViolationException</code> — the second insert rolls back and you return the existing user. And role edits use optimistic locking (<code>@Version</code>): two admins editing the same user, one gets <code>OptimisticLockException</code> and retries.</div>
+  </div>
+
+  <p class="hf-deck">or, how two requests both spent the same $100 and PostgreSQL said that was fine</p>
+
+  <div class="hf-kick">The problem</div>
+  <p class="hf-say">You read a number, you thought about it, and by the time you wrote it back it was a rumour.</p>
+
+  <div class="hf-card bad">
+    <div class="hf-cardtitle">The balance check that both requests passed</div>
+    <p>Two withdrawals land in the same millisecond. Each opens a transaction, runs
+    <code>SELECT balance FROM accounts WHERE id = 7</code>, and gets back <code>100</code>.
+    Each one does the subtraction <em>in Java</em> and writes the answer back:
+    <code>UPDATE accounts SET balance = 0 WHERE id = 7</code>. Both commit. The balance went
+    down by $100 and $200 walked out the door.</p>
+    <div class="hf-scatter">
+      <span>SELECT → 100</span><span>both read 100</span>
+      <span>both write 0 ⚠</span><span>$200 paid out ⚠</span>
+    </div>
+    <p class="hf-foot">Nothing threw. No deadlock, no constraint violation, no stack trace, not
+    even a warning line. The only evidence is a number that is $100 short, found three weeks
+    later in a reconciliation report by someone who does not read Java.</p>
+  </div>
+
+  <div class="hf-card good">
+    <div class="hf-cardtitle">Make the write depend on what you read</div>
+    <div class="hf-ladder">
+      <b>SELECT ... FOR UPDATE</b>
+      <i>↓ pessimistic — the row is yours until COMMIT, and request two waits in line for it</i>
+      <b>UPDATE ... AND version=?</b>
+      <i>↓ optimistic — no lock, but a stale row now updates ZERO rows instead of the wrong one</i>
+      <b>0 rows → re-read → retry</b>
+    </div>
+  </div>
+
+  <div class="principle" style="text-align:left">
+    <b>A read is not a reservation.</b> On the level your database is actually running,
+    <code>SELECT</code> tells you what was true a microsecond ago — not what will still be true
+    when your <code>UPDATE</code> lands. If a write depends on a value you read, you must lock
+    that row or version it. "Be careful" is not the third option.
+  </div>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">Request A</span>
+      <p>I read the refresh token, it said <code>used = false</code>, so I marked it used and
+      issued a fresh access token. Textbook rotation.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">Request B</span>
+      <p>Same token, same millisecond, same read, same conclusion. There are now two live
+      sessions from one single-use token — and only one of them will get revoked.</p>
+    </div>
+    <div class="hf-bub">
+      <span class="who">PostgreSQL</span>
+      <p>You asked me for READ COMMITTED. I gave you READ COMMITTED. Neither of you ever asked
+      me to stop the other one.</p>
+    </div>
+  </div>
+
+  <div class="hf-kick">The mechanism</div>
+  <p class="hf-say">Four levels, and each one closes exactly one more door.</p>
+
+  <div class="hf-card">
+    <ol class="hf-steps">
+      <li><span><b>READ UNCOMMITTED</b> — you would be able to read rows another transaction has
+      not committed yet: a <b>dirty read</b>. Postgres declines to implement it and quietly
+      hands you the next level up.</span><span class="tag">not real here</span></li>
+      <li><span><b>READ COMMITTED</b> — every <em>statement</em> takes a fresh snapshot, so two
+      <code>SELECT</code>s inside one transaction may legally disagree, and rows that match your
+      <code>WHERE</code> can appear out of nowhere.</span><span class="tag">the default</span></li>
+      <li><span><b>REPEATABLE READ</b> — one snapshot for the whole transaction. Rows stop
+      shifting under you and phantoms stay hidden, but writing onto a row somebody else changed
+      now fails with <code>40001</code>.</span><span class="tag">one snapshot</span></li>
+      <li><span><b>SERIALIZABLE</b> — Postgres tracks read/write dependencies between live
+      transactions and aborts any result that no serial ordering could have
+      produced.</span><span class="tag">retry required</span></li>
+    </ol>
+    <p class="hf-annot">The part everyone re-learns: your database is sitting on row two. Row two
+    is where the lost update lives.</p>
+  </div>
+
+  <p>Read that ladder again with the withdrawal in mind. On <b>READ COMMITTED</b> both
+  transactions read <code>100</code>, both write <code>0</code>, both commit — no error, because
+  neither statement ever asked whether the row had moved. Raise the same code to <b>REPEATABLE
+  READ</b> and the second <code>UPDATE</code> does not silently win: it dies with <em>could not
+  serialize access due to concurrent update</em>. That is better, and it is still an incident
+  unless you wrote the retry. <b>Isolation levels do not remove the conflict — they only change
+  whether you find out about it.</b> Notice the trap: the fix people reach for first
+  (<code>SET TRANSACTION ISOLATION LEVEL</code>) is the one that needs the code path they were
+  trying to avoid writing.</p>
+
+  <p><b>And an open transaction is never free.</b> <code>@Transactional</code> is not a hint. At
+  the proxy boundary Spring pulls a connection out of the pool, sends <code>BEGIN</code>, and
+  pins that connection to your thread until the method returns — then <code>COMMIT</code>, or
+  <code>ROLLBACK</code> if a <code>RuntimeException</code> escaped (a checked exception commits
+  happily unless you spell out <code>rollbackFor</code>). So every line in that method is inside
+  the transaction, including the 900 ms REST call to the IdP that someone added last sprint. The
+  row lock you took on line three is still held on line forty. <b>A transaction is a lease on one
+  connection plus every lock you hold, and the clock starts at BEGIN, not at the UPDATE.</b>
+  Twenty threads doing that against a pool of ten is an outage that will be filed as a database
+  problem when it is really a method that is too long.</p>
+
+  <div class="hf-check" data-answer="0">
+    <p class="q">Your refresh endpoint runs <code>SELECT used FROM refresh_tokens WHERE
+    token = ?</code>, checks <code>if (!used)</code> in Java, then <code>UPDATE refresh_tokens
+    SET used = true WHERE id = ?</code>. Two requests arrive with the same token at the same
+    instant, on stock PostgreSQL settings. What happens?</p>
+    <button type="button">Both succeed — each read <code>false</code>, and each <code>UPDATE</code> is perfectly valid</button>
+    <button type="button">The second blocks on the row lock, re-reads <code>true</code>, and is rejected</button>
+    <button type="button">Postgres spots the conflict and aborts one with a serialization failure</button>
+    <p class="why" data-for="0">Right — and nothing in that code looks wrong, which is the whole
+    problem. READ COMMITTED lets both <code>SELECT</code>s see <code>false</code>; the two
+    <code>UPDATE</code>s queue on the row lock and then both apply, because neither one asked
+    whether it was <em>still</em> false. One single-use token, two live sessions.</p>
+    <p class="why" data-for="1">The second <code>UPDATE</code> genuinely does wait on the row
+    lock. But its <code>SELECT</code> already ran and already returned <code>false</code> — the
+    <code>if</code> in your Java was decided before that lock existed. Waiting does not re-run
+    the decision. Only <code>FOR UPDATE</code> on the <em>read</em> would have.</p>
+    <p class="why" data-for="2">That is REPEATABLE READ or SERIALIZABLE behaviour. On the default
+    READ COMMITTED, Postgres has nothing to object to: two transactions each updated a row they
+    were allowed to update. You never told it these two were related.</p>
+  </div>
+
+  <div class="hf-kick">Where you've seen this before</div>
+  <p class="hf-say">Three CIAM bugs that are all this bug wearing a different hat.</p>
+
+  <div class="hf-terms">
+    <div class="hf-card hf-taped">
+      <h4>The single-use refresh token</h4>
+      <p>Two browser tabs wake up and refresh at once. Both read the token as unused, both
+      rotate. Now one revocation cleans up half the mess. Fix: take the row lock on the
+      <em>read</em> — <code>SELECT ... FOR UPDATE</code> inside the same transaction — so the
+      loser re-reads reality instead of a memory of it.</p>
+      <div class="hf-scatter"><span>FOR UPDATE</span><span>one token, one winner</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>The one-time MFA code</h4>
+      <p>Three attempts left. Two POSTs land together, both read <code>3</code>, both write
+      <code>2</code>. The attacker just spent two guesses and was charged for one. Fix: never
+      let the arithmetic happen in Java — do it in the statement, and check the row count.</p>
+      <div class="hf-scatter"><span>attempts = attempts - 1</span><span>AND attempts &gt; 0</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>Two admins, one user record</h4>
+      <p>Angular PUTs the whole user object back. Admin B loaded the form before Admin A saved,
+      so B's save quietly restores the role A just removed. Fix: a <code>@Version</code> column,
+      so the stale save updates zero rows and the UI says "reload" instead of lying.</p>
+      <div class="hf-scatter"><span>@Version</span><span>409, not last-write</span></div>
+    </div>
+  </div>
+
+  <div class="hf-kick">Questions from the back row</div>
+  <div class="hf-ask">
+    <p class="q">Why not just run SERIALIZABLE everywhere and stop thinking about it?</p>
+    <p class="a">Because it does not delete the conflict, it converts it into a <code>40001</code>
+    that arrives at runtime, under load, on the busiest endpoint — which is the exact moment you
+    least want an untested code path. SERIALIZABLE without a retry loop is READ COMMITTED with
+    extra outages. Write the retry first, then raise the level; that order is not negotiable.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">FOR UPDATE or a version column — how do I pick?</p>
+    <p class="a">Pessimistic (<code>FOR UPDATE</code>) when losing is <em>likely</em> and the
+    transaction is short: the second request waits a few milliseconds and then reads the truth.
+    Optimistic (<code>@Version</code>) when losing is <em>surprising</em> and you would rather not
+    hold a lock across work you do not control. Optimistic still needs the retry — the version
+    check tells you that you lost, it does not do anything about it.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Does <code>@Transactional(readOnly = true)</code> make any of this safer?</p>
+    <p class="a">No — faster and more honest, not safer. Hibernate skips dirty checking and the
+    connection refuses writes, which catches the day someone adds a save() to your report method.
+    Your snapshot rules are exactly what they were: it is a performance and intent flag, not an
+    isolation level.</p>
+  </div>
+
+  <div class="hf-kick">Grab a napkin</div>
+  <p class="hf-say">Predict it before you run it.</p>
+  <div class="hf-napkin">
+    Two requests hit <code>POST /mfa/verify</code> with the same code at the same instant. Each
+    runs <code>SELECT attempts FROM mfa_codes WHERE id = 7</code> (it returns <code>3</code>),
+    then <code>UPDATE mfa_codes SET attempts = 2 WHERE id = 7</code>, on stock Postgres settings.
+    <b>Part one:</b> after both commit, what number is in <code>attempts</code> — and how many
+    guesses did the attacker actually get to spend? <b>Part two:</b> rewrite that
+    <code>UPDATE</code> so the answer stops depending on timing, without adding a lock, an
+    isolation level, or a retry loop.
   </div>
 
 <div class="rt-ctlbar">
@@ -269,6 +456,10 @@ document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.addEventListener('
 $('Run').addEventListener('click',run);renderNodes();chip();
 })();
 </script>
+<script src="tracks-data.js"></script>
+<script src="devhub-chapters.js"></script>
+<script src="devhub-hf-theme.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>

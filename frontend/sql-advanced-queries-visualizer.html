@@ -1,7 +1,8 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-hf>
 <head>
 <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>SQL Advanced Queries — DevHub</title>
 <style>
 .who-QUERY{background:rgba(204,102,0,.22);color:#fcd34d}
@@ -11,6 +12,7 @@
 .who-ROWS{background:rgba(248,113,113,.18);color:#fca5a5}
 </style>
 <link rel="stylesheet" href="devhub.css"/>
+  <link rel="stylesheet" href="devhub-hf.css"/>
 </head>
 <body class="track-sql">
 <div class="page">
@@ -46,6 +48,180 @@
     </div>
     <div class="intro-ciam"><span class="tag">CIAM reporting queries:</span> "Suspicious login patterns" = CTE <code>recent_logins</code> ⨝ <code>failed_attempts</code>; "daily growth by IDP" = GROUP BY day+idp_type with a window running total (Ping vs Entra velocity); "top 10 active users per role" = <code>ROW_NUMBER() OVER (PARTITION BY role ORDER BY login_count DESC)</code> then <code>rank &lt;= 10</code>; "active last month but churned" = last_month <code>EXCEPT</code> this_month; "median session length" = <code>PERCENTILE_CONT(0.5) WITHIN GROUP</code>. Run these as native <code>@Query</code> (or JOOQ) when JPA can't express them cleanly.</div>
   </div>
+
+<p class="hf-deck">or, why SQL refuses to run in the order you wrote it</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Three rules that feel arbitrary. They are the same rule.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">"Column does not exist." It's right there. You just wrote it.</div>
+  <p>You cannot use a <code>SELECT</code> alias in <code>WHERE</code>. You cannot filter an
+  aggregate in <code>WHERE</code> — there is a whole separate keyword for that. And you cannot
+  put <code>ROW_NUMBER() OVER (...)</code> in <code>WHERE</code> either, so "top 10 per group"
+  needs a subquery that looks like ceremony. Three separate lessons, each learned by hitting an
+  error and memorising a workaround.</p>
+  <div class="hf-scatter">
+    <span>WHERE rank &lt;= 10 ⚠</span>
+    <span>WHERE COUNT(*) &gt; 5 ⚠</span>
+    <span>WHERE full_name LIKE '%a%' ⚠</span>
+    <span>all: column does not exist ⚠</span>
+  </div>
+  <p class="hf-foot">Memorising three workarounds gets you through the day. Knowing why gets
+  you the fourth one before you meet it.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Learn the running order once, and all three follow</div>
+  <div class="hf-ladder">
+    <b>SQL is written SELECT-first and RUN almost backwards</b>
+    <i>↓ FROM → WHERE → GROUP BY → HAVING → window functions → SELECT → ORDER BY → LIMIT</i>
+    <b>A clause can only see what earlier clauses have already produced</b>
+    <i>↓ WHERE runs before aliases, aggregates and windows exist</i>
+    <b>So filtering any of those means wrapping the query — a CTE or a subquery</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>You write SELECT first. The database runs it almost last.</b> <code>WHERE</code> cannot see
+  a <code>SELECT</code> alias, an aggregate, or a window function for one reason: none of them
+  exist yet when <code>WHERE</code> runs. Every "why can't I just…" in this page has that same
+  answer.
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I labelled it <code>rank</code> on line two and filtered on it on line five. How can it
+    not exist?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The planner</span>
+    <p>Line two is where you <i>wrote</i> it. I run <code>WHERE</code> before I ever evaluate
+    the select list — at that point I am still deciding which rows survive, and
+    <code>rank</code> is a value I have not computed for any of them.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">A CTE</span>
+    <p>Which is my entire job. Wrap the query in me and I finish completely first, so by the
+    time the outer query runs, <code>rank</code> is an ordinary column it can filter like any
+    other. Not ceremony — a phase boundary.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">The order the database actually uses.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>FROM</code> / <code>JOIN</code> — assemble the working set of rows</span><span class="tag">nothing is filtered yet</span></li>
+    <li class="open"><span><code>WHERE</code> — drop rows. Aliases, aggregates and window results do not exist here</span><span class="tag">the source of all three errors</span></li>
+    <li><span><code>GROUP BY</code> — collapse the survivors into groups, then aggregates are computed</span><span class="tag">rows become groups</span></li>
+    <li><span><code>HAVING</code> — drop groups. This is <code>WHERE</code>, one phase later, which is the only reason it exists</span><span class="tag">filter on COUNT(*) here</span></li>
+    <li class="open"><span>Window functions run <b>now</b> — over the rows that survived, without collapsing them</span><span class="tag">after WHERE, before SELECT</span></li>
+    <li><span><code>SELECT</code> — evaluate expressions and bind aliases. The names finally exist</span><span class="tag">this is where rank is born</span></li>
+    <li><span><code>ORDER BY</code>, then <code>LIMIT</code> — which is why ORDER BY <i>can</i> use an alias</span><span class="tag">the one clause that runs after SELECT</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the one worth carrying: a window function is not an aggregate.
+  <code>GROUP BY</code> collapses ten rows into one and loses the detail;
+  <code>SUM(x) OVER (...)</code> keeps all ten rows and adds a column to each. That is the whole
+  reason "running total per row" and "each row plus its group's average" are one-liners with a
+  window and genuinely awkward with a self-join.</p>
+</div>
+
+<p><b>So "top N per group" is not a trick — it is a consequence.</b>
+<code>ROW_NUMBER() OVER (PARTITION BY role ORDER BY login_count DESC)</code> numbers rows within
+each group, but it runs at step 5 and <code>WHERE</code> ran at step 2, so there is nowhere in
+that query to filter it. Wrap it in a CTE and the outer query's <code>WHERE rn &lt;= 10</code>
+now runs against a finished result set. While you are there, pick the right numbering function:
+<code>ROW_NUMBER()</code> never ties (1,2,3,4), <code>RANK()</code> ties and then skips
+(1,2,2,4), and <code>DENSE_RANK()</code> ties without skipping (1,2,2,3). "Top 10" with
+<code>ROW_NUMBER()</code> gives exactly ten rows and silently drops someone tied at tenth —
+which is right for pagination and wrong for a leaderboard.</p>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">You write
+  <code>SELECT user_id, COUNT(*) AS n FROM logins WHERE n &gt; 5 GROUP BY user_id</code>
+  and get "column n does not exist". Why — and where does the filter belong?</p>
+  <button type="button">WHERE runs before GROUP BY and before the select list, so no alias and no aggregate exists yet — use HAVING n &gt; 5</button>
+  <button type="button">Aliases can never be reused anywhere in SQL; you must repeat COUNT(*) &gt; 5 in the WHERE clause</button>
+  <button type="button">The alias is fine but COUNT(*) needs a window frame; use COUNT(*) OVER (PARTITION BY user_id)</button>
+  <p class="why" data-for="0">Right, and note that <code>HAVING</code> is not a special
+  aggregate keyword — it is simply <code>WHERE</code> positioned after grouping. Once you see
+  the running order, it stops being a second filtering syntax to memorise and becomes the same
+  filter at the only phase where the value exists.</p>
+  <p class="why" data-for="1">Half of the first clause is true — <code>WHERE</code> cannot see
+  the alias — but the conclusion is wrong twice. <code>ORDER BY</code> <i>can</i> use a
+  <code>SELECT</code> alias, because it runs after <code>SELECT</code>. And repeating
+  <code>COUNT(*)</code> in <code>WHERE</code> fails too: aggregates are not computed at that
+  phase at all.</p>
+  <p class="why" data-for="2">A window version does exist and computes something different: it
+  adds a per-user count to every row without collapsing them, so you get one row per login, not
+  one per user. Useful — but a different query, and it still cannot be filtered in
+  <code>WHERE</code>, for exactly the reason in the correct answer.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three neighbours of the same idea.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A CTE is a phase, not a variable</h4>
+    <p>That is why it fixes these errors: it forces a boundary the outer query runs after.
+    Worth knowing that most engines may still inline and optimise across it — Postgres does
+    unless you write <code>MATERIALIZED</code> — so a CTE is a readability and
+    <i>scoping</i> tool, not automatically a performance one.</p>
+    <div class="hf-scatter"><span>a boundary you can name</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>JPA and JPQL hit the same wall</h4>
+    <p>JPQL has no window functions at all, which is exactly when you drop to a native
+    <code>@Query</code> or JOOQ. Recognising "this needs a phase boundary" is how you know
+    the ORM is not going to express it — before you spend an afternoon trying.</p>
+    <div class="hf-scatter"><span>native @Query, on purpose</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A CIAM login-anomaly report</h4>
+    <p>"Each login, plus how it compares to that user's own average" is a window, not a
+    <code>GROUP BY</code> — you need every row kept <i>and</i> the group statistic beside it.
+    Collapsing to a group throws away the exact rows you were hunting for.</p>
+    <div class="hf-scatter"><span>keep the rows, add the context</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">When is it a window function and when is it <code>GROUP BY</code>?</p>
+  <p class="a">Ask what you want out. If one row per group is the answer — "logins per user" —
+  that is <code>GROUP BY</code>, and losing the detail is the point. If you want every row back
+  with a group statistic attached — "each login, and that user's total" — that is a window,
+  because <code>OVER</code> means "compute across these rows without collapsing them." The tell
+  is the word "each" in the requirement.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">What does the frame clause (<code>ROWS BETWEEN …</code>) actually change?</p>
+  <p class="a">It sets which rows the function sees for the current row. The default when you
+  write <code>ORDER BY</code> inside <code>OVER</code> is <code>RANGE BETWEEN UNBOUNDED
+  PRECEDING AND CURRENT ROW</code> — everything up to here, which is what makes
+  <code>SUM(x) OVER (ORDER BY day)</code> a running total. Omit <code>ORDER BY</code> and the
+  frame is the whole partition, giving a group total repeated on every row. Same function, two
+  very different columns, decided by a clause that is easy to skip reading.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Is a recursive CTE dangerous?</p>
+  <p class="a">It can loop forever on cyclic data — a role hierarchy where someone made A a
+  parent of B and B a parent of A. The guards are a depth counter in the recursive term with a
+  <code>WHERE depth &lt; 10</code>, or tracking the visited path in an array and excluding
+  anything already in it. Add one before the query meets production data, not after.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you run it.</p>
+<div class="hf-napkin">
+  You want the 3 most recent logins per user from a 2-million-row table, and only for logins in
+  the last 30 days. Which filter goes <i>inside</i> the CTE and which goes outside — and what
+  goes wrong if you swap them?
+</div>
 
 <div class="rt-ctlbar">
   <span class="lbl">scenario:</span>
@@ -289,6 +465,10 @@ document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.addEventListener('
 $('Run').addEventListener('click',run);renderNodes();chip();
 })();
 </script>
+<script src="tracks-data.js"></script>
+<script src="devhub-chapters.js"></script>
+<script src="devhub-hf-check.js"></script>
+<script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>

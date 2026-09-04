@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-hf>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -51,6 +51,7 @@
     .leakbar.safe{background:#052e16;border-color:#134d28;color:#bbf7d0}
   </style>
   <link rel="stylesheet" href="devhub.css" />
+  <link rel="stylesheet" href="devhub-hf.css"/>
 </head>
 <body class="track-ts">
 <div class="page">
@@ -85,6 +86,188 @@
       </div>
     </div>
     <div class="intro-ciam"><span class="tag">CIAM / Angular:</span> Angular services use parameter properties everywhere — <code>@Injectable() class UserService { constructor(private http: HttpClient, private auth: AuthService) {} }</code> — DI reads the parameter types from compiler metadata. Never keep a token in TS <code>private</code> (it leaks); use <code>#token</code> or an httpOnly cookie. A chainable query builder with <code>this</code> returns — <code>new UserSearchQuery().where(filter).sortBy('name').limit(20)</code> — stays fully typed across every call.</div>
+  </div>
+
+  <p class="hf-deck">or, one function object for ten thousand objects — until you type an arrow</p>
+
+  <div class="hf-kick">The problem</div>
+  <p class="hf-say">Your method never belonged to your object.</p>
+
+  <div class="hf-card bad">
+    <div class="hf-cardtitle">The callback that lost its object</div>
+    <p>You wrote an idle-timeout warning, wired it up with
+    <code>setTimeout(this.warn, 60_000)</code>, and <code>tsc</code> said nothing at all.
+    Sixty seconds later production throws
+    <code>Cannot read properties of undefined (reading 'banner')</code>.</p>
+    <p>Here is the thing nobody tells you: <code>this.warn</code> did not read a property off
+    your instance. Your instance has no <code>warn</code>. The lookup missed, walked up to
+    <code>SessionTimer.prototype</code>, found one bare function sitting there, and handed
+    it to you with <b>nothing attached</b>. The dot was supplying the object. You copied the
+    function and threw the dot away.</p>
+    <div class="hf-scatter">
+      <span>warn is not on the instance</span>
+      <span>lookup walks the prototype</span>
+      <span>called with no receiver ⚠</span>
+      <span>tsc compiles it clean ⚠</span>
+    </div>
+    <p class="hf-foot">The bug is not that <code>this</code> changed. It is that
+    <code>this</code> was never stored anywhere — it is handed in fresh on every single call,
+    by whatever sits to the left of the dot.</p>
+  </div>
+
+  <div class="hf-card good">
+    <div class="hf-cardtitle">Three fixes, three different bills</div>
+    <div class="hf-ladder">
+      <b>warn = () =&gt; this.banner.show()</b>
+      <i>↓ a field, not a method — one NEW closure per instance, but it survives being torn off</i>
+      <b>this.warn = this.warn.bind(this)</b>
+      <i>↓ same per-instance bill, and the prototype method still exists underneath for super</i>
+      <b>setTimeout(() =&gt; this.warn(), 60_000)</b>
+      <i>↓ costs nothing per object — the dot is still there, at the call site, where it belongs</i>
+    </div>
+  </div>
+
+  <div class="principle" style="text-align:left">
+    <b>A method is not part of your object. <code>this</code> is whatever sits to the left of
+    the dot, decided fresh at every call.</b> Which is why detaching a method detaches its
+    object too — and why the fix is never "bind harder", it is "keep the dot".
+  </div>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">One timer instance</span>
+      <p>I own <code>email</code>, <code>startedAt</code> and <code>retries</code>. That is my
+      entire contents. I do not own a single function.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">The prototype object</span>
+      <p>I own <code>warn</code>. One copy. Every timer you have ever constructed is pointing
+      at the exact same function object I am holding.</p>
+    </div>
+    <div class="hf-bub">
+      <span class="who">setTimeout</span>
+      <p>And I called it. I have never met either of you — I was given a function, so I called
+      it with no receiver. <code>this</code> was <code>undefined</code>. You are welcome.</p>
+    </div>
+  </div>
+
+  <div class="hf-kick">The mechanism</div>
+  <p class="hf-say">Ten thousand objects, one function.</p>
+
+  <div class="hf-card">
+    <div class="hf-one">
+      <div class="callers">
+        <span>timer #1</span><span>timer #2</span><span>…9,997 more</span><span>timer #10000</span>
+      </div>
+      <div class="funnel">.warn ↓ missed on the instance, so the lookup walks up</div>
+      <div class="instance">the prototype<small>holds ONE warn function object · shared by all 10,000 timers</small></div>
+    </div>
+    <p class="hf-annot">This is the part everyone re-learns: an arrow class property turns
+    this picture upside down. <code>warn = () =&gt; …</code> is a <em>field</em>, so it is
+    created inside the constructor — ten thousand timers, ten thousand closures, and the
+    prototype holding nothing at all.</p>
+  </div>
+
+  <p><b>Writing <code>class</code> creates two objects, not one.</b> There is the constructor
+  function <code>SessionTimer</code>, and there is the plain object hanging off its
+  <code>.prototype</code>. Instance methods are installed on the prototype object; fields
+  (including parameter properties, and including arrow properties) are assigned onto each
+  instance in the constructor; and <code>static</code> members are stuck on the constructor
+  function itself — which is exactly why <code>SessionTimer.MAX_IDLE</code> works and
+  <code>timer.MAX_IDLE</code> is <code>undefined</code>. <code>extends</code> then wires
+  <b>both</b> chains: <code>Object.getPrototypeOf(Child.prototype)</code> is
+  <code>Parent.prototype</code> so instances find inherited methods, and
+  <code>Object.getPrototypeOf(Child)</code> is <code>Parent</code> — that second link is the
+  only reason statics are inherited at all.</p>
+
+  <div class="hf-check" data-answer="1">
+    <p class="q">A grid renders 5,000 <code>Row</code> components. You change
+    <code>onSelect() { … }</code> to <code>onSelect = () =&gt; { … }</code> so it can be
+    passed straight to a child. What did that cost you?</p>
+    <button type="button">Nothing at runtime — TypeScript emits both forms as the same prototype method</button>
+    <button type="button">5,000 separate function objects, because a class field is built per instance</button>
+    <button type="button">Nothing extra — the arrow is made once and bound to each instance on lookup</button>
+    <p class="why" data-for="0">They are not the same declaration. <code>onSelect() {}</code>
+    is a method definition and is installed on <code>Row.prototype</code> exactly once, when
+    the class body evaluates. <code>onSelect = () =&gt; {}</code> is a field initializer — it
+    runs in the constructor, on every instance, forever.</p>
+    <p class="why" data-for="1">Right — one closure per row, each capturing its own
+    <code>this</code>. That capture is precisely what lets it survive being torn off and
+    handed to a child, and it is precisely what you are paying for. On 5,000 rows it is
+    usually fine. On a list you rebuild sixty times a second it is 300,000 function objects
+    a second for the garbage collector.</p>
+    <p class="why" data-for="2">There is no lazy, lookup-time binding in JavaScript.
+    <code>bind()</code> and arrow class fields both produce a real, new function object,
+    eagerly, at construction time.</p>
+  </div>
+
+  <div class="hf-kick">Where you've seen this before</div>
+  <p class="hf-say">You already lost an object to this, in your own stack.</p>
+
+  <div class="hf-terms">
+    <div class="hf-card hf-taped">
+      <h4>Any RxJS pipeline in Angular</h4>
+      <p><code>users$.subscribe(this.onUser)</code> compiles, runs, and throws on the first
+      emission. Same bug, different callback. <code>subscribe(u =&gt; this.onUser(u))</code>
+      is one arrow and no bug.</p>
+      <div class="hf-scatter"><span>subscribe(this.onUser) ⚠</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>constructor(private http: HttpClient)</h4>
+      <p>The parameter property in every Angular service is an <b>instance</b> field — the
+      desugared <code>this.http = http</code> runs per object. A root service is one object,
+      so you pay once; a component with that constructor pays per component on screen.</p>
+      <div class="hf-scatter"><span>param prop = instance field</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>Java, for contrast</h4>
+      <p>You cannot detach a method by accident in Java — <code>timer.warn</code> is not even
+      an expression. You have to write the binding down as <code>this::warn</code>, and the
+      compiler builds the receiver into the object it creates for you.</p>
+      <div class="hf-scatter"><span>this::warn is explicit</span></div>
+    </div>
+  </div>
+
+  <div class="hf-kick">Questions from the back row</div>
+  <div class="hf-ask">
+    <p class="q">If <code>warn</code> is shared by all 10,000 timers, how does
+    <code>this.email</code> inside it ever see <em>my</em> email?</p>
+    <p class="a">Because the function is shared but the receiver is not. <code>timer.warn()</code>
+    is two operations glued together: look <code>warn</code> up along the prototype chain,
+    then invoke it with <code>this</code> set to <code>timer</code>. One function body, ten
+    thousand different <code>this</code> values, one per call. Split those two operations —
+    <code>const f = timer.warn; f();</code> — and the lookup still succeeds perfectly. You
+    simply supplied no receiver on the second half.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">What does <code>super.warn()</code> actually compile to?</p>
+    <p class="a">Roughly <code>Object.getPrototypeOf(LoudTimer.prototype).warn.call(this)</code>.
+    Two halves matter. The <em>lookup</em> starts at the prototype of the object where the
+    method was defined — its <code>[[HomeObject]]</code>, captured once when the class body
+    evaluated, not re-derived from <code>this</code>. The <em>call</em> then forces
+    <code>this</code> back to the current instance, so the parent's code still operates on
+    your object. That split is why <code>super</code> survives deep inheritance, and why
+    copying a method out of one class onto some other object quietly breaks it: the home
+    object came along for the ride and it still points at the old chain.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">So should I stop using arrow class fields?</p>
+    <p class="a">No — use them exactly where the function genuinely gets torn off: a handler
+    you pass by reference, a callback handed to a library, anything that has to survive
+    destructuring. Use a normal method everywhere else. Rule of thumb: if the only call site
+    is <code>this.thing()</code>, it belongs on the prototype. And the real cost is not the
+    memory — it is that a field is <em>not</em> on the prototype, so a subclass cannot
+    <code>super.warn()</code> it and a test spy cannot patch it once for every instance.</p>
+  </div>
+
+  <div class="hf-kick">Grab a napkin</div>
+  <p class="hf-say">Predict it before you run it.</p>
+  <div class="hf-napkin">
+    <code>class Row { id = crypto.randomUUID(); render() { … } }</code> — and you construct
+    10,000 of them. Write down two numbers: how many <code>render</code> function objects
+    exist in memory, and how many <code>id</code> strings? Now change <code>render()</code>
+    to <code>render = () =&gt; { … }</code> and answer both again. Exactly one of your two
+    numbers moves, and it moves by 9,999.
   </div>
 
   <!-- ── TRY IT LIVE ── -->
@@ -693,6 +876,10 @@ render();
   reset2();
 })();
 </script>
+<script src="tracks-data.js"></script>
+<script src="devhub-chapters.js"></script>
+<script src="devhub-hf-check.js"></script>
+<script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>

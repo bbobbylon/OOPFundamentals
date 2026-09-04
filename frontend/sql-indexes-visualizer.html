@@ -1,7 +1,8 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-hf>
 <head>
 <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>SQL Indexes &amp; Query Plans — DevHub</title>
 <style>
 .who-QUERY{background:rgba(204,102,0,.22);color:#fcd34d}
@@ -11,6 +12,7 @@
 .who-RESULT{background:rgba(248,113,113,.18);color:#fca5a5}
 </style>
 <link rel="stylesheet" href="devhub.css"/>
+  <link rel="stylesheet" href="devhub-hf.css"/>
 </head>
 <body class="track-sql">
 <div class="page">
@@ -45,6 +47,209 @@
       </div>
     </div>
     <div class="intro-ciam"><span class="tag">CIAM index strategy:</span> Essentials — <code>UNIQUE INDEX ON users (email)</code> (login + uniqueness); <code>UNIQUE INDEX ON users (idp_type, external_id)</code> (lookup by Ping subject / Entra OID); <code>INDEX ON sessions (user_id, expires_at) WHERE revoked = false</code> (partial, active-session lookups); <code>INDEX ON audit_events (user_id, created_at DESC)</code> (recent-first history); <code>INDEX ON user_roles (user_id)</code> (role JOIN). Turn on <code>spring.jpa.show-sql</code>, run EXPLAIN ANALYZE on slow queries, and add an index wherever a Seq Scan hits a 1000+ row table with a selective WHERE.</div>
+  </div>
+
+
+  <p class="hf-deck">or, why a phone book sorted by surname is no help at all when the only thing you know is "Steve"</p>
+
+  <div class="hf-kick">The problem</div>
+  <p class="hf-say">Your login query reads ten million rows to find one.</p>
+
+  <div class="hf-card bad">
+    <div class="hf-cardtitle">The login lookup nobody indexed</div>
+    <p><code>SELECT id, password_hash FROM users WHERE email = ?</code> — with no index on
+    <code>email</code>, the database has exactly one strategy available: read the entire
+    <code>users</code> table, compare every row, throw away all but one. On 10 million users
+    that is roughly 12,500 eight-kilobyte pages dragged through memory <em>per sign-in</em>.</p>
+    <div class="hf-scatter">
+      <span>Seq Scan on users</span>
+      <span>rows=10,000,000</span>
+      <span>Rows Removed by Filter: 9,999,999 ⚠</span>
+      <span>…and again on the next login ⚠</span>
+    </div>
+    <p class="hf-foot">It passed code review, it passed the integration suite, it was
+    <em>instant</em> in dev. Of course it was — dev had 4,000 users. The defect was never in
+    the SQL. The defect was the row count, and the row count is the one thing your laptop
+    never has.</p>
+  </div>
+
+  <div class="hf-card good">
+    <div class="hf-cardtitle">Give the database a sorted side-copy and a pointer</div>
+    <div class="hf-ladder">
+      <b>CREATE INDEX idx_users_email ON users (email);</b>
+      <i>↓ every email now lives in a B-tree, in sorted order, next to the row's address</i>
+      <b>root page → branch page → leaf page</b>
+      <i>↓ three binary searches, three page reads, no comparison wasted</i>
+      <b>leaf holds the ctid → one heap fetch → your row</b>
+      <i>↓ 12,500 pages became 4</i>
+      <b>18 ms → 0.1 ms, and it stays 0.1 ms at 100 million rows</b>
+    </div>
+  </div>
+
+  <div class="principle" style="text-align:left">
+    <b>An index doesn't make your query faster. It makes your query read less.</b>
+    Everything else — B-trees, leftmost prefixes, covering indexes, <code>EXPLAIN</code> —
+    is bookkeeping in service of that one sentence. And the payoff scales the wrong way round
+    from your intuition: the bigger the table gets, the more the index wins, because a scan
+    grows with the table and a tree grows with the <em>logarithm</em> of it. Ten times the
+    users costs a seq scan ten times more work and costs the B-tree roughly one extra page.
+  </div>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">The planner</span>
+      <p><code>email = ?</code> on ten million rows. Scan is 12,500 pages;
+      <code>idx_users_email</code> is about four. I did not agonise over this.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">The B-tree</span>
+      <p>Because I keep every email sorted, and every leaf entry carries the physical address
+      of its row. I am not the data. I am a signpost that happens to be alphabetised.</p>
+    </div>
+    <div class="hf-bub">
+      <span class="who">Every INSERT on this table</span>
+      <p>And I pay for all of it. One new user is one row written — plus one entry threaded
+      into <em>you</em>, and into the other six indexes somebody added "just in case",
+      and a page split when a leaf fills up. Reads are the party. Writes get the bill.</p>
+    </div>
+  </div>
+
+  <div class="hf-kick">The mechanism</div>
+  <p class="hf-say">A composite index is a phone book: surname first, then first name.</p>
+
+  <div class="hf-card">
+    <ol class="hf-steps">
+      <li><span><code>WHERE tenant_id = 7</code> — the leading column is pinned, so the tree can seek</span><span class="tag">index used</span></li>
+      <li><span><code>… AND status = 'ACTIVE'</code> — column 2, with column 1 still pinned</span><span class="tag">index used, and now narrower</span></li>
+      <li><span><code>… AND created_at &gt; '2026-01-01'</code> — column 3, a range on the tail</span><span class="tag">the whole index earns its keep</span></li>
+      <li class="open"><span><code>WHERE status = 'ACTIVE'</code> on its own — column 1 was skipped</span><span class="tag">Seq Scan. The index is right there, and useless.</span></li>
+    </ol>
+    <p class="hf-annot">Here is the part everyone re-learns the hard way: you may drop columns
+    off the <b>right</b> end of the list as often as you like, and you may never skip one on
+    the <b>left</b>. <code>(a, b, c)</code> serves <code>a</code>, and <code>a,b</code>, and
+    <code>a,b,c</code> — and does nothing whatsoever for <code>b</code> alone.</p>
+  </div>
+
+  <p>The phone book is the memory hook, so use it. It is sorted by surname, then first name.
+  "Find every Nakamura" — you open it near the N's and you are done. "Find every Nakamura
+  called Kenji" — same page, the Kenjis are already grouped together, because within one
+  surname the book is sorted by first name. Now: <b>"find everyone called Steve."</b> You read
+  the entire book, cover to cover, because a book sorted by (surname, first name) is simply
+  <em>not sorted by first name</em>. Postgres is not being awkward when it picks a Seq Scan
+  for <code>WHERE status = 'ACTIVE'</code> — it is telling you the truth about what sorted
+  order it actually has. <b>The order in <code>CREATE INDEX</code> is the order of the book,
+  and you cannot read a book from the middle of a word.</b></p>
+
+  <p>The same logic explains the trap that eats an afternoon: <code>WHERE UPPER(email) = ?</code>
+  with an index on <code>email</code>. Your index is a list sorted by the raw stored value —
+  <code>'Alice@ex.com'</code>, <code>'bob@ex.com'</code>, <code>'Zoe@ex.com'</code>. Apply
+  <code>UPPER()</code> and that is a <em>different</em> sequence, one nobody ever sorted.
+  The planner will only reach for an index whose expression matches your predicate exactly, so
+  either index the expression itself — <code>CREATE INDEX ON users (UPPER(email))</code> — or,
+  better in CIAM, store the address already normalised at registration and stop calling the
+  function at all. <b>A function wrapped around an indexed column throws the index away
+  silently: no error, no warning, just a query that got 200× slower on the day the table grew.</b></p>
+
+  <div class="hf-check" data-answer="0">
+    <p class="q">Login is <code>SELECT id, password_hash FROM users WHERE LOWER(email) = ?</code>
+    and you already have <code>CREATE INDEX ON users (email)</code>. <code>EXPLAIN ANALYZE</code>
+    still reports a Seq Scan over 8 million rows. Which change actually gets you an index scan?</p>
+    <button type="button">Index the expression: <code>CREATE INDEX ON users (LOWER(email))</code></button>
+    <button type="button">Run <code>ANALYZE users</code> so the planner has fresh statistics</button>
+    <button type="button">Add a second plain index on <code>email</code> so the planner can choose</button>
+    <p class="why" data-for="0">Right. The index has to be sorted by the exact thing you are
+    comparing. Build it on <code>LOWER(email)</code> and the predicate matches the index
+    expression, so the tree can seek again. The alternative — and the better answer in a CIAM
+    system, where email comparison is case-insensitive anyway — is to normalise on the way in
+    and drop <code>LOWER()</code> from the query entirely.</p>
+    <p class="why" data-for="1">Fresh statistics help the planner choose well <em>among the
+    plans that exist</em>. Here no index-scan plan exists at all: your index is sorted by
+    <code>email</code>, and nothing in that <code>WHERE</code> clause is <code>email</code> —
+    it is <code>LOWER(email)</code>, a value the index has never seen.</p>
+    <p class="why" data-for="2">You would be adding a second copy of an index this query
+    already cannot use — no new reads served, and one more B-tree that every signup, every
+    profile edit and every password reset now has to update. Pure cost.</p>
+  </div>
+
+  <div class="hf-kick">Where you've seen this before</div>
+  <p class="hf-say">Three places this shows up in the identity stack you work in every day.</p>
+
+  <div class="hf-terms">
+    <div class="hf-card hf-taped">
+      <h4>The sessions table</h4>
+      <p><code>(user_id, expires_at) WHERE revoked = false</code>. Equality column first so the
+      tree can seek to one user, range column second so it can then walk forwards — and the
+      partial clause keeps years of dead sessions out of the index entirely.</p>
+      <div class="hf-scatter"><span>equality first</span><span>range second</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>Your Angular admin grid</h4>
+      <p>Tenant filter, newest first, 20 rows per page. With
+      <code>(tenant_id, created_at DESC)</code> the answer <em>is</em> the first 20 leaf
+      entries — no Sort node, no sorting 500,000 rows to throw 499,980 away.</p>
+      <div class="hf-scatter"><span>ORDER BY … LIMIT</span><span>no Sort node in EXPLAIN</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>The audit_events table that got slow to write</h4>
+      <p>Every login appends a row. Someone indexed <code>user_id</code>, <code>ip</code>,
+      <code>event_type</code>, <code>created_at</code>, <code>tenant_id</code>… now one insert
+      is one heap write plus five B-tree insertions, on your hottest write path.</p>
+      <div class="hf-scatter"><span>1 row written</span><span>6 structures updated ⚠</span></div>
+    </div>
+  </div>
+
+  <div class="hf-kick">Questions from the back row</div>
+  <div class="hf-ask">
+    <p class="q">So how many indexes is too many?</p>
+    <p class="a">There is no number, but there is a measurement:
+    <code>SELECT indexrelname, idx_scan FROM pg_stat_user_indexes</code>. Any index sitting at
+    <code>idx_scan = 0</code> after a full production week is a tax you pay on every single
+    write, forever, for a read that never comes. Drop it (<code>DROP INDEX CONCURRENTLY</code>)
+    and watch nothing break. The right instinct is not "index the columns" — it is "index the
+    <em>queries</em>", and only the slow ones.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">The index exists and <code>EXPLAIN</code> still says Seq Scan. Is Postgres broken?</p>
+    <p class="a">Usually it is right and you are annoyed. An index scan is random I/O: seek the
+    tree, then jump to a scattered heap page per match. If your predicate matches half the
+    table, doing that four million times is genuinely slower than reading the table
+    sequentially. Selectivity is the whole game — an index on a boolean
+    <code>active</code> column where 95% of rows are <code>true</code> earns nothing. Same for
+    tiny tables: scanning 200 rows beats traversing anything. It <em>is</em> worth suspecting
+    the planner when estimated rows and actual rows differ by orders of magnitude — that is
+    stale statistics, and <code>ANALYZE</code> is the fix.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Does the order I write the conditions in the <code>WHERE</code> clause matter?</p>
+    <p class="a">No, and this is the most common mix-up on this whole page.
+    <code>WHERE status = 'ACTIVE' AND tenant_id = 7</code> and
+    <code>WHERE tenant_id = 7 AND status = 'ACTIVE'</code> are the same query; the planner
+    reorders predicates freely. The order that is load-bearing is the one inside
+    <code>CREATE INDEX (tenant_id, status)</code> — that one is physical, written to disk, and
+    changing it means building a new index.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">What is a "covering" index actually covering?</p>
+    <p class="a">Your <code>SELECT</code> list. Normally the index gets you a row address and
+    then the database still fetches the heap page to read the columns. If every column the
+    query needs is already in the index — as a key column, or bolted on with
+    <code>INCLUDE (id, email)</code> — there is nothing left to fetch, and
+    <code>EXPLAIN</code> says <b>Index Only Scan</b>. That is two I/Os per row collapsing into
+    one. The catch: Postgres still checks the visibility map, so a table that has just been
+    heavily updated and not yet vacuumed will quietly go back to touching the heap.</p>
+  </div>
+
+  <div class="hf-kick">Grab a napkin</div>
+  <p class="hf-say">Predict it before you run it.</p>
+  <div class="hf-napkin">
+    You have <code>CREATE INDEX ON users (tenant_id, status, created_at)</code>. Two queries
+    arrive. <b>(A)</b> <code>WHERE tenant_id = 7 AND status = 'ACTIVE' AND created_at &gt;
+    '2026-01-01'</code>. <b>(B)</b> <code>WHERE tenant_id = 7 AND created_at &gt;
+    '2026-01-01'</code> — same table, but <code>status</code> is missing from the middle.
+    Both pin the leading column, so both use the index. Only one of them can <em>seek</em> all
+    the way down to <code>created_at</code>: which, and what does the other one do with its
+    <code>created_at</code> condition instead? Then part two: name the single extra index that
+    would fix the loser, and say what that index costs on every signup.
   </div>
 
 <div class="rt-ctlbar">
@@ -269,8 +474,12 @@ document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.addEventListener('
 $('Run').addEventListener('click',run);renderNodes();chip();
 })();
 </script>
+<script src="tracks-data.js"></script>
+<script src="devhub-chapters.js"></script>
+<script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

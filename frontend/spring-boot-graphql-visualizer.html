@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-hf>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -23,6 +23,7 @@
     .xlink{font-size:11.5px;color:var(--blue)}
   </style>
   <link rel="stylesheet" href="devhub.css" />
+  <link rel="stylesheet" href="devhub-hf.css"/>
 </head>
 <body class="track-spring">
 <div class="container">
@@ -57,6 +58,177 @@
       </div>
     </div>
   </div>
+
+
+<p class="hf-deck">or, how one request quietly became fifty-one database queries</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The client sent one request. The server sent fifty-one.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The request count stopped telling you the cost</div>
+  <p>Under REST you could read the Network tab and know roughly what you were doing to the
+  database. Under GraphQL the Network tab shows <b>one</b> row — and says nothing about
+  whether that row cost two queries or two thousand.</p>
+  <div class="hf-scatter">
+    <span>Network tab: 1 request ✓</span>
+    <span>p99 latency: 4.2s ⚠</span>
+    <span>DB: 51 SELECTs ⚠</span>
+    <span>the client added one line ⚠</span>
+  </div>
+  <p class="hf-foot">Nobody deployed anything. A front-end developer added <code>orders { id }</code>
+  to an existing query, and your database load multiplied by the length of a list you do not
+  control.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make the cost visible, then cap it</div>
+  <div class="hf-ladder">
+    <b>BATCH — a DataLoader collapses N child fetches into 1</b>
+    <i>↓ now it is 2 queries instead of 51, but still unbounded</i>
+    <b>MEASURE — log resolver count and DB calls per operation</b>
+    <i>↓ so the number is on a dashboard, not in a postmortem</i>
+    <b>LIMIT — depth limit, complexity budget, and pagination on every list</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>One request is not one query.</b> REST let you count cost by counting requests. GraphQL
+  moves the cost inside the resolver graph, where the client controls the shape and the server
+  pays the bill — so cost has to be measured and capped deliberately, because nothing about
+  the request shape reveals it any more.
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">The client</span>
+    <p>I asked for users, and each user's orders. One query. One round trip. This is the
+    efficient way, right?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The resolver graph</span>
+    <p>One round trip for <i>you</i>. I resolved <code>users</code> once, then called
+    <code>User.orders</code> once per user I got back. Fifty users, fifty-one queries.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">DataLoader</span>
+    <p>Which is why I exist. I do not resolve anything faster — I just refuse to run until the
+    tick ends, collect all fifty user IDs, and ask the database once:
+    <code>WHERE user_id IN (...)</code>.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One parent resolver. One child resolver call per row it returned.</p>
+
+<div class="hf-cast">
+  <div class="subject">Query.users → 1 SELECT<small>returns 50 User rows</small></div>
+  <div class="fan">↓ the engine now calls User.orders once per row</div>
+  <div class="obs">
+    <span>orders(user 1)</span>
+    <span>orders(user 2)</span>
+    <span>orders(user 3)</span>
+    <span>… 46 more …</span>
+    <span class="new">orders(user 50) — query #51</span>
+  </div>
+</div>
+<p class="hf-annot">The shape is the whole explanation: the fan-out is not something the
+resolver <i>does wrong</i> — it is what per-field resolution <i>means</i>. Each field owns its
+own function, and the engine calls that function once per parent object. Write
+<code>User.orders</code> as a straightforward <code>orderRepository.findByUserId(id)</code>
+and it is correct, readable, and fifty queries.</p>
+
+<p><b>This is the same N+1 you already know from JPA</b> — a lazy <code>@OneToMany</code>
+touched inside a loop — with one difference that matters: in JPA <i>you</i> wrote the loop, so
+the fix (<code>JOIN FETCH</code>, an <code>@EntityGraph</code>) lives next to it. In GraphQL
+the loop is inside the engine and the decision to run it was made by a client you may never
+meet. That is why the fix has to be structural — a batching layer under the resolver — rather
+than a smarter query at one call site.</p>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your single <code>/graphql</code> endpoint is behind
+  <code>@PreAuthorize("isAuthenticated()")</code>. A logged-in customer sends
+  <code>{ user(id: 999) { ssn } }</code> for an account that is not theirs. What happens?</p>
+  <button type="button">Denied — the check on the endpoint covers every field beneath it</button>
+  <button type="button">The SSN comes back — that check only asked whether they were logged in</button>
+  <button type="button">Denied — the schema validates field access against the caller's roles</button>
+  <p class="why" data-for="0">This is the assumption REST trains into you, and it is the whole
+  trap. Under REST that check sat on <code>/api/users/{id}</code> and guarded one response
+  shape. Here it sits on the <i>only</i> endpoint, so it guards the entire schema at once — at
+  the coarsest possible granularity.</p>
+  <p class="why" data-for="1">Right, and it is worth sitting with. <code>isAuthenticated()</code>
+  answered "is there a principal?" — not "may THIS principal see THIS field on THIS record?"
+  Those are different questions, and only the resolver for <code>User.ssn</code> is in a
+  position to answer the second one. Authorization in GraphQL belongs on the field, next to
+  the data.</p>
+  <p class="why" data-for="2">A GraphQL schema is a <i>type</i> contract, not an access-control
+  one. It will reject a field that does not exist, and happily resolve one the caller has no
+  business seeing. Field-level authorization is something you add — with
+  <code>@PreAuthorize</code> on the resolver method, or a directive — never something the
+  schema gives you.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three places this exact shape shows up again.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>JPA's lazy <code>@OneToMany</code></h4>
+    <p>Load 50 orders, touch <code>order.getItems()</code> in a loop, and Hibernate fires 50
+    more SELECTs. Identical arithmetic, different loop owner — and the reason
+    <code>JOIN FETCH</code> exists.</p>
+    <div class="hf-scatter"><span>N+1, just with your name on the loop</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>REST's chatty client</h4>
+    <p><code>GET /users</code> then one <code>GET /users/{id}/orders</code> per row is the same
+    51 calls — only there they are 51 <i>visible</i> HTTP requests. GraphQL did not create the
+    problem; it moved it somewhere you stopped looking.</p>
+    <div class="hf-scatter"><span>the cost moved, not the cause</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A CIAM profile query</h4>
+    <p><code>users { roles { permissions } }</code> is three levels of fan-out over your
+    identity store — and the field most worth batching is also the one most worth authorizing
+    per record.</p>
+    <div class="hf-scatter"><span>batch it AND guard it</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">If DataLoader fixes N+1, why cap query depth at all?</p>
+  <p class="a">Because batching bounds the number of <i>queries</i>, not the amount of
+  <i>work</i>. <code>user { friends { friends { friends { … } } } }</code> stays cheap in round
+  trips and grows exponentially in rows. Depth limits and a complexity budget (cost points per
+  field, multiplied by requested page size, rejected above a ceiling) bound the work itself —
+  and they are what stops a hostile query being a denial-of-service with a valid token
+  attached.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why do GraphQL errors come back with HTTP 200?</p>
+  <p class="a">Because a GraphQL response is partial by design: half the fields can resolve
+  while one fails, and the payload carries both — <code>data</code> with the successful fields
+  and an <code>errors</code> array beside it. The transport succeeded, so the transport says
+  200. Client code that branches on <code>response.ok</code> will treat a failed query as a
+  success, which is one of the first things to change when a team moves off REST.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does GraphQL replace REST, then?</p>
+  <p class="a">Not usually — it wins where clients are diverse and want different shapes from
+  the same graph (several front ends, mobile on a slow link, a partner integration). REST stays
+  better for cacheable public reads (a URL is a cache key; <code>POST /graphql</code> is not),
+  file upload and download, and simple one-shape-per-consumer services. Plenty of systems run
+  both, over the same service layer underneath.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you run it.</p>
+<div class="hf-napkin">
+  A query asks for 20 users, each user's 10 orders, and each order's shipping address. Every
+  resolver is written the obvious way, with no batching. How many SELECTs — and where in that
+  three-level walk does adding a DataLoader remove the most?
+</div>
 
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
@@ -340,6 +512,10 @@ DevHubCodeWalk.mount('#cw-graphql-mount', {
   reset();
 })();
 </script>
+<script src="tracks-data.js"></script>
+<script src="devhub-chapters.js"></script>
+<script src="devhub-hf-check.js"></script>
+<script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>

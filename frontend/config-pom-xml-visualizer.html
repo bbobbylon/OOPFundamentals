@@ -1,7 +1,8 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-hf>
 <head>
   <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>pom.xml — Config Visualizer</title>
   <style>
     :root{
@@ -65,6 +66,7 @@
     .who-badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
   </style>
   <link rel="stylesheet" href="devhub.css" />
+  <link rel="stylesheet" href="devhub-hf.css"/>
 </head>
 <body class="track-config">
 
@@ -107,6 +109,155 @@
     <span class="tag">In CIAM / Context:</span>
     <span>The CIAM Spring Boot service pom.xml extends spring-boot-starter-parent 3.x, declares starters for web, security, oauth2-resource-server, data-jpa, and validation. The spring-boot-maven-plugin is configured to produce a fat JAR that the Docker multi-stage build copies in. Properties set Java 21 and configure the maven-compiler-plugin to include Lombok and MapStruct annotation processors.</span>
   </div>
+</div>
+
+
+<p class="hf-deck">or, the version you never chose is the one that breaks production</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You declared four dependencies. Maven brought sixty.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The transitive version nobody picked</div>
+  <p>Two of your dependencies each need a different version of the same library. Maven picks
+  one by a rule you have never read, and the loser's classes are simply absent.</p>
+  <div class="hf-scatter">
+    <span>spring-boot-starter-web → jackson 2.15</span>
+    <span>some-sdk → jackson 2.9 ⚠</span>
+    <span>NoSuchMethodError at runtime ⚠</span>
+    <span>compiles perfectly ⚠</span>
+  </div>
+  <p class="hf-foot">The stack trace names a method inside a library you never mentioned, in a
+  version you never chose, and the build was green the whole time.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Know the rule, then take the decision back</div>
+  <div class="hf-ladder">
+    <b>NEAREST WINS — depth in the tree, not highest version</b>
+    <i>↓ and on a tie, first declaration in your pom</i>
+    <b>mvn dependency:tree tells you who dragged it in</b>
+    <i>↓ then decide on purpose</i>
+    <b>dependencyManagement pins it for the whole build</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Maven resolves conflicts by NEAREST, not by newest.</b> A 2.9 declared one level deep
+  beats a 2.15 three levels deep — so adding a dependency can silently DOWNGRADE something
+  else you rely on. That is the single most surprising rule in the file.
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">Your pom</span>
+    <p>I asked for spring-boot-starter-web. That is one line.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Maven</span>
+    <p>And I resolved sixty jars behind it. Every version in there was decided by depth in
+    the tree unless you said otherwise.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">dependencyManagement</span>
+    <p>Which is what I am for: I do not ADD anything, I only say which version wins if it
+    turns up. Spring Boot's parent is one enormous instance of me.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Inheritance, then management, then your declaration.</p>
+
+<div class="hf-card hf-nest">
+  <p class="note">each layer narrows the one outside ↘</p>
+  <div class="ring"><span class="lbl">spring-boot-starter-parent — versions for ~200 libraries</span>
+    <div class="ring"><span class="lbl">your &lt;dependencyManagement&gt; — overrides the parent</span>
+      <div class="ring"><span class="lbl">your &lt;dependencies&gt; — what actually gets pulled</span>
+        <div class="core">the resolved tree<small>versions omitted on purpose</small></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<p><b>That is why Spring Boot dependencies have no <code>&lt;version&gt;</code> and should not
+gain one.</b> The parent has already pinned a set that is tested together; writing your own
+version there opts you out of that guarantee for one library while everything around it still
+assumes the tested one. If you genuinely need a different version, override the parent's
+property (<code>&lt;jackson.version&gt;</code>) so the whole set moves together, rather than
+pinning one dependency out of step with its neighbours.</p>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Your pom declares library X 2.0 directly. A dependency of a dependency needs
+  X 3.0. Which version ends up on the classpath?</p>
+  <button type="button">3.0 — Maven takes the highest version to satisfy everyone</button>
+  <button type="button">Both, isolated per module the way OSGi would do it</button>
+  <button type="button">2.0 — yours is nearest to the root, and nearest wins</button>
+  <p class="why" data-for="0">That is Gradle's default, and the assumption most people carry
+  into Maven. Maven does not compare versions at all; it compares DEPTH.</p>
+  <p class="why" data-for="1">A plain classpath has exactly one copy of a class. Isolation
+  like that needs separate classloaders — OSGi, or shading — and is not what Maven does.</p>
+  <p class="why" data-for="2">Right: your direct declaration is depth 1, the transitive one is
+  depth 2, so yours wins — even though it is older. This is exactly how a library quietly gets
+  DOWNGRADED beneath something that needed the newer one, and the failure shows up as a
+  NoSuchMethodError at runtime.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three places this rule shows its teeth.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4><code>mvn dependency:tree</code></h4>
+    <p>The one command worth memorising. Add <code>-Dincludes=com.fasterxml.jackson</code> and
+    it shows only that subtree, with the omitted-for-conflict lines that name exactly who lost
+    and why.</p>
+    <div class="hf-scatter"><span>omitted for conflict with 2.15</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>npm's opposite choice</h4>
+    <p>npm nests conflicting versions so both can exist; Maven cannot, because the JVM
+    classpath has one slot per class. The trade is npm's larger installs against Maven's
+    sharper conflicts.</p>
+    <div class="hf-scatter"><span>one classpath, one winner</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A CIAM service's JWT library</h4>
+    <p>Two SDKs each pulling a different nimbus-jose version is the classic version of this,
+    and the symptom is signature verification failing on tokens that are perfectly valid.</p>
+    <div class="hf-scatter"><span>pin it in dependencyManagement</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">What is <code>&lt;scope&gt;</code> actually for?</p>
+  <p class="a">Deciding which classpath a jar reaches. <code>compile</code> is everywhere,
+  <code>provided</code> means "the server already has this, do not package it" (a servlet API
+  under a real container), <code>runtime</code> means needed to run but not to compile (a JDBC
+  driver), and <code>test</code> never ships. Getting <code>provided</code> wrong is how you
+  package a second copy of something the container already supplies and get a
+  LinkageError.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why does the build work locally and fail in CI?</p>
+  <p class="a">Usually your local <code>~/.m2</code> holds an artifact CI has never seen — an
+  install from a branch, or something a colleague built. <code>mvn -o</code> to fail fast
+  offline, or build in a clean container. SNAPSHOT dependencies do the reverse: they change
+  under you, so the same pom builds differently on two days.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Do I need a BOM?</p>
+  <p class="a">If you consume a family of libraries that must move together — Spring, Jackson,
+  AWS SDK — yes. A BOM imported into <code>dependencyManagement</code> pins the whole set
+  consistently, which is exactly the problem you cannot solve by pinning one at a time.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you run it.</p>
+<div class="hf-napkin">
+  Dependency A (depth 1) needs jackson 2.9. Dependency B (depth 1, declared later) needs
+  jackson 2.15. Neither is declared directly by you. Which wins — and what single word in
+  <code>dependency:tree</code>'s output tells you it happened?
 </div>
 
 <!-- ── EXTREME-VIZ HERO ── -->
@@ -775,8 +926,12 @@ function show(id, el) {
   reset2();
 })();
 </script>
+<script src="tracks-data.js"></script>
+<script src="devhub-chapters.js"></script>
+<script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

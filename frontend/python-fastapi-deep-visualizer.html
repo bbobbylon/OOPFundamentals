@@ -1,7 +1,8 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-hf>
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>FastAPI Deep Dive</title>
   <style>
     .who-req{background:#3776ab;color:#fff}
@@ -20,6 +21,7 @@
     code{background:#0b1426;padding:1px 5px;border-radius:3px;font-family:monospace;font-size:12px;color:#ffd43b}
   </style>
   <link rel="stylesheet" href="devhub.css" />
+  <link rel="stylesheet" href="devhub-hf.css"/>
 </head>
 <body class="track-python">
 <div class="container">
@@ -55,6 +57,193 @@
     </div>
     <div class="intro-ciam"><span class="tag">CIAM use cases:</span> A provisioning endpoint queues background syncs — <code>bg.add_task(sync_to_ping, req); bg.add_task(sync_to_entra, req); return {"status":"queued"}</code> — returning immediately (≈ <code>@Async</code>). A signed Ping webhook receiver verifies the signature then processes the event, and <code>@app.get('/actuator/health')</code> mirrors Actuator. The async model serves hundreds of concurrent webhook deliveries on one process without pool exhaustion.</div>
   </div>
+
+
+<p class="hf-deck">or, how one <code>time.sleep(2)</code> takes down every request in the process</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You wrote <code>async def</code> because it sounded faster. It was the dangerous one.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">One blocking line, and the whole server stops answering</div>
+  <p>An <code>async def</code> endpoint runs <b>directly on the event loop</b> — a single thread
+  that every concurrent request in the process shares. Put one blocking call in it
+  (<code>requests.get</code>, a sync SQLAlchemy query, <code>time.sleep</code>, a
+  <code>bcrypt</code> hash) and nothing else runs for the whole of it. Not the other requests.
+  Not the health check. Nothing.</p>
+  <div class="hf-scatter">
+    <span>1 slow endpoint ⚠</span>
+    <span>p99 on EVERY route climbs ⚠</span>
+    <span>/health times out ⚠</span>
+    <span>k8s restarts a healthy pod ⚠</span>
+  </div>
+  <p class="hf-foot">The endpoint you broke gets slower. Every endpoint you did not touch gets
+  slower with it, which is why this is so hard to find from a dashboard.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">FastAPI already handles this — if you let it</div>
+  <div class="hf-ladder">
+    <b>Plain <code>def</code> → FastAPI runs it in a threadpool, off the loop</b>
+    <i>↓ so blocking code in a def endpoint is SAFE, and this is the boring default</i>
+    <b><code>async def</code> → runs on the loop, and must never block</b>
+    <i>↓ so everything inside it has to be awaitable, all the way down</i>
+    <b>Need both? <code>await run_in_threadpool(fn)</code> or an async driver</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b><code>async def</code> is not "the fast one" — it is the one with a rule.</b> The rule is
+  that nothing inside it may block, and the punishment for breaking it is paid by every other
+  request in the process, not by yours. If your handler calls blocking code, plain
+  <code>def</code> is both simpler and faster in practice.
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I made all my endpoints <code>async def</code>. That's the modern way — it should handle
+    more load.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The event loop</span>
+    <p>It handles more load only while everything cooperates by awaiting. Your sync database
+    call does not await; it occupies me. And there is one of me.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">FastAPI</span>
+    <p>Which is exactly why I check your signature. Declare plain <code>def</code> and I move
+    the call to a worker thread so it cannot touch the loop. You opted out of that protection by
+    writing <code>async</code>.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Every concurrent request in this process funnels through one thread.</p>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>POST /users</span><span>GET /users/42</span><span>webhook from Ping</span><span>GET /health</span><span>…every other request…</span>
+    </div>
+    <div class="funnel">↓ all served by a single event loop thread, interleaved only at each <code>await</code></div>
+    <div class="instance">the event loop<small>one thread · progresses only when the current coroutine yields</small></div>
+  </div>
+  <p class="hf-annot">This is the trade the whole model rests on, and it is a good one: one
+  thread can juggle thousands of connections because each coroutine gives the loop back at every
+  <code>await</code>. But "gives it back" is the entire deal — a coroutine that runs two seconds
+  of blocking work never yields, so for those two seconds the loop is not juggling anything. It
+  is running your function. Concurrency here is cooperative, and one uncooperative handler is
+  enough.</p>
+</div>
+
+<div class="hf-vs">
+  <div class="bad"><h5><code>async def</code> + blocking call</h5>
+  <code>async def get_user(id): return db.query(...)</code> — runs on the loop, blocks it for
+  the whole query. Ten concurrent requests take ten times as long <i>each</i>, and every
+  unrelated route waits behind them.</div>
+  <div class="good"><h5>Plain <code>def</code> + the same blocking call</h5>
+  <code>def get_user(id): return db.query(...)</code> — FastAPI runs it in a worker thread. The
+  loop stays free, the other routes keep answering, and you changed one keyword. Removing
+  <code>async</code> made it faster.</div>
+</div>
+
+<p><b>And the same rule applies to dependencies, which is where it hides best.</b> A
+<code>Depends()</code> function is inspected exactly like a path operation: declare it
+<code>def</code> and FastAPI runs it in the threadpool, declare it <code>async def</code> and it
+runs on the loop. So a shared <code>get_current_user</code> dependency that does a blocking
+token-introspection call, written <code>async def</code> because everything else was, blocks the
+loop on <b>every authenticated request in the app</b> — while the endpoints themselves look
+completely innocent. When you cannot change the call, wrap it:
+<code>await run_in_threadpool(introspect, token)</code> from
+<code>starlette.concurrency</code>, or <code>await asyncio.to_thread(...)</code>.</p>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">Two endpoints do the identical blocking 2-second database call. One is
+  <code>def read_a()</code>, the other is <code>async def read_b()</code>. Ten concurrent
+  requests hit each. What happens?</p>
+  <button type="button"><code>read_a</code> serves them in parallel on threadpool workers; <code>read_b</code> serialises them and stalls the whole app</button>
+  <button type="button">Both take about 20 seconds — the blocking call is the bottleneck either way, regardless of declaration</button>
+  <button type="button"><code>read_b</code> is faster — <code>async def</code> lets FastAPI interleave the ten calls on the event loop</button>
+  <p class="why" data-for="0">Right, and the direction surprises almost everyone. FastAPI
+  inspects your signature: plain <code>def</code> gets moved to a threadpool (40 workers by
+  default), so ten 2-second calls overlap and finish in about two seconds. The
+  <code>async def</code> version runs on the loop, and since the call never awaits, the ten
+  queue up to roughly twenty seconds — and every other route in the process queues behind
+  them.</p>
+  <p class="why" data-for="1">The call takes 2 seconds in both cases; what differs is what else
+  can happen during it. That is the whole question. Where the work runs decides whether it
+  overlaps with anything, and here it decides a 10× difference.</p>
+  <p class="why" data-for="2">Interleaving requires the coroutine to <i>yield</i>, which only
+  happens at an <code>await</code>. A blocking driver call has no await in it, so there is no
+  point at which the loop can switch — <code>async</code> without an awaitable underneath buys
+  you nothing and costs you the threadpool.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three familiar shapes of the same rule.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring MVC vs WebFlux</h4>
+    <p>Exactly the same split in Bobby's other stack. MVC gives every request a thread and
+    blocking is fine; WebFlux runs on a few event-loop threads and one blocking JDBC call
+    poisons them. Both frameworks make the identical bargain and punish it identically.</p>
+    <div class="hf-scatter"><span>thread-per-request vs event loop</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>The browser's main thread</h4>
+    <p>You already know this one: a long synchronous loop freezes the UI because rendering and
+    your JavaScript share a thread. Same architecture, same failure, and the same fix — move
+    the work off it (a Web Worker there, a threadpool here).</p>
+    <div class="hf-scatter"><span>one thread, cooperative</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A CIAM token-introspection dependency</h4>
+    <p>The worst place for this, because a dependency runs on every protected route. One
+    blocking HTTP call to the IdP inside an <code>async def</code> dependency degrades the whole
+    service, and the endpoints all look fine in review.</p>
+    <div class="hf-scatter"><span>httpx.AsyncClient, or def</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">How do I tell whether a library call blocks?</p>
+  <p class="a">The signature is the tell: if you are not writing <code>await</code> in front of
+  it, it is blocking. <code>requests</code> blocks and <code>httpx.AsyncClient</code> does not;
+  <code>psycopg2</code> blocks, <code>asyncpg</code> does not; SQLAlchemy blocks unless you are
+  on its async engine <i>and</i> awaiting. If the async ecosystem has no version of what you
+  need — a C library, an SDK with no async client — that is a perfectly good reason to write a
+  plain <code>def</code> endpoint and let the threadpool earn its keep.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">What are <code>BackgroundTasks</code> actually good for, then?</p>
+  <p class="a">Returning to the client before the slow work finishes — a Ping sync, a welcome
+  email. But be clear about what they are not: they run in the <i>same process</i>, after the
+  response, on the loop or the threadpool by the same <code>def</code>/<code>async def</code>
+  rule. So they still consume this server's capacity, and if the pod is killed mid-task the
+  work is simply gone with no retry. Fine for best-effort side effects; use Celery or a real
+  queue for anything that must actually happen.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does a Pydantic model actually validate at runtime, or is it types like TypeScript?</p>
+  <p class="a">It genuinely validates, and this is the sharpest difference from every
+  TypeScript page in this hub. A Pydantic model is a real runtime check that parses, coerces and
+  rejects — closer to Spring's <code>@Valid</code> on a DTO than to a TS interface. So an
+  endpoint typed <code>user: UserCreate</code> is guaranteed a valid <code>UserCreate</code>
+  inside the body, and a bad payload was already rejected with a 422 you did not write. That is
+  a promise the TypeScript equivalent cannot make.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you run it.</p>
+<div class="hf-napkin">
+  Your <code>get_current_user</code> dependency is <code>async def</code> and calls
+  <code>requests.post(idp_introspect_url)</code>, which takes 300ms. Every protected endpoint
+  depends on it. With 50 requests per second arriving, what is the effective throughput of the
+  whole service — and which single keyword change fixes it?
+</div>
 
   <!-- ── TRY IT LIVE ── -->
   <div class="tryit" data-lang="python"
@@ -370,6 +559,10 @@ DevHubCodeWalk.mount('#cw-fastapi',{
   reset2();
 })();
 </script>
+<script src="tracks-data.js"></script>
+<script src="devhub-chapters.js"></script>
+<script src="devhub-hf-check.js"></script>
+<script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
