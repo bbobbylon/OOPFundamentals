@@ -10,6 +10,60 @@ page/track counts in `README.md` and `DEVHUB-GUIDE.md`, then delete the item fro
 
 ---
 
+## 🐞 KNOWN BUG — cream theme legibility race (found 2026-09-04, NOT fixed)
+
+**Reproduce:** `node frontend/tmp_creamrace.mjs` — loads one page fresh six times
+in cream and reports each run's text contrast. Typically **3-5 of 6 runs render
+text at 1.05-1.68:1** against a 0.734-luminance ground, i.e. invisible, and the
+rest at 10-13:1. Nothing about the page changes between runs. Worst known case:
+
+```
+node frontend/tmp_creamrace.mjs angular-dynamic-components-visualizer.html '.body div.desc'
+```
+
+**Cause.** `devhub-hf-theme.js`'s repair pass runs from `boot()` at
+`DOMContentLoaded`. That does not wait for linked CSS to paint, so `groundOf()`
+can measure the *inner* grounds (`.step`, `.panel` — per-page `<style>` classes
+whose colour comes from remapped tokens) while they are still the dark theme's.
+The repair then picks ink for a surface that will not exist a moment later, and
+which way it errs is decided by one threshold in `relight()`'s fallback:
+
+```js
+fixed = bgL < 0.18 ? [242,232,219] /* light ink */ : [32,30,29] /* dark ink */;
+```
+
+A stale ground reading 0.12 → light ink → invisible once cream lands. A stale
+0.21 → dark ink → correct *by accident*. That is the whole coin flip.
+
+Nothing corrects it afterwards: the ground changes because **CSS finished
+applying**, which is not a DOM mutation, so neither MutationObserver in that
+file fires. The re-derive guard
+(`if (done && Math.abs(hfcBg - bgL) <= 0.03) continue`) is sound and simply
+never gets a later pass to run in.
+
+**Two fixes attempted and reverted — do not just retry these:**
+
+1. A guaranteed extra pass on `window.load` plus a double `requestAnimationFrame`.
+   Improved it (1/6 → 4/6 readable) but stayed flaky, because `load` still is not
+   late enough for the inner grounds on every run.
+2. Gating `run()` on `document.body`'s luminance being > 0.5. Made it **worse**
+   (4/6 failing): `body` already carries cream while `.step` / `.panel` do not, so
+   the guard passes at exactly the wrong moment.
+
+**Likely real fix** (unverified): stop inferring readiness from a timer or from
+`body`, and make the repair idempotent against a *late* ground change — e.g.
+re-run once `document.styleSheets` are all loaded, or store the measured ground
+per element and re-derive on the first pass where it moves, without the 0.03
+early-out short-circuiting the very first correction. Whoever picks this up:
+`tmp_creamrace.mjs` is the failing test, so fix it until that script exits 0.
+
+**Scope.** Cream only — dark is unaffected. Seen on pages whose per-page
+`<style>` block defines its own panel grounds; `tmp_contrast.mjs` catches it only
+intermittently *for the same reason the bug exists*, which is why the repeat-load
+script had to be written.
+
+---
+
 ## ⚠ Branch state (2026-09-04) — read before touching git
 
 `claude/app-redesign-scope-cicd-9xi362` is the working branch and PR #1 is open against
