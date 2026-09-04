@@ -45,7 +45,12 @@
   }
 
   // 'light' is the hub's word for "not dark"; on a kit page that means cream.
-  function normalise(v) { return (v === 'cream' || v === 'light') ? 'cream' : 'dark'; }
+  /* CREAM IS THE DEFAULT (Bobby's 2026-09-01 reference mockup is cream): only an
+     explicitly stored 'dark' keeps the espresso colorway. Restored from 2260122 —
+     the merge took the cloud side of this whole file, correctly (it is the 14KB
+     superset carrying the runtime repair), and that discarded this one line with
+     it. 'light' is the hub's word for "not dark", so it maps to cream too. */
+  function normalise(v) { return v === 'dark' ? 'dark' : 'cream'; }
 
   function apply(v) { root.setAttribute('data-theme', normalise(v)); }
 
