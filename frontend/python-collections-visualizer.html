@@ -59,6 +59,167 @@
     <div class="intro-ciam"><span class="tag">CIAM Python script:</span> Fetch Ping users into a <code>{email: user}</code> dict for O(1) lookup; filter with <code>[u for u in users.values() if 'CIAM_ADMIN' in u['roles'] and u['active']]</code>; dedupe a CSV import with <code>{row['email'].lower() for row in rows}</code>; group by IdP with a <code>defaultdict(list)</code>; and count roles with <code>Counter(r for u in users for r in u['roles'])</code>. It's Java Streams' functional model in tighter comprehension syntax.</div>
   </div>
 
+  <p class="hf-deck">or, why your function still remembers the last person who called it</p>
+
+  <div class="hf-kick">The problem</div>
+  <p class="hf-say">You wrote <code>= []</code> once. Python built the list once. Those are the same "once."</p>
+
+  <div class="hf-card bad">
+    <div class="hf-cardtitle">A default that everybody shares</div>
+    <p>Here is a SCIM sync helper that collects the users it could not push. It looks like every
+    call starts with a clean slate. It does not. The <code>[]</code> was built the moment the
+    <code>def</code> line ran &mdash; at import, before your first request existed &mdash; and
+    every call since has been appending to that <em>same</em> list.</p>
+    <div class="hf-scatter">
+      <span>def sync(user, failed=[])</span><span>evaluated at def time</span>
+      <span>one list, shared by all 400 calls &#9888;</span><span>grows forever &#9888;</span>
+    </div>
+    <p class="hf-foot">And it never raises. Nothing breaks, nothing logs, nothing turns red &mdash;
+    the nightly failure report just gets longer every night until somebody opens an email with
+    12,000 names in it and asks why yesterday's users are in today's list.</p>
+  </div>
+
+  <div class="hf-card good">
+    <div class="hf-cardtitle">Default to something you cannot mutate</div>
+    <div class="hf-ladder">
+      <b>def sync(user, failed=None):</b>
+      <i>&darr; None is immutable &mdash; there is nothing to accumulate into</i>
+      <b>if failed is None: failed = []</b>
+      <i>&darr; that line is in the BODY, so it runs on every call &mdash; a fresh list each time</i>
+      <b>failed.append(user); return failed</b>
+      <i>&darr; and a caller who wants to accumulate can still pass their own list in</i>
+      <b>sync(u, failed=my_batch)</b>
+    </div>
+  </div>
+
+  <div class="principle" style="text-align:left">
+    <b>A default argument is evaluated ONCE, when the <code>def</code> statement runs &mdash; not
+    once per call.</b> The result is stapled to the function object and handed to every caller
+    forever. If you can mutate it, it is not a default &mdash; it is global state with a friendly face.
+  </div>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">the def statement</span>
+      <p>I ran exactly once, at import. I evaluated <code>[]</code>, got a list, and stapled it to
+      the function. My job was over before your app finished starting.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">call number 400, at 3am</span>
+      <p>And I have been appending to that same list all night. Nobody ever told me to get a new one.</p>
+    </div>
+    <div class="hf-bub">
+      <span class="who">sync.__defaults__</span>
+      <p>You can literally see me: <code>print(sync.__defaults__)</code> prints the list, failures
+      and all. The evidence was sitting on the function the whole time.</p>
+    </div>
+  </div>
+
+  <div class="hf-kick">The mechanism</div>
+  <p class="hf-say">Four hundred calls, one list &mdash; and the funnel is the whole bug.</p>
+
+  <div class="hf-card">
+    <div class="hf-one">
+      <div class="callers">
+        <span>sync(alice)</span><span>sync(bob)</span><span>sync(carol)</span><span>sync(&hellip;397 more)</span>
+      </div>
+      <div class="funnel">failed=[] &darr; evaluated ONCE, at def time</div>
+      <div class="instance">one list object<small>lives in sync.__defaults__ &middot; never reset &middot; len keeps climbing</small></div>
+    </div>
+    <p class="hf-annot">This is the part everyone re-learns the hard way: the list was never yours.
+    It belongs to the <em>function</em>, it was created before your first call arrived, and it will
+    outlive every one of them.</p>
+  </div>
+
+  <p>So which defaults are safe? Anything you cannot mutate: <code>=None</code>, <code>=0</code>,
+  <code>="ADMIN"</code>, <code>=()</code>, <code>=frozenset()</code>. Rebinding a parameter inside
+  the body (<code>n = n + 1</code>) makes a new object and leaves the default untouched. The traps
+  are the mutables &mdash; <code>=[]</code>, <code>={}</code>, <code>=set()</code> &mdash; plus one
+  that is not even a container: <code>def audit(event, at=datetime.now())</code> freezes the
+  timestamp at import, so every audit row for the next six weeks of uptime is stamped with the
+  second your pod booted. <b>If you can mutate it or it changes over time, don't default to it &mdash;
+  default to <code>None</code> and build the real value in the body.</b></p>
+
+  <div class="hf-check" data-answer="1">
+    <p class="q">Your nightly SCIM job calls <code>def sync(user, failed=[])</code> once per user.
+    Monday's run pushes 400 users and 3 fail. Tuesday's run pushes 400 users and <em>none</em>
+    fail. What does Tuesday's last call return?</p>
+    <button type="button">Empty &mdash; every call gets a brand-new empty list</button>
+    <button type="button">Monday's 3 failures, still sitting in that same list</button>
+    <button type="button">A TypeError, because the default was already returned</button>
+    <p class="why" data-for="0">That is what nearly everyone predicts, and it is what
+    <code>failed=[]</code> <em>looks</em> like it promises. But the list is built when the
+    <code>def</code> line executes, not when the call happens &mdash; so there is only ever one of it.</p>
+    <p class="why" data-for="1">Exactly. The list survived the whole Monday run, the process stayed
+    up, and Tuesday appended to the same object. Restarting the pod is what "fixes" it, which is
+    why this bug loves long-lived workers and hides in dev.</p>
+    <p class="why" data-for="2">No exception, ever &mdash; and that is the cruel part. Python is doing
+    precisely what the language says; it just silently accumulates instead of complaining.</p>
+  </div>
+
+  <div class="hf-kick">Where you've seen this before</div>
+  <p class="hf-say">Three places Python's collections quietly decide something for you.</p>
+
+  <div class="hf-terms">
+    <div class="hf-card hf-taped">
+      <h4>dict order is a promise now</h4>
+      <p>In 3.6 insertion order was a CPython accident you were told not to rely on. Since
+      <b>3.7 it is a language guarantee</b>. That is why <code>json.dumps(claims)</code> emits your
+      keys in the order you built them &mdash; so a canonical payload you sign is reproducible, and
+      your CSV export columns stop shuffling between runs.</p>
+      <div class="hf-scatter"><span>3.6: accident</span><span>3.7+: spec</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>deque, on a queue of 100,000</h4>
+      <p><code>list.pop(0)</code> shifts every remaining element one slot left. Drain 100k items and
+      you have moved about <b>5,000,000,000</b> elements. <code>deque.popleft()</code> unlinks one
+      block: <b>100,000</b> moves. Same loop, same output, four orders of magnitude apart.</p>
+      <div class="hf-scatter"><span>list.pop(0) &rarr; O(n)</span><span>deque.popleft() &rarr; O(1)</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>defaultdict on a SCIM sync</h4>
+      <p>Grouping 40,000 users by IdP with a plain dict means writing
+      <code>if idp not in groups</code> and running that branch 40,000 times.
+      <code>defaultdict(list)</code> deletes the branch; <code>Counter</code> deletes the loop.
+      Neither is faster magic &mdash; they are just the code you were about to write anyway.</p>
+      <div class="hf-scatter"><span>by_idp[idp].append(u)</span><span>Counter(&hellip;)</span></div>
+    </div>
+  </div>
+
+  <div class="hf-kick">Questions from the back row</div>
+  <div class="hf-ask">
+    <p class="q">Why doesn't Python just re-evaluate the default on every call?</p>
+    <p class="a">Because <code>def</code> is an executable <em>statement</em>, not a declaration.
+    When it runs, it evaluates the default expressions right there and stores the results in
+    <code>func.__defaults__</code>. Making them lazy would mean re-running arbitrary code on every
+    single call &mdash; and it would break the people who exploit this on purpose, like
+    <code>def fib(n, memo={})</code>, where the shared dict <em>is</em> the cache.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Is dict insertion order really safe to depend on in production?</p>
+    <p class="a">Yes on 3.7+ &mdash; it is in the language reference, not just CPython's changelog.
+    But read the promise carefully: <b>insertion-ordered, not sorted</b>. And <code>set</code> got no
+    such guarantee at all, so never treat set iteration order as stable, and never build a signature
+    or a test assertion out of one. Sort it, or use a dict.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">If deque is so much faster, why isn't <code>list</code> just a deque?</p>
+    <p class="a">Because deque pays for it somewhere else. A list is one contiguous array, so
+    <code>xs[50_000]</code> is a single pointer offset &mdash; O(1) &mdash; and slicing is cheap.
+    A deque is a chain of blocks, so indexing into the middle walks the chain (O(n)) and it will not
+    slice at all. Ends versus middle: pick the one your access pattern actually hits.</p>
+  </div>
+
+  <div class="hf-kick">Grab a napkin</div>
+  <p class="hf-say">Predict it before you run it.</p>
+  <div class="hf-napkin">
+    <code>def add_tag(tag, tags=[]): tags.append(tag); return tags</code> &mdash; you call
+    <code>add_tag("admin")</code>, then <code>add_tag("reader")</code>.
+    <b>Part one:</b> what do the two calls print? <b>Part two:</b> after both, what is inside
+    <code>add_tag.__defaults__</code>? Now rewrite it with <code>tags=None</code> and the guard
+    line, and answer both again &mdash; one of your four answers does not change.
+  </div>
+
   <!-- ── TRY IT LIVE ── -->
   <div class="tryit" data-lang="python"
        data-title="🧪 Try it: comprehensions do in one line what loops do in four"
@@ -355,5 +516,6 @@ DevHubCodeWalk.mount('#cw-pycoll',{
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>
