@@ -1010,9 +1010,9 @@ the thing that distinguishes it from `az` profiles and AWS named profiles.
 *(A third bug the same pass: `entra-id-overview-visualizer.html` was linked from the Azure
 page but the file is `entra-overview-visualizer.html` — a typo, now fixed.)*
 
-### 14. The 13 track landing pages ignore the theme — a visible cream/dark seam (2026-09-04)
+### 14. The 13 track landing pages ignore the theme — ✅ LANDED (2026-09-04)
 
-Now that cream is the default, the journey **hub → track index → lesson** goes
+Now that cream is the default, the journey **hub → track index → lesson** went
 **cream → dark navy → cream**. Verified by screenshot on `angular-index.html`.
 
 Why they are stranded: of the 530 pages, 15 carry no `data-hf`. `app.html` has its own
@@ -1057,6 +1057,69 @@ starting so a session cut cannot lose the plan.
 The 13: `angular-index`, `aws-index`, `configs-index`, `docker-index`, `ds-index`,
 `entra-id-index`, `git-index`, `interview-index`, `maven-index`, `ping-idm-index`,
 `spring-boot-index`, `typescript-index`, `index-legacy`.
+
+#### What actually shipped (2026-09-04)
+
+All four steps done, with **one deliberate deviation from step 1**: the bootstrap did *not*
+go in `devhub-transitions.js`. That script loads at **end of body**, so a bootstrap there
+paints the dark palette first and flips to cream after — a visible flash of the wrong theme
+on every landing page. Instead each page got an inline pre-paint `<script>` in `<head>`,
+right after `</title>`. Cost: the default now lives in **three** places (`app.html`'s head
+script, `devhub-hf-theme.js`'s `normalise()`, and these 13 inline scripts) — *change one,
+change all three*. That is written in the comment at each site.
+
+Note the two bootstraps store **different words for the same palette**: `app.html` stores
+`'light'`, `devhub-hf-theme.js` stores `'cream'`. Each normalises the other's word, so they
+interoperate — verified live: hub paints `data-theme="light"`, a lesson paints
+`data-theme="cream"`, and both compute `--bg: #f5ead8`.
+
+**The part that was not in the plan, and mattered most.** Step 2 said "give them light
+values to answer with", which reads like a CSS-variable job. It is not — roughly half the
+breakage was in rules that **hardcode a hex**, which no variable override can reach. Found by
+loading all 13 pages in same-origin iframes and measuring the *computed* colour of all 1202
+text nodes against each one's real effective background. Three distinct kinds:
+
+1. **Real failures.** `a.back` was `#22d3ee` cyan = **1.52:1** on cream (10 pages). Every h1
+   brand gradient failed, worst stop **1.10–2.50:1** — the page title on all 12 that have one.
+2. **Failures the fix itself introduced.** `.tier-num` is `color:#0f172a` near-black on
+   `background:var(--beg)`; fine when `--beg` was bright green, unreadable once cream made it
+   dark. Same for interview's four `.diff-*` chips (var text on a hardcoded near-black tint)
+   and aws's `.card:hover{background:#1e293b}`, which turned a hovered card navy under cream.
+   A variable-only sweep would have shipped all of these.
+3. **Visual seams that were not contrast bugs.** Tag chips hardcode `background:#0b1426`, so
+   dark navy chips floated on cream cards — readable, but obviously wrong.
+
+**Tune against the darkest surface, not the lightest.** The first pass tuned every accent to
+4.6:1 on `--bg` (`#f5ead8`). Card titles sit on `--panel` (`#efe2cc`) and chips on `--panel2`
+(`#e6d7bd`), so they landed at **4.28–4.38** — under AA by a hair, on ~500 card titles, on
+every page. Retuned against `--panel2`: one value is then safe on all three surfaces. Worth
+remembering for any future cream work.
+
+**`index-legacy` needed a different technique.** It sets ~40 brand colours as *inline* styles,
+which beat any stylesheet rule; on cream they ran **1.10–2.65:1**, the worst text in the sweep.
+Rather than `!important` whack-a-mole across 20 hexes, each inline colour became
+`var(--b-<hex>, <hex>)`: cream defines `--b-*` as a darkened equivalent, and the dark theme
+falls through to the fallback and renders exactly as before. The hook lives in the markup and
+each theme answers for itself. `#0f172a` was deliberately **excluded** — it is dark text on a
+bright chip and is correct in both themes.
+
+Verified: **light 3 failures, dark 0** across 1202 text nodes. Dark was re-checked through the
+real path (set `localStorage`, reload, read what the page painted) and is unchanged — screenshot
+of `angular-index` in dark is pixel-for-pixel the original. The migration was exercised both
+ways: a dark-era visitor is flipped to cream once and the flag set, and a dark choice made
+*after* the migration is respected.
+
+**Known-remaining (3, all pre-existing, none introduced here).** White text on a bright brand
+chip, identical in both themes, so they are a site-wide brand-chip question rather than a cream
+regression: `span.logo` white on Spring green `#6db33f` (2.57:1), and two `index-legacy`
+`span.tier-num` "+" markers whose colour is set *inline* — white on `#2496ed` (3.15) and on
+`#f05032` (3.56). Fixing them means deciding whether brand tiles may deviate from brand colour.
+
+Tooling note: `tmp_shot.mjs`/`tmp_smoke.mjs`/`tmp_contrast.mjs` could not run — **Playwright is
+not installed on the Windows box** (`npm i -g playwright`, or set `PW_MODULE`). The
+iframe-based audit above was the substitute and is arguably stronger for this particular
+question, since it measures computed colour against real effective backgrounds; but it is
+ad-hoc and lives in the scratchpad, not in the gates.
 
 ---
 

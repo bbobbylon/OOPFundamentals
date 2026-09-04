@@ -492,6 +492,27 @@ visualizers).
   `:is([data-theme="cream"],[data-theme="light"])[data-hf] …` — the comma form
   splits into a bare root selector plus a light-only rule and silently matches
   nothing; vcheck fails the build if it reappears.
+- **The 13 landing pages carry their own cream block** (2026-09-04) — a *third*
+  home for cream, separate from the two above. `angular-index`, `aws-index`,
+  `configs-index`, `docker-index`, `ds-index`, `entra-id-index`, `git-index`,
+  `interview-index`, `maven-index`, `ping-idm-index`, `spring-boot-index`,
+  `typescript-index` and `index-legacy` link **neither** `devhub.css` nor
+  `devhub-hf-theme.js`, so neither half above can reach them. Each now has an
+  inline pre-paint `<script>` in `<head>` (it must be in the head — a bootstrap
+  in the end-of-body `devhub-transitions.js` flashes dark first) plus its own
+  `:root[data-theme="light"]` block right after `<style>`, which outranks the
+  page's own `:root` on specificity so source order is irrelevant.
+  **Two things to know before editing them.** (1) A variable override only
+  reaches rules that *use* variables; about half the breakage was in rules that
+  hardcode a hex — `a.back{color:#22d3ee}` at 1.52:1, every h1 brand gradient,
+  and chips whose near-black text sat on a `var()` background that cream had
+  just made dark. Those need explicit higher-specificity rules, and
+  `index-legacy`'s ~40 *inline* colours need `var(--b-<hex>, <hex>)` in the
+  markup, since inline beats any rule. (2) Tune colours against `--panel2`
+  (`#e6d7bd`), the **darkest** cream surface — tuning against `--bg` puts every
+  card title at ~4.3:1, which passes on the page background and fails on the
+  cards. The site default now lives in **three** bootstraps (`app.html`,
+  `devhub-hf-theme.js`, these 13); change one, change all three.
 - **Head First kit** (in [`frontend/devhub.css`](../frontend/devhub.css),
   final section) — the book's visual vocabulary as drop-in classes, all
   tinted by the track's `--accent`: `.hf-big` (gradient big-type mnemonic),

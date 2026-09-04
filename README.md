@@ -188,11 +188,16 @@ by the *shape* of the concept** rather than at random:
 | `.hf-steps` | an ordered pipeline, each step gating the next | evaluation order, request paths |
 | `.hf-cycle` | a state machine returning to where it started | change detection, retry loops |
 
-It ships a **cream colorway** as well as the dark one. The cream variant has two
-halves and it is worth knowing which is which before writing a rule: shared
-components live in `devhub-hf.css`'s cream block, while per-page `<style>` blocks
-are repaired at runtime by `devhub-hf-theme.js`, because CSS cannot query a
-computed background.
+It ships a **cream colorway** as well as the dark one. The cream variant lives in
+three places and it is worth knowing which owns what before writing a rule: shared
+components live in `devhub-hf.css`'s cream block; per-page `<style>` blocks are
+repaired at runtime by `devhub-hf-theme.js`, because CSS cannot query a computed
+background; and the **13 track landing pages** carry their own inline cream block,
+because they link neither of the other two. The default theme is likewise decided
+in three bootstraps that must agree — `app.html`, `devhub-hf-theme.js`, and a
+pre-paint script in each landing page (in `<head>`, so the page never flashes dark
+first). A one-time `devhub-theme-v3` flag moves anyone still carrying the old dark
+default onto cream once, then respects every later choice.
 
 **✍️ 102 pages authored to the nine-point teaching bar** in `CLAUDE.md` — the
 problem card, the "one thing to remember" callout, a three-way dialogue, one

@@ -41,7 +41,21 @@
   })();
 
   function stored() {
-    try { return localStorage.getItem(KEY); } catch (e) { return null; }
+    try {
+      /* devhub-theme-v3 — ONE-TIME migration, identical to the one in
+         app.html's head script and in each landing page's pre-paint script.
+         Cream only became the default on 2026-09-01, so a user still carrying
+         a stored 'dark' from before would never see the redesign. Flip once,
+         then respect every later choice. All three bootstraps must run this:
+         if only some did, moving between hub, landing page and lesson would
+         flip the theme under the reader. */
+      if (!localStorage.getItem('devhub-theme-v3')) {
+        localStorage.setItem(KEY, 'cream');
+        localStorage.setItem('devhub-theme-v3', '1');
+        return 'cream';
+      }
+      return localStorage.getItem(KEY);
+    } catch (e) { return null; }
   }
 
   // 'light' is the hub's word for "not dark"; on a kit page that means cream.
