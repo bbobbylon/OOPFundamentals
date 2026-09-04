@@ -102,6 +102,183 @@
       <div class="intro-ciam"><span class="tag">CIAM / Angular:</span> Validate API responses (<code>isUser(json)</code> after <code>http.get()</code>), check a JWT payload's shape before trusting claims, and use <code>assertNever(action.type)</code> in NgRx reducers to catch unhandled action types at compile time.</div>
     </div>
 
+
+<p class="hf-deck">or, the "check" the compiler never checks</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Your type guard does not have to guard anything.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A predicate is a promise, not a proof</div>
+  <p>Write <code>function isUser(x: unknown): x is User</code> and TypeScript checks exactly one
+  thing about the body: that it returns a boolean. It never checks that the boolean has anything
+  to do with <code>User</code>. <code>return true</code> compiles. So does
+  <code>return typeof x === 'string'</code>. Both narrow perfectly, and both are wrong.</p>
+  <div class="hf-scatter">
+    <span>x is User { return true } ✓ compiles</span>
+    <span>narrows to User ⚠</span>
+    <span>payload.roles.includes(...) ✓ compiles</span>
+    <span>TypeError at runtime ⚠</span>
+  </div>
+  <p class="hf-foot">The crash lands three files downstream, in code that is correct, holding a
+  value the compiler swore was a <code>User</code>.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Know which checks are verified and which are yours to get right</div>
+  <div class="hf-ladder">
+    <b><code>typeof</code>, <code>instanceof</code>, <code>in</code>, a discriminant — the compiler derives the narrowing itself</b>
+    <i>↓ you cannot get these wrong; the check IS the evidence</i>
+    <b><code>x is User</code> — you supply the meaning, and nobody audits it</b>
+    <i>↓ so the body has to actually establish every field you promised</i>
+    <b>At a real trust boundary, let a schema library generate the check</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b><code>x is User</code> is <code>as User</code> with a boolean wrapped around it.</b> The
+  cast you were told to avoid and the guard you were told to prefer are the same unchecked
+  assertion — the guard is only better if the body you wrote makes it better.
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I used a proper type guard instead of a cast. That is the safe way, right?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">tsc</span>
+    <p>You told me the return value means "this is a User." I verified it is a boolean and
+    believed the rest. I have never looked inside that function to see whether it agrees
+    with you.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The JSON from your API</span>
+    <p>And I never read any of it. I am whatever the server sent — this morning, after that
+    deploy — and <code>roles</code> is <code>null</code> today.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Same narrowing machinery. Four checks you can plug in. One of them is on you.</p>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">if (…) { }<small>the narrowing site — identical in all four cases</small></div>
+    <div class="arrow">← plug a check in →</div>
+    <div class="opts">
+      <span>typeof x === 'string'</span>
+      <span>x instanceof HttpErrorResponse</span>
+      <span>'kind' in x  ·  x.kind === 'circle'</span>
+      <span class="on">isUser(x)  —  x is User</span>
+    </div>
+  </div>
+  <p class="hf-annot">The first three are <b>derived</b>: the compiler knows what
+  <code>typeof x === 'string'</code> proves, because it defined the operator. The highlighted
+  one is <b>declared</b>: you defined what it proves, and the only thing standing between that
+  claim and production is whether you wrote the body carefully. Same syntax at the call site,
+  completely different amount of trust.</p>
+</div>
+
+<p><b>So write the body as if someone will fuzz it, because the network already is.</b> A real
+guard checks the value is an object and not <code>null</code> (<code>typeof null</code> is
+<code>"object"</code> — the oldest trap in JavaScript), checks each field's type rather than
+just its presence, and checks inside arrays rather than trusting
+<code>Array.isArray</code> alone. That is tedious and easy to get subtly wrong, which is exactly
+why a schema library earns its place at a boundary: with <code>zod</code> you declare the shape
+once, and both the runtime check and the TypeScript type are <i>generated from the same
+declaration</i> — so they cannot drift apart, which hand-written guards do the moment someone
+adds a field to the interface and not to the guard.</p>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A colleague writes
+  <code>function isUser(x: unknown): x is User { return typeof x === 'object'; }</code>
+  and uses it on a JSON response. What does <code>tsc --strict</code> report?</p>
+  <button type="button">An error — the body's check is too weak to establish the <code>User</code> type</button>
+  <button type="button">Nothing at all — a predicate body is only required to return a boolean</button>
+  <button type="button">A warning under <code>strict</code>, since <code>typeof null === 'object'</code></button>
+  <p class="why" data-for="0">There is no such check, and there could not really be one —
+  proving that an arbitrary function body establishes an arbitrary type is not something a
+  compiler does. That is precisely why the feature is a declaration you are trusted with rather
+  than a claim that gets verified.</p>
+  <p class="why" data-for="1">Right — silence, which is the entire hazard. The signature says
+  "trust me" and the body is unaudited, so <code>null</code> narrows to <code>User</code>
+  (<code>typeof null === 'object'</code>) and so does <code>[]</code>, and so does
+  <code>{}</code>. The failure surfaces later, somewhere that looks innocent, as
+  <code>Cannot read properties of null</code>.</p>
+  <p class="why" data-for="2">TypeScript has no warning level — a rule either errors or does
+  not exist. And the <code>typeof null</code> quirk is real and is exactly what makes this
+  guard dangerous, but the compiler has no opinion about it here; it is your job to write
+  <code>x !== null &amp;&amp; typeof x === 'object'</code>.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three cousins of the same unchecked promise.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4><code>as</code> and the non-null <code>!</code></h4>
+    <p>Openly unchecked, which is their virtue — everyone reading the line knows an assumption
+    was made. A type predicate hides the same assumption inside a function with a reassuring
+    name, so it reviews better than it behaves.</p>
+    <div class="hf-scatter"><span>honest about being a promise</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An unvalidated JWT payload</h4>
+    <p>Decoding a token is not verifying it. The payload is base64 anyone can write, so a
+    <code>isAdminToken(claims)</code> guard that checks a field of an unverified token is a
+    beautifully typed authorization bypass. Verify the signature first; narrow second.</p>
+    <div class="hf-scatter"><span>decode ≠ verify</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Spring's <code>@Valid</code> on a DTO</h4>
+    <p>The Java analogue, and it is the version that actually runs: annotations on the DTO are
+    enforced at the boundary by the framework on every request. That is the shape to copy —
+    validation the framework performs, not validation a developer remembered.</p>
+    <div class="hf-scatter"><span>enforced, not remembered</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">When is <code>asserts x is User</code> better than <code>x is User</code>?</p>
+  <p class="a">When failure means "stop", not "take the other branch." A predicate hands you a
+  boolean to branch on; an assertion function throws and narrows for the rest of the scope, so
+  the happy path stays unindented. One sharp edge worth knowing before it costs you an hour:
+  the callee needs an explicit type annotation. Write
+  <code>const assertUser = (x: unknown): asserts x is User =&gt; {}</code> and calling it fails
+  with <code>TS2775 — Assertions require every name in the call target to be declared with an
+  explicit type annotation</code>. Use a <code>function</code> declaration, or annotate the
+  const's type.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why does narrowing evaporate inside a callback?</p>
+  <p class="a">Because the compiler cannot know when the callback runs. Narrow
+  <code>this.user</code> with an <code>if</code>, then read it inside a
+  <code>setTimeout</code> or a <code>subscribe</code>, and the narrowing is gone — between the
+  check and the call, anything could have reassigned it. The fix is a <code>const</code>: copy
+  the narrowed value into a local, and the narrowing sticks because a <code>const</code> cannot
+  be reassigned. This is also why narrowing survives on a <code>const</code> and evaporates on a
+  mutable class field.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">What does <code>satisfies</code> do that a type annotation doesn't?</p>
+  <p class="a">It checks conformance without widening. Annotate <code>const routes: Record&lt;string, string&gt;</code>
+  and every key's specific literal type is lost, so <code>routes.home</code> is just
+  <code>string</code>. Write <code>const routes = {…} satisfies Record&lt;string, string&gt;</code>
+  and you get the same error if a value is wrong, while keeping the exact literal types for
+  autocomplete and exhaustiveness. It is the answer to "I want the check but not the
+  forgetting."</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you run it.</p>
+<div class="hf-napkin">
+  <code>isUser(x)</code> is implemented as <code>return typeof x === 'object'</code>. You call it
+  on three values: <code>null</code>, <code>[]</code>, and <code>{ id: 1 }</code>. Which of them
+  narrow to <code>User</code> — and which line in a real guard would have rejected each one?
+</div>
+
   <!-- ── TRY IT LIVE ── -->
   <div class="tryit" data-lang="ts"
        data-title="🧪 Try it: write a guard the checker believes"
@@ -1257,6 +1434,7 @@ palette.green.toUpperCase(); <span class="cmt">// ✓ TS knows green is a string
 </script>
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>

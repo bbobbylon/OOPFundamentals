@@ -440,6 +440,201 @@
     </div>
   </div>
 
+  <p class="hf-deck">or, how to pay for a Node server and quietly ship client-side rendering anyway</p>
+
+  <div class="hf-kick">The problem</div>
+  <p class="hf-say">The server said "Good evening". The browser said "Good afternoon". Angular believed the browser and threw the server’s work away.</p>
+
+  <div class="hf-card bad">
+    <div class="hf-cardtitle">A component that renders something different every time it runs</div>
+    <p>Your public login page greets people by time of day: <code>{{ greeting() }}</code>, built
+    from <code>new Date().getHours()</code>. Node runs it in UTC at 19:00 and writes
+    <b>"Good evening"</b> into the HTML. Two hundred milliseconds later the browser in Denver
+    boots, runs the same component, gets <b>"Good afternoon"</b> — and the two do not match.</p>
+    <div class="hf-scatter">
+      <span>new Date().getHours()</span>
+      <span>Math.random()</span>
+      <span>window.innerWidth &lt; 768 ⚠</span>
+      <span>NG0500 in the console ⚠</span>
+      <span>a cookie the server never got ⚠</span>
+    </div>
+    <p class="hf-foot">Here is the part that should scare you: <em>nothing turns red for the
+    user</em>. Angular throws that whole subtree away and re-renders it in the browser, exactly
+    like the pre-v16 days. The page still ends up correct. You just bought a Node server, a
+    second build target and an on-call rotation — to ship CSR with extra steps.</p>
+  </div>
+
+  <div class="hf-card good">
+    <div class="hf-cardtitle">Render the same thing twice — or don't render it on the server at all</div>
+    <div class="hf-ladder">
+      <b>The server's HTML and the client's first render must agree, node for node</b>
+      <i>↓ so anything that differs per run has no business in an SSR template</i>
+      <b>isPlatformBrowser(inject(PLATFORM_ID)) — branch honestly instead of crashing</b>
+      <i>↓ and for the code that genuinely needs a live DOM</i>
+      <b>afterNextRender(() =&gt; …) — browser only, after the DOM is really there</b>
+      <i>↓ and for a region that can never agree, stop pretending</i>
+      <b>@defer (hydrate never) { … } — server HTML forever, zero JS shipped</b>
+    </div>
+  </div>
+
+  <div class="principle" style="text-align:left">
+    <b>Hydration is the browser <em>agreeing</em> with the server.</b> Disagree once — one text
+    node, one <code>@if</code> that flipped — and Angular sides with the browser: it destroys
+    the server's DOM for that subtree and re-renders it. SSR isn't a speed feature you switch
+    on. It's a promise that your components are deterministic, and every mismatch is you
+    breaking it.
+  </div>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">The Node server</span>
+      <p>I ran your component and produced HTML. There is no <code>window</code> in here, no
+      <code>document</code>, no <code>localStorage</code> — I'm a process, not a browser. I
+      don't have a screen to measure or a user to have cookies.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">The browser</span>
+      <p>I painted your HTML in 300 ms and it looked wonderful. Then <code>main.js</code>
+      arrived, I ran the same component, and I got a different answer than you did.</p>
+    </div>
+    <div class="hf-bub">
+      <span class="who">Angular hydration</span>
+      <p>Then I can't reuse that DOM. NG0500, subtree destroyed, re-rendered from scratch.
+      Sorry about the flicker — and about the layout shift you'll see in the Core Web Vitals
+      report next Tuesday.</p>
+    </div>
+  </div>
+
+  <div class="hf-kick">The mechanism</div>
+  <p class="hf-say">Seven steps, and every one of them gates the next.</p>
+
+  <div class="hf-card">
+    <ol class="hf-steps">
+      <li><span>A request arrives. Node runs your Angular app against a <b>synthetic DOM</b> — a data structure that looks enough like a document to render into</span><span class="tag">no browser exists anywhere in this process</span></li>
+      <li><span>Components construct, <code>HttpClient</code> fetches on the server, and Angular waits for the app to go <b>stable</b> before it serializes anything</span><span class="tag">a setInterval that never settles hangs the whole response</span></li>
+      <li><span>Angular writes out the HTML plus <code>ngh</code> markers plus <code>&lt;script id="ng-state"&gt;</code> holding the data it just fetched</span><span class="tag">ngh is the map from DOM node back to component</span></li>
+      <li class="open"><span>The HTML hits the wire, the browser paints, FCP is done. The user can read the page</span><span class="tag">visible — and completely dead</span></li>
+      <li><span><code>main.js</code> downloads, parses, compiles and bootstraps on the main thread</span><span class="tag">every click in this gap is lost unless withEventReplay() caught it</span></li>
+      <li><span>Hydration <b>walks the DOM you already have</b>, matches <code>ngh</code> markers to component instances, and attaches listeners</span><span class="tag">zero DOM writes — that is the entire point</span></li>
+      <li class="open"><span>Any node that doesn't match what the client would have rendered → NG0500, subtree destroyed, re-rendered</span><span class="tag">this is where SSR quietly refunds itself</span></li>
+    </ol>
+    <p class="hf-annot">Steps 4 → 6 are the window everybody forgets: the page <b>looks</b>
+    finished and isn't. That gap is measured in seconds on cold 4G, and it is the single reason
+    <code>withEventReplay()</code> exists.</p>
+  </div>
+
+  <p><b>Now the question that trips up everyone the first week: why is <code>window</code>
+  undefined on the server?</b> Because <code>window</code> is not part of JavaScript — it's part
+  of the <em>browser</em>. Node ships the language, not the DOM. Angular renders SSR into its own
+  minimal document implementation, so <code>document</code> exists in a limited form inside
+  Angular's rendering, but <code>window</code>, <code>localStorage</code>,
+  <code>navigator</code> and <code>matchMedia</code> simply are not there, and touching one at
+  field-initializer or constructor time is a <code>ReferenceError</code> that takes the whole
+  response down with a 500. That's why there are two different tools and they are not
+  interchangeable: <code>isPlatformBrowser()</code> answers <i>"am I allowed to touch this?"</i>
+  anywhere, while <code>afterNextRender()</code> answers <i>"run this later, in the browser,
+  once the DOM is actually committed"</i> — it never runs on the server, and it's excluded from
+  the stability wait, so a timer inside it can't hang your SSR response. Measuring an element,
+  initialising a charting library, reading scroll position, booting an analytics SDK: all
+  <code>afterNextRender</code>. <b>Guard reads, defer DOM work — and never, ever fake a
+  <code>window</code> global on the server to make the error go away.</b></p>
+
+  <div class="hf-check" data-answer="1">
+    <p class="q">Your public registration page is SSR'd for SEO. A banner reads
+    <code>@if (window.innerWidth &lt; 768) { … }</code> — guarded with
+    <code>isPlatformBrowser</code>, so nothing crashes. The server, having no viewport, renders
+    the desktop banner; every phone then renders the mobile one. Lighthouse still shows a fast
+    FCP and no errors reach your users. What did you actually ship?</p>
+    <button type="button">Nothing costly — Angular patches the one attribute that differs and carries on hydrating the rest</button>
+    <button type="button">A hydration mismatch: that subtree is destroyed and re-rendered client-side, so you paid for SSR and got CSR's flicker back</button>
+    <button type="button">A server crash on every mobile request, because <code>window</code> is undefined in Node</button>
+    <p class="why" data-for="0">This is the comfortable assumption, and it's the wrong one.
+    Hydration is not a diffing pass — Angular never compares the server DOM against a freshly
+    computed one to patch the delta. It <em>trusts</em> the markup and attaches to it. The
+    moment the shape it expects isn't the shape that's there, the only safe move is to throw the
+    subtree out.</p>
+    <p class="why" data-for="1">Right — and the cruelty is that it works. The user sees correct
+    content, your error tracker sees an NG0500 nobody triages, and the money you spent on a Node
+    render tier bought a first paint that gets repainted. Viewport is a browser fact; render one
+    layout on the server and let CSS media queries do the responsive work, or push the whole
+    banner behind <code>@defer (hydrate on viewport)</code>.</p>
+    <p class="why" data-for="2">That's the failure you'd get <em>without</em> the guard — and it
+    would be the better outcome, honestly, because a 500 in staging gets fixed on Tuesday. The
+    guard converted a loud crash into a silent mismatch, which is exactly why "I wrapped it in
+    <code>isPlatformBrowser</code>" is not the same as "I fixed it".</p>
+  </div>
+
+  <div class="hf-kick">Where you've seen this before</div>
+  <p class="hf-say">Three pages in your own CIAM app, three different verdicts.</p>
+
+  <div class="hf-terms">
+    <div class="hf-card hf-taped">
+      <h4>The login / registration screens</h4>
+      <p>Public, indexed, and the first thing a prospect ever loads. This is the SSR case: real
+      HTML for crawlers, content on screen before <code>main.js</code> exists. Just remember
+      MSAL and <code>angular-oauth2-oidc</code> reach for <code>localStorage</code> the instant
+      they're constructed.</p>
+      <div class="hf-scatter"><span>SSR</span><span>guard every token read ⚠</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>The authenticated dashboard</h4>
+      <p>Behind a login, so no crawler will ever see it, and every byte is per-user. Rendering it
+      on Node buys you nothing and costs you cookie forwarding, session leakage risk and a
+      per-request CPU bill. <code>RenderMode.Client</code>, and sleep well.</p>
+      <div class="hf-scatter"><span>renderMode: Client</span><span>no SEO to win</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>"Welcome back, {{ user.name }}"</h4>
+      <p>The classic mismatch factory. Node's fetch carries no browser cookie, so the server
+      renders <b>"Welcome, guest"</b>; the client has the session and renders the name. Forward
+      the header via <code>inject(REQUEST)</code>, or render that slot on the client only.</p>
+      <div class="hf-scatter"><span>server: guest</span><span>client: Bobby ⚠</span></div>
+    </div>
+  </div>
+
+  <div class="hf-kick">Questions from the back row</div>
+  <div class="hf-ask">
+    <p class="q">Can't I just polyfill <code>window</code> on the server and stop guarding
+    everything?</p>
+    <p class="a">You can — <code>domino</code> and <code>jsdom</code> exist, and plenty of
+    codebases do it. It's a trap with a very long fuse. A fake <code>window</code> has no layout
+    engine, no real viewport, no user's storage and a user agent that means nothing. So your
+    code stops crashing and starts taking the <em>browser</em> branch with wrong answers —
+    which the real browser then contradicts. You've traded a loud <code>ReferenceError</code>
+    for a silent hydration mismatch on every page. Guard, don't fake.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Isn't <code>afterNextRender</code> just <code>ngAfterViewInit</code> with a new
+    name?</p>
+    <p class="a">No, and the difference is precisely the one that matters here:
+    <code>ngAfterViewInit</code> <b>runs on the server too</b>, during SSR. Put
+    <code>document.querySelector(…).getBoundingClientRect()</code> in it and you'll find out on
+    the first render. <code>afterNextRender</code> callbacks never run on the server at all, and
+    they run after the DOM is committed rather than merely after the view is created — plus
+    they're outside SSR's stability wait, so a timer in there can't hang the response.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">How do I even <em>see</em> a hydration mismatch? Nothing looks broken.</p>
+    <p class="a">That's the whole problem. Look for the NG0500–NG0507 family in the browser
+    console on a dev build (production strips the message and leaves you a bare code), and watch
+    for a component whose constructor runs twice. The visual tell is a flicker or layout shift
+    at the exact moment <code>main.js</code> finishes — which is invisible on localhost, where
+    hydration lands 40 ms after paint. Throttle to slow 4G and it becomes impossible to miss.</p>
+  </div>
+
+  <div class="hf-kick">Grab a napkin</div>
+  <p class="hf-say">Predict it before you run it.</p>
+  <div class="hf-napkin">
+    Your SSR'd product page renders two things: a <b>"3 left in stock"</b> badge from an API the
+    server fetched, and a <b>"Sale ends in 04:59:12"</b> countdown built from
+    <code>Date.now()</code>. Two parts. <b>(a)</b> One of these hydrates cleanly and one throws
+    NG0500 — which is which, and what makes the difference? <b>(b)</b> You move the countdown
+    into <code>afterNextRender</code>. What does the user see for the ~800 ms before
+    <code>main.js</code> lands, and what should the server put in that box so the number
+    appearing doesn't shove the Add-to-cart button down the page?
+  </div>
+
+
   <!-- ═══ EXTREME-VIZ HERO ═══ -->
   <div class="rt-hero">
     <div class="rt-ctlbar">
@@ -1090,6 +1285,7 @@ renderNodes(cur);
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>

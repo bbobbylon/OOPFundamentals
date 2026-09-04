@@ -49,6 +49,180 @@
     <div class="intro-ciam"><span class="tag">PostgreSQL in your CIAM stack:</span> Store the full Ping webhook payload as <strong>JSONB</strong> in <code>audit_events.metadata</code> — no migration when Ping adds fields; query <code>metadata->>'event_type'</code>. <strong>Full-text search</strong> powers the admin user-lookup UI (<code>search_vector @@ plainto_tsquery(...)</code>). <strong>Pooling</strong> matters: 10 pods × HikariCP 10 = 100 direct connections (~800MB); PgBouncer in transaction mode collapses that to ~20 real connections (~160MB). And <strong>partition</strong> <code>audit_events</code> by month so old partitions drop instead of a slow DELETE.</div>
   </div>
 
+<p class="hf-deck">or, why PostgreSQL has never once updated a row in its life</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The table is 40GB. It holds 2GB of rows.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Four symptoms, one cause nobody mentioned</div>
+  <p>You get told to watch bloat, run VACUUM, avoid long transactions, and never
+  <code>SELECT count(*)</code> on a big table — four unrelated-sounding rules. They are one
+  rule. Postgres does not overwrite a row when you <code>UPDATE</code> it: it writes a
+  <b>new version</b> and marks the old one dead. Every row you have ever updated is still
+  physically on disk until something sweeps it.</p>
+  <div class="hf-scatter">
+    <span>50k live rows</span>
+    <span>8.2M dead tuples ⚠</span>
+    <span>disk 40GB, data 2GB ⚠</span>
+    <span>index scans reading tombstones ⚠</span>
+  </div>
+  <p class="hf-foot">Nothing deleted them, nothing is broken, and the row count on your
+  dashboard has not moved in a week.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Once you know it is versions, the rules stop being arbitrary</div>
+  <div class="hf-ladder">
+    <b>UPDATE = INSERT a new version + tombstone the old one</b>
+    <i>↓ so a hot table grows even when the row count is flat</i>
+    <b>VACUUM is the sweeper that makes dead space reusable</b>
+    <i>↓ but it can only remove versions no open transaction could still see</i>
+    <b>So a long transaction anywhere pins the garbage everywhere</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Postgres never updates a row — it writes a new version and tombstones the old one.</b>
+  That one sentence is the cause of dead tuples, table bloat, why VACUUM exists, why
+  <code>count(*)</code> has to walk the table, and why one forgotten open transaction can
+  bloat a table it never touched.
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I updated one column on one row. Surely that is a small write.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Postgres</span>
+    <p>I wrote a complete new copy of the row and left the old one in place with a "died at
+    transaction 9,412" stamp. I have to — a transaction that started before yours is still
+    entitled to see the old value.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">VACUUM</span>
+    <p>And I am the one who reclaims it, later. I remove versions that <i>no currently open
+    transaction could possibly see</i>. Which means the oldest open transaction in the whole
+    database decides how much I am allowed to clean.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one UPDATE all the way to reusable disk space.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>You run <code>UPDATE orders SET status='PAID' WHERE id=42</code></span><span class="tag">one row, one column</span></li>
+    <li><span>Postgres writes an entirely new tuple with the new value, and stamps the old one with the transaction that killed it</span><span class="tag">both versions now exist on disk</span></li>
+    <li class="open"><span>Readers pick a version using their snapshot — an older transaction still sees the old one, which is why readers never block writers</span><span class="tag">this is what MVCC buys you</span></li>
+    <li><span>Every index entry pointing at the row must also be updated — unless the new version fits on the same page and no indexed column changed (a HOT update)</span><span class="tag">why fillfactor matters on hot tables</span></li>
+    <li class="open"><span><code>VACUUM</code> later marks dead versions reusable — but only those older than the <b>oldest transaction still open anywhere in the database</b></span><span class="tag">the horizon that ruins afternoons</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the one that surprises people, and it is the one that pages you.
+  Autovacuum can be running perfectly, on schedule, on a table under heavy update load — and
+  reclaim <i>nothing</i>, because a reporting query on a completely different table has been
+  holding a snapshot open for three hours. The bloat is not an autovacuum failure. It is
+  autovacuum being told it is not allowed.</p>
+</div>
+
+<p><b>And this is also why <code>VACUUM FULL</code> is not the bigger hammer it looks like.</b>
+Plain <code>VACUUM</code> marks dead space reusable <i>in place</i> and takes no disruptive
+lock, so the file does not shrink but the space stops growing.
+<code>VACUUM FULL</code> rewrites the entire table into a new file to actually return disk to
+the OS — and takes an <code>ACCESS EXCLUSIVE</code> lock for the whole rewrite, which blocks
+every read and every write on that table until it finishes. On a 40GB table at 2am that is a
+maintenance window; run it reflexively during business hours and you have converted a disk-usage
+problem into an outage. When you genuinely need the space back without the lock, that is what
+<code>pg_repack</code> is for.</p>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Your reporting service holds one transaction open for three hours running a long
+  analytical query over <code>audit_events</code>. Meanwhile the <code>sessions</code> table —
+  a different table entirely — takes heavy <code>UPDATE</code> traffic. Autovacuum is healthy
+  and running on schedule. What happens to <code>sessions</code>?</p>
+  <button type="button">Nothing unusual — autovacuum cleans it normally, since the two tables are unrelated</button>
+  <button type="button">It bloats, because the reporting query is competing for autovacuum worker slots</button>
+  <button type="button">It bloats — vacuum may not remove versions the oldest open transaction could still see</button>
+  <p class="why" data-for="0">The tables are unrelated; the <i>snapshot horizon</i> is not. It
+  is computed across every backend in the database, because vacuum cannot know which rows that
+  long transaction is about to look at. Table isolation gives you no protection here at all.</p>
+  <p class="why" data-for="1">Worker slots are a real constraint (<code>autovacuum_max_workers</code>)
+  but they are not this. Autovacuum will visit <code>sessions</code> right on schedule, scan it,
+  and remove almost nothing — the work happens, the reclaim does not.</p>
+  <p class="why" data-for="2">Right, and it is the failure mode worth memorising. The oldest
+  open transaction anywhere in the database sets the horizon, and vacuum may only reclaim
+  versions that died before it. Watch it directly with
+  <code>SELECT max(age(backend_xmin)) FROM pg_stat_activity</code>, and defend against the
+  common cause — a connection parked <code>idle in transaction</code> — with
+  <code>idle_in_transaction_session_timeout</code>.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three things that stop being separate facts once you know this one.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Why <code>count(*)</code> is slow</h4>
+    <p>There is no single true row count to read — visibility is per version, per snapshot. So
+    an exact count walks the table. When "roughly how many" will do,
+    <code>reltuples</code> from <code>pg_class</code> is free.</p>
+    <div class="hf-scatter"><span>the count depends on who is asking</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A garbage-collected heap</h4>
+    <p>Exactly the same bargain, in a different runtime: allocation is cheap and something has
+    to sweep later, so the pathology is not "slow allocation" but "the sweeper could not keep
+    up." A long-lived reference pins garbage in a JVM the same way a long transaction pins
+    tuples here.</p>
+    <div class="hf-scatter"><span>allocate fast, collect later</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A CIAM sessions table</h4>
+    <p>The worst possible shape for this: small row count, enormous update rate — every token
+    refresh rewrites a row. Row count stays flat, disk climbs. Give it aggressive per-table
+    autovacuum settings rather than relying on the 20% global default.</p>
+    <div class="hf-scatter"><span>autovacuum_vacuum_scale_factor = 0.01</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">If dead tuples are the problem, why not vacuum constantly?</p>
+  <p class="a">Autovacuum essentially does, throttled on purpose — it reads pages and writes
+  them back, so running it flat out competes with your workload for I/O. The defaults are tuned
+  for a table that changes slowly, which is why the useful move is almost never "vacuum more
+  globally" and almost always "set a lower <code>autovacuum_vacuum_scale_factor</code> on the
+  three tables that actually churn." The 20% default on a 50-million-row table means waiting
+  for ten million dead tuples before it starts.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">What is transaction ID wraparound, and should I care?</p>
+  <p class="a">Transaction IDs are 32-bit and wrap around. Postgres has to freeze old rows
+  before that happens or they would appear to be from the future and become invisible — so if
+  vacuum is blocked long enough, the database will eventually refuse new writes to protect
+  itself. You will almost certainly never hit it; the reason to know it is that it is the same
+  root cause wearing a scarier hat. Anything that stops vacuum for long enough gets here
+  eventually, so <code>age(datfrozenxid)</code> is worth a monitor.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does JSONB make bloat worse?</p>
+  <p class="a">It can, and for a reason worth knowing: there is no partial update of a JSONB
+  document. Changing one key rewrites the whole value, and if it is large enough it also
+  rewrites its TOAST entries. A 40KB audit payload updated on every event is a lot of dead
+  bytes per change. Store payloads you append and read; be wary of JSONB columns you
+  repeatedly mutate — those wanted to be real columns.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you run it.</p>
+<div class="hf-napkin">
+  A <code>sessions</code> table holds 100,000 rows and every row is updated once a minute. The
+  row count never changes. After an hour with autovacuum blocked, roughly how many row versions
+  are on disk — and which of <code>VACUUM</code> or <code>VACUUM FULL</code> gives the disk
+  back to the operating system?
+</div>
+
 <div class="rt-ctlbar">
   <span class="lbl">scenario:</span>
   <span class="userseg" id="spScen">
@@ -282,6 +456,7 @@ $('Run').addEventListener('click',run);renderNodes();chip();
 </script>
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>

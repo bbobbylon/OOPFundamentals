@@ -49,6 +49,180 @@
     <div class="intro-ciam"><span class="tag">CIAM networking topology:</span> External traffic flows Internet → AWS ALB / Azure App Gateway → Ingress controller → host/path routing → ClusterIP Services → pods. Ping is a ClusterIP <code>ping-gateway.ciam-prod:9031</code>, the auth service <code>ciam-auth:8080</code>, the Angular nginx <code>ciam-frontend:80</code>, with TLS terminating once at the Ingress. A <strong>NetworkPolicy</strong> lets ciam-auth pods accept only from the Ingress controller — blocking lateral calls from a compromised microservice to your user-management endpoints.</div>
   </div>
 
+<p class="hf-deck">or, nobody is listening on that IP address and it works anyway</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You scaled to ten replicas. Your gRPC traffic still all goes to one pod.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">"Load balanced" turns out to mean something narrower than you thought</div>
+  <p>A Service load-balances <b>connections</b>, not requests. It picks a pod when the TCP
+  connection is established and then that connection is pinned there for its whole life. For
+  REST over short-lived HTTP/1.1 connections that is invisible. For anything that holds a
+  connection open — gRPC, HTTP/2, a WebSocket, a JDBC pool — you made one choice, once, and
+  every request afterwards rides it.</p>
+  <div class="hf-scatter">
+    <span>kubectl scale --replicas=10 ✓</span>
+    <span>endpoints: 10 healthy ✓</span>
+    <span>pod-3 CPU 95% ⚠</span>
+    <span>the other nine idle ⚠</span>
+  </div>
+  <p class="hf-foot">Every dashboard says the Service is healthy and balanced. It is. It
+  balanced the two connections you opened, perfectly, across two pods.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Once you know what a Service physically is, the fix is obvious</div>
+  <div class="hf-ladder">
+    <b>A Service is packet-rewriting rules, not a proxy process</b>
+    <i>↓ so the pod is chosen at connect time, in the kernel, once</i>
+    <b>Long-lived connections therefore need a client that re-balances</b>
+    <i>↓ periodic reconnect, or a client that opens one connection per endpoint</i>
+    <b>Give it the endpoints: a headless Service (<code>clusterIP: None</code>) returns pod IPs</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A ClusterIP is not an address anything owns.</b> No process listens on it, no interface has
+  it, and nothing will answer if you ping it. It is a value in an iptables rule on every node,
+  and the rule swaps it for a real pod IP as the packet leaves. That is the whole of it.
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p><code>ping ciam-auth</code> times out. Something is broken with the Service.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">kube-proxy</span>
+    <p>Nothing is broken. I wrote DNAT rules for TCP port 8080 because that is what your Service
+    declared. Ping is ICMP. No rule matches it, and there is no host behind that IP to reply —
+    so it goes nowhere, correctly.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">A headless Service</span>
+    <p>And when you want the real addresses instead of the illusion, ask for me. I skip the
+    virtual IP entirely and return every pod IP from DNS, so your client can hold ten
+    connections and balance across them itself.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one packet from your pod to a real pod IP.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Your app resolves <code>ciam-auth.ciam-prod.svc.cluster.local</code> — CoreDNS returns the ClusterIP, e.g. <code>10.96.14.7</code></span><span class="tag">a real DNS answer for a fake address</span></li>
+    <li><span>Your app opens a TCP connection to <code>10.96.14.7:8080</code>. Nothing anywhere is listening on it</span><span class="tag">no process, no interface, no host</span></li>
+    <li class="open"><span>Leaving the pod, the packet hits an iptables (or IPVS) rule on <b>this node</b> that kube-proxy programmed from the Endpoints list</span><span class="tag">every node has the full ruleset</span></li>
+    <li class="open"><span>The rule picks <b>one</b> endpoint at random and rewrites the destination to that pod's real IP — and conntrack records the choice</span><span class="tag">chosen ONCE, at connect time</span></li>
+    <li><span>Every subsequent packet on this connection follows the conntrack entry to the same pod, until the connection closes</span><span class="tag">this is the pinning</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the one that explains the pager. The random choice happens on the
+  first packet of a new connection and nowhere else, so "balanced" means balanced across
+  <i>connections</i>. Ten HTTP/1.1 requests open ten connections and spread nicely; ten thousand
+  gRPC calls over one HTTP/2 connection are ten thousand requests to a single pod. Nothing is
+  misconfigured — you are reading the word "load balancer" as more than the rule does.</p>
+</div>
+
+<p><b>And this is why so much Kubernetes debugging is looking at Endpoints rather than the
+Service.</b> A Service is only a label selector plus a port map; the actual list of pod IPs
+lives in the Endpoints (or EndpointSlice) object that the controller keeps in sync. So
+<code>kubectl get endpoints ciam-auth</code> is the question worth asking first — an empty list
+means the selector matches nothing (a typo'd label, or pods that are running but not
+<i>Ready</i>, because failing a readiness probe removes a pod from Endpoints and that is exactly
+what readiness is for). The Service will look perfectly healthy the entire time, because from
+its side there is nothing to be unhealthy about.</p>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Your Spring service holds a gRPC connection to <code>ciam-auth</code>, which has
+  3 replicas behind a normal ClusterIP Service. You scale it to 10. Where does traffic go?</p>
+  <button type="button">Spread across all 10 — kube-proxy reprograms its rules when Endpoints change</button>
+  <button type="button">Spread across the original 3, since existing connections keep their endpoint set</button>
+  <button type="button">All to the one pod it connected to originally, until that connection is closed</button>
+  <p class="why" data-for="0">The rules genuinely are reprogrammed — new connections will see
+  all 10. But conntrack already has an entry for your established connection, and rewriting the
+  rules does not rewrite existing flows. New connections balance; yours is not a new
+  connection.</p>
+  <p class="why" data-for="1">There is no per-connection endpoint set to keep. The choice was a
+  single destination, made once, recorded in conntrack — not a list narrowed to three.</p>
+  <p class="why" data-for="2">Right, and it is the shape of the whole problem. The pod was
+  chosen on the first packet and pinned by conntrack; scaling changes nothing about a flow
+  already established. Fixes, in order of bluntness: set a max connection age or idle timeout so
+  clients reconnect periodically; use a headless Service so the client sees every pod IP and
+  balances itself; or put a real L7 proxy in the path (a service mesh, or gRPC's own
+  <code>round_robin</code> policy over a headless Service) — which balances requests rather than
+  connections, because it actually parses them.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three places connection pinning shows up wearing a different name.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A JDBC connection pool</h4>
+    <p>HikariCP holds ten connections open for the life of the pod. Point it at a ClusterIP in
+    front of read replicas and those ten connections pick their replicas once, at startup, and
+    hold them — so a rolling restart of the database tier rebalances your app and nothing
+    else does.</p>
+    <div class="hf-scatter"><span>pooled means pinned</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>WebSockets and SSE</h4>
+    <p>Same physics, and the reason sticky sessions stop being a choice: the connection <i>is</i>
+    the session. Any state the server keeps for it must be in Redis rather than in that pod's
+    memory, because you cannot move the connection.</p>
+    <div class="hf-scatter"><span>the connection is the session</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A readiness probe you thought was cosmetic</h4>
+    <p>Readiness is precisely the switch that adds and removes a pod from Endpoints — which is
+    the list kube-proxy programs from. Liveness restarts a pod; readiness decides whether the
+    Service will ever send it anything.</p>
+    <div class="hf-scatter"><span>readiness = "in the rules or not"</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Then what is Ingress, if a Service is already "load balancing"?</p>
+  <p class="a">A different layer doing a genuinely different job. A Service works at L4 — it
+  moves packets and never looks inside them. An Ingress controller is a real proxy process
+  (nginx, Envoy, Traefik) that terminates the connection, <i>parses HTTP</i>, and can therefore
+  route by host and path, terminate TLS once, and balance <b>per request</b> rather than per
+  connection. That last point is the one that matters here: an L7 proxy in the path is a real
+  fix for the gRPC problem, because it is the only thing in the chain that can see where one
+  request ends and the next begins.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why can I reach a Service by name from one namespace but not another?</p>
+  <p class="a">Because the short name is resolved through a DNS search path that puts your own
+  namespace first. <code>ciam-auth</code> from inside <code>ciam-prod</code> becomes
+  <code>ciam-auth.ciam-prod.svc.cluster.local</code>; from <code>default</code> it tries
+  <code>ciam-auth.default…</code> and finds nothing. Use the two-label form
+  <code>ciam-auth.ciam-prod</code> across namespaces. And note a NetworkPolicy can produce the
+  same symptom from a completely different cause — DNS resolving fine and the connection
+  hanging — so check which one you are actually looking at before you start editing manifests.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Is <code>NodePort</code> ever the right answer?</p>
+  <p class="a">Rarely on a cloud cluster, and it is worth knowing it is always <i>there</i>: a
+  <code>LoadBalancer</code> Service is a <code>NodePort</code> Service with a cloud load
+  balancer pointed at it, and a <code>NodePort</code> is a <code>ClusterIP</code> with a
+  high-numbered port opened on every node. They stack. Its honest uses are bare metal without a
+  cloud LB, and local development. For several HTTP services, one Ingress in front of ClusterIPs
+  beats a cloud load balancer per Service on both cost and TLS management.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you run it.</p>
+<div class="hf-napkin">
+  <code>kubectl get svc ciam-auth</code> shows a healthy ClusterIP.
+  <code>kubectl get endpoints ciam-auth</code> shows <code>&lt;none&gt;</code>. The pods are
+  <code>Running</code>. Name two different causes — and say which one a
+  <code>kubectl describe pod</code> would reveal immediately.
+</div>
+
 <div class="rt-ctlbar">
   <span class="lbl">scenario:</span>
   <span class="userseg" id="ksScen">
@@ -290,6 +464,7 @@ $('Run').addEventListener('click',run);renderNodes();chip();
 </script>
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>

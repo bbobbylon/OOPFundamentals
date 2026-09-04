@@ -23,6 +23,17 @@
  *   6  inline JS     every inline <script> parses — catches a stray `)`, an
  *                    unescaped quote, or a literal </script> inside a string,
  *                    each of which silently kills a page's interactivity
+ *   7  hf-check      a page with .hf-check markup loads devhub-hf-check.js.
+ *                    Without it every explanation renders at once and clicking
+ *                    does nothing — the page LOOKS fine, so only a click finds
+ *                    it, and nobody clicks 500 pages
+ *   8  CSS selectors no theme selector list mixes a bare branch with a
+ *                    descendant branch. `[data-theme="cream"][data-hf],
+ *                    [data-theme="light"][data-hf] .thing` READS as one rule
+ *                    but PARSES as two — a bare root selector that leaks the
+ *                    declarations onto <html>, plus a light-only rule. It
+ *                    silently killed the entire component half of the cream
+ *                    theme once; nothing throws and the dark theme looks fine
  *
  * Failures are errors; drift that is not yet clean is reported as a warning
  * so the gate can land before every last page is perfect.
@@ -176,6 +187,53 @@ for (const f of htmlFiles) {
       err(f, `broken local link: ${target}`);
     } else {
       warn(f, `unresolved reference (not a page or shared asset): ${target}`);
+    }
+  }
+}
+
+/* ── 7. knowledge checks are wired ─────────────────────────────────────────
+   .hf-check is inert markup without devhub-hf-check.js: the .why explanations
+   are hidden BY that script, so a page missing it renders every answer's
+   explanation at once and the buttons do nothing. It looks like a styled quiz
+   and it teaches the opposite of active recall. This has now been shipped
+   broken twice — once because an idempotency guard matched the filename inside
+   the page's own prose, once because a freshly authored page simply never got
+   the tag — so it is a gate rather than a habit. */
+for (const f of htmlFiles) {
+  const s = readFileSync(join(HERE, f), 'utf8');
+  if (!/class="hf-check"/.test(s)) continue;
+  if (!/<script src="devhub-hf-check\.js"><\/script>/.test(s))
+    err(f, 'has .hf-check markup but does not load devhub-hf-check.js (the check is dead)');
+}
+
+/* ── 8. CSS theme selector lists ───────────────────────────────────────────
+   A selector list where one branch carries a descendant combinator and another
+   does not is almost always a comma that was meant to be an alternation:
+
+     [data-theme="cream"][data-hf],[data-theme="light"][data-hf] .thing { ... }
+
+   reads as "either theme, this thing" but parses as TWO selectors — a bare
+   [data-theme="cream"][data-hf] (which matches <html> and leaks every
+   declaration onto it) and a light-only rule for .thing. The cream branch
+   silently styles nothing. Write :is([data-theme="cream"],[data-theme="light"])
+   [data-hf] .thing instead. Only flagged when the bare branch is root-ish,
+   because that is the case that is always a mistake rather than a shorthand. */
+for (const cssFile of ['devhub.css', 'devhub-hf.css', 'devhub-warm.css']) {
+  const abs = join(HERE, cssFile);
+  if (!existsSync(abs)) continue;
+  const css = readFileSync(abs, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  for (const m of css.matchAll(/([^{}]+)\{/g)) {
+    const sel = m[1].trim();
+    if (!sel || sel.startsWith('@')) continue;
+    const parts = sel.split(',').map((x) => x.trim()).filter(Boolean);
+    if (parts.length < 2) continue;
+    // strip functional pseudos first: the spaces inside :is(a, b) are not combinators
+    const hasDescendant = (p) => /[ >+~]/.test(p.replace(/:(?:is|not|where|has)\([^)]*\)/g, ''));
+    const bare = parts.filter((p) => !hasDescendant(p));
+    if (bare.length && bare.length < parts.length &&
+        bare.some((p) => /^(?::root|html|\[data-)/.test(p))) {
+      err(cssFile, `selector list mixes a bare theme branch with a descendant branch ` +
+                   `(the bare branch styles <html>): ${sel.replace(/\s+/g, ' ').slice(0, 120)}`);
     }
   }
 }

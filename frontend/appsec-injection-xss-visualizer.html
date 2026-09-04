@@ -60,6 +60,182 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> Session/auth cookies should always be <code>HttpOnly</code> (JS can't read them, so XSS can't exfiltrate them directly) and <code>Secure</code>+<code>SameSite</code>. A Bearer JWT kept in <code>localStorage</code> instead of a cookie sidesteps CSRF (see the CSRF page) but is fully readable by any XSS on the page — which is exactly why an app that stores tokens in JS memory/localStorage has to take XSS defense even more seriously, not less.</div>
   </div>
 
+
+  <p class="hf-deck">or, the bug is never the quote — it's the <code>+</code></p>
+
+  <div class="hf-kick">The problem</div>
+  <p class="hf-say">Two strings went in. One string came out. That is the whole bug.</p>
+
+  <div class="hf-card bad">
+    <div class="hf-cardtitle">Escape harder. Filter the bad stuff.</div>
+    <p>A payload gets through, so you strip <code>&lt;script&gt;</code>. Next week it's
+    <code>&lt;img onerror&gt;</code>, so you strip <code>onerror</code>. Then
+    <code>&lt;svg onload&gt;</code>. Then someone sends the same tag URL-encoded and your regex
+    never sees a single angle bracket. Meanwhile a real customer called O'Brien cannot create
+    an account, because your filter decided the apostrophe was the enemy.</p>
+    <div class="hf-scatter">
+      <span>strip &lt;script&gt;</span><span>&lt;img onerror&gt; ⚠</span>
+      <span>&lt;svg onload&gt; ⚠</span><span>%3Cscript%3E ⚠</span>
+      <span>O'Brien rejected ⚠</span>
+    </div>
+    <p class="hf-foot">You are trying to list every string an attacker will ever send. They
+    only have to find one you didn't.</p>
+  </div>
+
+  <div class="hf-card good">
+    <div class="hf-cardtitle">Never build the string in the first place</div>
+    <div class="hf-ladder">
+      <b>the query text is a constant: <code>WHERE email = :email</code></b>
+      <i>↓ it goes to the database alone, and is parsed into a plan</i>
+      <b>the value travels on a second channel, as data</b>
+      <i>↓ it arrives after parsing has already finished</i>
+      <b>there is no parse step left for it to hijack</b>
+    </div>
+  </div>
+
+  <div class="principle" style="text-align:left">
+    <b>Data must never travel in the same string as code.</b> Not "escaped inside the same
+    string" — not in it at all. Bind parameters, Angular's <code>{{ }}</code>,
+    <code>textContent</code>, an argv array instead of a shell line: four names for one move,
+    which is splitting one channel into two.
+  </div>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">Your repo method</span>
+      <p>I concatenated the email into <code>WHERE email = '…'</code> and sent it over. Ordinary
+      string work. I've done it a thousand times.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">Postgres</span>
+      <p>I received valid SQL and I ran it. I have never met a user. I don't know what "input"
+      means, and there is no field on the wire where you could have told me.</p>
+    </div>
+    <div class="hf-bub">
+      <span class="who">Your repo method</span>
+      <p>So the database was never the thing that could fix this. The boundary existed in my
+      method, for one line, and I deleted it before anything downstream could see it.</p>
+    </div>
+  </div>
+
+  <div class="hf-kick">The mechanism</div>
+  <p class="hf-say">Watch the exact instant data turns into grammar.</p>
+
+  <div class="hf-card">
+    <ol class="hf-steps">
+      <li><span>you hold two separate things: a query <b>template</b> and a <b>value</b> typed
+      into a form</span><span class="tag">right now the boundary between them still exists</span></li>
+      <li class="open"><span>you join them with <code>+</code> into one flat
+      string</span><span class="tag">the boundary is gone, and nothing downstream can rebuild it</span></li>
+      <li><span>that string reaches a parser — SQL engine, HTML parser, shell, LDAP,
+      template</span><span class="tag">a parser's entire job is to find grammar in text</span></li>
+      <li><span>the <code>'</code> stops being a character and becomes a
+      token</span><span class="tag">it does exactly what you asked; it cannot read your mind</span></li>
+      <li><span>everything after that token is parsed as code, and
+      runs</span><span class="tag">login bypass, stolen session, dropped table — pick your parser</span></li>
+    </ol>
+    <p class="hf-annot">Look at which step a real fix deletes. Not step 4 — you cannot teach a
+    parser to guess which characters you meant. Not step 5 — by then it is already executing.
+    Every genuine defence kills step 2.</p>
+  </div>
+
+  <p><b>One disease, five parsers.</b> SQL injection, XSS, command injection, LDAP injection and
+  server-side template injection are not five bug classes to memorise for an exam — they are one
+  bug held against five different grammars. Which parser you happen to be feeding decides only
+  the blast radius, never the cause, and never the shape of the fix: bind parameters for SQL,
+  <code>textContent</code> or <code>{{ }}</code> for HTML, an argument array for
+  <code>ProcessBuilder</code> instead of a shell line. Three different APIs, one identical move.
+  <b>If a fix's name contains the word "escape" or "filter", it is a speed bump, not a wall.</b>
+  Which is exactly what a WAF is: it reads your traffic as text and guesses, because it does not
+  know your grammar either.</p>
+
+  <div class="hf-check" data-answer="0">
+    <p class="q">Your Angular console keeps its session in an
+    <code>HttpOnly; Secure; SameSite=Strict</code> cookie — textbook CIAM. A stored XSS lands in
+    a profile bio an admin views. The attacker's script cannot read
+    <code>document.cookie</code>. So what?</p>
+    <button type="button">Fire authenticated requests from the admin's own browser; the cookie rides along</button>
+    <button type="button">Nothing serious — HttpOnly is precisely the fix for a stolen session cookie</button>
+    <button type="button">Read the cookie anyway — HttpOnly only stops scripts on OTHER origins</button>
+    <p class="why" data-for="0">Right, and this is the part that gets skipped: XSS does not need
+    to steal the session, because it <em>is</em> the session. It can change the recovery email,
+    enrol its own MFA factor, mint an API key, or approve its own consent screen — all from
+    inside the victim's tab, all perfectly authenticated. "We use HttpOnly" is an answer to
+    cookie theft. It is not an answer to XSS.</p>
+    <p class="why" data-for="1">HttpOnly stops the cookie being <em>read</em>. It does nothing
+    about it being <em>used</em>. The script is running on your origin, so the browser attaches
+    that cookie to every request the script makes — helpfully, and by design.</p>
+    <p class="why" data-for="2">No — HttpOnly hides the cookie from every script, same-origin
+    ones included. That is the one thing it does well, and it is still not enough here.</p>
+  </div>
+
+  <div class="hf-kick">Where you've seen this before</div>
+  <p class="hf-say">Three places this exact bug is waiting in a CIAM stack.</p>
+
+  <div class="hf-terms">
+    <div class="hf-card hf-taped">
+      <h4>The bio in your admin console</h4>
+      <p>Support renders a user's profile with <code>[innerHTML]</code> so the bio keeps its
+      line breaks. Now any user can write script that runs with an <b>admin's</b> session.
+      Stored XSS, aimed upward.</p>
+      <div class="hf-scatter"><span>[innerHTML]</span><span>admin views it ⚠</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>The <code>?error=</code> on your login page</h4>
+      <p>The IdP redirects back with an error string and you echo it so the user knows what went
+      wrong. Reflected XSS, on the one page in the product where people type passwords.</p>
+      <div class="hf-scatter"><span>?error=</span><span>echoed raw ⚠</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>An LDAP filter you concatenated</h4>
+      <p>Directory-backed login builds <code>(uid=</code> + name + <code>)</code>. Send
+      <code>*)(uid=*</code> and the filter matches everyone. Fourth parser, same disease, and no
+      SQL in sight.</p>
+      <div class="hf-scatter"><span>(uid=*)(uid=*)</span><span>no binding ⚠</span></div>
+    </div>
+  </div>
+
+  <div class="hf-kick">Questions from the back row</div>
+  <div class="hf-ask">
+    <p class="q">We have a WAF in front of everything. Doesn't that cover this?</p>
+    <p class="a">It buys you hours during a zero-day and it eats the drive-by scanners, which is
+    real value — keep it. But it inspects your traffic as <em>text</em> and guesses, because it
+    doesn't know your grammar any better than your regex did:
+    <code>SeLeCt</code>, double URL-encoding and inline <code>/**/</code> comments have been
+    beating those rules for twenty years. And for DOM-based XSS the WAF sees literally nothing —
+    the payload lives after the <code>#</code>, which the browser never sends. Defence in depth,
+    never the fix.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Then why not sanitize once on input and be done?</p>
+    <p class="a">Because at input time you don't yet know which parser the value will meet. The
+    same display name is harmless in a <code>&lt;p&gt;</code>, lethal inside a
+    <code>&lt;script&gt;</code> block, and needs a completely different encoding again in a URL
+    or a CSV a colleague opens in Excel. Sanitizing on input means guessing every future
+    context, and it corrupts your data permanently while doing it. Store what the user actually
+    typed; encode at the moment you write it somewhere, when you finally know where "somewhere"
+    is.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">So bind everything and I'm safe?</p>
+    <p class="a">Almost. A bind parameter can only replace a <b>value</b>, never an identifier —
+    <code>ORDER BY :col</code> and a parameterised table name simply do not work, because the
+    plan is built before the value shows up. That's a feature, and it's also the one hole left:
+    for a sortable admin grid you need a hard allowlist, a <code>switch</code> mapping the string
+    <code>"name"</code> to the literal column <code>u.display_name</code>. Not an escape
+    function. A list of the columns that exist.</p>
+  </div>
+
+  <div class="hf-kick">Grab a napkin</div>
+  <p class="hf-say">Predict it before you run it.</p>
+  <div class="hf-napkin">
+    You bind <code>' OR '1'='1' --</code> as <code>:email</code>, the query returns zero rows,
+    and you declare the endpoint fixed. The same admin search also takes
+    <code>?sort=email</code> and pastes it into <code>ORDER BY</code>. Two things to answer: which
+    of those two is still injectable — and why does adding a bind parameter not save the second
+    one?
+  </div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -346,6 +522,7 @@ DevHubCodeWalk.mount('#cw-appsec-mount', {
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>

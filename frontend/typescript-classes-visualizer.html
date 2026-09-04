@@ -165,6 +165,128 @@
     <div class="intro-ciam"><span class="tag">Angular / Spring / CIAM:</span> Angular services are <code>@Injectable</code> classes, Spring beans are classes, CIAM DTOs are classes with validation decorators. Understanding <code>abstract</code> explains the template-method pattern Spring uses in <code>AbstractSecurityFilterChain</code> and <code>JdbcTemplate</code>.</div>
   </div>
 
+
+  <p class="hf-deck">or, the difference between a lock and a sign that says "please don't"</p>
+
+  <div class="hf-kick">The problem</div>
+  <p class="hf-say">You typed <code>private refreshToken</code> and felt safe. It is not private at runtime.</p>
+
+  <div class="hf-card bad">
+    <div class="hf-cardtitle">The TokenStore that handed out its own refresh token</div>
+    <p>A CIAM front end parks the refresh token in a class field marked <code>private</code>. Then one request fails, and your error reporter does the only thing error reporters do — it serialises the object it was given. <code>private</code> is a word <em>for the compiler</em>. <code>tsc</code> reads it, enforces it, <b>deletes it</b>, and ships a perfectly ordinary public property with a perfectly ordinary string key.</p>
+    <div class="hf-scatter">
+      <span>JSON.stringify(store) → the token ⚠</span>
+      <span>Object.keys(store) lists it ⚠</span>
+      <span>(store as any).refreshToken ⚠</span>
+      <span>DevTools prints it, no cast needed ⚠</span>
+      <span>{...store} copies it into your log ⚠</span>
+      <span>Sentry breadcrumb, retained 90 days ⚠</span>
+    </div>
+    <p class="hf-foot">The field was never hidden. It was <em>discouraged</em> — and only for people compiling against your types. The attacker is not compiling against your types.</p>
+  </div>
+
+  <div class="hf-card good">
+    <div class="hf-cardtitle">One character, and the JavaScript engine takes the job over</div>
+    <div class="hf-ladder">
+      <b>#refreshToken = token;</b>
+      <i>↓ that is not a property name — it is a per-instance slot the engine owns</i>
+      <b>JSON.stringify · Object.keys · spread · structuredClone · devtools: all blank</b>
+      <i>↓ and no cast rescues you, because there is no string key to reach for</i>
+      <b>(store as any)["#refreshToken"] is undefined, and store.#refreshToken outside the class is a SyntaxError — it will not even parse</b>
+    </div>
+  </div>
+
+  <div class="principle" style="text-align:left">
+    <b><code>private</code> is a code-review comment that the compiler happens to enforce. <code>#</code> is a lock.</b>
+    If the only cost of getting a field wrong is a confused teammate, <code>private</code> is exactly right and you should keep using it everywhere. If the cost is a refresh token in a log aggregator, you need the one JavaScript enforces — because the compiler is not running in production, and everything it was protecting you from happens there.
+  </div>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">tsc</span>
+      <p>I checked every access to <code>refreshToken</code> in your codebase. Not one of them was outside the class. You are clean.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">The shipped bundle</span>
+      <p>Great. I dropped the word <code>private</code> on the way out — it is not JavaScript, I had nowhere to put it. The field is still here though! <code>this.refreshToken = t</code>, right on the instance, fully enumerable.</p>
+    </div>
+    <div class="hf-bub">
+      <span class="who">The analytics SDK</span>
+      <p>Ooh, an object. I serialise those.</p>
+    </div>
+  </div>
+
+  <div class="hf-kick">The mechanism</div>
+  <p class="hf-say">Follow one field from your editor into production.</p>
+
+  <div class="hf-card">
+    <ol class="hf-steps">
+      <li><span>You write <code>private refreshToken: string</code> and <code>#session: Session</code> in the same class</span><span class="tag">source .ts — both look equally locked</span></li>
+      <li class="open"><span>Type-check: <code>store.refreshToken</code> from outside is <code>error TS2341</code>, and <code>store.#session</code> is a parse error</span><span class="tag">the only place the word private exists at all</span></li>
+      <li><span>Emit: the modifier is <b>erased</b>. The field is not — the field was never a type</span><span class="tag">private is not JavaScript, so it cannot survive</span></li>
+      <li><span>The <code>.js</code> that ships: <code>this.refreshToken = t;</code> sitting right next to <code>this.#session = s;</code></span><span class="tag">one of these two is still enforced</span></li>
+      <li class="open"><span><code>Object.keys(store)</code> → <code>["refreshToken"]</code>. The <code>#session</code> slot is not on that list and never will be</span><span class="tag">the only gate an attacker ever meets</span></li>
+    </ol>
+    <p class="hf-annot">Everyone re-learns this at step 3, usually while reading a bug report. Erasure does not delete your field — your field is data, and data has to ship. It deletes the <em>rule about who may touch it</em>, and the compiler was the only thing that ever read that rule.</p>
+  </div>
+
+  <p><b><code>readonly</code> lives on exactly the same side of that line — it is erased too.</b> And it is not <code>const</code>, which people conflate constantly. <code>const</code> freezes a <em>binding</em>: the variable cannot be pointed at something else, checked once, at the point of declaration. <code>readonly</code> freezes an <em>assignment to a property</em>: <code>this.id = x</code> is legal inside the constructor and an error everywhere after. Both stop the same thing — reassignment — and neither stops <b>mutation</b>: <code>readonly roles: string[]</code> happily lets anyone call <code>store.roles.push("ADMIN")</code>, because pushing does not reassign anything. The runtime equivalents are different tools entirely: <code>Object.freeze()</code> for the object, <code>ReadonlyArray&lt;string&gt;</code> for the compile-time half of the array, and a getter with no setter when you want the field genuinely unreachable.</p>
+
+  <p>And while you are drawing that line: <b><code>implements</code> gives you nothing.</b> Not a method, not a field, not a single byte of emitted JavaScript. <code>extends</code> hands you a working parent; <code>implements</code> asks the compiler one question — "does this class have that shape?" — and then goes home. The payoff is <em>where the error lands</em>: without it, a missing <code>serialize()</code> shows up as a type mismatch at all eleven call sites that pass your object as a <code>Serializable</code>. With it, you get one error, on the class declaration line, the moment you save the file.</p>
+
+  <div class="hf-check" data-answer="1">
+    <p class="q">Your <code>TokenStore</code> holds <code>private refreshToken: string</code>. A request fails and your error handler runs <code>logger.error("auth failed", JSON.stringify(store))</code>. What reaches the log aggregator?</p>
+    <button type="button">Nothing sensitive — <code>private</code> fields are skipped when an object is serialised</button>
+    <button type="button">The refresh token in plain text, as an ordinary key called <code>refreshToken</code></button>
+    <button type="button">A compile error — <code>tsc</code> refuses to stringify a class holding private state</button>
+    <p class="why" data-for="0">That is the intuition that causes the incident. Nothing skips it: after erasure the field is an ordinary own enumerable property with a string key, indistinguishable from <code>owner</code> or <code>createdAt</code>. Only <code>#</code> fields are skipped by <code>JSON.stringify</code>, and only because they are not properties in the first place.</p>
+    <p class="why" data-for="1">Right, and the tell is that nobody had to do anything clever — no cast, no reflection, no <code>as any</code>. <code>JSON.stringify</code> walks own enumerable string keys, and <code>refreshToken</code> is one, because <code>private</code> was a compile-time rule that stopped existing the moment the file was emitted. Write <code>#refreshToken</code> instead and the very same line logs <code>{}</code>.</p>
+    <p class="why" data-for="2"><code>JSON.stringify</code> takes <code>any</code>-ish input and is perfectly happy here; there is nothing to complain about. <code>tsc</code> only objects when you <em>name</em> the member from outside the class — and this code never does.</p>
+  </div>
+
+  <div class="hf-kick">Where you've seen this before</div>
+  <p class="hf-say">Three places this bites in the stack you already work in.</p>
+
+  <div class="hf-terms">
+    <div class="hf-card hf-taped">
+      <h4>An Angular token service</h4>
+      <p>An <code>@Injectable</code> holding <code>private accessToken</code> is a singleton that lives for the whole session — and the one object most likely to be spread into a state snapshot, a devtools plugin, or an error payload. This is the field that earns the <code>#</code>.</p>
+      <div class="hf-scatter"><span>#accessToken</span><span>getter only, no setter</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>Java <code>private</code> is stronger than this</h4>
+      <p>If you came from Spring, recalibrate: the JVM verifier actually enforces <code>private</code>, and it takes <code>setAccessible(true)</code> to get past it. In TypeScript there is no verifier — the enforcement <em>ends at the build</em>. Same keyword, very different promise.</p>
+      <div class="hf-scatter"><span>JVM: enforced</span><span>TS: erased ⚠</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4><code>implements OnInit</code></h4>
+      <p>You have typed this a thousand times, and it does not make Angular call anything — the framework looks for a method named <code>ngOnInit</code> and that is all. What <code>implements</code> buys you is that when you fat-finger <code>ngOnInIt</code>, you get a compile error instead of a lifecycle hook that silently never fires.</p>
+      <div class="hf-scatter"><span>contract checked</span><span>zero code inherited</span></div>
+    </div>
+  </div>
+
+  <div class="hf-kick">Questions from the back row</div>
+  <div class="hf-ask">
+    <p class="q">Can I get a parameter property for a <code>#</code> field — <code>constructor(#token: string)</code>?</p>
+    <p class="a">No, and it is worth knowing why rather than just bouncing off the error. Parameter properties are a TypeScript feature, and they only recognise the four TypeScript modifiers: <code>public</code>, <code>private</code>, <code>protected</code>, <code>readonly</code>. A <code>#</code> name is JavaScript syntax and has to be declared in the class body. So the moment you want real privacy you go back to the long form: <code>#token: string;</code> as a field, and <code>constructor(token: string) { this.#token = token; }</code>. Two extra lines is the entire price.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Does <code>readonly</code> stop anything at runtime?</p>
+    <p class="a">Nothing whatsoever. It is erased exactly like <code>private</code>, so <code>(config as any).apiUrl = "http://evil"</code> succeeds, and so does any plain JavaScript in the same bundle that never saw your types. If you need the assignment to actually fail, that is <code>Object.freeze(this)</code> at the end of the constructor (silently ignored in sloppy mode, throws in strict mode and in modules), or a <code>get</code> accessor with no matching <code>set</code>, which throws on assignment in strict mode. Pick based on whether you are defending against a colleague or against code you do not control.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Surely <code>abstract</code> is real, though — <code>new Shape()</code> is blocked.</p>
+    <p class="a">Blocked by the compiler, and by nothing else. <code>abstract</code> emits an ordinary JavaScript class, so <code>new (Shape as any)()</code> constructs an object without complaint — and abstract <em>methods</em> emit no code at all, so the first call to <code>shape.area()</code> dies with "not a function" somewhere far away from the mistake. Same pattern as everything else on this page: the TypeScript keyword is a promise kept at build time. If a caller can hand you an untyped object, validate it; do not assume a modifier is standing guard.</p>
+  </div>
+
+  <div class="hf-kick">Grab a napkin</div>
+  <p class="hf-say">Predict it before you run it.</p>
+  <div class="hf-napkin">
+    <code>class Store { private a = "A"; #b = "B"; constructor(public c = "C") {} }</code> — you run
+    <code>JSON.stringify(new Store())</code> and then <code>Object.keys(new Store()).length</code>.
+    Write down the exact string, and the exact number, before you look. Then ask yourself the one that matters:
+    which of <code>a</code>, <code>b</code> and <code>c</code> would you be comfortable seeing in a log?
+  </div>
   <!-- ── TRY IT LIVE ── -->
   <div class="tryit" data-lang="ts"
        data-title="🧪 Try it: TS private vs JS #private — only one survives runtime"
@@ -1402,6 +1524,7 @@ function absSubclass(which) {
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>

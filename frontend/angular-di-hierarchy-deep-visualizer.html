@@ -132,6 +132,182 @@
     </div>
   </div>
 
+
+<p class="hf-deck">or, why your singleton has two instances and both of them are correct</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Someone added one line to a <code>providers</code> array. Your login state forked.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">"Available here" and "a new one for here" look identical</div>
+  <p>Everyone reads <code>providers: [AuthStore]</code> as <i>make AuthStore available to this
+  component</i>. It already was. What that line actually says is <b>build a fresh AuthStore for
+  this component and everything under it</b> — so the child writes to one instance and the
+  header reads from another, and neither of them is broken.</p>
+  <div class="hf-scatter">
+    <span>login succeeds ✓</span>
+    <span>header still says "Sign in" ⚠</span>
+    <span>no error anywhere ⚠</span>
+    <span>works after a full reload ⚠</span>
+  </div>
+  <p class="hf-foot">Two objects of the same class, each perfectly consistent with itself. There
+  is nothing to see in a stack trace, because nothing threw.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Read a providers array as a scope, and it stops surprising you</div>
+  <div class="hf-ladder">
+    <b><code>providedIn:'root'</code> — one instance for the application</b>
+    <i>↓ this is the default you want for shared state, and it tree-shakes if unused</i>
+    <b><code>providers: [X]</code> on a component — a new X per instance of that component</b>
+    <i>↓ which is a feature: per-row state, per-dialog state, per-wizard state</i>
+    <b>Resolution walks up and takes the FIRST provider it meets, then stops</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b><code>providers:</code> is a scoping decision, not a registration decision.</b> It does not
+  make a service reachable — it creates a new one and shadows whatever was above. Every
+  "my singleton isn't a singleton" bug in Angular is that sentence, discovered the hard way.
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I added <code>AuthStore</code> to the component's providers so it could inject it.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The injector</span>
+    <p>It could already inject it — I would have walked up and found the root one. What you did
+    was give this component its own, and I stop walking the moment I find a provider. Yours is
+    closer than root, so yours wins.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The header component</span>
+    <p>And I am not underneath you, so my walk goes past you entirely and reaches the root
+    instance. We are reading two different objects and both of us are behaving correctly.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Resolution walks outward and stops at the first provider it finds.</p>
+
+<div class="hf-card hf-nest">
+  <p class="note">each layer is searched before the one outside it ↘</p>
+  <div class="ring"><span class="lbl">NullInjector — throws NG0201 "No provider for AuthStore"</span>
+    <div class="ring"><span class="lbl">root EnvironmentInjector — <code>providedIn:'root'</code> lives here</span>
+      <div class="ring"><span class="lbl">route EnvironmentInjector — a lazy route's own <code>providers</code></span>
+        <div class="ring"><span class="lbl">parent component ElementInjector — <code>providers:[…]</code></span>
+          <div class="core">your component<small>the walk starts here and goes outward</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<p class="hf-annot">The detail worth carrying out of this picture: the <b>entire</b> element
+chain is searched before the environment chain is tried at all. So a <code>providers:[X]</code>
+on some ancestor component fifteen levels up still beats <code>providedIn:'root'</code> — being
+"closer" means closer in the element tree, not closer in the file you are reading. And when the
+walk falls off the end, the NullInjector's only job is to throw the error you have seen a
+hundred times.</p>
+
+<p><b>Which turns the four resolution modifiers from trivia into tools for steering that
+walk.</b> <code>@Self()</code> says look only in my own element injector and go no further —
+useful when you specifically want <i>this</i> component's instance or nothing.
+<code>@SkipSelf()</code> says start at my parent, which is how a component provides a service
+and still injects the outer one, the standard trick for hierarchical structures.
+<code>@Optional()</code> says return <code>null</code> instead of throwing when the walk falls
+off the end. <code>@Host()</code> stops the walk at the host component's boundary, which is what
+makes a directive able to reach its host's <code>NgForm</code> without accidentally finding a
+different form somewhere higher up.</p>
+
+<div class="hf-check" data-answer="1">
+  <p class="q"><code>AuthStore</code> is <code>providedIn:'root'</code>. Someone adds
+  <code>providers: [AuthStore]</code> to <code>ProfilePageComponent</code> to "make the
+  dependency explicit". A child of ProfilePage calls <code>login()</code>; the app header, which
+  is outside ProfilePage, reads <code>isLoggedIn</code>. What happens?</p>
+  <button type="button">Angular throws a duplicate-provider error at startup — the same token is registered twice</button>
+  <button type="button">Two instances exist; the child writes to ProfilePage's and the header reads root's, silently</button>
+  <button type="button">The component-level provider is ignored, since <code>providedIn:'root'</code> already registered the token</button>
+  <p class="why" data-for="0">There is no such error, and there could not be — providing the
+  same token at different levels is the normal, intended way to scope a service. The injector
+  has no way to know you meant one instance rather than two.</p>
+  <p class="why" data-for="1">Right, and the silence is the whole problem. The child's walk hits
+  ProfilePage's element injector first and stops; the header is not underneath ProfilePage, so
+  its walk goes straight to root. Two correct objects, no error, and a bug that looks like a
+  change-detection problem — which is where people usually start looking, and lose an
+  afternoon.</p>
+  <p class="why" data-for="2">The opposite is true: the closer provider wins. Element injectors
+  are searched in full before the environment chain is consulted, so a component-level provider
+  shadows <code>providedIn:'root'</code> for that entire subtree.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three familiar versions of "the nearest one wins".</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Lexical scope in JavaScript</h4>
+    <p>A <code>const user</code> inside a function shadows the outer <code>user</code>, and
+    nothing warns you. Injector resolution is the same walk over a different tree — which is
+    why "shadowing" is the right word for what the providers array did.</p>
+    <div class="hf-scatter"><span>same walk, different tree</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Spring bean scopes</h4>
+    <p>Singleton, request, prototype — same question, answered at configuration time instead of
+    by position in a tree. A Spring dev's instinct that "a bean is a singleton" is the exact
+    instinct that makes this Angular bug invisible.</p>
+    <div class="hf-scatter"><span>scope is a decision either way</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>The version where scoping is the point</h4>
+    <p>Per-row edit state, a dialog's own form service, a wizard whose step state must not
+    outlive it — all of them <i>want</i> a fresh instance per component, and all of them get it
+    from this same mechanism. The feature and the bug are one line apart.</p>
+    <div class="hf-scatter"><span>providers: [] on purpose</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">What is the difference between <code>providers</code> and <code>viewProviders</code>?</p>
+  <p class="a">Reach. <code>providers</code> is visible to the component's whole subtree
+  including content projected in through <code>ng-content</code>;
+  <code>viewProviders</code> is visible only to the component's own template. The distinction
+  exists so a component can hold internal services without silently supplying them to whatever
+  a parent projected inside it — the projected content belongs to the parent, so it should
+  resolve against the parent's scope, not yours.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does a lazy-loaded route really get its own injector?</p>
+  <p class="a">Yes — a route with its own <code>providers</code> creates a child
+  EnvironmentInjector, and a service provided there is one instance per <i>that route tree</i>,
+  not per application. That is deliberate and often what you want. It becomes a bug when the
+  service was meant to be global and someone listed it in the route's providers as well as
+  <code>providedIn:'root'</code> — same fork as the component case, one level up, and harder to
+  spot because it is in a routing file nobody was reading.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why <code>inject()</code> instead of constructor parameters?</p>
+  <p class="a">It works in places a constructor cannot: field initialisers, functional route
+  guards, resolvers, <code>HttpInterceptorFn</code>, and inside helper functions you write
+  yourself. It also composes — you can factor injection out into a reusable function, which
+  constructor DI cannot do. The constraint is that it only runs in an <i>injection context</i>:
+  during construction, or inside <code>runInInjectionContext</code>. Calling it from an event
+  handler throws NG0203, and that error means "you asked outside the window", not "the provider
+  is missing".</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you run it.</p>
+<div class="hf-napkin">
+  <code>DataService</code> is <code>providedIn:'root'</code>. <code>ListComponent</code> has
+  <code>providers:[DataService]</code>, and renders 20 <code>RowComponent</code> children that
+  each inject it. How many instances exist — and how many would there be if
+  <code>providers:[DataService]</code> were on <code>RowComponent</code> instead?
+</div>
+
   <!-- ── EXTREME-VIZ HERO: DI Injector Tree ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -261,7 +437,7 @@
         <div>
           <div class="resbox" id="resbox"><div style="color:var(--muted);font-size:12px">Pick a provide location and press Resolve.</div></div>
           <div class="walklog" id="walklog"></div>
-          <button class="runbtn" id="run">▶ Resolve from &lt;Leaf&gt;</button>
+          <button class="runbtn" id="resolveRun">▶ Resolve from &lt;Leaf&gt;</button>
         </div>
       </div>
     </div>
@@ -481,7 +657,7 @@ function injectCallStr(){
 }
 function resolve(){
   if(running) return; running=true; clearT();
-  document.getElementById('run').disabled=true;
+  document.getElementById('resolveRun').disabled=true;
   renderTree();
   document.getElementById('resbox').innerHTML='<div class="code">'+injectCallStr().replace(/</g,'&lt;')+'</div><div style="color:var(--blue);font-size:12px">Walking the tree…</div>';
   document.getElementById('walklog').innerHTML='';
@@ -524,7 +700,7 @@ function finish(foundAt, stop){
       msg+='A <b>component-level provider</b> created a <b>new instance</b> scoped to this component and its descendants. A sibling outside the subtree would get a different instance.';
       v+='<div class="resmsg">'+msg+'</div><div class="instkind scoped">🧩 Scoped instance — new per '+LEVELS.find(l=>l.lvl===foundAt).name.replace(/</g,'&lt;').replace(/>/g,'&gt;')+' subtree.</div>';
     }
-    box.innerHTML=html+v; running=false; document.getElementById('run').disabled=false; return;
+    box.innerHTML=html+v; running=false; document.getElementById('resolveRun').disabled=false; return;
   }
   // not found
   // mark the terminal node
@@ -553,7 +729,7 @@ function finish(foundAt, stop){
     else why='The walk went all the way up to the <code>NullInjector</code> and found no provider for TOKEN anywhere.';
     box.innerHTML=html+'<div class="verdict err">❌ NullInjectorError: No provider for TOKEN!</div><div class="resmsg">'+why+' Add <code>@Optional()</code> to get <code>null</code> instead, or provide TOKEN somewhere on the path.</div>';
   }
-  running=false; document.getElementById('run').disabled=false;
+  running=false; document.getElementById('resolveRun').disabled=false;
 }
 document.querySelectorAll('#modseg button').forEach(b=>b.onclick=()=>{
   if(running) return;
@@ -564,7 +740,7 @@ document.querySelectorAll('#modseg button').forEach(b=>b.onclick=()=>{
   if(m==='skipSelf' && mods.skipSelf) mods.self=false;
   renderMods(); resetRes();
 });
-document.getElementById('run').onclick=resolve;
+document.getElementById('resolveRun').onclick=resolve;
 renderProv(); renderMods(); renderTree(); resetRes();
 </script>
 <script>
@@ -712,6 +888,7 @@ renderNodes(cur);
 </script>
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>

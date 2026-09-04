@@ -100,6 +100,163 @@
     <div class="intro-ciam"><span class="tag">Angular / Spring / CIAM:</span> Angular HTTP returns RxJS <code>Observable</code>s, but many APIs use Promises; auth flows are async — <code>await oidc.getToken()</code>, <code>await http.get&lt;User&gt;(url)</code>. Spring WebFlux uses Reactor (same idea), and <code>Promise.all()</code> runs parallel auth checks.</div>
   </div>
 
+
+  <p class="hf-deck">or, the three hundred milliseconds you spend twice for no reason</p>
+
+  <div class="hf-kick">The problem</div>
+  <p class="hf-say">Two awaits in a row is a decision, even when you didn't make one.</p>
+
+  <div class="hf-card bad">
+    <div class="hf-cardtitle">Accidentally sequential</div>
+    <p>The profile call does not need the settings call. Nothing here says "wait" — but
+    <code>await</code> on its own line says it anyway.</p>
+    <div class="hf-scatter">
+      <span>const user = await getUser()</span>
+      <span>const prefs = await getPrefs() ⚠</span>
+      <span>const flags = await getFlags() ⚠</span>
+      <span>300 + 300 + 300 = 900ms</span>
+    </div>
+    <p class="hf-foot">Three independent 300ms calls, run one after another, is 900ms of a
+    user watching a spinner. The same three in parallel is 300ms. You did not write a bug —
+    you wrote a schedule, by accident.</p>
+  </div>
+
+  <div class="hf-card good">
+    <div class="hf-cardtitle">Say what actually depends on what</div>
+    <div class="hf-ladder">
+      <b>start all three at once</b>
+      <i>↓ the calls are already in flight</i>
+      <b>const [user, prefs, flags] = await Promise.all([...])</b>
+      <i>↓ one wait, for the slowest</i>
+      <b>300ms total</b>
+    </div>
+  </div>
+
+  <div class="principle" style="text-align:left">
+    <b><code>await</code> does not block the thread — it blocks THIS function.</b> Everything
+    else on the page keeps running. So the cost of an extra <code>await</code> is never
+    "the browser froze"; it is "this one flow got longer", which is exactly why it hides.
+  </div>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">A Promise</span>
+      <p>I started the moment I was created. Not when you awaited me.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">await</span>
+      <p>Which is the whole trick: if you build all three promises first and await them
+      after, they overlap. Build-then-await, not build-await-build-await.</p>
+    </div>
+    <div class="hf-bub">
+      <span class="who">Promise.all</span>
+      <p>And I reject the instant any one of you does — but I can't cancel the rest. They
+      finish in the background, unwatched. People are always surprised by that.</p>
+    </div>
+  </div>
+
+  <div class="hf-kick">The mechanism</div>
+  <p class="hf-say">Four combinators. One question picks between them.</p>
+
+  <div class="hf-card">
+    <div class="hf-slot">
+      <div class="ctx">N promises<small>what do you need back?</small></div>
+      <div class="arrow">which combinator? →</div>
+      <div class="opts">
+        <span class="on">ALL of them, or fail → Promise.all</span>
+        <span>All outcomes, successes and failures → Promise.allSettled</span>
+        <span>The first to SETTLE, win or lose → Promise.race</span>
+        <span>The first to SUCCEED → Promise.any</span>
+      </div>
+    </div>
+    <p class="hf-annot"><code>all</code> is fail-fast, <code>allSettled</code> never rejects
+    (you get a <code>{status, value|reason}</code> per entry), <code>race</code> is the one you
+    want for a timeout, and <code>any</code> ignores failures until everything has failed.
+    Reaching for <code>all</code> when you meant <code>allSettled</code> is how one flaky
+    optional call takes down a whole dashboard.</p>
+  </div>
+
+  <p><b>None of these cancel anything.</b> A rejected <code>Promise.all</code> settles
+  immediately, but the other requests are still in flight and will still resolve — into
+  nothing. If you actually need to stop the work, that is <code>AbortController</code>'s job,
+  and it has to be threaded into the <code>fetch</code> call itself. TypeScript will not warn
+  you about this; the types are identical either way.</p>
+
+  <div class="hf-check" data-answer="2">
+    <p class="q"><code>Promise.all([a, b, c])</code> and <code>b</code> rejects after 50ms while
+    <code>a</code> and <code>c</code> take 2s. What is true at t=100ms?</p>
+    <button type="button">a and c were cancelled when b rejected</button>
+    <button type="button">The await is still pending — <code>all</code> waits for every promise</button>
+    <button type="button">The await already threw, and a and c are still running unobserved</button>
+    <p class="why" data-for="0">Nothing cancels a promise. There is no cancel in the Promise
+    API at all — <code>AbortController</code> exists precisely because of that gap, and it has
+    to be wired into the underlying <code>fetch</code>.</p>
+    <p class="why" data-for="1">That is <code>allSettled</code>. <code>all</code> is
+    <em>fail-fast</em>: the first rejection settles it immediately.</p>
+    <p class="why" data-for="2">Right, and the second half is the part that bites. Your
+    <code>catch</code> already ran, but <code>a</code> and <code>c</code> keep going and
+    resolve into a result nobody is holding — which is why a "failed" request can still write
+    to state or log an error seconds later.</p>
+  </div>
+
+  <div class="hf-kick">Where you've seen this before</div>
+  <p class="hf-say">The same four choices, three other places.</p>
+
+  <div class="hf-terms">
+    <div class="hf-card hf-taped">
+      <h4>Angular's forkJoin</h4>
+      <p><code>forkJoin</code> is <code>Promise.all</code> for observables — same fail-fast
+      behaviour, same trap. <code>combineLatest</code> is the one people reach for by mistake,
+      and it emits on every change instead of once at the end.</p>
+      <div class="hf-scatter"><span>forkJoin = all</span><span>race = race</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>Spring's CompletableFuture</h4>
+      <p><code>allOf(...)</code> is the same idea on the JVM, and the same lesson applies:
+      building the futures starts the work; joining them is just the wait.</p>
+      <div class="hf-scatter"><span>CompletableFuture.allOf</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>A CIAM login screen</h4>
+      <p>Token exchange must finish before the profile call — genuinely sequential. But the
+      profile, the tenant config and the feature flags are independent, and running them
+      sequentially is three round trips a user waits through at the worst possible moment.</p>
+      <div class="hf-scatter"><span>await token</span><span>then Promise.all([...])</span></div>
+    </div>
+  </div>
+
+  <div class="hf-kick">Questions from the back row</div>
+  <div class="hf-ask">
+    <p class="q">Why didn't my <code>try/catch</code> catch that error?</p>
+    <p class="a">Almost always because the throw happened in a promise you never awaited — a
+    "floating" promise. <code>try { doThing(); } catch {}</code> without <code>await</code>
+    catches nothing, because <code>doThing()</code> returns before it fails. The rejection
+    surfaces later as an unhandled rejection with no stack you recognise. TypeScript's
+    <code>no-floating-promises</code> lint rule exists for exactly this and is worth turning on.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Is <code>await</code> in a <code>for</code> loop always wrong?</p>
+    <p class="a">No — it is wrong when the iterations are independent, and right when each one
+    depends on the last, or when you are deliberately rate-limiting. Firing 5,000 requests with
+    <code>Promise.all</code> is its own outage. The honest answer is "batch": chunk the list and
+    <code>Promise.all</code> each chunk.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Does <code>async</code> make my function run on another thread?</p>
+    <p class="a">Never. It marks the function as returning a Promise and lets it pause at
+    <code>await</code>. All your JavaScript still runs on one thread — the concurrency comes
+    from the browser doing the I/O elsewhere and handing you the result. If you want real
+    parallelism for CPU work, that is a Web Worker, not <code>async</code>.</p>
+  </div>
+
+  <div class="hf-kick">Grab a napkin</div>
+  <p class="hf-say">Predict it before you run it.</p>
+  <div class="hf-napkin">
+    You write <code>const a = fetchA(); const b = fetchB(); const x = await a; const y = await
+    b;</code> — each call takes 300ms. How long until you have both, and how does that differ
+    from putting <code>await</code> directly on each call?
+  </div>
+
   <!-- ── TRY IT LIVE ── -->
   <div class="tryit" data-lang="ts"
        data-title="🧪 Try it: Promise.all vs race vs allSettled — clock them"
@@ -1044,5 +1201,6 @@ function switchTab(el, id) {
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

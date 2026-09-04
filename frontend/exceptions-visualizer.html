@@ -124,6 +124,164 @@
       <div class="intro-ciam"><span class="tag">CIAM / Spring Boot:</span> Custom exceptions map to status codes — <code>UserNotFoundException</code> → 404, <code>UnauthorizedException</code> → 401, <code>ForbiddenException</code> → 403, <code>ValidationException</code> → 400 — and one <code>@ControllerAdvice</code> catches them all and emits <code>ProblemDetail</code> JSON. Never let a raw <code>NullPointerException</code> reach the response: it's a 500 that leaks stack traces to clients.</div>
     </div>
 
+
+  <p class="hf-deck">or, the two lines that delete the evidence and the crime</p>
+
+  <div class="hf-kick">The problem</div>
+  <p class="hf-say">The worst catch block in the world compiles perfectly.</p>
+
+  <div class="hf-card bad">
+    <div class="hf-cardtitle">Catch, log, carry on</div>
+    <p>The IDE offered to surround with try/catch, you accepted, and the method now returns
+    normally after failing.</p>
+    <div class="hf-scatter">
+      <span>catch (Exception e) { }</span>
+      <span>e.printStackTrace() ⚠</span>
+      <span>caller believes it worked ⚠</span>
+      <span>the NPE 3 layers up is the symptom ⚠</span>
+      <span>the real cause is gone ⚠</span>
+    </div>
+    <p class="hf-foot">You will spend an afternoon debugging the null that appeared later,
+    and the stack trace will point at code that is entirely innocent.</p>
+  </div>
+
+  <div class="hf-card good">
+    <div class="hf-cardtitle">Handle it, or let it travel — but never neither</div>
+    <div class="hf-ladder">
+      <b>Can this layer actually DO something about it?</b>
+      <i>↓ yes — retry, fall back, ask the user</i>
+      <b>Handle it, and say so in the log</b>
+      <i>↓ no — you are not the right layer</i>
+      <b>Let it propagate, or wrap it WITH the cause</b>
+      <i>↓ never</i>
+      <b>swallow it and return as if nothing happened</b>
+    </div>
+  </div>
+
+  <div class="principle" style="text-align:left">
+    <b>Catch an exception only where you can add information or take a decision.</b>
+    Everywhere else, letting it travel is not laziness — it is the correct behaviour, because
+    the layer that can actually respond is further up.
+  </div>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">The DAO</span>
+      <p>The database refused the connection. I can't fix that. I'm throwing.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">The service</span>
+      <p>Nor can I, but I know WHAT was being attempted. I'll wrap it —
+      <code>new UserLoadException("loading user " + id, e)</code> — keeping the cause.</p>
+    </div>
+    <div class="hf-bub">
+      <span class="who">The controller</span>
+      <p>And I'm the layer that can decide: a 503, a retry header, and the full chain in the
+      log. That decision was never the DAO's to make.</p>
+    </div>
+  </div>
+
+  <div class="hf-kick">The mechanism</div>
+  <p class="hf-say">Where it goes, and what it takes with it.</p>
+
+  <div class="hf-card">
+    <ol class="hf-steps">
+      <li class="open"><span>throw — the JVM starts unwinding the call stack</span><span class="tag">thrown</span></li>
+      <li><span>each frame is checked for a matching catch, innermost first</span><span class="tag">unwinding</span></li>
+      <li><span><code>finally</code> runs on the way out of every frame it leaves</span><span class="tag">always</span></li>
+      <li><span>a matching catch stops the unwinding and takes over</span><span class="tag">caught</span></li>
+      <li><span>no match anywhere → the thread dies and prints the trace</span><span class="tag">uncaught</span></li>
+    </ol>
+    <p class="hf-annot">The stack trace is a recording of step 2 — the frames it passed
+    through. Swallow the exception and you destroy that recording; wrap it WITHOUT passing the
+    cause (<code>new RuntimeException("failed")</code>) and you destroy it just as thoroughly
+    while looking like you handled it.</p>
+  </div>
+
+  <p><b>A <code>return</code> inside <code>finally</code> is the one to know about.</b> It
+  does not just run after the exception — it <em>discards</em> it. The method returns
+  normally, the exception vanishes with no trace anywhere, and the caller has no idea. Same
+  for a <code>throw</code> in <code>finally</code>: it replaces the original. This is the
+  reason try-with-resources exists — it closes resources without a <code>finally</code> block
+  you can get wrong, and it attaches any close failure as a <em>suppressed</em> exception
+  instead of letting it overwrite the real one.</p>
+
+  <div class="hf-check" data-answer="1">
+    <p class="q">A method throws <code>IllegalStateException</code> inside <code>try</code>,
+    and its <code>finally</code> block contains <code>return false;</code>. What does the
+    caller observe?</p>
+    <button type="button">The exception propagates; the return value is discarded</button>
+    <button type="button"><code>false</code> is returned and the exception disappears entirely</button>
+    <button type="button">A compile error — you cannot return from <code>finally</code></button>
+    <p class="why" data-for="0">That is the intuition, and it is backwards. The
+    <code>finally</code> block completes ABRUPTLY with a return, and an abrupt completion in
+    <code>finally</code> replaces whatever the <code>try</code> was doing — including
+    throwing.</p>
+    <p class="why" data-for="1">Right, and it is genuinely dangerous: no log, no trace, no
+    evidence the failure ever happened. The caller sees a perfectly ordinary
+    <code>false</code>. Compilers and linters warn about this precisely because nothing else
+    will.</p>
+    <p class="why" data-for="2">It compiles. It is legal Java — which is exactly the problem.</p>
+  </div>
+
+  <div class="hf-kick">Where you've seen this before</div>
+  <p class="hf-say">Three places this shows up in your own stack.</p>
+
+  <div class="hf-terms">
+    <div class="hf-card hf-taped">
+      <h4>Spring's <code>@ControllerAdvice</code></h4>
+      <p>The architectural version of "handle it at the layer that can decide": one place that
+      turns exceptions into status codes, so no controller needs a try/catch and no exception
+      is swallowed on the way.</p>
+      <div class="hf-scatter"><span>@ExceptionHandler</span><span>→ ProblemDetail</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>An unhandled promise rejection</h4>
+      <p>Identical failure in your Angular code: an async call whose rejection nobody awaited.
+      Same shape, same silence, same afternoon lost.</p>
+      <div class="hf-scatter"><span>floating promise ⚠</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>Transactions and rollback</h4>
+      <p>Worth knowing: <code>@Transactional</code> rolls back on unchecked exceptions by
+      default and NOT on checked ones. Catching an exception inside the method can quietly
+      commit a half-finished write.</p>
+      <div class="hf-scatter"><span>rollbackFor = Exception.class</span></div>
+    </div>
+  </div>
+
+  <div class="hf-kick">Questions from the back row</div>
+  <div class="hf-ask">
+    <p class="q">Checked or unchecked — is there a rule?</p>
+    <p class="a">The intended one: checked for conditions a caller can reasonably recover from,
+    unchecked for programming errors. In practice most modern Java leans unchecked, because
+    checked exceptions do not compose with lambdas and streams at all, and because the usual
+    reaction to a checked exception is to wrap it in a <code>RuntimeException</code> anyway.
+    Whatever you choose, be consistent within a layer.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Is catching <code>Exception</code> always wrong?</p>
+    <p class="a">Not at a genuine boundary — a request handler, a scheduled job, a message
+    consumer — where the alternative is killing the thread and losing every subsequent
+    message. It is wrong in the middle of business logic, and it is wrong anywhere you catch
+    it without logging the cause. Never catch <code>Throwable</code>: that includes
+    <code>OutOfMemoryError</code>, which you cannot handle and should not hide.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Why does my stack trace stop at "... 42 more"?</p>
+    <p class="a">That is the JVM eliding frames shared with the enclosing trace, not losing
+    them. The frames are in the <code>Caused by:</code> section above. If the
+    <code>Caused by:</code> is missing entirely, that IS the bug — someone wrapped without
+    passing the cause.</p>
+  </div>
+
+  <div class="hf-kick">Grab a napkin</div>
+  <p class="hf-say">Predict it before you run it.</p>
+  <div class="hf-napkin">
+    A try-with-resources block throws while reading, and then <code>close()</code> also throws
+    on the way out. Which exception does the caller get, and where did the other one go?
+  </div>
+
   <!-- ── TRY IT LIVE ── -->
   <div class="tryit" data-lang="java"
        data-title="🧪 Try it: who catches it, and does finally REALLY always run?"
@@ -706,5 +864,6 @@ public class Main {
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

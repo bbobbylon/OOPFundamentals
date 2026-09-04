@@ -124,6 +124,186 @@
     <div class="intro-ciam"><span class="tag">CIAM / Angular + Spring:</span> <code>sortUsers&lt;K extends keyof UserDto&gt;(users, field: K, dir)</code> only accepts real <code>UserDto</code> fields, so typos are caught. <code>const CIAM_ROLES = [...] as const; type CiamRole = typeof CIAM_ROLES[number]</code> is a single source of truth that forces a <code>Record&lt;CiamRole, string&gt;</code> to cover every role. And <code>PagedResponse&lt;UserDto&gt;['content']</code> extracts <code>UserDto[]</code> without duplicating the type.</div>
   </div>
 
+
+<p class="hf-deck">or, why <code>Object.keys()</code> refuses to give you the keys you can see</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You wrote the shape once. Then you wrote it again, by hand, as strings.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Types and string literals that must agree, and nothing checks that they do</div>
+  <p>A sort key, a column list, a form field name, a config lookup — each one is a
+  <code>string</code> that has to match a property that already exists in a type you declared
+  two files ago. Rename the property and the type moves. The strings do not. The compiler was
+  never told they were related.</p>
+  <div class="hf-scatter">
+    <span>sortBy: string = 'lastName'</span>
+    <span>renamed to surname ⚠</span>
+    <span>tsc: 0 errors ⚠</span>
+    <span>sort silently does nothing ⚠</span>
+  </div>
+  <p class="hf-foot">Nothing throws. The list just comes back in whatever order the server sent,
+  and it looks like a backend problem.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Derive the strings from the type instead of retyping them</div>
+  <div class="hf-ladder">
+    <b><code>keyof User</code> — the union of that type's keys, kept in sync automatically</b>
+    <i>↓ rename a property and every place that key was used stops compiling</i>
+    <b><code>User['email']</code> — indexed access: the type OF that property</b>
+    <i>↓ so a getter can return the right type per key instead of a union of all of them</i>
+    <b>Together: <code>&lt;K extends keyof T&gt;(o: T, k: K) =&gt; T[K]</code></b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b><code>keyof</code> and <code>T[K]</code> are how you stop repeating your data's shape.</b>
+  Anywhere you were about to write a property name as a <code>string</code>, you can usually
+  write a type that is derived from the property instead — and then renaming becomes a compile
+  error rather than a silent no-op.
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p><code>Object.keys(user)</code> obviously returns the keys of <code>User</code>. Why is it
+    <code>string[]</code>?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">tsc</span>
+    <p>Because at runtime that object may have more properties than <code>User</code> declares.
+    Structural typing means anything with an <code>id</code> and a <code>name</code> is a
+    <code>User</code> — including one that also carries a <code>secret</code> field. I would be
+    lying if I promised the runtime keys were exactly <code>keyof User</code>.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Your API response</span>
+    <p>And I usually do have extra fields. The DTO on the server grew last sprint; nobody
+    updated your interface, and nothing broke, because extra properties are fine.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say"><code>keyof</code> turns a type into a union of its keys.</p>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">interface User<small>{ id: number; name: string; email: string }</small></div>
+    <div class="fan">keyof User ↓ produces a union of literal types, not strings</div>
+    <div class="obs">
+      <span>'id'</span>
+      <span>'name'</span>
+      <span>'email'</span>
+      <span class="new">and User['email'] → string</span>
+    </div>
+  </div>
+  <p class="hf-annot">Both halves matter. <code>keyof User</code> gives you the <i>names</i> as a
+  union of literal types — so <code>'emial'</code> is not assignable to it and a typo is a
+  compile error. <code>User['email']</code> gives you the <i>type of that property</i>, looked
+  up rather than restated, so changing <code>email</code> to a branded type updates every
+  signature that indexed it. Neither of these exists at runtime; both are pure lookups the
+  compiler performs while reading your code.</p>
+</div>
+
+<p><b>The payoff is one signature you will use forever:</b>
+<code>function get&lt;T, K extends keyof T&gt;(obj: T, key: K): T[K]</code>. Because
+<code>K</code> is captured per call site rather than widened to the whole union,
+<code>get(user, 'id')</code> returns <code>number</code> and <code>get(user, 'name')</code>
+returns <code>string</code> — not <code>number | string</code>. That distinction is the entire
+reason to write the generic instead of typing the parameter as <code>keyof T</code> directly,
+and it is the same technique behind every well-typed form library, table column definition and
+state selector you have used.</p>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Given <code>interface User { id: number; name: string }</code> and a
+  <code>const u: User</code>, why does
+  <code>const keys: (keyof User)[] = Object.keys(u)</code> fail to compile?</p>
+  <button type="button">It doesn't — <code>Object.keys</code> is typed generically and infers <code>('id' | 'name')[]</code></button>
+  <button type="button">Because <code>keyof</code> only works on type declarations, never on a value's runtime keys</button>
+  <button type="button">Because <code>u</code> may hold more properties than <code>User</code> declares, so the runtime keys are not provably <code>keyof User</code></button>
+  <p class="why" data-for="0"><code>Object.keys</code> is declared to return <code>string[]</code>
+  in the standard library, and deliberately so — the error is
+  <code>TS2322: Type 'string[]' is not assignable to type '(keyof User)[]'</code>. It is not an
+  oversight waiting to be fixed.</p>
+  <p class="why" data-for="1"><code>keyof</code> works on any type, including the type of a
+  value — <code>keyof typeof someObject</code> is an everyday idiom. The obstacle here is not
+  where <code>keyof</code> can be applied.</p>
+  <p class="why" data-for="2">Right, and it follows directly from structural typing: an object
+  with <code>id</code>, <code>name</code> <i>and</i> <code>secret</code> is a perfectly valid
+  <code>User</code>, so promising the runtime keys are exactly <code>keyof User</code> would be
+  a lie the compiler cannot back. When you know your object is exact, assert it deliberately —
+  <code>Object.keys(u) as (keyof User)[]</code> — and understand you have just promised
+  something TypeScript could not.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three consequences of the same two operators.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4><code>for…in</code> has the identical problem</h4>
+    <p>The loop variable is <code>string</code>, so <code>u[k]</code> is
+    <code>TS7053: Element implicitly has an 'any' type</code>. Same cause, different syntax —
+    and the reason <code>Object.entries</code> with a typed helper is usually nicer than
+    fighting it.</p>
+    <div class="hf-scatter"><span>same lie, refused twice</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An index signature widens <code>keyof</code></h4>
+    <p><code>keyof { [k: string]: number }</code> is not <code>string</code> — it is
+    <code>string | number</code>, because JavaScript coerces numeric keys to strings anyway.
+    A small surprise that explains a lot of confusing errors around <code>Record</code>.</p>
+    <div class="hf-scatter"><span>string | number, always</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A CIAM table's sort key</h4>
+    <p><code>sortBy: keyof UserDto</code> instead of <code>sortBy: string</code> means renaming
+    a DTO field breaks the table at compile time rather than sorting by a column that no longer
+    exists. One word, and a whole class of silent bug becomes loud.</p>
+    <div class="hf-scatter"><span>keyof UserDto, not string</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">What is <code>typeof</code> doing in <code>keyof typeof obj</code>?</p>
+  <p class="a">Bridging the two worlds. <code>keyof</code> needs a <i>type</i>, and
+  <code>obj</code> is a <i>value</i> — so the type-level <code>typeof</code> operator fetches
+  the type TypeScript inferred for it, and <code>keyof</code> takes the keys of that. It is
+  unrelated to JavaScript's runtime <code>typeof</code> despite the spelling; the giveaway is
+  that it appears in a type position. Combine it with <code>as const</code> and you get literal
+  key unions out of a plain config object, which is how most "enum without an enum" patterns
+  work.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">How do I get only the keys whose values are a certain type?</p>
+  <p class="a">A filtering mapped type — the standard recipe is
+  <code>type KeysOfType&lt;T, V&gt; = { [K in keyof T]: T[K] extends V ? K : never }[keyof T]</code>.
+  It maps every key to either itself or <code>never</code>, then indexes the whole thing by
+  <code>keyof T</code> to collapse it back to a union, and <code>never</code> vanishes from
+  unions automatically. That last trick — index the mapped type by its own keys to flatten it —
+  is worth remembering on its own; it shows up constantly once you start writing your own
+  utility types.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does any of this exist at runtime?</p>
+  <p class="a">None of it. <code>keyof</code>, <code>T[K]</code>, the generics, all of it is
+  erased — the emitted JavaScript for <code>get(obj, key)</code> is
+  <code>obj[key]</code> and nothing else. Which is exactly why the <code>Object.keys</code>
+  answer above is the honest one rather than a limitation: the type layer is reasoning about
+  code it will not be present to supervise.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you run it.</p>
+<div class="hf-napkin">
+  <code>function get&lt;T, K extends keyof T&gt;(o: T, k: K): T[K]</code> versus
+  <code>function get2&lt;T&gt;(o: T, k: keyof T): T[keyof T]</code>. Call both with
+  <code>(user, 'id')</code> where <code>id</code> is a <code>number</code>. What type does each
+  return — and which one forces you to narrow at every call site?
+</div>
+
   <!-- ── TRY IT LIVE ── -->
   <div class="tryit" data-lang="ts"
        data-title="🧪 Try it: keyof makes property names type-checked values"
@@ -615,6 +795,7 @@ one source of truth: the array drives the type.`},
 </script>
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>

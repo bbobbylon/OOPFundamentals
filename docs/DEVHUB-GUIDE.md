@@ -2,6 +2,11 @@
 # DevHub — a Guided Tour
 
 > **New here? Don't try to read all 512 pages.** Pick a *path* below and follow it.
+>
+> **Contributors:** 102 of them are now authored to the nine-point teaching bar in
+> `CLAUDE.md`; the rest carry the design but not yet the rhythm. Run
+> `node frontend/tmp_hfaudit.mjs --top=20` for the current worklist, and read the
+> caveat on that tool below before you act on its ranking.
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
@@ -399,7 +404,7 @@ visualizers).
   banned syntax → insert after the intro card (`intro-ciam` anchor regex) →
   validate every page has exactly one widget + one script tag.
 - [`frontend/devhub-transitions.js`](../frontend/devhub-transitions.js) —
-  sitewide **click feedback + page-fade transitions**, on all 527 pages via
+  sitewide **click feedback + page-fade transitions**, on all 528 pages via
   one `<script>` tag (no per-page markup). Press feedback is an accent
   **pulse ring** (2026-08-30): pointerdown toggles `.dh-press` on the nearest
   `button`/`.tab`/`[role="button"]`/`.page-link`/`.track-card`/`.tc-dot`/
@@ -431,6 +436,62 @@ visualizers).
   (id `dh-syntax-css`) so pages without `devhub.css` still get full color.
   API: `DevHubSyntax.highlight(text)`, `DevHubSyntax.apply(root)` for
   late-added nodes. Include on every new page that shows code.
+- **Validation gates** (`frontend/tmp_*.mjs`, run from `frontend/`) — `tmp_vcheck.mjs`
+  is the CI gate (`deploy.yml` blocks the Pages deploy on it): encoding, registry
+  both ways, required shared scripts, internal links, duplicate registrations,
+  inline-`<script>` parse, and CSS theme-selector shape. `tmp_smoke.mjs` opens
+  every page in Chromium at 320px and reports uncaught errors and horizontal
+  overflow (network-only failures listed separately — a sandbox with no CDN fails
+  every CDN load). `tmp_assetcheck.mjs <ref>` fails on any LOSS of a teaching asset
+  versus a git ref. `tmp_contrast.mjs` measures text contrast in a theme
+  (`--theme=cream|dark`, `--inject=candidate.css` to try a fix without editing the
+  site); it composites translucent backgrounds and exempts `aria-hidden` ornament
+  and gradient-clipped headings, because an earlier version did neither and
+  invented ~1860 phantom failures. `tmp_shot.mjs` screenshots any page at phone and
+  desktop; `tmp_hfapply.mjs` opts a page into the kit.
+- **Head First bar audit** (`frontend/tmp_hfaudit.mjs`) — scores every lesson
+  page against CLAUDE.md's nine-point teaching standard and ranks the thinnest
+  first, so the standing "scan for thin lessons" directive is a command rather
+  than a reading marathon. Weights follow CLAUDE.md's own emphasis: line-by-line
+  code explanation and active recall carry most. It reads markup, not meaning —
+  it finds pages that lack the ingredients (no memory hooks, no recall beat, one
+  explanation and out), which is exactly what "thin" means; it cannot tell a
+  brilliant analogy from a limp one.
+
+  One dimension is worth distrusting specifically. **`explain` divides by
+  `<pre>` count**, so a page built from many one-line snippets (a lambda
+  cheatsheet, a list of functional-interface shapes) is scored as though each
+  were an unexplained program. `streams-visualizer.html` scores 25/100 on it and
+  has exactly *one* substantial code block; `typescript-fundamentals` scores
+  worst on the whole site and has 7 bare blocks out of 32. To find the real
+  worklist, count blocks of **6+ lines** with no CodeWalk or annotation nearby
+  and under 25% comment density — by that measure the site has ~353 genuinely
+  bare blocks across ~72 authored pages, and the ranking is completely different
+  from the score's.
+- **Cream contrast repair** (in
+  [`frontend/devhub-hf-theme.js`](../frontend/devhub-hf-theme.js)) — the part CSS
+  structurally cannot reach. 513 pages carry their own `<style>` block that
+  hardcodes a dark ground and lets text inherit `var(--text)`; under cream that
+  ink turns dark and the box goes black-on-black. CSS has no way to ask "is this
+  element's computed background dark?", and the class names are invented per page,
+  so there is nothing shared to name — but the browser knows the answer exactly.
+  Runs ONLY under cream (0 elements touched in dark), composites the background
+  stack, and moves the text's LIGHTNESS while keeping its HUE, so green still
+  reads as "the fix" and red as "the bug". First pass is synchronous so the page
+  never paints unreadable text and then corrects itself; later passes are
+  idle-scheduled for subtrees the scenario/CodeWalk engines add after load. Every
+  change records what it replaced, so switching back to dark restores the page
+  exactly. Costs ~7ms per page.
+- **Cream repair layer** (end of [`frontend/devhub-hf.css`](../frontend/devhub-hf.css))
+  — the cream theme's token block is enough for anything token-driven, but
+  `devhub.css` also hardcodes several hundred literal colours picked against the
+  navy dark theme and repairs them only under `[data-theme="light"]`. This layer
+  repairs them for cream, in both directions: dark-theme near-whites and neons
+  landing on a pale card, and cream's dark ink inherited into the code panels that
+  stay dark in both themes. Every selector is written
+  `:is([data-theme="cream"],[data-theme="light"])[data-hf] …` — the comma form
+  splits into a bare root selector plus a light-only rule and silently matches
+  nothing; vcheck fails the build if it reappears.
 - **Head First kit** (in [`frontend/devhub.css`](../frontend/devhub.css),
   final section) — the book's visual vocabulary as drop-in classes, all
   tinted by the track's `--accent`: `.hf-big` (gradient big-type mnemonic),
@@ -451,32 +512,10 @@ visualizers).
   [`head-first-decorator-visualizer.html`](../frontend/head-first-decorator-visualizer.html)
   — clone its intro structure when sweeping pages. Full rollout tracked in
   ROADMAP's ACTIVE BACKLOG (items 1 & 8).
-- **Head First design language** ([`frontend/devhub-hf.css`](../frontend/devhub-hf.css)) —
-  the full book-style reskin, on ALL 513 registered pages via `<html data-hf>` + a stylesheet
-  link after `devhub.css`. Two colorways from one token block: **cream (default since
-  2026-09-01** — Bobby's reference mockup) and dark espresso, with code panels staying dark in
-  both. Component vocabulary: `.hf-deck`, `.hf-kick`/`.hf-say` (the page's spine), `.hf-card`
-  good/bad, `.hf-talk`/`.hf-bub`, six mechanism diagrams (`.hf-nest`/`.hf-slot`/`.hf-cast`/
-  `.hf-one`/`.hf-steps`/`.hf-cycle`), `.hf-napkin`, `.hf-ask`, `.hf-terms`, and the 2026-09-01
-  mockup wave: `.hf-meta`/`.hf-badge`, `.hf-question`, `.hf-numcards`, `.hf-refhead`/
-  `.hf-refgrid`, `.hf-chip-vs`. Companions:
-  [`devhub-chapters.js`](../frontend/devhub-chapters.js) (chapter rail from `tracks-data.js`),
-  [`devhub-hf-theme.js`](../frontend/devhub-hf-theme.js) (the dark⇄cream switch — SAME
-  `devhub-theme` key as app.html, one theme system),
-  [`devhub-hf-check.js`](../frontend/devhub-hf-check.js) (declarative mid-lesson knowledge
-  checks, `data-answer` + `.why[data-for]`), and
-  [`devhub-lesson.js`](../frontend/devhub-lesson.js) (`.hf-walk` numbered reveal-output
-  terminal walkthrough + `.hf-anatomy` clickable command tokens). **Authored exemplars to
-  clone:** `head-first-decorator-visualizer.html` (pattern chapters) and
-  [`shell-cli-basics-visualizer.html`](../frontend/shell-cli-basics-visualizer.html)
-  (beginner/tooling lessons, rebuilt 2026-09-01 to Bobby's cream mockup).
 
 ---
 
-*This guide is updated as new tracks and deep-dives land. **Newest pass — cream default + the authored sweep begins (2026-09-01):**
-Bobby's round-3 review supplied a cream reference mockup and green-lit the ~500-page authored sweep. Landed: cream is now the site's default colorway (hub included — app.html's light theme was restyled from cool violet to warm cream, and `devhub-hf-theme.js` defaults to cream when nothing is stored); the Try It editor finally renders IDE-colored code (transparent textarea over a live-highlighted `<pre>` in `devhub-tryit.js`); the kit gained the mockup's components (`.hf-meta`/`.hf-question`/`.hf-numcards`/`.hf-refgrid`/`.hf-chip-vs` in `devhub-hf.css`, `.hf-walk`/`.hf-anatomy` in the new `devhub-lesson.js`); `shell-cli-basics-visualizer.html` was rebuilt as the sweep's second authored exemplar; and the Decorator page's code samples now carry a comment on essentially every line. Decision of record: NO React/Angular migration — the declarative shared-engine layer already centralizes styling/behavior without breaking the one-file-per-lesson property. New backlog: cloud-CLI lessons (aws/az/gcloud) for the Shell track; the IDE-mastery track re-confirmed.
-
-**Previous pass — design-system v2 + press pulse (2026-08-30):**
+*This guide is updated as new tracks and deep-dives land. **Newest pass — design-system v2 + press pulse (2026-08-30):**
 Bobby's second review round came with a reference mockup of the Decorator page; the shared design system now matches it — editorial titles, restrained accent, editor-window code blocks, `.hf-kicker`/`.hf-receipt`/`.hf-chain` components, light-theme fixes — and the fill-ripple is retired in favor of an accent press-pulse ring plus hover micro-lift (see the `devhub-transitions.js` entry). `head-first-decorator-visualizer.html` was rebuilt as the reference page. The per-page sweep (kill inline styles that fight the system, break up text walls, pull long expressions out of prose) is ROADMAP backlog #8; a new IDE-mastery track (VS Code / IntelliJ / Spring tooling, with official-doc sources) is backlog #9.
 
 **Previous pass — feedback fixes: syntax coloring everywhere + the Head First kit (2026-08-29, evening):**

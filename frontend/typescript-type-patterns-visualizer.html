@@ -121,6 +121,175 @@
       <div class="intro-ciam"><span class="tag">CIAM / Angular / Spring:</span> Brand <code>AccessToken</code> vs <code>RefreshToken</code> vs <code>IdToken</code> so the wrong one can't be passed; model the OAuth PKCE flow with phantom states (<code>PkceState&lt;'initiated'&gt;</code> → <code>PkceState&lt;'authorized'&gt;</code>); and use <code>assertNever</code> in NgRx reducers to catch unhandled actions.</div>
     </div>
 
+  <!-- ── HEAD FIRST TEACHING BLOCK ── -->
+  <p class="hf-deck">or, why <code>getUser(orderId)</code> compiles, returns 200 OK, and hands a stranger's profile to the wrong person</p>
+
+  <div class="hf-kick">The problem</div>
+  <p class="hf-say">Two ids. Both <code>string</code>. The compiler cannot tell them apart — and neither can you at 3am.</p>
+
+  <div class="hf-card bad">
+    <div class="hf-cardtitle">Every id in your system is the same type</div>
+    <p>You typed <code>type UserId = string</code> and <code>type OrderId = string</code> and felt
+    organised. You weren't. TypeScript is <b>structural</b>: it compares shapes, and both of those
+    shapes are "a string". So <code>getUser(orderId)</code> type-checks, runs, hits the database,
+    and returns whichever human happens to own the row whose primary key equals order
+    <code>88213</code>. Not a crash. Not a 500. A <b>200 with someone else's email and phone number
+    in the body</b> — a data-leak class of bug that the compiler cheerfully waved through.</p>
+    <div class="hf-scatter">
+      <span>getUser(orderId) ✓ compiles</span><span>string = string = string</span>
+      <span>200 OK, wrong human ⚠</span><span>no stack trace to grep ⚠</span>
+    </div>
+    <p class="hf-foot">And your test passed, because the fixture used <code>"id-1"</code> for both.</p>
+  </div>
+
+  <div class="hf-card good">
+    <div class="hf-cardtitle">Give the string a name the compiler can see</div>
+    <div class="hf-ladder">
+      <b>type UserId = string &amp; { readonly __brand: 'UserId' }</b>
+      <i>↓ because <code>__brand</code> lives in the type only — it is never emitted, never serialized</i>
+      <b>function parseUserId(raw: string): UserId — validates, then casts once</b>
+      <i>↓ because that is the only <code>as UserId</code> in the entire repository</i>
+      <b>getUser(orderId) — red squiggle, in your editor, before the PR exists</b>
+    </div>
+  </div>
+
+  <div class="principle" style="text-align:left">
+    <b>A brand is a name the compiler can see and the runtime cannot.</b> After branding,
+    <code>typeof uid</code> is still <code>"string"</code>, <code>JSON.stringify(uid)</code> is still
+    <code>"usr_42"</code>, and the bundle is byte-for-byte identical. You pay nothing at runtime and
+    buy nominal typing at compile time.
+  </div>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">plain string</span>
+      <p>I'm the most popular type in your codebase. I'm also why <code>revoke(userId)</code> and
+      <code>revoke(sessionId)</code> look identical from where the compiler is standing.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">UserId</span>
+      <p>Same bytes as you at runtime. Difference is there's exactly one door into me —
+      <code>parseUserId()</code> — and it checks the prefix before it lets anything through.</p>
+    </div>
+    <div class="hf-bub">
+      <span class="who">tsc</span>
+      <p>Which is why I can kill <code>getUser(orderId)</code> in 40 milliseconds, instead of you
+      meeting it in a support ticket six weeks from now.</p>
+    </div>
+  </div>
+
+  <div class="hf-kick">The mechanism</div>
+  <p class="hf-say">One cast, at the edge. Zero casts everywhere else.</p>
+
+  <div class="hf-card">
+    <ol class="hf-steps">
+      <li class="open"><span>a raw <code>string</code> arrives — a route param, a JWT claim, a form field</span><span class="tag">untrusted</span></li>
+      <li><span><code>parseUserId(raw)</code> checks the shape: prefix, length, UUID version — whatever "real" means here</span><span class="tag">validate</span></li>
+      <li><span>one <code>return raw as UserId</code> — the single cast the whole codebase is allowed</span><span class="tag">the one cast</span></li>
+      <li><span>the branded value flows through resolver → service → repo → guard, and nobody casts again</span><span class="tag">flow</span></li>
+      <li><span><code>getUser(orderId)</code> stops compiling: <code>OrderId</code> has no <code>__brand: 'UserId'</code></span><span class="tag">the payoff</span></li>
+    </ol>
+    <p class="hf-annot">Step 3 is the pattern everyone remembers and step 2 is the reason it is worth
+    anything. Cast without validating and the brand only proves "somebody called the constructor" —
+    not "this is a real user id". A brand is exactly as trustworthy as the function that mints it.</p>
+  </div>
+
+  <p>Two cousins of this move live further down the page, and they are the same idea wearing
+  different clothes. <b>Builder / fluent typing</b> moves the state out of the value and into the
+  type parameter: a <code>QueryBuilder&lt;{ table: true; columns: false }&gt;</code> cannot call
+  <code>.build()</code> — not "throws at runtime", <em>cannot be called</em> — because
+  <code>build()</code> declares <code>this: QueryBuilder&lt;{ table: true; columns: true }&gt;</code>
+  and yours is not that type. <b>Exhaustive <code>never</code></b> turns the screw the other way:
+  <code>assertNever(shape)</code> only compiles when the union has been narrowed to nothing, so
+  adding a fourth <code>kind</code> to a discriminated union lights up every switch that forgot it —
+  all fourteen of them, in the same keystroke, instead of one of them in production next quarter.
+  Branding, type-state, and <code>never</code> are one move played three ways:
+  <b>make the illegal state fail to typecheck instead of failing at 2am.</b></p>
+
+  <div class="hf-check" data-answer="1">
+    <p class="q">Your Angular resolver pulls <code>route.paramMap.get('id')</code> — a plain
+    <code>string</code> straight off the URL bar — and needs to hand it to
+    <code>loadUser(id: UserId)</code>. What is the honest fix?</p>
+    <button type="button">Write <code>loadUser(id as UserId)</code> — it's one cast, and that route only ever carries user ids</button>
+    <button type="button">Run it through <code>parseUserId(id)</code>, which validates the shape and does the one cast inside</button>
+    <button type="button">Change <code>loadUser</code> to accept <code>string</code>, since the value is a string anyway</button>
+    <p class="why" data-for="0">This is the cast that eats the pattern. <code>as UserId</code> at the
+    call site says "trust me" about a value that came from the address bar — the least trustworthy
+    input in the building. Do it in ten resolvers and <code>UserId</code> now means
+    "somebody typed <code>as</code>", which is worth nothing.</p>
+    <p class="why" data-for="1">Right. The cast lives in the one function that <em>earned</em> it by
+    checking first, so the type keeps meaning "validated" — and
+    <code>grep "as UserId"</code> still returns exactly one line, which is how you audit this pattern
+    in five seconds.</p>
+    <p class="why" data-for="2">That deletes the protection you came for. Widen the parameter to
+    <code>string</code> and <code>loadUser(orderId)</code> compiles again — you have argued yourself
+    all the way back to the bug at the top of this page.</p>
+  </div>
+
+  <div class="hf-kick">Where you've seen this before</div>
+  <p class="hf-say">Three places this exact bug is already waiting for you at work.</p>
+
+  <div class="hf-terms">
+    <div class="hf-card hf-taped">
+      <h4>Three tokens, all <code>string</code></h4>
+      <p>Access, refresh, and id token are structurally identical, so nothing stops a refresh token
+      being put in an <code>Authorization</code> header — or written to a log line. Brand them and
+      the wrong one won't fit.</p>
+      <div class="hf-scatter"><span>Bearer &lt;refresh&gt; ⚠</span><span>logger.debug(token) ⚠</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>Spring already does this the expensive way</h4>
+      <p>Java's answer is a value object — <code>record UserId(UUID value)</code> — same guarantee,
+      but a real allocation per id and <code>.value()</code> everywhere. The TypeScript brand buys the
+      identical protection for zero bytes.</p>
+      <div class="hf-scatter"><span>record UserId(UUID value)</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>Angular route params and NgRx</h4>
+      <p>Everything off <code>paramMap</code> is <code>string | null</code>. Brand at the resolver and
+      a <code>tenantId</code> can't quietly become a <code>userId</code> three effects deep in the
+      store.</p>
+      <div class="hf-scatter"><span>paramMap.get('id')</span><span>→ string | null</span></div>
+    </div>
+  </div>
+
+  <div class="hf-kick">Questions from the back row</div>
+  <div class="hf-ask">
+    <p class="q">Isn't <code>__brand</code> a lie? The property doesn't exist.</p>
+    <p class="a">It's a lie the compiler agrees to. <code>__brand</code> is never emitted, never
+    serialized, never present at runtime — <code>Object.keys()</code> on a branded string returns
+    exactly what it returns for any string. That's the whole trick: nominal typing with no runtime
+    representation. Write it as <code>declare const brand: unique symbol</code> and nobody can even
+    fake one by hand.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Can't anyone just write <code>x as UserId</code> and walk straight past it?</p>
+    <p class="a">Yes — and that's TypeScript being TypeScript, not a hole in the pattern. Branding is
+    not a security boundary; it's a way to make the wrong call <em>loud</em>. The defence is
+    mechanical: one file owns the constructors, and an <code>as UserId</code> anywhere else is a lint
+    rule or a review comment. Compare with the unbranded version, where there is nothing to grep for
+    at all.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Do I have to brand every id in the codebase?</p>
+    <p class="a">No. Brand the pairs that actually get confused — two strings that never meet in the
+    same signature can't be swapped. Start where a shape and a call site are shared:
+    userId / orderId / tenantId, accessToken / refreshToken, cents / dollars, milliseconds / seconds.
+    Then stop.</p>
+  </div>
+
+  <div class="hf-kick">Grab a napkin</div>
+  <p class="hf-say">Predict it before you run it.</p>
+  <div class="hf-napkin">
+    You brand <code>UserId</code>, then <code>JSON.stringify(parseUserId('usr_42'))</code> and POST
+    the body to your Spring backend. <b>(1)</b> What exactly goes on the wire — does
+    <code>__brand</code> show up in the JSON, and what does that tell you about where brands live?
+    <b>(2)</b> The response comes back through <code>res.json()</code> as <code>any</code> and you
+    assign it to a <code>UserId</code>. How many compile errors did that round trip cost you — and
+    what has your brand proven about the value you just stored?
+  </div>
+
+
   <!-- ── TRY IT LIVE ── -->
   <div class="tryit" data-lang="ts"
        data-title="🧪 Try it: branded types — stop mixing up your IDs"
@@ -1394,6 +1563,7 @@ DevHubCodeWalk.mount('#cw-tstp',{
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
