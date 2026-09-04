@@ -741,7 +741,15 @@ modern-java (records + sealed + pattern matching only pay off together), excepti
 control-flow, communication, content-projection, lazy-loading, standalone-migration,
 decorators. Every one verified afterwards by CLICKING both a wrong and the right answer.
 
-Running totals: **49 authored**, thin pages (under 40) **69 → 45**, site mean 49.8 → 52.2.
+Running totals: **61 authored**, thin pages (under 40) **69 → 33**, site mean 49.8 → 53.3.
+
+**A staging slip worth recording, because the fix is a habit not a tool.** Two of those pages
+reached a commit without me verifying them: agents write their file BEFORE they report, and a
+bare `git add -A` while a batch is running sweeps up whatever happens to be on disk. Both
+turned out fine when checked afterwards (77.9 and clean click-tests), so nothing shipped
+broken — but "turned out fine" is luck, and two commit messages carried counts that were wrong
+by one because I was counting what I had verified rather than what I was staging.
+**While a batch is running, read `git status` and account for every file before staging.**
 The two weakest dimensions moved from 5/100 to 9/100 — which is the honest shape of the
 remaining work: 416 pages still have the bones and not the rhythm.
 
