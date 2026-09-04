@@ -97,6 +97,178 @@
     <div class="intro-ciam"><span class="tag">CIAM / Angular + Spring:</span> A PATCH DTO uses optional fields — <code>interface UpdateUserDto { firstName?: string; … }</code> (absent = don't change). An index signature carries JWT custom claims while keeping known fields typed — <code>{ id: number; name: string; [claim: string]: string | number | undefined }</code> — mirroring Spring's <code>@JsonInclude(NON_NULL)</code>. And <code>type FormErrors = { [field in keyof UserFormData]?: string }</code> keys errors to real form fields only.</div>
   </div>
 
+
+<p class="hf-deck">or, the typo TypeScript catches only if you don't move it first</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The same object. The same target type. One errors, one doesn't.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Two lines that behave differently for no reason you can see</div>
+  <p>Write <code>const a: Opts = { url:'/x', timeuot: 5 }</code> and TypeScript catches the typo
+  and even suggests the fix. Assign the identical object to a variable first and pass
+  <i>that</i>, and it compiles in silence. Nothing about the types changed. Only where you put
+  the braces.</p>
+  <div class="hf-scatter">
+    <span>direct literal → TS2561 ✓</span>
+    <span>via a variable → no error ⚠</span>
+    <span>via a spread → no error ⚠</span>
+    <span>timeout stays undefined ⚠</span>
+  </div>
+  <p class="hf-foot">Your request goes out with no timeout, the default is "wait forever", and
+  you find out during an incident rather than during a build.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Know what the check actually is and where it stops applying</div>
+  <div class="hf-ladder">
+    <b>Assignability in TypeScript is STRUCTURAL — extra properties are always fine</b>
+    <i>↓ that is the real rule, and it never changes</i>
+    <b>Excess property checking is a separate courtesy for <i>fresh</i> literals</b>
+    <i>↓ it exists to catch typos at the moment you type them, and nowhere else</i>
+    <b>A literal is fresh for exactly one assignment — then the courtesy is gone</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>An object literal is "fresh" for exactly one assignment.</b> Excess property checking is
+  not a rule about types — it is a warning about braces. Move those braces into a variable and
+  you have opted out of it, permanently, for that object.
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>If extra properties are an error here, why are they fine one line later?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">tsc</span>
+    <p>They were never an error. Structurally, an object with more properties satisfies the type
+    perfectly. I made an exception for the literal because you had clearly just written it, and
+    a property that matches nothing is almost always a typo.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The variable</span>
+    <p>And once it goes through me, that context is gone. I hold an object of some wider type,
+    and the wider type is a legal <code>Opts</code>. There is nothing left to warn about.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow the same object down both paths.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>You write <code>{ url:'/x', timeuot: 5 }</code> — the compiler marks this literal <b>fresh</b></span><span class="tag">freshness is a real internal flag</span></li>
+    <li class="open"><span>Assigned <i>directly</i> to <code>Opts</code>: the fresh check runs, finds a property matching nothing, and reports <code>TS2561 — 'timeuot' does not exist… Did you mean 'timeout'?</code></span><span class="tag">the courtesy, doing its job</span></li>
+    <li><span>Alternative path: assign it to <code>const tmp</code> first. Freshness is <b>lost</b> on that assignment</span><span class="tag">one hop is all it takes</span></li>
+    <li class="open"><span><code>const b: Opts = tmp</code> now runs only the ordinary structural check — has <code>url</code>, extra properties allowed — and passes</span><span class="tag">no error, same object</span></li>
+    <li><span>A spread does the same: <code>{ ...{ url:'/x', timeuot: 5 } }</code> produces a value that is no longer a fresh literal of that shape</span><span class="tag">spreads bypass it too</span></li>
+  </ol>
+  <p class="hf-annot">The part worth carrying: this is not a hole to be plugged, it is the
+  structural type system behaving normally with one deliberate exception bolted on for
+  ergonomics. Which also tells you where the check genuinely cannot help — anything arriving
+  from <code>JSON.parse</code>, <code>res.json()</code>, or a config file was never a literal in
+  your source, so no amount of interface strictness will notice a misspelled key in it. That is
+  a job for a runtime schema.</p>
+</div>
+
+<p><b>Optional is also not quite what its name suggests, and there is a flag that fixes it.</b>
+By default <code>timeout?: number</code> means "may be absent <i>or</i> explicitly
+<code>undefined</code>", so <code>{ url:'/x', timeout: undefined }</code> is accepted — even
+though "absent" and "present but undefined" are genuinely different things to a
+<code>PATCH</code> endpoint, an <code>Object.keys</code> loop, or anything doing
+<code>'timeout' in opts</code>. Turn on <code>exactOptionalPropertyTypes</code> and that
+assignment becomes <code>TS2375</code>, forcing you to write <code>timeout?: number | undefined</code>
+when you really do mean both. It is one of the few strictness flags that changes what your code
+<i>means</i> rather than just how loudly it complains.</p>
+
+<div class="hf-check" data-answer="0">
+  <p class="q"><code>interface Opts { url: string; timeout?: number }</code>. Which of these
+  three compiles cleanly under <code>--strict</code>?</p>
+  <button type="button"><code>const t = { url:'/x', timeuot: 5 }; const o: Opts = t;</code> — assigned through a variable first</button>
+  <button type="button"><code>const o: Opts = { url:'/x', timeuot: 5 };</code> — the object literal written directly</button>
+  <button type="button">Neither — a property that does not exist on <code>Opts</code> is an error in both positions</button>
+  <p class="why" data-for="0">Right. The literal was fresh only for its assignment to
+  <code>t</code>, where the target type was inferred and so nothing was "excess". By the time it
+  reaches <code>o</code> it is an ordinary value of a wider type, and a wider type is a
+  structurally valid <code>Opts</code>. The typo survives, and so does the missing timeout.</p>
+  <p class="why" data-for="1">This one is the error — <code>TS2561</code>, complete with "Did
+  you mean to write 'timeout'?". This is excess property checking working exactly as intended,
+  which is why the contrast with the other line is so jarring.</p>
+  <p class="why" data-for="2">Only one of them errors, and that is the whole lesson. Extra
+  properties are structurally fine in TypeScript; the direct-literal check is a deliberate
+  exception, not the rule it looks like.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three places this shows its teeth.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>An options object built up conditionally</h4>
+    <p>The most common way to lose the check without noticing: build <code>const opts = {…}</code>,
+    add fields with <code>if</code>s, then pass it. Every typo added after the first line is
+    invisible. Annotate the variable itself — <code>const opts: Opts = {…}</code> — and the
+    check moves to where you are actually writing.</p>
+    <div class="hf-scatter"><span>annotate the variable, not the call</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Java's <code>equals</code> contract</h4>
+    <p>The same species of rule: something the language strongly encourages and does not
+    enforce. Knowing which guarantees are checked and which are conventions is most of what
+    separates reading a language from knowing it.</p>
+    <div class="hf-scatter"><span>encouraged ≠ enforced</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A CIAM config or JWT claims object</h4>
+    <p>Both arrive as parsed JSON, so neither was ever a literal in your source and the check
+    never had a chance. A misspelled <code>issuer</code> key types as <code>undefined</code>
+    and fails validation for a reason the logs will not explain. Validate at the boundary.</p>
+    <div class="hf-scatter"><span>parsed JSON is never fresh</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Then how do I actually forbid extra properties?</p>
+  <p class="a">TypeScript has no "sealed object" type, and that is a deliberate design choice —
+  structural typing is the point. The practical answers are: annotate the variable at its
+  declaration so the literal is checked where you write it; use a generic helper with a
+  <code>Record&lt;Exclude&lt;keyof O, keyof Opts&gt;, never&gt;</code> constraint if you truly
+  need it enforced at a boundary; or, at a real trust boundary, validate at runtime with a
+  schema that can be told to reject unknown keys. The first one covers ninety percent of cases
+  and costs one annotation.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">What is the difference between an <code>interface</code> and a <code>type</code> here?</p>
+  <p class="a">For describing an object shape, almost nothing — both are structural, both
+  support optional and readonly members, both extend. The differences that matter in practice:
+  an <code>interface</code> can be reopened and merged by a later declaration (essential for
+  augmenting library types, and a hazard everywhere else), a <code>type</code> cannot; and a
+  <code>type</code> can express things an interface cannot — unions, mapped types, conditional
+  types, tuples. Reasonable default: <code>interface</code> for object shapes you own,
+  <code>type</code> for everything else.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why does an index signature force my known properties to widen?</p>
+  <p class="a">Because the index signature is a promise about <i>every</i> key, and a declared
+  property is one of those keys — so <code>{ id: number; [k: string]: string }</code> is
+  rejected: <code>id</code> is a <code>string</code> key whose value is not a
+  <code>string</code>. The fix is to widen the index signature to a union that covers your
+  known types, which is exactly what the JWT claims example in the intro does. It is the
+  compiler holding you to a promise you made, not being awkward.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you run it.</p>
+<div class="hf-napkin">
+  You have <code>const cfg = { url:'/api', retires: 3 }</code> (note the typo) and a function
+  <code>call(o: Opts)</code>. Does <code>call(cfg)</code> compile? Does
+  <code>call({ url:'/api', retires: 3 })</code>? And which single character, added to line one,
+  makes both behave the same?
+</div>
+
   <!-- ── TRY IT LIVE ── -->
   <div class="tryit" data-lang="ts"
        data-title="🧪 Try it: optional, readonly — and the truth about erasure"
@@ -568,6 +740,7 @@ render();
 </script>
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
