@@ -992,20 +992,61 @@ into a page scrollbar. Fixed at the cause with `minmax(min(280px,100%),1fr)` —
 landing pages that link no `devhub.css`. **The smoke gate's default width is now 320**, so the
 class cannot come back: 390 is a comfortable phone, 320 is where the arithmetic actually fails.
 
-### 13. Cloud-CLI lessons — AWS + Azure LANDED, gcloud outstanding (2026-09-04)
+### 13. Cloud-CLI lessons — ✅ ALL THREE LANDED (2026-09-04)
 
-Two of the three shipped and are registered under **Shell & Scripting → Cloud CLIs**:
-[`shell-aws-cli-visualizer.html`](../frontend/shell-aws-cli-visualizer.html) and
-[`shell-azure-cli-visualizer.html`](../frontend/shell-azure-cli-visualizer.html) — both
-`data-hf`, both authored, the Azure one deliberately routed through `az ad` so it lands on
-Bobby's actual CIAM surface.
+All three ship under **Shell & Scripting → Cloud CLIs**:
+[`shell-aws-cli-visualizer.html`](../frontend/shell-aws-cli-visualizer.html),
+[`shell-azure-cli-visualizer.html`](../frontend/shell-azure-cli-visualizer.html), and
+[`shell-gcloud-cli-visualizer.html`](../frontend/shell-gcloud-cli-visualizer.html) — all
+`data-hf`, all authored, each routed through the identity surface of its cloud (`az ad`,
+IAM, `gcloud iam`) so they land on Bobby's actual CIAM day job rather than generic compute.
 
-**`shell-gcloud-cli-visualizer.html` is not written.** Both pages' "Where to go next" lists
-had linked it before it existed, which is what turned `tmp_vcheck.mjs` red; those two entries
-are now plain text marked *(not written yet)*. Writing the page is the whole fix — re-link
-both entries when it lands. Clone the Azure page: same three-part grammar
-(`gcloud <group> <verb>`), with **named configurations** (`gcloud config configurations`) as
-the thing that distinguishes it from `az` profiles and AWS named profiles.
+The gcloud page closes the item. Both sibling pages' "Where to go next" entries — plain text
+marked *(not written yet)* since the page was linked before it existed, which is what turned
+`tmp_vcheck.mjs` red — are now real links again.
+
+**How it was written, since the same shape suits any "third of a set" page.** Cloned the Azure
+page's structure verbatim (same vertical chip engine, prefix `gc`) and then spent the effort on
+the **delta**, not the overlap: the page opens by telling the reader that group → verb is
+already familiar and that only two things are genuinely new. Those two carry the lesson:
+
+1. **Named configurations** (`gcloud config configurations activate`) — the differentiator this
+   item called for. Framed against the other two: AWS's `--profile` swaps credentials only and
+   `az account set` swaps the subscription only, so both let you end up *half*-switched — right
+   person, wrong project. `activate` swaps account + project + region atomically.
+2. **Two logins** — `gcloud auth login` (for the human) vs `gcloud auth application-default
+   login` (for client libraries). This is the actual first-day failure on GCP, and it is
+   scenario ① plus a knowledge check, because "my terminal works but my app says *Could not
+   automatically determine credentials*" is the moment the distinction has to land.
+
+Three smaller `az`→`gcloud` traps are called out where they bite: the read-one verb is
+`describe`, not `show`; names are positional, not `--name`; and `--format`/`--filter` are
+gcloud's own languages, **not** the JMESPath `--query` that AWS and Azure share. That last one
+is the page's memory hook — *two clouds query, the third one formats and filters* — and it is
+the kind of contrast only the third page in a set can make.
+
+CIAM payoff, which no other page in the track can show as cleanly: `gcloud auth
+print-access-token` vs `print-identity-token` makes **authorization vs authentication** two
+runnable commands rather than a diagram, and scenario ④ ends on workload identity federation
+as the reason `gcloud iam service-accounts keys create` is the command you should never run.
+
+**Verification, honestly.** `tmp_vcheck` green (531 pages, 515 registered), `tmp_assetcheck`
+clean, `tmp_hfaudit` scores it **65** — level with its Azure sibling (65) and above AWS (61.5).
+The browser gates did **not** run: Playwright is still not installed on the Windows box. In
+their place a scratchpad script checked the things parsing cannot see — every scenario step
+references a node that exists, every node drawn is actually visited, every `who-*` badge has a
+CSS rule, both `hf-check` blocks have an in-range `data-answer` with a `.why` per option, and
+every non-blank CodeWalk line is covered by a step. That is not a substitute for rendering the
+page; it is a substitute for *this class of bug*. **Still worth doing when Playwright exists:**
+`tmp_smoke` and `tmp_contrast` on this page, in both themes.
+
+*(A third bug found in the earlier AWS/Azure pass: `entra-id-overview-visualizer.html` was
+linked from the Azure page but the file is `entra-overview-visualizer.html` — a typo, fixed
+then.)*
+
+**Also fixed here:** `DEVHUB-GUIDE.md`'s Shell track row never mentioned the Cloud CLIs at all —
+the AWS/Azure pass updated the registry but not the navigator, so the section was invisible to
+anyone reading the guide rather than the hub.
 
 *(A third bug the same pass: `entra-id-overview-visualizer.html` was linked from the Azure
 page but the file is `entra-overview-visualizer.html` — a typo, now fixed.)*

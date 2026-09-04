@@ -892,6 +892,7 @@ window.DEVHUB_TRACKS = [
       { label: 'Cloud CLIs', pages: [
         { title: 'The AWS CLI',                   file: 'shell-aws-cli-visualizer.html',                    level: 'intermediate' },
         { title: 'The Azure CLI (az)',            file: 'shell-azure-cli-visualizer.html',                  level: 'intermediate' },
+        { title: 'The gcloud CLI',                file: 'shell-gcloud-cli-visualizer.html',                 level: 'intermediate' },
       ]},
     ]
   },

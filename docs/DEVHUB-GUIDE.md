@@ -1,7 +1,7 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 514 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 515 pages.** Pick a *path* below and follow it.
 >
 > **Contributors:** 102 of them are now authored to the nine-point teaching bar in
 > `CLAUDE.md`; the rest carry the design but not yet the rhythm. Run
@@ -69,7 +69,7 @@ Or jump straight to any file linked below.
 | ♾️ **DevOps & CI/CD** | **CI/CD pipelines** (GitHub Actions: jobs/steps/artifacts/gated environments) and **Infrastructure as Code** (Terraform plan/apply/state/drift) | [CI/CD Pipelines](../frontend/devops-cicd-pipeline-visualizer.html) |
 | ⎈ **Kubernetes** | pods, deployments, services, config & secrets, Helm, Spring on K8s | [Kubernetes Fundamentals](../frontend/kubernetes-fundamentals-visualizer.html) |
 | 🗄️ **SQL & Databases** | SQL, indexes & query plans, transactions/ACID, CTEs, normalization, Postgres | [SQL Fundamentals](../frontend/sql-fundamentals-visualizer.html) |
-| ⌨️ **Shell & Scripting** | CLI basics, **Bash**, **PowerShell** objects, **CMD/Batch** — three shells side by side | [CLI Basics](../frontend/shell-cli-basics-visualizer.html) |
+| ⌨️ **Shell & Scripting** | CLI basics, **Bash**, **PowerShell** objects, **CMD/Batch** — three shells side by side — plus the three **cloud CLIs** (`aws`, `az`, `gcloud`) taught as one shared grammar | [CLI Basics](../frontend/shell-cli-basics-visualizer.html) |
 | 🌐 **Web Fundamentals** | the true zero-starting-point before Angular/React/TypeScript: **HTML** structure/forms/a11y, **CSS** box model/specificity/Flexbox/Grid, plain **JavaScript** (closures, `this`, the DOM & events), **async JS** (Promises/async-await/`fetch`), and **how browsers actually render a page** | [HTML Fundamentals](../frontend/web-html-fundamentals-visualizer.html) |
 | 📊 **Data Science & ML** | **NumPy/pandas**, data cleaning & **EDA**, **visualization**, ML fundamentals (bias-variance), **regression/classification**, model evaluation, **clustering/PCA**, and **neural networks/PyTorch** | [NumPy & Pandas](../frontend/datasci-numpy-pandas-visualizer.html) |
 | 🧠 **AI / LLM Engineering** | **transformers & attention**, how LLMs work (tokenization/sampling), **prompt engineering**, **embeddings & vector DBs**, **RAG**, **tool-calling agents**, wiring an **LLM API** into a real backend, fine-tuning vs RAG vs prompting & **LLMOps**, and **AI safety/guardrails** (prompt injection, jailbreaks, PII) | [Transformers & Attention](../frontend/genai-transformers-attention-visualizer.html) |
