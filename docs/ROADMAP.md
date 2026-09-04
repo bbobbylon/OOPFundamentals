@@ -10,57 +10,51 @@ page/track counts in `README.md` and `DEVHUB-GUIDE.md`, then delete the item fro
 
 ---
 
-## 🐞 KNOWN BUG — cream theme legibility race (found 2026-09-04, NOT fixed)
+## ✅ FIXED — cream theme legibility (was a KNOWN BUG; kept as a record of the diagnosis)
 
-**Reproduce:** `node frontend/tmp_creamrace.mjs` — loads one page fresh six times
-in cream and reports each run's text contrast. Typically **3-5 of 6 runs render
-text at 1.05-1.68:1** against a 0.734-luminance ground, i.e. invisible, and the
-rest at 10-13:1. Nothing about the page changes between runs. Worst known case:
+**Symptom.** In cream, text on pages with their own panel grounds rendered
+unreadable. Two faces, both invisible in dark:
 
-```
-node frontend/tmp_creamrace.mjs angular-dynamic-components-visualizer.html '.body div.desc'
-```
+- *deterministic* — `angular-custom-directives`, `.demo-area div.code-live`:
+  dark ink `rgb(71,66,56)` on a near-black `rgb(5,10,20)` panel, 1.99:1, 6 of 6 loads.
+- *nondeterministic* — `angular-dynamic-components`, `.body div.desc`: 3-5 of every
+  6 FRESH loads at 1.05-1.68:1 against a 0.734-luminance ground; the rest at 10-13:1.
 
-**Cause.** `devhub-hf-theme.js`'s repair pass runs from `boot()` at
-`DOMContentLoaded`. That does not wait for linked CSS to paint, so `groundOf()`
-can measure the *inner* grounds (`.step`, `.panel` — per-page `<style>` classes
-whose colour comes from remapped tokens) while they are still the dark theme's.
-The repair then picks ink for a surface that will not exist a moment later, and
-which way it errs is decided by one threshold in `relight()`'s fallback:
+**Root cause: CSS transitions.** Much of the site carries `transition: all .3s`,
+so when the theme's colours land, every colour and background ANIMATES for 300ms.
+`getComputedStyle` returns the value mid-flight, so the repair pass in
+`devhub-hf-theme.js` measured intermediate ink on an intermediate ground — a
+surface that is not what finally gets painted. The deterministic case saw light
+ink on a dark panel, judged it fine, and skipped; the transition then completed
+to dark-on-dark. The race caught a different animation frame each load, so
+`relight()`'s `bgL < 0.18` fallback flipped between light and dark ink.
 
-```js
-fixed = bgL < 0.18 ? [242,232,219] /* light ink */ : [32,30,29] /* dark ink */;
-```
+Neither MutationObserver in that file could see it: **an animating value produces
+no DOM mutation.**
 
-A stale ground reading 0.12 → light ink → invisible once cream lands. A stale
-0.21 → dark ink → correct *by accident*. That is the whole coin flip.
+**Fix.** Listen for `transitionend` on `color` / `background-color` and schedule
+another pass — i.e. measure once the animation has finished rather than during
+it. Capped at 60 passes as a backstop, since our own writes can re-trigger a
+transition under `transition: all`; the 0.03 ground guard in `repair()` means
+repeated passes converge and stop writing, so the cap is not the mechanism.
 
-Nothing corrects it afterwards: the ground changes because **CSS finished
-applying**, which is not a DOM mutation, so neither MutationObserver in that
-file fires. The re-derive guard
-(`if (done && Math.abs(hfcBg - bgL) <= 0.03) continue`) is sound and simply
-never gets a later pass to run in.
+**Two earlier attempts that did NOT work — do not retry them:**
 
-**Two fixes attempted and reverted — do not just retry these:**
+1. A guaranteed pass on `window.load` plus a double `requestAnimationFrame`.
+   1/6 → 4/6 readable, still flaky. Wrong because the ink is still light at
+   `load` and only settles ~1.4s in — this was never about stylesheet loading.
+2. Gating `run()` on `document.body` luminance > 0.5. Made it **worse** (4/6
+   failing): `body` already carries cream while `.step` / `.panel` do not, so the
+   guard passed at exactly the wrong moment.
 
-1. A guaranteed extra pass on `window.load` plus a double `requestAnimationFrame`.
-   Improved it (1/6 → 4/6 readable) but stayed flaky, because `load` still is not
-   late enough for the inner grounds on every run.
-2. Gating `run()` on `document.body`'s luminance being > 0.5. Made it **worse**
-   (4/6 failing): `body` already carries cream while `.step` / `.panel` do not, so
-   the guard passes at exactly the wrong moment.
+**Regression tested:** both cases 6/6 and 4/4 clean after the fix; dark theme
+unchanged (the one dark failure, `.diagram-toggle div.dtab.active` at 1.86, is
+byte-identical with and without the patch — pre-existing); vcheck 528/528; full
+site smoke at 320px clean.
 
-**Likely real fix** (unverified): stop inferring readiness from a timer or from
-`body`, and make the repair idempotent against a *late* ground change — e.g.
-re-run once `document.styleSheets` are all loaded, or store the measured ground
-per element and re-derive on the first pass where it moves, without the 0.03
-early-out short-circuiting the very first correction. Whoever picks this up:
-`tmp_creamrace.mjs` is the failing test, so fix it until that script exits 0.
-
-**Scope.** Cream only — dark is unaffected. Seen on pages whose per-page
-`<style>` block defines its own panel grounds; `tmp_contrast.mjs` catches it only
-intermittently *for the same reason the bug exists*, which is why the repeat-load
-script had to be written.
+**The test stays.** `node frontend/tmp_creamrace.mjs` loads a page fresh N times
+and reports per-run contrast — a single load proves nothing about a race, which
+is the whole reason it exists. Run it if you touch the repair pass.
 
 ---
 

@@ -296,6 +296,35 @@
     }
     /* Re-evaluate when the theme flips, in either direction. */
     new MutationObserver(schedule).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+
+    /* The pass above is not enough on its own, and the reason is CSS transitions.
+       Much of the site carries `transition: all .3s`, so when the theme's colours
+       land, every colour and background ANIMATES for 300ms. getComputedStyle
+       returns the value mid-flight, so a pass that runs during the animation
+       measures intermediate ink on an intermediate ground — a surface that is
+       not what finally gets painted. Two failures came out of that, both
+       invisible in the dark theme:
+
+         - deterministic: on angular-custom-directives, `.code-live` is still
+           light ink at DOMContentLoaded AND at load, reads fine against its dark
+           panel, so the pass skips it. The transition then completes to
+           rgb(71,66,56) on rgb(5,10,20) — 1.99:1, unreadable, 6 of 6 loads.
+         - the race: on angular-dynamic-components the ground is sampled at
+           whatever frame the pass caught, so relight()'s `bgL < 0.18` fallback
+           flips between light and dark ink — 3-5 of 6 fresh loads unreadable.
+
+       Neither MutationObserver above can see it: an animating value produces no
+       DOM mutation. So listen for the animation actually finishing. Our own
+       writes can re-trigger a transition (property: all), hence the cap — the
+       0.03 ground guard in repair() means repeated passes converge and stop
+       writing, so this is a backstop against a pathological page, not the
+       mechanism. `node tmp_creamrace.mjs` is the test. */
+    var transPasses = 0;
+    document.addEventListener('transitionend', function (e) {
+      if (e.propertyName !== 'color' && e.propertyName !== 'background-color') return;
+      if (transPasses++ > 60) return;
+      schedule();
+    }, true);
   }
 
   function boot() { build(); startRepair(); }
