@@ -105,6 +105,183 @@
     <div class="intro-ciam"><span class="tag">CIAM / Angular + Spring:</span> Derive a whole type library instead of hand-writing it — <code>type UpdateUserDto = Partial&lt;Pick&lt;UserDto, 'firstName'|'lastName'|'email'&gt;&gt;</code>, <code>type UserFormModel = { [K in keyof UpdateUserDto]: FormControl&lt;UpdateUserDto[K]&gt; }</code>, <code>type PagedUserResponse = Paged&lt;UserDto&gt;</code>. A <code>FormGroup&lt;UserFormModel&gt;</code> has value type <code>UpdateUserDto</code>, so <code>userService.update(id, form.value)</code> type-checks with no mapping. Spring mirrors it with a Java <code>record UpdateUserDto(...)</code>.</div>
   </div>
 
+
+<p class="hf-deck">or, programming in a language with no <code>console.log</code> and no breakpoints</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The type is wrong. There is nothing to step through.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A real language, stripped of every tool you debug with</div>
+  <p>Type-level TypeScript is genuinely a programming language — conditionals, recursion, pattern
+  matching, a whole functional style. What it does not have is a way to <i>watch</i> any of it
+  happen. No <code>console.log</code>, no breakpoint, no stack you can print. When a
+  seven-deep conditional produces <code>never</code>, the compiler tells you the answer and
+  nothing about how it got there.</p>
+  <div class="hf-scatter">
+    <span>expected string, got never ⚠</span>
+    <span>no stack trace ⚠</span>
+    <span>no intermediate values ⚠</span>
+    <span>TS2589 at depth ~50 ⚠</span>
+  </div>
+  <p class="hf-foot">So you comment out half the type to see which half was lying, which is
+  bisection — the debugging technique of last resort, and here it is the first one.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Build the substitutes deliberately, before you need them</div>
+  <div class="hf-ladder">
+    <b>Hover is your <code>console.log</code> — name intermediate steps as their own types</b>
+    <i>↓ <code>type Step1 = …; type Step2 = Foo&lt;Step1&gt;</code> so each is inspectable</i>
+    <b>Write type-level TESTS: <code>Expect&lt;Equal&lt;Result, Wanted&gt;&gt;</code></b>
+    <i>↓ they fail at build time, exactly like real tests, because they are real tests</i>
+    <b>Measure cost with <code>tsc --extendedDiagnostics</code>, do not guess it</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>If you cannot see it, name it.</b> The single highest-leverage habit in type-level code is
+  breaking one clever type into several named ones — not for reuse, but so the editor will show
+  you the value at each step. That is the whole debugger, and you build it yourself.
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>This conditional should give me <code>string</code>. It gives me <code>never</code>.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">tsc</span>
+    <p>Correct, and I will not tell you why. I evaluated it, I got <code>never</code>, and I
+    have no notion of showing my working. Split it into named steps and hover each one — that is
+    the only view into me there is.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">A distributive conditional</span>
+    <p>And check whether I distributed. Given a union, I evaluate once per member and union the
+    results — which is usually what you wanted, and occasionally the exact reason your
+    <code>never</code> appeared out of nowhere.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">A recursive conditional type, evaluated one step at a time.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>BuildTuple&lt;5&gt;</code> starts with an accumulator: <code>A = []</code></span><span class="tag">the parameter default IS the base case</span></li>
+    <li><span>Check <code>A['length'] extends N</code>. <code>0 extends 5</code> is false, so take the false branch</span><span class="tag">this is the "if"</span></li>
+    <li class="open"><span>The false branch calls <b>itself</b> with a bigger accumulator: <code>BuildTuple&lt;N, [...A, unknown]&gt;</code></span><span class="tag">this is the "loop"</span></li>
+    <li><span>Repeat until <code>A['length']</code> finally matches <code>N</code>, then return <code>A</code></span><span class="tag">recursion, not iteration</span></li>
+    <li class="open"><span>Ask for <code>BuildTuple&lt;5000&gt;</code> and you get <code>TS2589 — Type instantiation is excessively deep and possibly infinite</code></span><span class="tag">the stack overflow of this language</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is this language's only runtime error, and it is deliberate: without
+  a depth limit a mistyped recursive type would hang your editor rather than fail. So read
+  TS2589 as "you wrote a loop that does not terminate, <i>or</i> one that terminates too far
+  away" — those are different bugs and the message cannot tell them apart. The limit is roughly
+  50 for ordinary recursion and higher for tail-recursive conditionals, which is why rewriting
+  in accumulator style sometimes makes an "impossible" type suddenly work.</p>
+</div>
+
+<p><b>Before optimising anything here, measure it — because TypeScript is lazier than it
+looks.</b> A type that appears enormous on the page may cost almost nothing, because types are
+instantiated on demand rather than eagerly expanded, so a three-million-member union that
+nothing ever forces is close to free. <code>tsc --extendedDiagnostics</code> prints
+<code>Types</code>, <code>Instantiations</code> and <code>Check time</code>, and those three
+numbers are the only honest answer to "is this type expensive?" Track them before and after, on
+your own codebase — a guess in either direction is usually wrong, and this is one of the few
+places where intuition about performance is actively misleading.</p>
+
+<div class="hf-check" data-answer="1">
+  <p class="q"><code>type NonNull&lt;T&gt; = T extends null | undefined ? never : T</code>.
+  What is <code>NonNull&lt;string | null&gt;</code> — and what changes if you write the condition
+  as <code>[T] extends [null | undefined]</code>?</p>
+  <button type="button">Both give <code>string</code>; the brackets are a style choice with no effect on the result</button>
+  <button type="button">Naked <code>T</code> distributes over the union and gives <code>string</code>; the tuple form checks the union as a whole and gives back <code>string | null</code></button>
+  <button type="button">Both give <code>never</code>, because part of the union matched the <code>null</code> branch</button>
+  <p class="why" data-for="0">The brackets are the standard way to switch distribution
+  <i>off</i>, and they change the answer completely. It is one of the few places in TypeScript
+  where syntax that looks decorative is load-bearing.</p>
+  <p class="why" data-for="1">Right. A <i>naked</i> type parameter on the left of
+  <code>extends</code> makes the conditional distributive: it runs once per union member —
+  <code>string</code> → <code>string</code>, <code>null</code> → <code>never</code> — and unions
+  the results, and <code>never</code> vanishes from a union, leaving <code>string</code>.
+  Wrapping both sides in a tuple removes the nakedness, so the whole union is tested at once,
+  fails the condition, and comes back untouched.</p>
+  <p class="why" data-for="2">This is what people expect the first time and it never happens
+  with a naked parameter — the members are evaluated separately, not collectively. It <i>is</i>
+  what you would get from a condition the whole union genuinely failed, which is why knowing
+  which mode you are in matters.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three things that make more sense once you accept it is a language.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Recursion instead of loops</h4>
+    <p>There is no <code>for</code> here — a type calls itself with a changed accumulator and
+    stops on a base case, exactly like Haskell or a Lisp. If recursion-with-an-accumulator feels
+    unnatural, that is the thing to practise; almost every type-level technique is a variation
+    on it.</p>
+    <div class="hf-scatter"><span>accumulator + base case</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>C++ template metaprogramming</h4>
+    <p>The same discovery, thirty years earlier: a type system accidentally Turing-complete, and
+    a decade of people finding out that the cleverest code in the file is the one nobody dares
+    change. Worth knowing as a warning as much as a precedent.</p>
+    <div class="hf-scatter"><span>clever, then untouchable</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A CIAM permission string</h4>
+    <p>A template-literal type that parses <code>'users:read'</code> into
+    <code>{ resource:'users'; action:'read' }</code> is a genuinely good use — it makes a typo
+    in a permission a compile error. The test is whether the next person can read it, not
+    whether it works.</p>
+    <div class="hf-scatter"><span>useful beats impressive</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">How do I write a test for a type?</p>
+  <p class="a">Two aliases, and they are worth pasting into any project doing this seriously:
+  <code>type Equal&lt;A, B&gt; = (&lt;T&gt;() =&gt; T extends A ? 1 : 2) extends (&lt;T&gt;() =&gt; T extends B ? 1 : 2) ? true : false</code>
+  and <code>type Expect&lt;T extends true&gt; = T</code>. Then
+  <code>type _ = Expect&lt;Equal&lt;MyType&lt;'a,b'&gt;, ['a','b']&gt;&gt;</code> is a real
+  assertion that fails the build when it breaks. The odd doubled-function shape in
+  <code>Equal</code> is a known trick to force TypeScript into an <i>exact</i> comparison rather
+  than a mutual-assignability one — worth using and not worth deriving from scratch.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Should I be doing this at all?</p>
+  <p class="a">Sometimes, and less often than it is fun to. It earns its keep when it turns a
+  whole class of runtime mistake into a compile error that many people hit — a typed route
+  table, permission strings, an ORM's query builder, a form library. It does not earn its keep
+  when the alternative is a slightly less elegant explicit type, because the cost is not
+  compile time (usually negligible) but the next engineer, who has to modify it. If you cannot
+  explain the type in two sentences, write the boring version.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">What does <code>infer</code> actually do?</p>
+  <p class="a">It is pattern matching with capture — the same idea as a regex group.
+  <code>T extends Promise&lt;infer U&gt; ? U : never</code> says "if T has the shape
+  <code>Promise&lt;something&gt;</code>, bind that something to <code>U</code> and let me use
+  it." Everything you can do with it follows from that one sentence: unwrapping a
+  <code>Promise</code>, pulling the element type out of an array, splitting a template literal,
+  reading a function's return type. It only exists inside the true branch of a conditional,
+  because that is the only place the match has succeeded.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you run it.</p>
+<div class="hf-napkin">
+  <code>type F&lt;T&gt; = T extends string ? 'yes' : 'no'</code>. What is <code>F&lt;string | number&gt;</code>
+  — one answer or two? Now what is <code>F&lt;never&gt;</code>, and why is it the answer that
+  catches everyone?
+</div>
+
   <!-- ── TRY IT LIVE ── -->
   <div class="tryit" data-lang="ts"
        data-title="🧪 Try it: the type system can COUNT — tuple-length arithmetic"
@@ -716,6 +893,7 @@ DevHubCodeWalk.mount('#cw-tstl',{
 </script>
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
