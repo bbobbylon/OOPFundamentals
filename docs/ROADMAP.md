@@ -69,8 +69,10 @@ script had to be written.
 `claude/app-redesign-scope-cicd-9xi362` is the working branch and PR #1 is open against
 `master`.
 
-- **`legacy`** now exists at `9e4de0a` — the pre-overhaul master, preserved so master can be
-  overwritten safely.
+- **`legacy`** and **`oldmasterbranch`** both exist at `9e4de0a` — two names for the same
+  pre-overhaul master commit, preserved so master can be overwritten safely. They are
+  byte-identical snapshots; keep whichever name you prefer and delete the other
+  (`git push origin --delete legacy`). Neither is a working branch — do not commit to them.
 - **master is an ANCESTOR of the branch** (29+ ahead, 0 behind) and GitHub computes a clean
   merge ref. There is nothing to merge *from* master, and master is the old format — do not
   merge it in.
