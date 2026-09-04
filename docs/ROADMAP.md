@@ -777,6 +777,56 @@ component that only works for the shape its author happened to test is a trap wi
 fuse.** It looked right for months because every existing step happened to have exactly two
 children.
 
+**TEXT WAS BEING CLIPPED ON ~450 PAGES AND THE GATE COULD NOT SEE IT (2026-09-03).**
+
+An authoring agent mentioned in passing that a long code token inside a `.hf-card` was cut off
+at 390px, and added: *"page-level overflow stays 0 while the token is silently clipped inside
+the card, so the 390px overflow check alone does not catch it."*
+
+That is a hole in `tmp_smoke.mjs`, which measured `documentElement.scrollWidth` only. Checked
+it, and the report was right — on my own pages:
+
+    streams-visualizer          .hf-card.good clipped by 125px, .hf-ask by 50px
+    spring-boot-di-ioc          .hf-card.good clipped by  24px, .hf-ask by 25px
+    …with pageOverflow = 0 on both, so the sweep called them clean.
+
+A phone content column is ~220px and `IllegalStateException: stream has already been operated
+upon or closed` is one word as far as line breaking is concerned. With
+`overflow-wrap: normal` it neither wrapped nor scrolled — it was **clipped**, and the reader
+lost the end of the sentence with nothing on screen to say so.
+
+Three fixes, in widening blast radius:
+1. **The kit** — `overflow-wrap:anywhere; min-width:0` on every text-bearing `.hf-*`
+   component. `min-width:0` matters: a flex item's default `min-width:auto` refuses to shrink
+   below its content, which defeats the wrap.
+2. **Inline code sitewide** — `:not(pre) > code{ overflow-wrap:anywhere }`. The selector is
+   the whole point: code inside a `<pre>` is a listing that scrolls itself, and forcing it to
+   wrap would destroy the line structure CodeWalk depends on. Verified afterwards that `pre`
+   and `.cw-code` still report `overflow-x:auto` with `overflow-wrap:normal`. This one was
+   found on `.intro-lead`, which nearly every lesson page has — `ViewContainerRef.create…`
+   rendering 434px wide inside a 218px box.
+3. **Tables of contents** — 35 pages set `columns:3`, dropping to 2 under 800px, and nobody
+   carried it to a phone: two columns of ~107px, with entries clipped by up to 138px. Fixed
+   with `body .toc{ columns:1 }` under 560px. `body .toc` rather than `.toc` because the
+   page's own rule is in a `<style>` after this file's `<link>` and would win at equal
+   specificity — the extra element selector out-specifies it, so no `!important` was needed
+   (checked by removing it and re-measuring: column width 107px → 238px).
+
+**The gate now measures per-element clipping**, restricted to elements that own a direct text
+node — `scrollWidth` propagates up the ancestor chain, so an unrestricted check flagged 35–43
+elements per page and buried the one actually losing a word. It reports clipping in its own
+section rather than failing the page, for the same reason the network-only failures are
+separated: ~450 pages carry hand-written per-page CSS, and a sweep that fails on all of them
+is a sweep people skip.
+
+Site-wide after the fixes: **73 pages / 121 elements**, every one of them page-local. Visible
+now instead of invisible, and scoped as follow-up.
+
+**The lesson, and it is the third time today:** the instrument decides what counts as a bug.
+`tmp_contrast.mjs` invented 1862 failures by not compositing alpha; `tmp_smoke.mjs` hid a real
+class of failure by measuring the document instead of the elements. Both were *my* gates, and
+in both cases the numbers looked reassuring right up until someone checked them.
+
 **Mobile, while here.** The smoke gate ran at 390px, which hid a real class of bug: all 14
 landing pages carry `minmax(280px,1fr)` grids inside a 272px container, so every card was 8px
 wider than its own container and ate its right margin; on `interview-index` it broke through

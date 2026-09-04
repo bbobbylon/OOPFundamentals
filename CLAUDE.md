@@ -72,6 +72,9 @@ standing goal, not a one-time task. The full Head First rollout state lives in
   It scores every lesson page against the nine-point standard above and ranks the thinnest
   first. It reads MARKUP, not meaning — a low score means "go look", never a verdict, and a
   high score means "has the parts", never "is good".
+- Long tokens must WRAP in prose and SCROLL in code blocks. `:not(pre) > code` wraps inline
+  chips; `<pre>` and `.cw-code` keep `overflow-x:auto`. Text clipped inside a non-scrolling
+  box is invisible to a page-level overflow check — tmp_smoke.mjs reports it separately.
 - Check theme legibility with `node frontend/tmp_contrast.mjs` (`--theme=cream|dark`,
   `--pages=`, `--inject=candidate.css` to try a fix without editing the site). It reports
   text under 2.2:1 grouped by selector, so you fix causes not instances. The 2.2 floor is

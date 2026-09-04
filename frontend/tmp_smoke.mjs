@@ -14,8 +14,8 @@
  * download is a heavy dependency for a gate that runs on every push.
  *
  * WHAT IT CHECKS, per page: uncaught exceptions, console errors, horizontal
- * overflow at phone width (the site is read on a phone), and that the page
- * rendered something at all.
+ * overflow at phone width (the site is read on a phone), TEXT CLIPPED INSIDE a
+ * non-scrolling element, and that the page rendered something at all.
  *
  * The default width is 320, not 390. 390 is a comfortable modern phone; 320 is
  * the iPhone SE and a folded foldable, and it is where a rigid grid track
@@ -69,6 +69,7 @@ console.log(`smoke-testing ${pages.length} page(s) at ${width}px…`);
 
 const browser = await chromium.launch();
 const real = [], network = [];
+const clipping = [];   // text cut off inside a non-scrolling box (reported, not fatal)
 let done = 0;
 
 // A page-per-context is slower but keeps one page's storage/errors out of the next.
@@ -83,16 +84,62 @@ async function run(list) {
     try {
       await page.goto(`http://127.0.0.1:${port}/${f}`, { waitUntil: 'domcontentloaded', timeout: 25000 });
       await page.waitForTimeout(450);
-      const m = await page.evaluate(() => ({
-        overflow: document.documentElement.scrollWidth > window.innerWidth + 2,
-        sw: document.documentElement.scrollWidth,
-        empty: (document.body.innerText || '').trim().length < 40,
-      }));
+      const m = await page.evaluate(() => {
+        /* Page-level overflow is only half the story. A card whose content is
+           125px too wide CLIPS internally — the reader loses the end of the
+           sentence — while documentElement.scrollWidth stays exactly equal to
+           clientWidth, so the page reports clean. That is how kit cards shipped
+           with truncated code tokens on several authored pages. Measure the
+           elements too: content wider than its box, in a box that does not
+           scroll, is content nobody can read.
+
+           Deliberately ignores anything with overflow-x auto/scroll (a <pre> or
+           a wide table is SUPPOSED to scroll itself) and anything clipped by
+           less than 4px, which is rounding rather than a defect. */
+        const clipped = [];
+        for (const el of document.querySelectorAll('body *')) {
+          if (el.scrollWidth <= el.clientWidth + 4) continue;
+          if (!el.clientWidth) continue;                       // not laid out
+          /* Only elements that OWN the text. scrollWidth propagates up the
+             ancestor chain, so a single wide <pre> makes its container, its
+             section and its body all look guilty; flagging all of them buries
+             the one element actually losing a word. A direct text child is what
+             distinguishes "this box clips its own sentence" from "something
+             inside me is wide". */
+          let ownsText = false;
+          for (const n of el.childNodes)
+            if (n.nodeType === 3 && n.textContent.trim()) { ownsText = true; break; }
+          if (!ownsText) continue;
+          const st = getComputedStyle(el);
+          if (/auto|scroll/.test(st.overflowX)) continue;      // scrolls on purpose
+          if (st.position === 'absolute' || st.position === 'fixed') continue;
+          if (st.whiteSpace === 'pre' || st.whiteSpace === 'nowrap') continue;  // opted out of wrapping
+          if (st.textOverflow === 'ellipsis') continue;        // truncation on purpose
+          clipped.push(el.tagName.toLowerCase() +
+            (typeof el.className === 'string' && el.className
+              ? '.' + el.className.trim().split(/\s+/)[0] : '') +
+            ' +' + (el.scrollWidth - el.clientWidth) + 'px');
+        }
+        return {
+          overflow: document.documentElement.scrollWidth > window.innerWidth + 2,
+          sw: document.documentElement.scrollWidth,
+          empty: (document.body.innerText || '').trim().length < 40,
+          clipped: clipped.slice(0, 3),
+          clippedCount: clipped.length,
+        };
+      });
       const netOnly = errs.length && errs.every((e) => /ERR_(CONNECTION|TUNNEL|NAME|CERT|ABORTED)|net::/.test(e));
       const issues = [];
       if (errs.length && !netOnly) issues.push(errs.find((e) => !/net::/.test(e)) || errs[0]);
       if (m.overflow) issues.push(`horizontal overflow (${m.sw}px at ${width}px)`);
       if (m.empty) issues.push('rendered almost no text');
+      /* Clipping is reported SEPARATELY, not as a page failure. The shared
+         components are fixed, but ~450 pages carry hand-written per-page CSS
+         with its own narrow boxes, and failing the sweep on every one of them
+         would make the whole report something people skip. Same reasoning as
+         the network-only section below: a gate that cries wolf is a gate that
+         gets ignored. */
+      if (m.clippedCount) clipping.push([f, m.clippedCount, m.clipped.join(', ')]);
       if (issues.length) real.push([f, issues.join(' | ')]);
       else if (netOnly) network.push([f, errs[0]]);
     } catch (e) {
@@ -120,4 +167,13 @@ if (real.length) {
   console.error('');
   process.exit(1);
 }
+if (clipping.length) {
+  const totalEls = clipping.reduce((n, c) => n + c[1], 0);
+  console.log(`\nℹ ${clipping.length} page(s) clip text inside a non-scrolling box (${totalEls} element(s)).`);
+  console.log('   Not a failure: the shared components wrap correctly; these are per-page styles.');
+  clipping.sort((a, b) => b[1] - a[1]).slice(0, 8)
+    .forEach(([f, n, what]) => console.log(`   ${String(n).padStart(3)}  ${f}  ${what}`));
+  if (clipping.length > 8) console.log(`   …and ${clipping.length - 8} more`);
+}
+
 console.log(`\n✓ ${pages.length} page(s) clean — no uncaught errors, no overflow, all rendered\n`);
