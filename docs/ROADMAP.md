@@ -1031,9 +1031,32 @@ place for the attribute half (it already must be self-contained per `CLAUDE.md`)
 implementation is superseded — an older "paper" palette (`#f0e9da`/`#bf5f1f`, since replaced
 by cream `#f5ead8`/`#c15c30`), Fraunces instead of Playfair/Caprasimo, and a Google Fonts
 `@import` where the repo now self-hosts all four `.woff2` files. Don't restore it; it only
-identified the gap. It also carried a `devhub-theme-v3` one-time migration flag, worth
-considering separately: without one, anyone who ever stored `'dark'` — Bobby included —
-keeps getting dark and never sees the cream redesign.*
+identified the gap.*
+
+**APPROVED 2026-09-04 — do both halves, plus the migration flag.** Written down before
+starting so a session cut cannot lose the plan.
+
+1. **Set the attribute.** Add a theme bootstrap to **`devhub-transitions.js`** — the only
+   shared script all 13 load. It must be **self-contained** (`CLAUDE.md`: these pages link no
+   `devhub.css`, which is exactly how the giant-ripple bug happened), so it injects its own
+   id-guarded `<style>` rather than assuming any stylesheet. Read `localStorage`
+   `devhub-theme`, default **cream/light**, set `<html data-theme>` before first paint.
+   Must agree with the other two defaults — `app.html`'s `|| 'light'` and
+   `devhub-hf-theme.js`'s `normalise()`. **Three places now; change one, change all three.**
+2. **Give them light values to answer with.** The 13 pages' dark colours are inline, so the
+   attribute alone changes nothing. Each needs cream equivalents under
+   `:root[data-theme="light"]` — matching the hub's tokens (`--bg:#f5ead8`,
+   `--accent:#c15c30`, `--text:#2e2318`), not the stash's older paper ones.
+3. **One-time migration — `devhub-theme-v3`.** Without it, anyone already storing `'dark'`
+   (Bobby included) never sees the cream redesign. Flip stored `'dark'` → cream **once**,
+   set the flag, and respect every choice made after that. Put it in the same bootstrap so
+   hub and standalone pages migrate identically.
+4. **Verify by screenshot, not by reading**: `hub → angular-index → an Angular lesson` must
+   be continuous cream, and the dark toggle must still carry across all three.
+
+The 13: `angular-index`, `aws-index`, `configs-index`, `docker-index`, `ds-index`,
+`entra-id-index`, `git-index`, `interview-index`, `maven-index`, `ping-idm-index`,
+`spring-boot-index`, `typescript-index`, `index-legacy`.
 
 ---
 
