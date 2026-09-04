@@ -79,20 +79,44 @@ script had to be written.
 - **Never force-push this branch.** Eight amend+force-pushes earlier rewrote it under Bobby's
   clone and his next `git pull` conflicted across ~555 files. Ordinary fast-forward commits
   only; his one-commit requirement is satisfied by **squash-merging** the PR at the end.
-- **One commit is stranded on Bobby's machine** — `2260122`, from session
-  `session_01BoEsHjQmczbCEB7dnjGVyT` (a *bridge* session running on his computer, not the
-  cloud; unreachable since 2026-09-01). It is on no remote ref. Recovering it, in this order:
 
-  ```
-  git push origin HEAD:claude/local-session-work    # 1. SAVE first, under a NEW name
-  git fetch origin                                  # 2. then repair the clone
-  git reset --hard origin/claude/app-redesign-scope-cicd-9xi362
-  ```
+### ✅ RESOLVED 2026-09-04 — the divergence is merged, nothing is stranded
 
-  Order matters — step 3 destroys the commit if step 1 has not happened. It cannot push to the
-  same branch name; that push would be rejected.
-- **Open question: which colorway is default.** Bobby's local session made cream default; this
-  branch keeps dark, per his earlier "keep the dark colorway, add mocha/cream later".
+The force-push damage above is repaired. Bobby's clone had diverged **2 local / 34 remote**
+from a merge-base of `9e4de0a` (master), so `git pull` conflicted in **44 files**. It was
+never two rival designs: **12 of the 16 new shared files were byte-identical**, i.e. one
+lineage that the rewrite split in two.
+
+Resolved by a real **merge** (not the `reset --hard` recipe that used to live here — that
+would have destroyed the local-only work below, and a merge needs no force-push):
+
+- **theirs (cloud) ×42** — the cloud branch is the superset: `devhub-hf.css` 42KB → 208KB,
+  `devhub-hf-theme.js` 3.8KB → 14KB, plus the 102 authored pages.
+- **ours (local) ×2** — `shell-cli-basics-visualizer.html` (local authored it to the HF bar,
+  37.1KB → 44.6KB with 15 `hf-walk`/`hf-anatomy` uses; the cloud only swept it, +181 bytes)
+  and `tmp_shot.mjs` (the cloud copy hardcodes `/opt/node22/...` and `URL().pathname`, which
+  yields `/B:/…` on Windows — broken on Bobby's machine).
+- **`devhub-lesson.js` survived on its own** — local-only, and the cloud branch has *zero*
+  occurrences of `hf-walk`/`hf-anatomy`. A plain "take cloud" would have deleted it silently.
+
+**`2260122` is no longer stranded** — it is in this branch's history, and also kept at the
+local branch/tag `backup/local-before-merge-20260904` / `backup-local-20260904`.
+
+- **Colorway: half-restored, deliberately.** Taking the cloud's `app.html` and
+  `devhub-hf-theme.js` wholesale had silently reverted Bobby's `2260122` cream work. The
+  **cream palette is restored** in `app.html` (`:root[data-theme="light"]` — pure CSS, warm
+  `#f5ead8` ground, `#c15c30` accent, no JS involved, so the race below cannot touch it).
+  The **default stays dark**: cream-by-default would put every fresh visitor into the colorway
+  with the unfixed legibility race at the top of this file, and it matches Bobby's earlier
+  "keep the dark colorway, add mocha/cream later". Two one-line changes flip it once
+  `tmp_creamrace.mjs` is green on a slow machine — `|| 'dark'` in `app.html`, and
+  `normalise()` in `devhub-hf-theme.js` (local's form: `v === 'dark' ? 'dark' : 'cream'`).
+- **Tooling is portable again.** New `frontend/tmp_pw.mjs` is the single place that resolves
+  Playwright and a browser binary; `tmp_shot` / `tmp_smoke` / `tmp_contrast` / `tmp_creamrace`
+  all import it instead of carrying four copies, three of which were cloud-sandbox-only. On a
+  machine with no Playwright they now print one actionable message instead of a
+  `MODULE_NOT_FOUND` on `/opt/node22`. Verified end-to-end on Windows with
+  `PW_MODULE=<dir>/node_modules/playwright-core` against the system Chrome.
 
 ---
 
@@ -105,7 +129,7 @@ syntax coloring on ALL code, the Head First brain-friendly aesthetic on ALL subj
 the Java patterns pages), colored/manipulated text as a deliberate memory device.
 
 ### 1. Head First rhythm — sitewide rollout (design landed, ~363 pages still to author)
-The design language shipped and is opted into on **513 of 528 pages** (`<html data-hf>`), and
+The design language shipped and is opted into on **515 of 530 pages** (`<html data-hf>`), and
 **102 pages are authored to the full nine-point rhythm**: deck line, problem/fix cards, a
 "one thing to remember" principle callout, a three-way dialogue, ONE shape-matched mechanism
 diagram, a knowledge check, "where you've seen this before", back-row Q&A, napkin predict-note.
@@ -964,6 +988,24 @@ into a page scrollbar. Fixed at the cause with `minmax(min(280px,100%),1fr)` —
 280px, verified 3 columns unchanged at 1280px — plus a self-contained phone net for the 13
 landing pages that link no `devhub.css`. **The smoke gate's default width is now 320**, so the
 class cannot come back: 390 is a comfortable phone, 320 is where the arithmetic actually fails.
+
+### 13. Cloud-CLI lessons — AWS + Azure LANDED, gcloud outstanding (2026-09-04)
+
+Two of the three shipped and are registered under **Shell & Scripting → Cloud CLIs**:
+[`shell-aws-cli-visualizer.html`](../frontend/shell-aws-cli-visualizer.html) and
+[`shell-azure-cli-visualizer.html`](../frontend/shell-azure-cli-visualizer.html) — both
+`data-hf`, both authored, the Azure one deliberately routed through `az ad` so it lands on
+Bobby's actual CIAM surface.
+
+**`shell-gcloud-cli-visualizer.html` is not written.** Both pages' "Where to go next" lists
+had linked it before it existed, which is what turned `tmp_vcheck.mjs` red; those two entries
+are now plain text marked *(not written yet)*. Writing the page is the whole fix — re-link
+both entries when it lands. Clone the Azure page: same three-part grammar
+(`gcloud <group> <verb>`), with **named configurations** (`gcloud config configurations`) as
+the thing that distinguishes it from `az` profiles and AWS named profiles.
+
+*(A third bug the same pass: `entra-id-overview-visualizer.html` was linked from the Azure
+page but the file is `entra-overview-visualizer.html` — a typo, now fixed.)*
 
 ---
 

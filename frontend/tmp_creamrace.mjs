@@ -15,9 +15,8 @@
  */
 import { createServer } from 'node:http'; import { readFile } from 'node:fs/promises';
 import { join, extname, dirname } from 'node:path'; import { fileURLToPath } from 'node:url';
-import { createRequire } from 'node:module';
-const require = createRequire(import.meta.url);
-const { chromium } = require('/opt/node22/lib/node_modules/playwright');
+import { loadChromium, browserExecutablePath } from './tmp_pw.mjs';
+const chromium = loadChromium();
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const MT = { '.html':'text/html', '.js':'text/javascript', '.css':'text/css', '.woff2':'font/woff2' };
@@ -34,7 +33,7 @@ const sel  = process.argv[3] || '.body div.desc';
 const runs = +(process.argv[4] || 6);
 const MIN  = 2.2;   /* same floor as tmp_contrast.mjs: "invisible", not "could be crisper" */
 
-const b = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' });
+const b = await chromium.launch({ executablePath: browserExecutablePath() });
 console.log(`cream race — ${page}  ${sel}  ${runs} fresh load(s) at 390px\n`);
 let bad = 0;
 for (let run = 1; run <= runs; run++) {

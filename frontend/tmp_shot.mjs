@@ -22,35 +22,16 @@
  * Animations: pages pace their scenario walks at ~800ms/step, so we wait for
  * network-idle plus a settle delay before shooting. --settle=N to override.
  *
- * Requires the globally-installed playwright + the preinstalled Chromium at
- * PLAYWRIGHT_BROWSERS_PATH (/opt/pw-browsers). Do NOT run `playwright install`.
+ * Playwright and the browser binary are located by tmp_pw.mjs — a global
+ * install, $PW_MODULE, or playwright-core paired with your system Chrome/Edge.
  * ========================================================================== */
 import { createServer } from 'node:http';
 import { readFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { extname, join, basename, resolve } from 'node:path';
-import { createRequire } from 'node:module';
+import { loadChromium, browserExecutablePath } from './tmp_pw.mjs';
 
-const require = createRequire(import.meta.url);
-// playwright is not installed in this repo — resolve it from wherever this
-// machine has it: a local/global install, $PW_MODULE (an absolute path to a
-// playwright or playwright-core package), or a bare playwright-core.
-// playwright-core ships no browsers, so pair it with the system Chrome/Edge
-// (see the executable candidates at launch below).
-const PW_CANDIDATES = [
-  'playwright',
-  '/opt/node22/lib/node_modules/playwright',      // the cloud sandbox's global
-  process.env.PW_MODULE,                          // e.g. <scratch>/node_modules/playwright-core
-  'playwright-core',
-].filter(Boolean);
-let chromium;
-for (const cand of PW_CANDIDATES) {
-  try { ({ chromium } = require(cand)); break; } catch { /* next */ }
-}
-if (!chromium) {
-  console.error('playwright not found — npm i playwright-core somewhere and set PW_MODULE to it');
-  process.exit(1);
-}
+const chromium = loadChromium();
 
 // fileURLToPath, not URL.pathname: the latter yields "/B:/…" on Windows.
 const { fileURLToPath } = await import('node:url');
@@ -98,6 +79,9 @@ for (const w of widths) {
 // ── static server over frontend/ ──────────────────────────────────────────
 const server = createServer(async (req, res) => {
   try {
+    // See tmp_smoke.mjs: the site ships no favicon, and the browser's probe
+    // would otherwise show up as a console error on the shot report.
+    if (req.url === '/favicon.ico') { res.writeHead(204); return res.end(); }
     const url = decodeURIComponent(req.url.split('?')[0]);
     const file = join(ROOT, url === '/' ? 'index.html' : url);
     if (!file.startsWith(ROOT) || !existsSync(file)) { res.writeHead(404); return res.end('nf'); }
@@ -113,18 +97,7 @@ const port = server.address().port;
 
 await mkdir(outDir, { recursive: true });
 
-// First existing browser wins: the sandbox chromium, $CHROME_PATH, then the
-// standard Windows Chrome/Edge locations. undefined = playwright's own download.
-const EXE_CANDIDATES = [
-  '/opt/pw-browsers/chromium/chrome-linux/chrome',
-  process.env.CHROME_PATH,
-  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-].filter(Boolean);
-const browser = await chromium.launch({
-  executablePath: EXE_CANDIDATES.find((p) => existsSync(p)),
-});
+const browser = await chromium.launch({ executablePath: browserExecutablePath() });
 
 const written = [];
 for (const page of pages) {

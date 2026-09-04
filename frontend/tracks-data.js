@@ -889,6 +889,10 @@ window.DEVHUB_TRACKS = [
         { title: 'PowerShell',                    file: 'shell-powershell-visualizer.html',                 level: 'intermediate' },
         { title: 'CMD & Batch Files',             file: 'shell-cmd-visualizer.html',                        level: 'beginner' },
       ]},
+      { label: 'Cloud CLIs', pages: [
+        { title: 'The AWS CLI',                   file: 'shell-aws-cli-visualizer.html',                    level: 'intermediate' },
+        { title: 'The Azure CLI (az)',            file: 'shell-azure-cli-visualizer.html',                  level: 'intermediate' },
+      ]},
     ]
   },
   {
