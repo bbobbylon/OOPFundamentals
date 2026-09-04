@@ -1010,6 +1010,31 @@ the thing that distinguishes it from `az` profiles and AWS named profiles.
 *(A third bug the same pass: `entra-id-overview-visualizer.html` was linked from the Azure
 page but the file is `entra-overview-visualizer.html` — a typo, now fixed.)*
 
+### 14. The 13 track landing pages ignore the theme — a visible cream/dark seam (2026-09-04)
+
+Now that cream is the default, the journey **hub → track index → lesson** goes
+**cream → dark navy → cream**. Verified by screenshot on `angular-index.html`.
+
+Why they are stranded: of the 530 pages, 15 carry no `data-hf`. `app.html` has its own
+cream palette and `index.html` is only a redirect, so the real set is the **13 landing
+pages** (`angular-index`, `aws-index`, `configs-index`, `docker-index`, `ds-index`,
+`entra-id-index`, `git-index`, `interview-index`, `maven-index`, `ping-idm-index`,
+`spring-boot-index`, `typescript-index`, `index-legacy`). None of them link `devhub.css`
+and none load `devhub-hf-theme.js`, so **nothing sets `data-theme` on them at all** — and
+their dark colours are inline, so setting it alone would not be enough either.
+
+Both halves are needed: something must set the attribute, *and* these pages need light-theme
+values to answer it. All 13 do load **`devhub-transitions.js`**, which makes it the natural
+place for the attribute half (it already must be self-contained per `CLAUDE.md`).
+
+*Found via a 2026-08-31 stash (`stash-backup-20260904`) that tried exactly this. Its
+implementation is superseded — an older "paper" palette (`#f0e9da`/`#bf5f1f`, since replaced
+by cream `#f5ead8`/`#c15c30`), Fraunces instead of Playfair/Caprasimo, and a Google Fonts
+`@import` where the repo now self-hosts all four `.woff2` files. Don't restore it; it only
+identified the gap. It also carried a `devhub-theme-v3` one-time migration flag, worth
+considering separately: without one, anyone who ever stored `'dark'` — Bobby included —
+keeps getting dark and never sees the cream redesign.*
+
 ---
 
 ## Done — design-system v2 + press pulse (landed 2026-08-30)
