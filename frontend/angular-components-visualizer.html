@@ -218,6 +218,190 @@
     </div>
   </div>
 
+
+  <p class="hf-deck">or, why the <code>@Input</code> you read in the constructor is always <code>undefined</code></p>
+
+  <div class="hf-kick">The problem</div>
+  <p class="hf-say">Angular builds your class before it has anything to put in it.</p>
+
+  <div class="hf-card bad">
+    <div class="hf-cardtitle">The admin button nobody ever saw</div>
+    <p>You write an <code>&lt;app-admin-tools&gt;</code> that takes the signed-in user and decides,
+    once, whether to show the "Edit roles" control. You put that decision in the constructor,
+    because that is where initialisation goes in every other language you have ever used.
+    Angular calls <code>new AdminTools()</code> <b>before</b> it assigns a single input — so
+    <code>this.user</code> is <code>undefined</code>, the <code>?.</code> you added quietly
+    swallows it, and <code>canEdit</code> is computed as <code>false</code> and never computed
+    again.</p>
+    <div class="hf-scatter">
+      <span>constructor runs first</span><span>user = undefined</span>
+      <span>canEdit = false ⚠</span><span>nothing throws ⚠</span>
+      <span>ships to prod ⚠</span>
+    </div>
+    <p class="hf-foot">The version that crashes gets fixed on Tuesday. This version renders
+    perfectly, for everybody, forever — and turns up in March as a ticket titled "admins can't
+    edit anything".</p>
+  </div>
+
+  <div class="hf-card good">
+    <div class="hf-cardtitle">Read inputs where inputs exist</div>
+    <div class="hf-ladder">
+      <b>constructor() — inject services, and stop there</b>
+      <i>↓ the object exists, but Angular has not touched its inputs yet</i>
+      <b>Angular assigns every bound input, then calls ngOnChanges()</b>
+      <i>↓ the values are really there now, for the first time</i>
+      <b>ngOnInit() — the first moment this.user is a user</b>
+      <i>↓ so fetches, subscriptions and derived flags all live here</i>
+      <b>ngOnDestroy() — hand back everything you took</b>
+    </div>
+  </div>
+
+  <div class="principle" style="text-align:left">
+    <b>The constructor belongs to TypeScript. <code>ngOnInit</code> belongs to Angular.</b>
+    <code>new</code> is a language feature and it fires the instant the class is created; inputs
+    are a framework feature and they arrive later, in a separate pass. Every "why is this
+    undefined" question in Angular is that one sentence, asked again.
+  </div>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">constructor()</span>
+      <p>I run the microsecond the class is created. Ask me for a service and I will hand it
+      over. Ask me for <code>user</code> and I will hand you <code>undefined</code> with a
+      completely straight face.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">Angular</span>
+      <p>Correct, and not my fault. I cannot bind <code>[user]="me()"</code> onto an object that
+      does not exist yet. Build first, bind second — there is no other order available.</p>
+    </div>
+    <div class="hf-bub">
+      <span class="who">ngOnInit()</span>
+      <p>Which is the entire reason I exist. I am the phone call that says "everything the
+      parent promised has arrived." Start your HTTP call on my line, not one step earlier.</p>
+    </div>
+  </div>
+
+  <div class="hf-kick">The mechanism</div>
+  <p class="hf-say">Seven beats, and each one only makes sense after the one before it.</p>
+
+  <div class="hf-card">
+    <ol class="hf-steps">
+      <li><span><code>new YourComponent()</code> — DI runs, field initialisers run, inputs are still empty</span><span class="tag">constructor</span></li>
+      <li><span>Angular writes every bound input onto the instance</span><span class="tag">binding</span></li>
+      <li class="open"><span><code>ngOnChanges(changes)</code> — a map keyed by input name, each entry carrying <code>previousValue</code>, <code>currentValue</code> and <code>firstChange</code></span><span class="tag">inputs arrived</span></li>
+      <li class="open"><span><code>ngOnInit()</code> — runs exactly once, and is the first hook where the inputs are real</span><span class="tag">set up here</span></li>
+      <li><span>the template is evaluated and the DOM is patched</span><span class="tag">render</span></li>
+      <li><span>in dev mode only, Angular re-checks every binding and shouts if one moved</span><span class="tag">verify</span></li>
+      <li><span><code>ngOnDestroy()</code> — the component leaves the DOM; the things it subscribed to do not</span><span class="tag">clean up</span></li>
+    </ol>
+    <p class="hf-annot">Step 6 is the one everybody re-learns.
+    <code>ExpressionChangedAfterItHasBeenCheckedError</code> is not Angular being fussy — it is
+    Angular telling you that a value it had already verified changed again inside the same
+    cycle, so the number on the screen is no longer the number in your component.</p>
+  </div>
+
+  <p><b>That the error exists only in development is the entire point of it.</b> Dev mode runs
+  change detection twice per cycle: once to render, once to compare. If
+  <code>ngAfterViewInit</code> measured a table and wrote <code>rowCount = 12</code> after the
+  first pass, the second pass finds the binding saying <code>12</code> while the DOM still says
+  <code>0</code> — mismatch, throw. Production runs that pass once, notices nothing, and shows
+  you <code>0</code>: a stale number, silently, with no error anywhere on the page.
+  <b>The exception is not the bug — it is the only thing that ever told you about the bug.</b>
+  Fix it by moving the write out of the checked window (<code>afterNextRender()</code>, a signal
+  Angular will re-read, or simply computing the value earlier), not by pasting in
+  <code>detectChanges()</code> until the shouting stops.</p>
+
+  <div class="hf-check" data-answer="1">
+    <p class="q">In <code>ngAfterViewInit</code> you set <code>this.rowCount</code> from a
+    measured table, and <code>{{ rowCount }}</code> is in the template. Dev mode throws
+    <code>ExpressionChangedAfterItHasBeenCheckedError</code>. What does that actually mean?</p>
+    <button type="button">Your component subscribed twice, so the value arrives twice in one cycle</button>
+    <button type="button">Angular had already checked <code>rowCount</code> this cycle, and then you changed it — so the value it verified and the DOM disagree</button>
+    <button type="button">Nothing real — it is a dev-mode formality, and production renders the same screen</button>
+    <p class="why" data-for="0">A double subscription gives you duplicate work, not this error.
+    Angular is not complaining about how many times the value arrived; it is complaining about
+    <em>when</em>. One assignment, made after the check, is enough on its own.</p>
+    <p class="why" data-for="1">Right. First pass: <code>rowCount</code> is <code>0</code>, the
+    DOM says <code>0</code>, checked and done. Then <code>ngAfterViewInit</code> sets it to
+    <code>12</code>. The verification pass reads <code>12</code>, sees <code>0</code> painted,
+    and refuses to pretend that is fine.</p>
+    <p class="why" data-for="2">This is the trap. Production skips the verification pass, so
+    nothing throws — and the screen keeps showing the stale <code>0</code> until something else
+    happens to trigger a check. Dev mode is the only thing standing between you and a number
+    that is quietly wrong in front of a customer.</p>
+  </div>
+
+  <div class="hf-kick">Where you've seen this before</div>
+  <p class="hf-say">Two-phase construction, in three places on your own stack.</p>
+
+  <div class="hf-terms">
+    <div class="hf-card hf-taped">
+      <h4>Spring's <code>@PostConstruct</code></h4>
+      <p>Spring builds the bean, wires it, <em>then</em> calls the annotated method. You already
+      accept that "constructed" and "ready" are two different moments on the backend —
+      <code>ngOnInit</code> is the same promise on the frontend.</p>
+      <div class="hf-scatter"><span>@PostConstruct</span><span>= ngOnInit</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>The OIDC callback screen</h4>
+      <p>The component takes the authorization code off the route and trades it for tokens. That
+      exchange goes in <code>ngOnInit</code> — the code is an input, and in the constructor it is
+      not there yet. Hitting back mid-flight is what <code>ngOnDestroy</code> is for.</p>
+      <div class="hf-scatter"><span>?code → tokens</span><span>cancel on leave</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>The "session expires in 2:00" banner</h4>
+      <p>It subscribes to a countdown in <code>ngOnInit</code>. Forget to unsubscribe and every
+      route visit stacks another live subscription, so after ten navigations the warning toast
+      fires ten times. <code>takeUntilDestroyed()</code> retired the old <code>destroy$</code>
+      Subject for exactly this.</p>
+      <div class="hf-scatter"><span>takeUntilDestroyed()</span><span>ten toasts ⚠</span></div>
+    </div>
+  </div>
+
+  <div class="hf-kick">Questions from the back row</div>
+  <div class="hf-ask">
+    <p class="q">If <code>ngOnChanges</code> already fires before <code>ngOnInit</code>, why do I need both?</p>
+    <p class="a">Because they answer different questions. <code>ngOnChanges</code> fires on every
+    input update — and never fires at all for a component that has no inputs.
+    <code>ngOnInit</code> runs exactly once either way. "Do this once, with the first values"
+    belongs in <code>ngOnInit</code>; "react to this changing" belongs in
+    <code>ngOnChanges</code>. And the trap: with decorator inputs the hook only fires when the
+    <em>reference</em> changes. Do <code>user.roles.push('admin')</code> in the parent and the
+    reference is identical, so the hook never fires and you will swear Angular is broken.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">What is <code>firstChange</code> actually for?</p>
+    <p class="a"><code>changes['user'].firstChange</code> is <code>true</code> only on the very
+    first delivery, which lets one handler do two jobs: initialise on the first call, diff
+    against <code>previousValue</code> on every call after it — no hand-rolled boolean flag.
+    Note that <code>SimpleChanges</code> is a map, not a record of all your inputs: if a
+    <em>different</em> input changed, <code>changes['user']</code> is simply absent, so guard the
+    key before you read it.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Is <code>ngOnDestroy</code> dead now that <code>takeUntilDestroyed</code> exists?</p>
+    <p class="a">For RxJS, mostly — <code>takeUntilDestroyed()</code> in a field initialiser, or
+    <code>takeUntilDestroyed(inject(DestroyRef))</code> anywhere else, and the subscription ends
+    with the component. But it only knows about observables. A <code>setInterval</code>, a chart
+    instance, a listener you added to <code>window</code>, an open socket — those still need
+    <code>ngOnDestroy</code> or a <code>DestroyRef.onDestroy()</code> callback, and a leaked one
+    keeps a whole component tree alive in memory.</p>
+  </div>
+
+  <div class="hf-kick">Grab a napkin</div>
+  <p class="hf-say">Predict it before you run it.</p>
+  <div class="hf-napkin">
+    <code>&lt;app-user-menu&gt;</code> takes <code>@Input() user</code>, and its constructor runs
+    <code>this.greeting = 'Hi ' + this.user.name;</code>. The parent binds
+    <code>[user]="currentUser()"</code> and somebody is definitely signed in.
+    <b>Part one:</b> what lands in the console on the first render?
+    <b>Part two:</b> you "fix" it to <code>this.user?.name</code>, the red text disappears — so
+    what does the menu greet them with for the rest of the session, and what happens to that
+    greeting when they change their display name?
+  </div>
+
   <!-- ── EXTREME-VIZ HERO: Angular Components ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -1071,5 +1255,6 @@ renderNodes(cur);
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

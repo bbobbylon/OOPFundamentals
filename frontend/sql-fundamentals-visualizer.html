@@ -49,6 +49,177 @@
     <div class="intro-ciam"><span class="tag">In your CIAM database:</span> Core tables — <code>users</code>, <code>roles</code>, <code>user_roles</code>, <code>sessions</code>, <code>audit_events</code> (metadata JSONB). "Which users have CIAM_ADMIN?" = JOIN users → user_roles → roles; "registrations per IDP this month?" = GROUP BY idp_type with COUNT(); "sessions expiring in the next hour?" = WHERE expires_at BETWEEN NOW() AND NOW() + INTERVAL '1 hour'; "inactive users to soft-delete?" = LEFT JOIN sessions with HAVING. Spring's JPA handles CRUD, but you'll write native SQL for reporting and bulk operations.</div>
   </div>
 
+
+  <p class="hf-deck">or, how one missing value quietly deletes rows from your report</p>
+
+  <div class="hf-kick">The problem</div>
+  <p class="hf-say">Your query isn't wrong. It's short.</p>
+
+  <div class="hf-card bad">
+    <div class="hf-cardtitle">The audit that returned zero rows and no error</div>
+    <p>You needed "CIAM users who have never started a session", so you wrote
+    <code>WHERE id NOT IN (SELECT user_id FROM sessions)</code>. It ran in 40ms. It returned
+    nothing. There are 6,000 such users. One legacy row in <code>sessions</code> has a
+    <code>NULL</code> user_id, and that single row silently answered your question with
+    "unknown" for every user in the table.</p>
+    <div class="hf-scatter">
+      <span>NOT IN + one NULL = 0 rows &#9888;</span>
+      <span>status != 'ACTIVE' skips NULL status &#9888;</span>
+      <span>COUNT(phone) &lt; COUNT(*)</span>
+      <span>LEFT JOIN quietly turns INNER &#9888;</span>
+    </div>
+    <p class="hf-foot">A query that throws gets fixed on Tuesday. A query that returns 41,000
+    of 47,000 users gets pasted into a compliance report and believed for a quarter.</p>
+  </div>
+
+  <div class="hf-card good">
+    <div class="hf-cardtitle">Ask about absence with the syntax built for absence</div>
+    <div class="hf-ladder">
+      <b>NULL is not a value — it is the hole where one isn't</b>
+      <i>&#8595; so <code>=</code> and <code>!=</code> can only ever answer "unknown" about it</i>
+      <b>status IS NULL OR status &lt;&gt; 'ACTIVE'</b>
+      <i>&#8595; and a subquery that might contain NULL needs a TRUE/FALSE question</i>
+      <b>NOT EXISTS (SELECT 1 FROM sessions s WHERE s.user_id = u.id)</b>
+    </div>
+  </div>
+
+  <div class="principle" style="text-align:left">
+    <b>WHERE keeps a row only when the predicate is TRUE — and NULL comparisons are never
+    TRUE.</b> They are not FALSE either. They are UNKNOWN, which fails the gate just as hard,
+    with none of the noise. NULL never fails your WHERE clause; it just never passes it.
+  </div>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">WHERE</span>
+      <p>I keep a row when its predicate is TRUE. Not TRUE-ish. TRUE.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">NULL</span>
+      <p>Then we will never meet. Compare me to anything &mdash; a string, a date, even to
+      another NULL &mdash; and the answer that comes back is UNKNOWN.</p>
+    </div>
+    <div class="hf-bub">
+      <span class="who">Your nightly report</span>
+      <p>Which is how I shipped six thousand fewer users than exist and stayed green the
+      whole time.</p>
+    </div>
+  </div>
+
+  <div class="hf-kick">The mechanism</div>
+  <p class="hf-say">Three answers, one gate, and the gate only opens for one of them.</p>
+
+  <div class="hf-card">
+    <ol class="hf-steps">
+      <li><span>a row arrives with <code>status</code> set to NULL &mdash; the column is nullable</span><span class="tag">the row</span></li>
+      <li><span>your predicate runs: <code>status != 'ACTIVE'</code></span><span class="tag">compare</span></li>
+      <li class="open"><span>the answer is neither TRUE nor FALSE &mdash; it is UNKNOWN</span><span class="tag">3-valued logic</span></li>
+      <li class="open"><span>WHERE admits TRUE only, and UNKNOWN is not TRUE</span><span class="tag">the gate</span></li>
+      <li><span>the row is dropped: no error, no warning, no row count to compare with</span><span class="tag">the sting</span></li>
+    </ol>
+    <p class="hf-annot">Steps 3 and 4 are the entire lesson. Every other NULL bug is these two
+    steps with a different predicate bolted on the front.</p>
+  </div>
+
+  <p>That is why the four bugs on that red card are one bug in four costumes.
+  <code>NOT IN (a, b, NULL)</code> expands to <code>x &lt;&gt; a AND x &lt;&gt; b AND x &lt;&gt; NULL</code>,
+  and that last term is UNKNOWN for every possible <code>x</code>, so the whole AND-chain is
+  UNKNOWN and nothing passes the gate. A LEFT JOIN dutifully hands you an unmatched row full
+  of NULLs, and then <code>WHERE s.created_at &gt; '2024-01-01'</code> evaluates UNKNOWN on it
+  and throws away exactly the rows LEFT JOIN existed to keep &mdash; put that condition in the
+  <code>ON</code> clause instead and the join stays a LEFT JOIN. <code>COUNT(phone)</code>
+  disagrees with <code>COUNT(*)</code> for the same reason, except here nothing is broken:
+  it is counting known phone numbers, which is what you literally asked for.
+  <b>Notice the asymmetry that catches everyone: <code>IN</code> survives a NULL in the list,
+  because TRUE OR UNKNOWN is TRUE &mdash; <code>NOT IN</code> dies of it.</b></p>
+
+  <div class="hf-check" data-answer="1">
+    <p class="q">Your CIAM audit needs "users who have never started a session".
+    <code>sessions.user_id</code> is nullable and one legacy row has NULL in it. You run
+    <code>SELECT email FROM users WHERE id NOT IN (SELECT user_id FROM sessions);</code>
+    What comes back?</p>
+    <button type="button">The users with no session row &mdash; one stray NULL can't change a subquery's result</button>
+    <button type="button">Zero rows, every time &mdash; that one NULL makes every comparison UNKNOWN</button>
+    <button type="button">An error, because NOT IN rejects a subquery that can return NULL</button>
+    <p class="why" data-for="0">That is what you meant, which is why this one is so tempting.
+    But <code>NOT IN</code> expands to <code>id &lt;&gt; 1 AND id &lt;&gt; 2 AND ... AND id &lt;&gt; NULL</code>,
+    and that final term is UNKNOWN for every id in the table. TRUE AND UNKNOWN is UNKNOWN, so
+    no row's predicate is ever TRUE.</p>
+    <p class="why" data-for="1">Right &mdash; and here is the cruelty: delete that one legacy
+    row and the query returns the correct answer. It passes in dev with clean seed data and
+    empties itself in prod. Use <code>NOT EXISTS</code>, which asks "does a matching row
+    exist" and can only answer TRUE or FALSE.</p>
+    <p class="why" data-for="2">No error. Nothing here is illegal SQL, and that is precisely
+    the problem: you get a clean, fast, empty result set and a green build.</p>
+  </div>
+
+  <div class="hf-kick">Where you've seen this before</div>
+  <p class="hf-say">The same hole, three places in your own stack.</p>
+
+  <div class="hf-terms">
+    <div class="hf-card hf-taped">
+      <h4>Spring Data derived queries</h4>
+      <p>You write <code>findByStatusNot("ACTIVE")</code> and Hibernate generates
+      <code>status &lt;&gt; ?</code>. The trap comes through the ORM untouched &mdash; every
+      user with a NULL status vanishes from the result and from your test expectations.</p>
+      <div class="hf-scatter"><span>findByStatusNot</span><span>&rarr; status &lt;&gt; ?</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>The dormant-account sweep</h4>
+      <p><code>WHERE last_login &lt; NOW() - INTERVAL '180 days'</code> never matches a user
+      who has <em>never</em> logged in, because their <code>last_login</code> is NULL. The
+      accounts you most want to disable are the exact ones you skip.</p>
+      <div class="hf-scatter"><span>OR last_login IS NULL</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>A UNIQUE index that admits duplicates</h4>
+      <p><code>UNIQUE (email, tenant_id)</code> does not stop two rows that share an email
+      when <code>tenant_id</code> is NULL &mdash; NULL isn't equal to NULL, so the index sees
+      no conflict. One human, two accounts, one very confusing support ticket.</p>
+      <div class="hf-scatter"><span>NULL &ne; NULL</span><span>duplicates slip in &#9888;</span></div>
+    </div>
+  </div>
+
+  <div class="hf-kick">Questions from the back row</div>
+  <div class="hf-ask">
+    <p class="q">Isn't <code>NULL = NULL</code> being NULL just a wart in the standard?</p>
+    <p class="a">It is the whole point, and it reads better with real data: two users whose
+    phone number you do not know are not thereby known to have the <em>same</em> phone number.
+    When you genuinely do want NULL to match NULL, Postgres gives you an operator that says
+    so &mdash; <code>IS NOT DISTINCT FROM</code> &mdash; and the fact that it needs its own
+    name tells you it is the unusual request, not the default one.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Then should I just make every column NOT NULL with a default of empty string?</p>
+    <p class="a">Careful &mdash; an empty string is a value, and it lies. "No phone number on
+    file" and "phone number is blank" are different facts, and once you flatten them you can
+    never separate them again. Use NOT NULL where the absence is genuinely impossible (a
+    <code>tenant_id</code>, a <code>created_at</code>), and where absence is real, keep NULL
+    and handle it on purpose. What you must not do is leave a column nullable out of habit
+    and then write predicates that pretend it isn't.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">Doesn't <code>COALESCE</code> just make all of this go away?</p>
+    <p class="a">It fixes the output, not the predicate &mdash; and in a WHERE clause it costs
+    you dearly. <code>WHERE COALESCE(status, '') &lt;&gt; 'ACTIVE'</code> is correct and
+    wraps the column in a function, so your index on <code>status</code> is dead and the
+    planner falls back to a sequential scan: an index seek touching a few dozen pages becomes
+    four million rows read on every run. <code>WHERE status IS NULL OR status &lt;&gt;
+    'ACTIVE'</code> is just as correct and still uses the index. Keep COALESCE for the SELECT
+    list, where it belongs.</p>
+  </div>
+
+  <div class="hf-kick">Grab a napkin</div>
+  <p class="hf-say">Predict it before you run it.</p>
+  <div class="hf-napkin">
+    <code>sessions</code> has four million rows and exactly one of them has a NULL
+    <code>user_id</code>. You run
+    <code>SELECT count(*) FROM users WHERE id NOT IN (SELECT user_id FROM sessions)</code>.
+    Two questions: what number comes back &mdash; and if you rewrite it with
+    <code>NOT EXISTS</code>, which of the two answers is the one that would have been mailed
+    to the compliance team?
+  </div>
+
 <div class="rt-ctlbar">
   <span class="lbl">scenario:</span>
   <span class="userseg" id="sfScen">
@@ -288,6 +459,7 @@ $('Run').addEventListener('click',run);renderNodes();chip();
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
