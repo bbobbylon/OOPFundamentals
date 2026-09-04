@@ -130,6 +130,182 @@
     </div>
   </div>
 
+
+<p class="hf-deck">or, why the fix everyone reaches for first does nothing for the stutter they came to fix</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You made the bundle 40% smaller. The list still stutters.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Two different problems, one word</div>
+  <p>"The app is slow" is two complaints wearing the same coat. <b>Load</b> is slow to appear;
+  <b>runtime</b> is slow to respond. Lazy loading, <code>@defer</code> and image optimisation
+  fix the first and do <i>nothing</i> for the second — so a team can spend a whole sprint on
+  performance, ship a genuinely faster first paint, and hear the exact same complaint back.</p>
+  <div class="hf-scatter">
+    <span>LCP 4.1s → 1.6s ✓</span>
+    <span>bundle 2.1MB → 1.2MB ✓</span>
+    <span>scrolling still janky ⚠</span>
+    <span>typing still laggy ⚠</span>
+  </div>
+  <p class="hf-foot">Nothing you did was wrong. It was just aimed at the half of the problem
+  nobody was complaining about.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Ask which half, before you fix anything</div>
+  <div class="hf-ladder">
+    <b>Slow the FIRST time and fine after? → load</b>
+    <i>↓ lazy routes, @defer, NgOptimizedImage, a smaller initial bundle</i>
+    <b>Fine at first and degrades while you use it? → runtime</b>
+    <i>↓ OnPush, signals, track on lists, virtual scroll, work off the template</i>
+    <b>Profile before either — the bottleneck is rarely where you guessed</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A template expression is not a value. It is a function you have asked Angular to call,
+  forever.</b> <code>{{ format(user) }}</code> looks like a field read and behaves like a
+  subscription — every change detection cycle, for the life of the component. That single
+  sentence explains almost every runtime performance bug in an Angular app.
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>It's one function. It formats a name. It cannot possibly be the bottleneck.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Change detection</span>
+    <p>It is one function <i>per binding, per component, per cycle</i>. You have 200 rows on
+    screen and I run a cycle on every keystroke. That is 200 calls per letter typed.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">A pure pipe</span>
+    <p>Same code, memoised on the input reference. I run once per row and then keep quiet
+    until that row's object actually changes. A <code>computed()</code> signal does the same
+    thing with less ceremony.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Change detection is a loop, and something restarts it constantly.</p>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Something async finishes</span>
+      <span class="go"><em>a click, an HTTP response, a setTimeout, a WebSocket frame</em>
+      <span class="arrow">→</span> Angular is told to tick</span></div>
+    <div class="stt"><span class="nm">Walk the component tree from the root</span>
+      <span class="go">default components are checked <em>every</em> time; OnPush ones only if
+      dirty <span class="arrow">→</span> evaluate bindings</span></div>
+    <div class="stt"><span class="nm">Evaluate every binding on every checked component</span>
+      <span class="go"><em>{{ format(user) }}</em> is called here — this is the moment the cost
+      is paid <span class="arrow">→</span> compare to last value</span></div>
+    <div class="stt"><span class="nm">Update only the DOM nodes whose value changed</span>
+      <span class="go">the DOM write is usually cheap; the <em>checking</em> is what cost you
+      <span class="arrow">→</span> back to the top on the next event</span></div>
+  </div>
+  <p class="hf-annot">The part everyone re-learns: OnPush does not stop the loop. The loop
+  still runs, and still walks past your component — OnPush only lets Angular <i>skip
+  evaluating its bindings</i>. That is why one un-memoised expression in a hot leaf can cost
+  more than the entire rest of the tree, and why "we made it all OnPush" and "it's still slow"
+  are perfectly compatible statements.</p>
+</div>
+
+<p><b>Which is also why <code>track</code> matters more than it looks.</b> Without it,
+<code>@for</code> cannot tell "the same user, moved" from "a different user", so a re-sort or a
+refetch destroys every DOM node and builds a new one — you lose scroll position, focus, any
+half-typed input, and CSS transitions, and you pay full DOM construction for data that did not
+change. With <code>track user.id</code> Angular moves the existing nodes instead. The rule is
+narrow: track by something <i>stable and unique</i>. Tracking by array index is worse than
+useless on a re-ordered list, because index 0 is always "the same" and always a different user.</p>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A component is <code>OnPush</code>. Its parent passes <code>[user]="user"</code>.
+  A WebSocket message arrives and your handler runs <code>this.user.name = 'Bobby'</code>. The
+  screen does not update. Why?</p>
+  <button type="button">The WebSocket callback ran outside Angular, so no cycle happened at all</button>
+  <button type="button">OnPush components ignore parent updates and need their own change detector run</button>
+  <button type="button">The object reference never changed, so OnPush had no reason to re-check it</button>
+  <p class="why" data-for="0">Plausible, and it is a real bug in its own right — but with
+  zone.js patching WebSocket, the cycle does run. Even in a zoneless app the symptom would be
+  identical for a different reason, which is exactly why guessing instead of profiling is
+  expensive here.</p>
+  <p class="why" data-for="1">They do not ignore parent updates — a new input <i>reference</i>
+  marks them dirty and they re-check happily. That is the entire contract, and it is why the
+  fix is about the reference, not about reaching for <code>ChangeDetectorRef</code>.</p>
+  <p class="why" data-for="2">Right. OnPush's question is "did the input reference change?",
+  not "did anything inside it change?" — and mutating a field leaves the reference identical.
+  Fix it at the source: <code>this.user = { ...this.user, name: 'Bobby' }</code>, or hold it in
+  a <code>signal</code> so the read itself registers the dependency. <code>markForCheck()</code>
+  works too and is the one to be suspicious of — it treats the symptom and leaves the mutable
+  state that will bite the next component too.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three places the same "how often does this actually run" question shows up.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A getter in the template</h4>
+    <p><code>get fullName()</code> looks cheaper than a method call and is exactly as
+    expensive — it is called on every cycle too. Angular cannot tell the difference; neither
+    can the profiler, until you look at the call count.</p>
+    <div class="hf-scatter"><span>same cost, better disguise</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>N+1 on the server</h4>
+    <p>Same disease, other tier: a loop that looks like one line and costs one query per row.
+    Both come from a call site that hides how many times it runs, and both are found by
+    counting, not by reading.</p>
+    <div class="hf-scatter"><span>count the calls, not the lines</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A CIAM user table</h4>
+    <p>5,000 rows, a permissions lookup per row, live session updates over a socket. Virtual
+    scroll takes the DOM to ~20 nodes; <code>track user.id</code> keeps them; OnPush plus
+    immutable updates stops the tree walk re-checking all of it.</p>
+    <div class="hf-scatter"><span>~45ms per cycle → ~3ms</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">How do I actually find the hot one instead of guessing?</p>
+  <p class="a">Chrome DevTools Performance, record while you reproduce the jank, and read the
+  flame chart's bottom-up view — the expensive function is named there, with a call count that
+  is usually the shocking part. Angular DevTools' profiler goes one better and attributes time
+  to components per cycle, so you can see which component is being checked and how long its
+  bindings take. Do this <i>first</i>. The bottleneck is regularly something nobody in the
+  room nominated.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Should I just put OnPush on everything?</p>
+  <p class="a">Broadly yes for presentational and leaf components — but understand what you
+  are signing up for. OnPush is a promise that state reaching this component only changes by
+  new reference, and every mutation someone adds later quietly breaks that promise with no
+  error, just a stale screen. Signals make the promise enforceable instead of cultural, which
+  is why signal-based components plus zoneless is where Angular is heading.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Is <code>@defer</code> a runtime fix or a load fix?</p>
+  <p class="a">Load — and precisely so. It splits a chunk out of the initial bundle and pulls
+  it in on a trigger (<code>on viewport</code>, <code>on interaction</code>, <code>on
+  idle</code>). Once the deferred block has rendered, it is an ordinary part of the tree and
+  gets change-detected like everything else. It shortens the time to first paint; it does not
+  make a single frame cheaper.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you run it.</p>
+<div class="hf-napkin">
+  A table shows 200 rows. Each row's template calls <code>formatRole(user)</code> once. The
+  page has a search box with default change detection. You type a 12-character query. How many
+  times does <code>formatRole</code> run — and which single change takes that number closest to
+  200?
+</div>
+
   <!-- ═══ EXTREME-VIZ HERO ═══ -->
   <div class="rt-hero">
     <div class="rt-ctlbar">
@@ -691,6 +867,7 @@ renderNodes(cur);
 </script>
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
