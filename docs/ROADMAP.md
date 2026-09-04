@@ -10,6 +10,36 @@ page/track counts in `README.md` and `DEVHUB-GUIDE.md`, then delete the item fro
 
 ---
 
+## ⚠ Branch state (2026-09-04) — read before touching git
+
+`claude/app-redesign-scope-cicd-9xi362` is the working branch and PR #1 is open against
+`master`.
+
+- **`legacy`** now exists at `9e4de0a` — the pre-overhaul master, preserved so master can be
+  overwritten safely.
+- **master is an ANCESTOR of the branch** (29+ ahead, 0 behind) and GitHub computes a clean
+  merge ref. There is nothing to merge *from* master, and master is the old format — do not
+  merge it in.
+- **Never force-push this branch.** Eight amend+force-pushes earlier rewrote it under Bobby's
+  clone and his next `git pull` conflicted across ~555 files. Ordinary fast-forward commits
+  only; his one-commit requirement is satisfied by **squash-merging** the PR at the end.
+- **One commit is stranded on Bobby's machine** — `2260122`, from session
+  `session_01BoEsHjQmczbCEB7dnjGVyT` (a *bridge* session running on his computer, not the
+  cloud; unreachable since 2026-09-01). It is on no remote ref. Recovering it, in this order:
+
+  ```
+  git push origin HEAD:claude/local-session-work    # 1. SAVE first, under a NEW name
+  git fetch origin                                  # 2. then repair the clone
+  git reset --hard origin/claude/app-redesign-scope-cicd-9xi362
+  ```
+
+  Order matters — step 3 destroys the commit if step 1 has not happened. It cannot push to the
+  same branch name; that push would be rejected.
+- **Open question: which colorway is default.** Bobby's local session made cream default; this
+  branch keeps dark, per his earlier "keep the dark colorway, add mocha/cream later".
+
+---
+
 ## ★ ACTIVE BACKLOG — Bobby's feedback pass (2026-08-29, evening)
 
 Bobby reviewed the site and gave a big feedback batch. Items below are ordered by his emphasis.
@@ -18,22 +48,58 @@ repeat them): every code snippet explained line-by-line in depth (never a one-li
 syntax coloring on ALL code, the Head First brain-friendly aesthetic on ALL subjects (not just
 the Java patterns pages), colored/manipulated text as a deliberate memory device.
 
-### 1. Head First aesthetic — FULL sitewide rollout (kit landed, sweep pending)
-The visual kit shipped this session (see Done section below): marker highlights, sticky notes
-(`.hf-note`), annotation arrows (`.hf-arrow`), Brain Power boxes (`.hf-brain`), no-dumb-questions
-Q&As (`.hf-qa`), big-type mnemonics (`.hf-big`), exaggerated contrast panels (`.hf-vs`), colored
-prose spans (`.hf-g/r/a/v/c`, `.hf-mark`). **3 pilot pages** done: abstraction, angular-binding,
-sorting. **Remaining: apply to all ~500 lesson pages**, tranche by track. Per-page bar: ≥1
-`.hf-big` mnemonic, ≥1 sticky-note memory hook, ≥1 Brain Power predict-first box, arrows pointing
-into code, `.hf-vs` where a before/after contrast exists. Also add images/diagrams where a
-picture beats prose (the book uses pictures constantly — we lean on the animated visualizers,
-but static annotated diagrams between sections are still missing on most pages).
+### 1. Head First rhythm — sitewide rollout (design landed, ~363 pages still to author)
+The design language shipped and is opted into on **513 of 528 pages** (`<html data-hf>`), and
+**102 pages are authored to the full nine-point rhythm**: deck line, problem/fix cards, a
+"one thing to remember" principle callout, a three-way dialogue, ONE shape-matched mechanism
+diagram, a knowledge check, "where you've seen this before", back-row Q&A, napkin predict-note.
+
+Current state (`node frontend/tmp_hfaudit.mjs`):
+
+| band | pages |
+|---|---|
+| under 40 (thin) | **0** — was 69 |
+| 40–60 (design, not yet the rhythm) | ~363 |
+| 60–75 | ~5 |
+| 75+ (at the bar) | ~97 |
+
+**Remaining: the ~363 in the 40–60 band.** Bobby gated this sweep on the model-switch
+checkpoint — do not start it unilaterally. Diagram choice is by SHAPE, never at random:
+`.hf-nest` contains, `.hf-slot` plugs, `.hf-cast` fans out, `.hf-one` funnels, `.hf-steps`
+gates, `.hf-cycle` returns.
+
+Still genuinely missing sitewide: **static annotated diagrams between sections**. The animated
+visualizers carry most of the visual load, and `visual` is the weakest dimension after
+`explain`.
 
 ### 2. Line-by-line code annotation audit (Bobby has asked "many many many times")
 Every static code snippet must teach each line — via the Code Walkthrough widget, an adjacent
 per-line annotation column, or inline `.hf-arrow` notes. A one-sentence intro above a 20-line
-block fails the bar. Sweep all 231 pages with `<pre>` blocks; convert or annotate. The
-bottom-of-page codewalks are "pretty good" per Bobby but should get MORE depth too.
+block fails the bar. The bottom-of-page codewalks are "pretty good" per Bobby but should get
+MORE depth too.
+
+**Scoped properly (2026-09-04).** "Sweep all 231 pages with `<pre>` blocks" was the wrong
+target, and so is `tmp_hfaudit.mjs`'s `explain` score — it divides by `<pre>` count, so a page
+of one-line snippets is punished as though they were unexplained programs (`streams` scores
+25/100 with exactly ONE substantial block; `typescript-fundamentals` scores worst on the site
+with 7 bare blocks out of 32). Measure instead: blocks of **6+ lines** with no CodeWalk or
+annotation nearby AND under 25% comment density. Verified against the rendered DOM, not just
+static markup.
+
+Real worklist across the 97 at-bar pages:
+
+- 278 snippets under 6 lines — already carried by the prose above them, leave alone
+- 781 substantial blocks
+- **~353 genuinely bare, across ~72 pages**
+
+Worst first (bare / substantial): `angular-standalone-migration` 18/26 ·
+`angular-material-cdk` 15/19 · `angular-content-projection` 13/21 · `config-pom-xml` 13/17 ·
+`config-environment-runtime` 13/16 · `angular-custom-directives` 13/15. None of these led the
+score-ranked list.
+
+A worked sample of the treatment is on `angular-standalone-migration-visualizer.html` (commit
+`b823165`): inline comments carrying the per-line meaning, plus an `.hf-arrow up` note tying
+the block to the idea underneath it. Awaiting Bobby's go-ahead on the volume.
 
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:

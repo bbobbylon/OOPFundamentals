@@ -2,6 +2,11 @@
 # DevHub — a Guided Tour
 
 > **New here? Don't try to read all 512 pages.** Pick a *path* below and follow it.
+>
+> **Contributors:** 102 of them are now authored to the nine-point teaching bar in
+> `CLAUDE.md`; the rest carry the design but not yet the rhythm. Run
+> `node frontend/tmp_hfaudit.mjs --top=20` for the current worklist, and read the
+> caveat on that tool below before you act on its ranking.
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
@@ -399,7 +404,7 @@ visualizers).
   banned syntax → insert after the intro card (`intro-ciam` anchor regex) →
   validate every page has exactly one widget + one script tag.
 - [`frontend/devhub-transitions.js`](../frontend/devhub-transitions.js) —
-  sitewide **click feedback + page-fade transitions**, on all 527 pages via
+  sitewide **click feedback + page-fade transitions**, on all 528 pages via
   one `<script>` tag (no per-page markup). Press feedback is an accent
   **pulse ring** (2026-08-30): pointerdown toggles `.dh-press` on the nearest
   `button`/`.tab`/`[role="button"]`/`.page-link`/`.track-card`/`.tc-dot`/
@@ -452,6 +457,17 @@ visualizers).
   it finds pages that lack the ingredients (no memory hooks, no recall beat, one
   explanation and out), which is exactly what "thin" means; it cannot tell a
   brilliant analogy from a limp one.
+
+  One dimension is worth distrusting specifically. **`explain` divides by
+  `<pre>` count**, so a page built from many one-line snippets (a lambda
+  cheatsheet, a list of functional-interface shapes) is scored as though each
+  were an unexplained program. `streams-visualizer.html` scores 25/100 on it and
+  has exactly *one* substantial code block; `typescript-fundamentals` scores
+  worst on the whole site and has 7 bare blocks out of 32. To find the real
+  worklist, count blocks of **6+ lines** with no CodeWalk or annotation nearby
+  and under 25% comment density — by that measure the site has ~353 genuinely
+  bare blocks across ~72 authored pages, and the ranking is completely different
+  from the score's.
 - **Cream contrast repair** (in
   [`frontend/devhub-hf-theme.js`](../frontend/devhub-hf-theme.js)) — the part CSS
   structurally cannot reach. 513 pages carry their own `<style>` block that
