@@ -123,6 +123,144 @@ local branch/tag `backup/local-before-merge-20260904` / `backup-local-20260904`.
 
 ---
 
+## 🔍 SEVEN-DIMENSION AUDIT (2026-09-05) — the backlog that came out of it
+
+Everything above this line was found by looking at teaching *rhythm*. This section
+came from auditing the seven dimensions nobody had measured: accessibility,
+performance, learner journey, interactive-feature health, retention mechanics,
+maintainability, and factual correctness of the content. Eight agents, every
+finding required to cite a file path, real command output or a browser
+measurement; anything unevidenced was discarded.
+
+**The theme: the parts all work and are not connected to each other.** The recall
+machinery is built and verified (19/19 exams, 16/16 decks, 9 graded IDEs) and
+reachable from almost nowhere. Navigation loses state between the hub and the
+page. That is a much better problem to have than "the content is wrong" — see
+"measured healthy" below.
+
+### ✅ Fixed 2026-09-05
+
+- **CodeWalk was inert on 307 of 465 pages** (`b088024`). `linesForStep()` read
+  only `s.line`; 307 pages author `lines:`. Every step advanced the counter and
+  highlighted nothing while the whole block sat dimmed at opacity .4. Invisible to
+  every gate — the widget renders, throws nothing, and scores as present.
+  The two keys are NOT interchangeable: `line:[a,b]` is a range (all 363 on the
+  site are exactly 2 elements), `lines:[...]` is an explicit list (1-13 elements,
+  545 steps have exactly 5). Treating either as the other teaches the wrong lines.
+- **The chapter rail credited the wrong page** (`dde21c1`). Rail stops were plain
+  `<a href>`; inside the hub's iframe that navigates the frame only, so
+  `currentFile` stayed stale and "Mark as Learned" credited the page you left.
+  Now routed through the `dlh-navigate` postMessage contract app.html already had.
+- **47 of 514 pages could not be bookmarked** (`fb00663`). The hash is written by
+  stripping both suffixes, so reading it back is ambiguous; the restore assumed
+  `-visualizer.html` and silently dropped every exam, deck and practice page on
+  the welcome screen. Now resolved against the sidebar. Round-tripped all 514:
+  467 → 514.
+- **90 of 124 sections dead-ended** (`90a9329`). The rail now renders
+  "Next up · <next section> →" on the last page of a section, and stays quiet on
+  the last section of a track.
+
+### Remaining, ranked by learner impact per unit of effort
+
+#### 4. Wire lessons forward into practice by inverting the exam refs you already have
+
+*1-2 days* — Three of the seven audits found this independently, which makes it the best-corroborated finding in the set. The recall machinery all works — 19 exams, 16 decks, 9 graded IDEs, all verified end to end in a browser — and it is reachable only from a sidebar track sitting 33rd of 34. A learner who finishes a lesson has nowhere to go. The data to fix it is already in the repo and already 100% valid, so the first 123 lessons cost zero new content.
+
+**Evidence.** I confirmed both directions: `grep -l 'href="exam-\|href="flashcards-\|href="practice-' *visualizer.html` returns 2 of 465 lesson pages (both ds-* pages pointing at exam-dsa-interview.html); `grep -oh "ref:" exam-*.html | wc -l` returns 560, and the retention audit resolved all 560 to existing files with 0 broken, covering 202 distinct lessons. 292 of 465 lessons have no on-page recall of any kind — including 50/53 Spring Boot, 50/74 Angular, 18/19 Identity & Auth and 27/27 React, which is precisely your CIAM job surface. Inverting the existing refs lifts practice-linked lessons from 173 (37%) to 296 (64%) with nothing new authored.
+
+**First step.** Write a one-off script that reads every exam bank's `ref:{label,file}` entries and emits a track→{exam,deck,practice} mapping keyed by lesson file. Then have devhub-chapters.js (already on all 512 pages) render a "Test yourself" footer strip after the last <h2> — one engine change plus one generated table, no per-page edits.
+
+#### 5. Make the hub's 512 lesson links real anchors, and give search an empty state
+
+*Half a day including the CSS reset* — Two auditors measured this separately. Every lesson link in app.html is a styled div with a click handler: no keyboard access, no middle-click-to-new-tab, no copy-link, no browser history, nothing for a crawler. It is one render function, and switching to `<a href>` with a preventDefault click handler keeps the SPA behaviour while restoring all of that at once. The blank-panel search miss is a two-line addition in the same file.
+
+**Evidence.** app.html:171 styles `.page-link` with `cursor: pointer; user-select: none` — the tell of a div standing in for a link, which I confirmed in the source. Measured in Chromium after clicking every track open: {pageLinks: 512, pageLinkTag: ["DIV"], pageLinkHref: 0, secHeaders: 123, secHeaderTag: ["DIV"]}; 34 track-headers, 0 with tabindex, 0 with aria-expanded. A real 400-press Tab walk with everything expanded finds 7 stops total. The instrumented listener scan flags 43 of app.html's 48 click-handled elements as keyboard-unreachable — the worst page on the site. Separately, searching a non-matching string leaves #sidebar-tracks with innerText === "" and no message; `grep -n 'no result\|No match\|nothing found' app.html` returns 0 hits.
+
+**First step.** In app.html:983-1021, build each link as `<a href="<file>" class="page-link">` and call preventDefault in the existing click handler; make .track-header/.sec-header `<button type="button">` carrying aria-expanded alongside the .open class. Add `button{all:unset}`-scale resets — the CSS already targets these by class. Give #search an aria-label while you're there.
+
+#### 6. Fix the handful of individually broken pages
+
+*An afternoon for all five* — Each is a small, self-contained defect on a page that currently teaches nothing or teaches the opposite of its point. Together they are maybe an afternoon, and the material-cdk one is the only page on the entire site that can render a blank screen.
+
+**Evidence.** (a) angular-material-cdk-visualizer.html line 7 — I read it: `<link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons" />`, the only render-blocking external resource across 528 pages. FCP measured 13,112ms against a site median of 312ms; with the host hanging, at 2.5s paintEntries=0 with 979/1010 elements laid out — a solid dark rectangle. It needs exactly three icons (lines 558, 561, 776). tmp_smoke files it as "failed only on OUTBOUND NETWORK — expected in a sandbox" and then prints "✓ 1 page(s) clean". (b) appsec-injection-xss-visualizer.html:397 puts a literal `<script>` in a node label that line 481 concatenates into innerHTML; the real script element swallows 4 of 5 diagram nodes, applyStep throws `Cannot read properties of null (reading 'classList')` at line 499, and because the throw escapes tick() the `disabled=true` set on Play and all five scenario buttons at line 508 is never lifted — the page is dead until reload. (c) typescript-declarations-visualizer.html ships a full rt-* hero including `<button class="rt-run" id="tdRun">` at line 175 that no script references — `grep -n tdRun` returns one line, the markup itself; it was the only page in the 438-page sweep with 1 inspector state on all four scenarios. (d) typescript-decorators-visualizer.html's Try It throws a red TypeError exactly at the line commented "silently ignored", because transpileModule emits "use strict" — the punchline line never runs. (e) tmp_smoke already names 121 clipped text elements on 73 pages (an h2 overflowing by +141px on interview-system-design), where the sentence is simply invisible on a phone.
+
+**First step.** Delete angular-material-cdk-visualizer.html line 7 and swap the three `<span class="material-icons">` glyphs for inline SVG or Unicode ♥ / + / ☰ — that leaves the whole 528-page site free of render-blocking third-party requests. Then teach tmp_smoke to distinguish a network failure on a lazy resource from one on a render-blocking <link> in <head>, so the next one can't hide in the sandbox bucket.
+
+#### 7. Four shared-file accessibility fixes that each cover hundreds of pages
+
+*About an hour total* — These are near-zero-effort because they all live in shared files, and two also help you directly: the reduced-motion block makes tmp_shot screenshots deterministic, and dropping the codegrade autofocus removes a dead end anyone can hit by pressing Tab. Grouped because individually none justifies a slot; together they are an hour.
+
+**Evidence.** (1) prefers-reduced-motion appears in 3 of 528 pages while 300 pages define unguarded @keyframes/transition; under Playwright's reducedMotion:'reduce' across 20 pages, 1,660 elements were still transitioning and `.rt-chip`'s computed transition was byte-identical in both modes. devhub.css:557 already uses the correct `no-preference` polarity for hover-lift, so the intent exists — it just never reached per-page CSS. (2) I confirmed 437 pages carry `.rt-inspect` and 0 have aria-live on it; the per-step payload — the actual HttpRequest, the JWT claims — is announced to nobody. (3) I confirmed devhub-codegrade.js:899 and devhub-tryit.js:419 both capture Tab with no escape hatch; only codegrade calls `ta.focus()` (line 990) on render, so on the 9 practice pages focus lands in the editor on load and 15 Tab presses later is still there, having typed indentation into the code — Run, the language tabs and the back link unreachable. (4) devhub-quiz.js:531-541 has a working 1-8/arrow shortcut that appears nowhere on screen, and `.dq-choice` is a bare div with no role, tabindex or aria-checked across 19 exams / 560 questions.
+
+**First step.** Add the global `@media (prefers-reduced-motion: reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}` block to devhub.css — one edit, 300 pages. Then add three lines to a shared script setting `role="status"` on every `.rt-inspect`, drop the `ta.focus()` at devhub-codegrade.js:990, and gate both Tab handlers behind an Escape flag.
+
+#### 8. Correct four pages that teach something false, and build the harness that found them
+
+*A day for the four pages; another day for the harness* — These are the only findings where a learner comes away actively wrong, and one is a deep-dive page whose entire subject is the thing it gets backwards. The structural lesson matters more than the four fixes: in every case the authored prose was right and the interactive payload — CodeWalk note:/vars:, scenario res:, .intro cards — was wrong. That is the layer the animation says out loud when attention is highest, and no gate reads it as code.
+
+**Evidence.** I reproduced the worst one myself: typescript-generic-inference-deep-visualizer.html:274-278 animates `merge("a", 42)` to a green ✅ reading "T = string|number. TS picks the union when types differ", and `tsc --noEmit --strict` on that exact signature gives `error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'`. The suggested fix `merge<string>("a",42)` is also an error. Same false model at line 336 (`pair(1,"x")`), and the clamp/NoInfer CodeWalk at line 454 has both halves inverted. Angular: I confirmed 7 pages still emit `provideExperimentalZonelessChangeDetection`, removed in v21; five pages give five different stability answers, and angular-zoneless-deep's intro (L85) contradicts its own body (L224). exam-angular.html #12 names the correct API — the exam bank is more current than the lessons. Java: the StructuredTaskScope CodeWalk fails `javac --release 21 --enable-preview` with `Subtask<U> conforms to Future<User>`, and is labelled a stable Java 21 feature when it is preview. SQL: sql-transactions-visualizer.html says phantoms are prevented at REPEATABLE READ in its table (L283) and prose (L120) and not prevented in its CodeWalk (L359-360).
+
+**First step.** Start with typescript-generic-inference-deep-visualizer.html:274-278 — the green ✅ on non-compiling code is the most misleading single thing found in the whole audit. Recast it as a red scenario ending in TS2345, and move the union example onto the page's existing `paint(["red","blue"],"green")` case, which is correct and compiles. Then consider a hand-run frontend/tmp_codecheck.mjs that extracts <pre> and CodeWalk `code:` arrays and compiles the TS/Java ones, ignoring blocks adjacent to an ❌ marker — it caught all four defects at 30 candidates read for 4 real hits.
+
+#### 9. Fix the dark theme's genuinely invisible text, then darken ~10 shared tokens for AA
+
+*Half a day for the dark 2.2 fixes; another half for the AA tokens* — Two separate problems the same tool measures. The first is unambiguous: text below the site's own "is it invisible" floor, on the theme nobody has ever run the gate against. The second is a policy call — 1,816 selectors sounds catastrophic but is really about ten shared components, and the code comments carrying your line-by-line explanations are among the least legible text on the page.
+
+**Evidence.** `tmp_contrast.mjs --theme=dark --min=2.2` over all 528 pages: "✗ 31 distinct selector(s) under 2.2:1, across 57 page(s)" — .topbar span at 1.37:1 on 12 pages, .cw-head span.cw-title (the CodeWalk's own title) at 1.95:1, .panel button at 1.81:1 (white on white), .cg-editor .cg-gutter at 2.19:1 on 9. Cream is clean at 2.2 on all 528, and the tool defaults to cream (tmp_contrast.mjs:44), which is why the espresso half was never measured. At the real AA bar: cream 1,816 selectors / 524 pages, dark 546 / 495, and the head of both lists is shared components — .hf-rail a 3.61:1 on 483 pages, .cw-line .cw-ln 4.45 cream / 2.24 dark on 464, .rt-ctlbar .rt-pill 3.25 on 428, .rt-inspect .rt-dir 3.94 on 424, .userseg button.on (the SELECTED chip) 2.77 on 155. Font sizes were measured against html{zoom:1.12} — .hf-rail a 10px/400, .rt-pill 11px/400, .cw-ln 12.5px — none qualifies for the large-text exemption, so 4.5 is the right bar.
+
+**First step.** Run `node frontend/tmp_contrast.mjs --theme=dark --min=2.2` and fix those 31 selectors — mark the deliberately faint connector glyphs (.lc-arrow, .hier-arrow, .pg-arrow) aria-hidden rather than recolouring, since the tool already exempts those. Then darken .cw-ln and the .cm comment colour first: they carry the line-by-line explanation and are the widest-reaching offenders in both themes.
+
+#### 10. Make the streak count retrieval, and let learners retake the questions they missed
+
+*A day for both; the due-date clock is a separate, larger piece* — Both are small changes to existing engines and both target the thing the site is for. Today a day spent re-drilling Spring flashcards breaks your streak, and after scoring 27% on an exam you are told which domain was weakest but can never see or re-attempt the 16 specific questions you failed — the next attempt reshuffles a fresh random draw, so hitting them again is chance.
+
+**Evidence.** I confirmed `touchStreak()` has exactly one call site: app.html:688, inside setStatus, which only fires from autoVisit's `if (!progressCache[file])` first-visit branch or the Mark-as-Learned toggle. Measured: a 5-day streak plus one day of pure review collapses to {"lastDate":"...","count":1}. A full 22-question timed exam and a flashcard session both wrote their own stores and left dlh_streak_v1 untouched. For misses: devhub-quiz.js:472 persists `{at, mode, pct, correct, total, domains}` and nothing else — a real run produced dlh-quiz:git with domain tallies and no question ids; `grep -niE "retry|missed questions" devhub-quiz.js` → 0 hits. The bank entries already carry stable `id` fields. Related and worth knowing: `grep -c "Date\|getTime\|now()" devhub-flashcards.js` returns 0 — the Leitner boxes have no clock, so nothing is ever "due", and README/DEVHUB-GUIDE's "spaced repetition" is currently weakness-ordered practice.
+
+**First step.** Add `missed: [qid]` to the attempt object in devhub-quiz.js finish() and a third mode beside Practice/Exam that draws from that id set. Then export a small DevHubStreak.touch() and call it from quiz finish(), flashcards grade(), devhub-hf-check on first answer, and codegrade on a passing run — and from autoVisit on any visit, not just the first.
+
+#### 11. Surface learning-paths.html and paint completion state on its steps
+
+*Half a day for surfacing plus step state; a day more to author the CIAM path* — It is the only ordered curriculum on the site, its own subtitle says "a library has no finish line; a path does", and no page links to it. Fixing discoverability is a card on the welcome screen; fixing the steps is one localStorage read. The CIAM path you actually care about exists only in a markdown file a learner never opens.
+
+**Evidence.** `grep -n "learning-paths" frontend/*.html frontend/*.js` returns exactly one hit — tracks-data.js:900, its own registration. Zero inbound links from any of 528 pages, including exam-readiness.html in the same section. Measured sidebar position: category 6 of 6 → track 5 of 5 → section 1 of 10, with both accordions defaulting closed. The welcome screen measured anyStartHereText: false, pathsLinkOnWelcome: []. The page reads DevHubQuiz.loadHistory for its capstone but never reads dlh_progress_v1, so a learner ten steps into a twelve-step path sees the day-one screen. Coverage is also inverted against your job: Azure/GCP/K8s/DataSci/AI all 100%, but Identity & Auth 4/19 (21%), Angular 17/74 (23%), Spring Boot 17/53 (32%); and DEVHUB-GUIDE's 11-step featured CIAM path has 4 steps that appear in no in-app path at all.
+
+**First step.** Add a "New here? Start with a path →" card at the top of #welcome in app.html above the progress card, and cross-link exam-readiness.html. Then in learning-paths.html's step renderer (lines 391-400) read dlh_progress_v1 and paint ✓ learned / ● visited / ○ untouched using the same three-state vocabulary app.html:refreshUI() already uses.
+
+#### 12. Split devhub-hf-theme.js's contrast repair into a read phase and a write phase
+
+*A day* — It is the largest main-thread cost on every lesson page and the fix is a well-understood refactor, not a redesign. Ranked last of the real items because it costs responsiveness on mid-range phones rather than breaking anything, and because CLAUDE.md documents the pass as load-bearing for cream legibility — so this is optimisation, not removal.
+
+**Evidence.** Ablation at 4x CPU throttle with the script stubbed to an empty body: typescript-fundamentals-visualizer.html goes from 10,458 getComputedStyle calls / TBT 1,060ms / 284ms style recalc to 0 calls / TBT 603ms / 143ms — 457ms of blocking time from this one script. angular-rxjs 313ms attributable, collections 180ms. CPU profiling agrees: 467ms self-time versus 85ms for the next-largest script on the page. The ratio is the tell — angular-rxjs makes 13,378 getComputedStyle calls over 2,135 nodes to apply 156 inline colour writes. Cause is repair() at devhub-hf-theme.js:198-246: getComputedStyle at 203, groundOf walking ancestors with more getComputedStyle at 143, then style.setProperty at 245 inside the same loop, so each write invalidates style and the next read forces a synchronous recalc. Google's "good" TBT bar is 200ms. Worth noting this cost is partly downstream of per-page .who-* colours living in inline <style> where CSS can't reach them.
+
+**First step.** Split repair() into two loops: collect every element's computed colour and ground into an array first (pure reads), then apply all style.setProperty writes in a second pass. Also widen the groundOf cache — line 152 only caches when stack.length is 0, so translucent-panel subtrees re-walk to the root for every child.
+
+### Measured healthy — do not spend effort here
+
+- Registry integrity is immaculate — 512 registered entries, 512 unique files, 0 duplicates, 0 registered-but-missing, 0 orphan lesson pages (the 16 unregistered files on disk are all infrastructure). tracks-data.js is a genuine single source of truth.
+- Page-level robustness: loading all 512 registered pages in Chromium produced 0 uncaught page errors and 0 load failures. tmp_vcheck passes cleanly at 528 pages / 512 registered.
+- Caching and page weight are far healthier than expected. Five lesson navigations in one session hit every shared asset exactly once; the warm second navigation transfers 4.4KB with 446KB served from cache. Median lesson page: FCP 312ms, max DOM depth 12 across all 77 sampled pages, and exactly one render-blocking external resource on the whole site (item 6 removes it).
+- The scenario engines work. 436 of 438 rt-* pages animate with distinct per-step inspector states across multiple scenarios — the two exceptions are named in item 6. The pacing is wrong; the mechanism is not.
+- The assessment layer is verified working end to end in a browser: 19/19 exams (560 questions, all with per-choice reasoning, all 560 refs resolving to existing files), 16/16 flashcard decks (459 cards, Leitner boxes persisting), 9/9 graded practice IDEs across 4 languages with real test diffs. The notebook round-trips too.
+- Shared-script wiring has zero drift in both directions: 231/231 <pre>-bearing pages load devhub-syntax.js and 0 load it without a <pre>; 465/465 CodeWalk, 119/119 Try It, 21/21 quiz, 9/9 codegrade pages all load their engine. The 15 pages that link no devhub.css load only the self-injecting devhub-transitions.js, so the self-containment rule is holding.
+- Code samples are overwhelmingly correct where it counts: 43/43 extracted Java snippets compile on JDK 21 (0 needing anything newer than CheerpJ's Java 8 target), 22/23 Python snippets run, 29/30 TypeScript widgets transpile and run clean.
+- Security and framework content held up under scrutiny — NIST SP 800-63B-aligned password guidance with no weak-hashing advice anywhere, implicit flow marked dead on all 6 pages that mention it, PKCE as default, and correct Spring Security 6 migration facts across rbac-deep, method-security-deep and oauth2-resource-server. All 25 exam-typescript and 27 exam-angular explanations read end to end with zero errors.
+- Offline degradation is honest and fast. Every playground and Try It widget prints a clear message within ~0.6s and re-enables its Run button; nothing hangs. The CDN loads for pyodide/sql.js/typescript/CheerpJ are all lazy and off the critical path.
+- The cream theme passes its own 2.2 floor on all 528 pages, every page sets lang="en", the focus ring at devhub.css:441 is real and no stylesheet anywhere sets outline:none, and the cream-legibility race documented in ROADMAP.md no longer reproduces (6/6 runs at 4.92:1).
+- Pages are genuinely distinct hand-authored material, not template clones — only 27 of 528 pages fall into near-duplicate pairs, and those are the deliberately generated flashcard/practice/index families. The inline JS is mostly per-page teaching DATA (only 10.3% duplicated logic), and 82% of the 438 scenario pages already share one uniform data contract.
+
+### Known, deliberately deferred
+
+- The `.hf-rail` "you are here" label is centre-aligned rather than positioned
+  over the current stop, so on a section-final page it floats above the wrong
+  dot. Cosmetic, pre-existing, noticed while shipping the Next-up link.
+- Discarded for weak or out-of-scope evidence: the heading-order sweep, splitting
+  `devhub-hf.css`, the nginx `immutable` bug (the live site is GitHub Pages, so
+  that config is not in the serving path), dead per-page CSS, consolidating the
+  458 hand-rolled stage engines, `.who-*` palette drift, and cross-device sync.
+  Full reasoning in the audit output; none was dropped for being fabricated.
+
+---
+
 ## ★ ACTIVE BACKLOG — Bobby's feedback pass (2026-08-29, evening)
 
 Bobby reviewed the site and gave a big feedback batch. Items below are ordered by his emphasis.

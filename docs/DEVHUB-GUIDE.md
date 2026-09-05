@@ -421,6 +421,29 @@ visualizers).
   parent hub instead of following the link directly (grep `dlh-navigate` if
   touching that pattern). Everything here is inert under
   `prefers-reduced-motion: reduce`.
+- [`frontend/devhub-chapters.js`](../frontend/devhub-chapters.js) — the
+  **chapter rail** (`.hf-rail`) at the top of a lesson: where this page sits in
+  its section, which pages sit either side, and — since 2026-09-05 — where the
+  path continues. Reads `tracks-data.js`, so a page never hand-writes its own
+  position. Three things worth knowing before editing it:
+  **(1) Rail links must not be plain anchors.** The hub renders lessons in an
+  iframe and tracks the current page in its own `currentFile`; a bare
+  `<a href>` navigates the *frame* only, so the hub's breadcrumb, active sidebar
+  link, hash and progress all stay on the page you arrived from — and because
+  progress is keyed off `currentFile`, "Mark as Learned" then credits the page
+  you LEFT. Rail links therefore route through `railClick`, which posts
+  `{type:'dlh-navigate', file}` to the parent (a contract `app.html` has accepted
+  since it was built). The real `href` is kept so middle-click, ctrl-click,
+  copy-link and the keyboard still behave like links; only the plain left-click
+  is intercepted, and only when embedded.
+  **(2) `nextSectionStart()` is what stops sections dead-ending.** On the last
+  page of a section it returns the first page of the next one and the rail
+  renders "Next up · <section> →". It returns `null` on the last section of a
+  track — a real ending, not a dead end. `locate()` filters out empty sections
+  first, or "next" could point at one.
+  **(3) Styles live in `devhub-hf.css`** (`.hf-rail*`), not injected — the rail
+  only renders on kit pages, which link it.
+
 - [`frontend/devhub-syntax.js`](../frontend/devhub-syntax.js) — sitewide
   **IDE-style syntax highlighting** for static code, on all 231 pages that
   contain `<pre>` blocks. Auto-runs on DOMContentLoaded: any static,
