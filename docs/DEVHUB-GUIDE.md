@@ -1,7 +1,7 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 515 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 519 pages.** Pick a *path* below and follow it.
 >
 > **Contributors:** 102 of them are now authored to the nine-point teaching bar in
 > `CLAUDE.md`; the rest carry the design but not yet the rhythm. Run
@@ -10,7 +10,7 @@
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **515 browser visualizers** across **34 tracks** (grouped into
+DevHub is a learning hub: **519 browser visualizers** across **34 tracks** (grouped into
 categories in the sidebar — Languages & Concepts, Frontend, Backend & APIs, DevOps/Cloud & Data, Practice & Prep; several tracks also have a 🍳 **Common Recipes** section of practical how-tos — API→form, batch upload, password complexity), plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
@@ -66,7 +66,7 @@ Or jump straight to any file linked below.
 | 🦀 **Rust** | ownership, borrowing & the **borrow checker** (memory safety, no GC), then the **async web stack** — Tokio + Axum, type-driven extractors | [Ownership, Borrowing & the Borrow Checker](../frontend/rust-fundamentals-visualizer.html) |
 | 🏗️ **Full-Stack Stacks** | how the layers combine into real stacks — **SPA + REST** (Angular + Spring/CIAM), **MERN**, server-rendered **monoliths** (Rails/Laravel), **compiled API + SPA** (Go/Rust) | [Full-Stack Web Stacks Compared](../frontend/web-stacks-visualizer.html) |
 | 🔌 **MuleSoft** | enterprise integration with Anypoint — **Mule flows**, the Mule Event &amp; **DataWeave**, then **API-led connectivity** and the **Anypoint API Gateway** (JWT/rate-limit policies) | [Flows, the Mule Event &amp; DataWeave](../frontend/mulesoft-fundamentals-visualizer.html) |
-| ♾️ **DevOps & CI/CD** | **CI/CD pipelines** (GitHub Actions: jobs/steps/artifacts/gated environments) and **Infrastructure as Code** (Terraform plan/apply/state/drift) | [CI/CD Pipelines](../frontend/devops-cicd-pipeline-visualizer.html) |
+| ♾️ **DevOps & CI/CD** | **CI/CD pipelines** (GitHub Actions: jobs/steps/artifacts/gated environments), **Infrastructure as Code** (Terraform plan/apply/state/drift), and **deploying on Render** — the PaaS deploy lifecycle, Blueprints (`render.yaml`), managed Postgres &amp; secrets, and a real Spring Boot + Angular stack | [CI/CD Pipelines](../frontend/devops-cicd-pipeline-visualizer.html) |
 | ⎈ **Kubernetes** | pods, deployments, services, config & secrets, Helm, Spring on K8s | [Kubernetes Fundamentals](../frontend/kubernetes-fundamentals-visualizer.html) |
 | 🗄️ **SQL & Databases** | SQL, indexes & query plans, transactions/ACID, CTEs, normalization, Postgres | [SQL Fundamentals](../frontend/sql-fundamentals-visualizer.html) |
 | ⌨️ **Shell & Scripting** | CLI basics, **Bash**, **PowerShell** objects, **CMD/Batch** — three shells side by side — plus the three **cloud CLIs** (`aws`, `az`, `gcloud`) taught as one shared grammar | [CLI Basics](../frontend/shell-cli-basics-visualizer.html) |
@@ -166,6 +166,15 @@ accounts are seeded in dev: **`demo` / `demo12345`** (USER) and **`admin` / `adm
 - **"Building the auth-aware Angular app"** → 🅰️ [Auth State (Signals)](../frontend/angular-auth-state-signals-deep-visualizer.html)
   · [Reactive Forms (Auth)](../frontend/angular-auth-forms-deep-visualizer.html) (live, typeable)
   · [Lazy Loading & Preloading](../frontend/angular-lazy-loading-deep-visualizer.html).
+- **"I'm deploying my project on Render"** → ♾️ [From git push to live URL](../frontend/render-deploys-visualizer.html)
+  (the port rule, the health check, the 15-minute nap) → [Blueprints (`render.yaml`)](../frontend/render-blueprints-visualizer.html)
+  (the whole environment in one reviewable file, plus preview environments per PR)
+  → [Postgres, Env Vars & Secrets](../frontend/render-databases-env-visualizer.html)
+  (internal vs external connection strings, the free-tier 30-day clock, the connection budget)
+  → [Spring Boot + Angular on Render](../frontend/render-spring-angular-visualizer.html)
+  (a Docker web service and a static site, joined by the rewrite rule that deletes CORS).
+  Read alongside [Docker for Spring Boot](../frontend/docker-spring-boot-visualizer.html)
+  and [Deployment Strategies](../frontend/devops-deployment-strategies-visualizer.html).
 
 ---
 

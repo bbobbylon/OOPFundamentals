@@ -844,7 +844,7 @@ window.DEVHUB_TRACKS = [
   },
   {
     id: 'devops', icon: '♾️', label: 'DevOps & CI/CD',
-    desc: 'Ship code automatically and provision infra from code: CI/CD pipelines (GitHub Actions) and Infrastructure as Code (Terraform)',
+    desc: 'Ship code automatically and provision infra from code: CI/CD pipelines (GitHub Actions), Infrastructure as Code (Terraform), and deploying a real Spring Boot + Angular stack on Render',
     sections: [
       { label: 'Delivery', pages: [
         { title: 'CI/CD Pipelines (GitHub Actions)', file: 'devops-cicd-pipeline-visualizer.html',           level: 'beginner' },
@@ -852,6 +852,12 @@ window.DEVHUB_TRACKS = [
       ]},
       { label: 'Infrastructure as Code', pages: [
         { title: 'Terraform — plan / apply / state',  file: 'devops-iac-terraform-visualizer.html',           level: 'intermediate' },
+      ]},
+      { label: 'Deploying on Render', pages: [
+        { title: 'Render — from git push to live URL', file: 'render-deploys-visualizer.html',                level: 'beginner' },
+        { title: 'Blueprints (render.yaml)',       file: 'render-blueprints-visualizer.html',                 level: 'intermediate' },
+        { title: 'Postgres, Env Vars & Secrets',   file: 'render-databases-env-visualizer.html',              level: 'intermediate' },
+        { title: 'Spring Boot + Angular on Render', file: 'render-spring-angular-visualizer.html',            level: 'advanced' },
       ]},
     ]
   },

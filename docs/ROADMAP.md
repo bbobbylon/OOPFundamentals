@@ -123,6 +123,74 @@ local branch/tag `backup/local-before-merge-20260904` / `backup-local-20260904`.
 
 ---
 
+## ✅ Done — "Deploying on Render" (requested + landed 2026-09-05)
+
+Bobby is now deploying on Render and asked for it to sit with the other CI/CD material.
+Four new pages under a **Deploying on Render** section in the ♾️ DevOps & CI/CD track,
+which was the thinnest track on the site at three pages and is now seven.
+
+| page | level | the one thing to remember |
+| --- | --- | --- |
+| [`render-deploys-visualizer.html`](../frontend/render-deploys-visualizer.html) | beginner | *"Bind `0.0.0.0:$PORT` — or you don't exist."* Push → build → health check → live, plus no-open-ports, the 15-minute idle spin-down, and a failed deploy that never takes traffic. |
+| [`render-blueprints-visualizer.html`](../frontend/render-blueprints-visualizer.html) | intermediate | *"If it isn't in the file, it isn't real."* `render.yaml` as four resources, wiring without secrets (`sync: false` / `generateValue` / `fromDatabase`), preview environments per PR, and dashboard drift getting resurrected on the next sync. |
+| [`render-databases-env-visualizer.html`](../frontend/render-databases-env-visualizer.html) | intermediate | *"A free Postgres expires 30 days after it is created."* Internal vs external connection strings, where a secret actually lives (env var / group / secret file; build-time vs run-time), and the connection budget — Hikari pool × instances × services against `max_connections`. |
+| [`render-spring-angular-visualizer.html`](../frontend/render-spring-angular-visualizer.html) | advanced | *Two services, one origin, no CORS.* A Docker web service and a static site, joined by a rewrite whose destination is a full public URL — so the browser never learns there were two hosts. |
+
+**Every fact was verified against render.com/docs before it was authored**, deliberately,
+because audit item #8's whole finding is that DevHub's false claims hide in the
+*interactive payloads* — CodeWalk `note:`/`vars:`, scenario results, intro cards — which
+no gate reads as code. Two would have been wrong from memory: there is **no native Java
+runtime** (Spring Boot must use `runtime: docker`, which reshaped pages 1 and 4 entirely),
+and the static-site route field is **`source`**, not `path` — two doc sources disagreed
+and a search settled it. A wrong field name teaches something false in exactly the way
+#8 describes.
+
+The advanced page's angle is the one most tutorials miss: you can **delete** the CORS
+problem instead of configuring it. A static site's rewrite `destination` accepts a full
+public URL, so `/api/*` → the API's URL makes every call same-origin — no preflight, no
+`allowedOrigins` list to keep in step with each preview environment, and session cookies
+become first-party. The costs are named too: the API now sits behind a proxy, so
+`server.forward-headers-strategy=framework` is required or every absolute URL Spring
+builds (redirects, `Location`, the OIDC `redirect_uri`) names the wrong host.
+
+**Also fixed, and a prerequisite for the above:** `devhub-hf.css` had **six lesson-chrome
+classes that four existing pages authored and nothing styled** — `hf-meta`, `hf-badge`
+(+`.level`/`.mid`), `hf-question`, `hf-numcards`, `hf-refhead`, `hf-refgrid`. Markup with
+no rules renders as unstyled inline text, which no gate flags because the elements are
+present and the page throws nothing. Written against `--hf-*` variables only, so cream is
+carried automatically with no `[data-theme]` selector to get wrong.
+
+**`tmp_hfaudit` earned its keep twice.** First it caught a bug I had introduced and no
+other gate can see: all four pages carried `<body class="track-shell">`, inherited from
+`shell-gcloud-cli-visualizer.html`, the page they were cloned from. That class is not
+decoration — `devhub.css:61` and `devhub-hf.css:2317` key the per-track accent colours off
+it in both themes, so the pages were wearing the Shell track's palette inside the DevOps
+track. vcheck cannot see it (the page is valid), and the audit only surfaced it because it
+reads the track from the body class and filed four brand-new DevOps pages under `shell`.
+**Clone-and-adapt inherits more than the skeleton; the body class is part of the adapting.**
+
+Then, scored honestly, the pages came back at **61.5–65** — above the track but not at the
+bar, and for two reasons that were both real gaps rather than measurement artefacts. They
+had **no `.intro` card** (CLAUDE.md #6 and a standing ask: a deck line is not an intro),
+and **one visual apiece** — the animated stage and nothing else. Both were inherited from
+the template, which has the same two gaps. Fixed on all four: a full plain-English intro
+card with `intro-gist` / `intro-cards` / `intro-ciam`, and one mechanism diagram chosen by
+the *shape* of the concept rather than at random — `hf-steps` for the deploy lifecycle and
+for the request path through the rewrite, `hf-cycle` for the drift-and-resurrection loop,
+`hf-one` for the connection budget (many pools funnelling into one `max_connections`). Then
+16 `hf-arrow` annotations, one per walkthrough step, each naming the single line in the
+block above that does the work — because four of the eight `<pre>` blocks per page were
+commands with only a prose lead-in, which is exactly what CLAUDE.md #7 rules out.
+**61.5 → 87.5 on all four**, and they are the only pages in the track above 75.
+
+**Gates:** `tmp_vcheck` ✓ (535 pages, 519 registered), `tmp_genpracticemap --check` ✓,
+`tmp_assetcheck` ✓ (no teaching assets lost vs `f549358`), plus a hand-written check that
+every CodeWalk `lines:` entry is in range, non-blank and within the 1–13 limit on all four
+pages — the failure mode from audit item #1, which no gate reads. The four browser gates
+could not run: Playwright is not installed on this machine.
+
+---
+
 ## 🔍 SEVEN-DIMENSION AUDIT (2026-09-05) — the backlog that came out of it
 
 Everything above this line was found by looking at teaching *rhythm*. This section

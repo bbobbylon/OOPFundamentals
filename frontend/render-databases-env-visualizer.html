@@ -1,0 +1,622 @@
+<!doctype html>
+<html lang="en" data-hf>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Render — Postgres, Env Vars &amp; Secrets — DevHub</title>
+  <link rel="stylesheet" href="devhub.css"/>
+  <link rel="stylesheet" href="devhub-hf.css"/>
+  <style>
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
+    .who-badge{font-size:10.5px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
+    .who-NET{background:rgba(88,166,255,.18);color:#a5d0ff}
+    .who-DB{background:rgba(63,185,80,.18);color:#7ee787}
+    .who-SEC{background:rgba(255,212,121,.16);color:#ffe07a}
+    .who-APP{background:rgba(167,139,250,.18);color:#c4b5fd}
+    .who-TIME{background:rgba(148,163,184,.18);color:#cbd5e1}
+  </style>
+</head>
+<body class="track-devops">
+<div class="container">
+  <a class="back" href="app.html">← back to Dev Hub</a>
+
+  <div class="hf-meta">
+    <span class="hf-badge level">Intermediate</span>
+    <span class="hf-badge">15 min read</span>
+    <span class="hf-badge">internal URL · 30-day clock · pooling</span>
+  </div>
+
+  <h1>Render — Postgres, env vars and the 30-day clock</h1>
+  <p class="hf-deck">or, two connection strings for one database, and the free tier that starts a timer the moment you click create</p>
+  <div class="intro">
+    <div class="intro-head"><span class="ico">🗄️</span> What does "managed Postgres" actually give you, and why are there two connection strings?</div>
+    <p class="intro-lead">
+      A managed database is a real PostgreSQL server that <strong>somebody else patches, backs up and keeps running</strong>. You get a hostname and a password; you don't get a machine to log into. Render hands you <b>two</b> ways to reach it, and picking the wrong one is the single most common configuration mistake on the platform: the <em>internal</em> address only resolves from inside Render's private network, and the <em>external</em> one is reachable from anywhere on the internet.
+    </p>
+    <ul class="intro-gist">
+      <li><b>Internal for your app, external for your laptop.</b> Internal never leaves the private network — faster and not exposed.</li>
+      <li><b>Same region, or no private network.</b> A service in Oregon cannot use a Frankfurt database's internal address.</li>
+      <li><b>A free database expires 30 days after it is created</b> — not after 30 idle days. The clock starts at creation and does not stop.</li>
+      <li><b>Connections are a budget.</b> Every instance of every service multiplies its pool size against one fixed <code>max_connections</code>.</li>
+    </ul>
+    <div class="intro-cards">
+      <div class="intro-mini">
+        <h4>An environment variable is not a secret store</h4>
+        <p>It is good enough for most things and it is what you'll use. But know what it is: readable by anyone with dashboard access, visible to every process in the container, and easy to print into a log by accident. Group it, scope it, and never log the whole environment in an error handler.</p>
+      </div>
+      <div class="intro-mini">
+        <h4>Build time and run time are different worlds</h4>
+        <p>Your build runs on one machine; your app runs on another. A variable available to one is not automatically available to the other, and a value baked into a front-end bundle at build time is shipped to every visitor's browser. That distinction is where "the secret is right there in the dashboard, why is it null?" comes from.</p>
+      </div>
+    </div>
+    <div class="intro-ciam"><span class="tag">Spring / CIAM:</span> Spring Boot will not accept Render's connection string as-is. The platform hands you a libpq-style URL; JDBC wants <code>jdbc:postgresql://host/db</code> with the username and password as separate properties. So you pull <code>host</code>, <code>database</code>, <code>user</code> and <code>password</code> individually and assemble the URL yourself — which is also why Hikari's pool size becomes something you have to think about rather than something you inherit.</div>
+  </div>
+
+
+  <div class="hf-question">
+    <span class="ico">&gt;_</span>
+    <p>Your service queries its database in single-digit milliseconds. A second service — same
+    account, same code, same connection string, different <em>region</em> — can't reach it at
+    all. Nothing is misconfigured, no firewall rule is missing, and the string is byte-for-byte
+    identical. <b>What is actually different?</b></p>
+  </div>
+
+  <!-- ── THE IDEA ────────────────────────────────────────────────────────── -->
+  <div class="hf-kick">The idea</div>
+  <p class="hf-say">One database, two doors — and picking the wrong one is a latency bug, not an error message.</p>
+  <p>Every Render Postgres hands you <b>two connection strings for the same database</b>, and
+  they are not interchangeable.</p>
+  <ul style="font-size:14px;line-height:1.85">
+    <li>The <b>Internal Database URL</b> travels over Render's private network. It is fast,
+    it never touches the public internet, and it works from your other Render services on one
+    condition: <span class="hf-mark">the same account <em>and</em> the same region</span>.
+    Render's own advice is blunt — "use the internal URL wherever possible."</li>
+    <li>The <b>External Database URL</b> goes over the public internet, encrypted with
+    Render-managed TLS. It works from anywhere: your laptop, a GitHub Action, a colleague's
+    machine, a service you put in the wrong region nine months ago. It is slower, and it is
+    reachable by anyone holding the string.</li>
+  </ul>
+  <p>That is the answer to the question above. Two services, one region apart, and only one of
+  them has a private network path to the database.</p>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">You</span>
+      <p>Why is prod fast and staging slow? Same query, same indexes.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">Render</span>
+      <p>Prod is in oregon with the database and uses the internal URL. Staging is in frankfurt, so it fell back to the external URL — every query is crossing an ocean and negotiating TLS to do it.</p>
+    </div>
+  </div>
+
+  <div class="hf-big">A free Postgres expires 30 days after it is created.</div>
+  <p>Not thirty days of inactivity. Thirty days from <em>creation</em>, whether you use it every
+  hour or never touch it again. Render gives you a 14-day grace period to upgrade before the
+  database is deleted, and if you miss that, it goes — with the data in it.</p>
+  <p>This is the single most expensive surprise on the platform, because it is silent, it is
+  slow, and it lands on exactly the wrong thing: <span class="hf-mark">the portfolio project you
+  built in March and linked on your CV in May</span>. The web service is still there. The URL
+  still resolves. The app comes up and every page that needs data is broken. Keep-alive pingers
+  do nothing about it — they keep the <em>service</em> awake, and this clock was never about
+  traffic.</p>
+
+  <!-- ── MOTIVATION ──────────────────────────────────────────────────────── -->
+  <div class="hf-card">
+    <div class="hf-one">
+      <div class="callers">
+        <span>api · instance 1</span><span>api · instance 2</span><span>api · instance 3</span><span>the worker service</span><span>your laptop's psql</span>
+      </div>
+      <div class="funnel">each opens its own Hikari pool ↓ 10 connections apiece, and none of them knows the others exist</div>
+      <div class="instance">one Postgres · max_connections<small>a fixed number set by your plan — 40 or so on the small tiers, and the last one to ask gets refused</small></div>
+    </div>
+    <p class="hf-annot">This is the arithmetic nobody does until it fails. Hikari's default
+    pool is 10, and that default is <em>per process</em> — so scaling your API from one
+    instance to three did not add a third of the load, it tripled the connection demand.
+    Add a worker service and an open psql window and you are at 41 against a ceiling of 40.
+    The error arrives as <code>FATAL: sorry, too many clients already</code>, on the
+    healthiest-looking service you own, at whatever moment the last connection was
+    requested — which is to say, <b>not necessarily in the service that caused it.</b></p>
+  </div>
+
+  <div class="hf-kick">Motivation</div>
+  <p class="hf-say">Four things that are worth knowing before you need to know them.</p>
+
+  <div class="hf-numcards">
+    <div><b class="num">01</b><h5>The region choice is permanent-ish</h5>
+      <p>Private networking is same-region only, and moving a service's region means creating a
+      new one. Pick deliberately on day one.</p></div>
+    <div><b class="num">02</b><h5>Secrets have three homes here</h5>
+      <p>An env var, an env group, and a secret <em>file</em> — and knowing which is which stops
+      you pasting a keystore into a text box.</p></div>
+    <div><b class="num">03</b><h5>Build time and run time are different worlds</h5>
+      <p>A variable your build needs and a variable your app needs are not automatically the
+      same set, and the failure looks like nonsense.</p></div>
+    <div><b class="num">04</b><h5>Connections are a budget, not a faucet</h5>
+      <p>Three services with a pool of ten each is thirty connections. Small plans say no, and
+      the error names the symptom, never the cause.</p></div>
+  </div>
+
+  <!-- ── ANATOMY ─────────────────────────────────────────────────────────── -->
+  <div class="hf-kick">Anatomy of a connection string</div>
+  <p class="hf-say">Click each part — the host is the only one that differs between the two URLs, and it changes everything.</p>
+
+  <div class="hf-anatomy">
+    <button class="tok on" data-part="scheme">postgresql://</button>
+    <button class="tok" data-part="user">devhub</button>
+    <button class="tok" data-part="pw">:••••••••</button>
+    <button class="tok" data-part="host">@dpg-cs4k2h9r0ff-a</button>
+    <button class="tok" data-part="db">/devhub</button>
+    <div class="hf-anatomy-info" data-part="scheme">
+      <b>the scheme — and a JDBC papercut</b>
+      <p>Render gives you a URL starting <code>postgresql://</code> (or the older
+      <code>postgres://</code>). Most drivers are happy with it. <b>The JVM is not:</b> JDBC
+      wants <code>jdbc:postgresql://…</code>, and it does not accept a username and password
+      embedded in the URL the way libpq does. So a Spring Boot app usually splits the value into
+      <code>spring.datasource.url</code>, <code>.username</code> and <code>.password</code>
+      rather than pasting the string in whole. That mismatch — a perfectly valid URL that the
+      JDBC driver refuses — is one of the most common first-hour failures for a Java service
+      here.</p>
+    </div>
+    <div class="hf-anatomy-info" data-part="user" hidden>
+      <b>the user</b>
+      <p>The role Render created with the database. In a Blueprint it's the <code>user:</code>
+      field, and it comes back out through <code>fromDatabase</code> with
+      <code>property: user</code> — which is exactly how you feed
+      <code>spring.datasource.username</code> without ever typing it.</p>
+    </div>
+    <div class="hf-anatomy-info" data-part="pw" hidden>
+      <b>the password — the reason you never copy this string</b>
+      <p>It's right there in the URL, in plain text. Every place you paste it is a place you now
+      have to protect and remember to update: a <code>.env</code> file, a Slack message to
+      yourself, a screenshot in a ticket. <span class="hf-mark">Reference it, don't copy
+      it</span> — <code>fromDatabase</code> in your Blueprint means one authoritative copy, and
+      rotating the credential updates every consumer at once instead of leaving stale copies to
+      fail later.</p>
+    </div>
+    <div class="hf-anatomy-info" data-part="host" hidden>
+      <b>the host — the entire difference between the two URLs</b>
+      <p>This is the only part that changes. The <b>internal</b> URL uses a bare hostname with
+      no public domain on it — it resolves only inside Render's private network, from services
+      in the <em>same account and region</em>. The <b>external</b> URL is the same name with a
+      region-qualified <code>render.com</code> domain appended, resolvable from anywhere and
+      protected by TLS instead of by network isolation. Same database, same credentials, two
+      completely different security and latency stories — and nothing in your app's config
+      hints at which one you handed it.</p>
+    </div>
+    <div class="hf-anatomy-info" data-part="db" hidden>
+      <b>the database name</b>
+      <p>The Postgres database itself — the Blueprint's <code>databaseName:</code>, as opposed
+      to <code>name:</code>, which is what Render calls the resource in its own dashboard.
+      Two names for two different layers, and the one <code>fromDatabase</code> refers to is
+      the Render one.</p>
+    </div>
+  </div>
+
+  <div class="hf-check" data-answer="0">
+    <p class="q">A GitHub Action needs to run a schema migration against your Render Postgres before a release. Which connection string does it use?</p>
+    <button type="button">The external URL — the runner isn't on Render's private network at all</button>
+    <button type="button">The internal URL — it's faster, and migrations should be as quick as possible</button>
+    <button type="button">Either one; they're the same database, so the string doesn't matter</button>
+    <p class="why" data-for="0">Correct, and the reason is worth stating precisely: the internal hostname doesn't resolve outside Render's private network, so a GitHub runner can't even look it up — you get a DNS failure, not a permissions error. Anything running off-platform (your laptop, CI, a colleague) uses the external URL, over TLS. And if it's a <em>Render</em> service doing the migrating, the better answer is a <code>preDeployCommand</code>, which runs on the private network and needs no external exposure at all.</p>
+    <p class="why" data-for="1">It <em>is</em> faster — but speed isn't the constraint here. The internal hostname is only resolvable from inside Render's private network, and a GitHub-hosted runner is not on it. The job would fail at name resolution before it ever tried to authenticate.</p>
+    <p class="why" data-for="2">Same database, yes — but not the same reachability. The internal URL works only from the same account and region <em>inside</em> Render; the external one works from anywhere. Treating them as interchangeable is how a service ends up quietly routing every query over the public internet.</p>
+  </div>
+
+  <!-- ── HERO ── -->
+  <div class="hf-kick">See it move</div>
+  <p class="hf-say">Two doors into one database, a clock nobody hears, where a secret actually lives, and the day you run out of connections.</p>
+  <div class="card" style="border-color:var(--accent)">
+    <h2 id="hero" style="margin-top:0;border:0;padding:0;color:var(--accent2)">▶ The database, the clock and the secrets</h2>
+    <p class="note top">Pick a scenario and press ▶ — the inspector shows the real strings,
+    timers, error messages and connection maths at every step.</p>
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="rvSeg">
+        <button data-s="urls" class="on">① two strings, one database</button>
+        <button data-s="clock">② the 30-day clock</button>
+        <button data-s="secrets">③ where a secret lives</button>
+        <button data-s="pool">④ out of connections</button>
+      </span>
+      <button class="rt-run" id="rvRun">▶ Play</button>
+      <span class="rt-pill" id="rvPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="rvDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="rvDir">▶ READY</span>
+        <div class="rt-cap" id="rvCap">Pick a scenario and press ▶ Play</div>
+        <div class="rt-payload" id="rvPay"></div>
+        <div class="rt-headers" id="rvHdr"></div>
+        <div class="rt-result" id="rvRes"></div>
+      </div>
+    </div>
+    <div class="who-row">
+      <span class="who-badge who-NET">NET — the network path</span>
+      <span class="who-badge who-DB">DB — the database</span>
+      <span class="who-badge who-SEC">SEC — a secret</span>
+      <span class="who-badge who-APP">APP — your service</span>
+      <span class="who-badge who-TIME">TIME — a clock running</span>
+    </div>
+  </div>
+
+  <!-- ── REFERENCE ───────────────────────────────────────────────────────── -->
+  <div class="hf-kick">The reference</div>
+  <p class="hf-say">What you can pull off a database, and where each kind of secret belongs.</p>
+
+  <h5 class="hf-refhead">Properties <code>fromDatabase</code> can give you</h5>
+  <div class="hf-refgrid">
+    <div><code>connectionString</code><span>The whole internal URL. The usual choice for a service in the same region.</span></div>
+    <div><code>connectionPoolString</code><span>The pooled endpoint — many app connections multiplexed onto few database ones.</span></div>
+    <div><code>host</code> / <code>port</code><span>The pieces, for a driver that wants them separately — which JDBC does.</span></div>
+    <div><code>user</code> / <code>password</code><span>Feed <code>spring.datasource.username</code> and <code>.password</code> without ever typing them.</span></div>
+    <div><code>database</code><span>The database name inside Postgres.</span></div>
+  </div>
+
+  <h5 class="hf-refhead">The three homes for a secret</h5>
+  <div class="hf-refgrid">
+    <div><code>an env var</code><span>One value, one service. <code>sync: false</code> keeps it out of the file; <code>generateValue</code> means nobody ever types it.</span></div>
+    <div><code>an env group</code><span>One set of values, many services. Prevents two services from slowly disagreeing.</span></div>
+    <div><code>a secret file</code><span>For things that are <em>files</em>: a keystore, a service-account JSON, an <code>application-prod.yml</code>. Render places it in your service rather than stuffing it into a variable.</span></div>
+    <div><code>never: the repo</code><span>A committed secret is compromised even after you delete the commit. Rotate it; don't just remove it.</span></div>
+  </div>
+
+  <h5 class="hf-refhead">The clocks and limits worth writing down</h5>
+  <div class="hf-refgrid">
+    <div><code>free Postgres · 30 days</code><span>From <b>creation</b>, not from last use. Then a 14-day grace period to upgrade before deletion.</span></div>
+    <div><code>free web service · 15 min</code><span>Spins down after 15 idle minutes; about a minute to wake. A different clock, a different fix.</span></div>
+    <div><code>internal URL · same region</code><span>Same account and same region, or it simply doesn't resolve.</span></div>
+    <div><code>connection limits</code><span>Every plan caps concurrent connections. Your pool size × your instance count is the number that matters.</span></div>
+  </div>
+
+  <div class="hf-check" data-answer="2">
+    <p class="q">Your build needs an npm auth token to install a private package. You set it as a normal environment variable on the service, and the build fails with a 401 from the registry — but the running app can read every other variable perfectly.</p>
+    <p class="q" style="font-weight:400;opacity:.8">Predict before you pick: what's the shape of this bug?</p>
+    <button type="button">The token is wrong — a 401 is a credentials problem, so regenerate it</button>
+    <button type="button">Environment variables are only available at run time, so no build can ever see one</button>
+    <button type="button">Build time and run time are different phases, so a value has to be available to the phase that needs it</button>
+    <p class="why" data-for="0">The most natural reading of a 401, and the reason this one eats an afternoon: you regenerate a token that was never wrong. Before touching the credential, check whether the phase that failed could see <em>any</em> value at all — echo its length in the build log.</p>
+    <p class="why" data-for="1">Too strong in the other direction. Builds absolutely can use environment variables — for Docker services Render even translates them into build arguments. The rule isn't "never"; it's that the two phases have separate contexts and some values are deliberately scoped to one of them.</p>
+    <p class="why" data-for="2">Right — this is a <em>phase</em> bug wearing a credentials costume. Your build runs on a build machine and your app runs on an instance; they're different environments, and some variables (Render's own <code>RENDER_WEB_CONCURRENCY</code>, for instance) exist only at run time. The debugging move that finds it in thirty seconds is to print the variable's <b>length</b> — never its value — in the failing phase. Length 0 means "not visible here", which sends you somewhere completely different from "wrong token".</p>
+  </div>
+
+  <!-- ── WALKTHROUGH ─────────────────────────────────────────────────────── -->
+  <div class="hf-kick">Put it together</div>
+  <p class="hf-say">Wire a Spring Boot service to a Render Postgres properly — predict each output before you reveal it.</p>
+
+  <div class="hf-walk">
+    <div class="hf-walk-step">
+      <h6>Give JDBC the pieces, not the URL</h6>
+      <p>Render's <code>connectionString</code> is a libpq-style URL with credentials inside it,
+      and the JDBC driver won't take it. Pull the parts separately and assemble the one shape
+      the JVM actually accepts.</p>
+      <pre>envVars:
+  - key: DB_HOST
+    fromDatabase: { name: devhub-db, property: host }
+  - key: DB_NAME
+    fromDatabase: { name: devhub-db, property: database }
+  - key: SPRING_DATASOURCE_USERNAME
+    fromDatabase: { name: devhub-db, property: user }
+  - key: SPRING_DATASOURCE_PASSWORD
+    fromDatabase: { name: devhub-db, property: password }
+  - key: SPRING_DATASOURCE_URL
+    value: jdbc:postgresql://${DB_HOST}/${DB_NAME}</pre>
+      <pre class="hf-walk-out" data-nohl>HikariPool-1 - Starting...
+HikariPool-1 - Added connection org.postgresql.jdbc.PgConnection@5a1c0f2b
+HikariPool-1 - Start completed.
+
+# no password anywhere in the repo, and rotating it in Render
+# updates all four values at once.</pre>
+      <div class="hf-arrow">four separate <code>fromDatabase</code> pulls exist for one reason: <b>JDBC will not parse the string Render gives you</b>. Take the pieces and assemble <code>jdbc:postgresql://${DB_HOST}/${DB_NAME}</code> yourself, and pass user and password as their own properties.</div>
+    </div>
+    <div class="hf-walk-step">
+      <h6>Check which door you came in through</h6>
+      <p>Nothing in your config announces whether you're on the private network or crossing the
+      public internet — but the hostname tells you, and so does the latency.</p>
+      <pre data-nohl>$ echo $DB_HOST
+$ psql "$DATABASE_URL" -c '\timing' -c 'select 1'</pre>
+      <pre class="hf-walk-out" data-nohl># internal (same region) — a bare hostname, no public domain:
+dpg-cs4k2h9r0ff-a
+Time: 1.284 ms
+
+# external (from your laptop) — region-qualified public domain:
+dpg-cs4k2h9r0ff-a.oregon-postgres.render.com
+Time: 84.402 ms</pre>
+      <div class="hf-arrow">the hostname is the tell, and so is the timing — <b>1ms against 84ms</b>. A bare hostname means you are on the private network; a <code>.oregon-postgres.render.com</code> suffix means your traffic went out to the internet and came back.</div>
+    </div>
+    <div class="hf-walk-step">
+      <h6>Do the connection maths before Postgres does it for you</h6>
+      <p>Every plan caps concurrent connections, and a connection pool is a <em>reservation</em>,
+      not a request — Hikari opens up to its maximum and keeps them. Multiply before you deploy
+      the third service.</p>
+      <pre data-nohl>$ psql "$DATABASE_URL" -c 'show max_connections;'
+$ psql "$DATABASE_URL" -c 'select count(*) from pg_stat_activity;'</pre>
+      <pre class="hf-walk-out" data-nohl>max_connections
+-----------------
+ 22
+
+count
+-------
+ 21          ← api (10) + worker (10) + your psql session (1)
+
+# the next connection gets:
+FATAL: sorry, too many clients already</pre>
+      <div class="hf-arrow">multiply before you scale, not after: <b>pool size × instances × services</b> against one fixed ceiling. The failure lands on whichever service asks last, which is rarely the one that caused it.</div>
+    </div>
+    <div class="hf-walk-step">
+      <h6>Find out when the clock runs out — today, not in October</h6>
+      <p>If the database is free, it has an expiry date that was set the moment you created it.
+      Look it up now, put it in your calendar, and decide deliberately whether this project
+      deserves a paid database or an export.</p>
+      <pre data-nohl>$ pg_dump "$EXTERNAL_DATABASE_URL" &gt; devhub-$(date +%F).sql</pre>
+      <pre class="hf-walk-out" data-nohl># Free database created 2026-03-04
+#   expires   2026-04-03   (30 days after CREATION, not last use)
+#   grace     +14 days to upgrade, then deleted with its data
+
+# a dump costs you one command and turns "it vanished"
+# into "I restored it".</pre>
+      <div class="hf-arrow">the word to notice is <b>CREATION</b>. This is not an idle timer you can reset by using the database — it started when you clicked create and it does not stop. Write the date down now; a <code>pg_dump</code> is one command.</div>
+    </div>
+  </div>
+
+  <div class="hf-note"><b>The CIAM version of this page:</b> notice that the internal URL is
+  protected by <em>where it is</em> and the external URL by <em>what it proves</em> — network
+  isolation versus TLS and credentials. That's the same choice you make between a private
+  service on an internal network and a public API behind OAuth, and the same reason
+  <span class="hf-mark">"it's on the internal network" is a boundary, not an
+  authorisation</span>. Anything reachable from the internet needs to prove who it is on every
+  request; anything reachable only from inside still needs to, the day someone adds a service
+  you didn't expect. Use the private path because it's faster and smaller-surface — never as a
+  substitute for authentication.</div>
+
+  <!-- ── NO DUMB QUESTIONS ───────────────────────────────────────────────── -->
+  <div class="hf-kick">There are no dumb questions</div>
+  <div class="hf-ask">
+    <p class="q">If the internal URL is better, why does the external one exist at all?</p>
+    <p class="a">Because plenty of legitimate things aren't on Render. Your local machine
+    running a migration, a GitHub Action doing a release, a BI tool, a colleague reproducing a
+    bug, <code>pg_dump</code> taking the backup you'll be glad about later — none of those can
+    resolve an internal hostname, because it isn't in public DNS. The external URL is the door
+    for all of them, which is exactly why it deserves respect: it is reachable from anywhere in
+    the world by anyone holding the string. Use internal for service-to-service traffic, use
+    external deliberately and briefly, and treat the external string as the credential it
+    is.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">What's the actual difference between a connection pool and the pooled connection string?</p>
+    <p class="a">They solve the same shortage at different layers, and knowing which one you
+    need is the whole trick. <b>Your pool</b> — HikariCP in Spring Boot — lives inside one
+    instance and stops that instance from opening a new TCP connection per request. <b>The
+    pooled connection string</b> lives in front of the database and multiplexes many client
+    connections onto a smaller number of real ones. If a single service is exhausting the
+    database, tune your own pool. If <em>the sum of your services</em> exceeds the database's
+    limit — three services × ten connections each, plus previews, plus the psql window you left
+    open — no per-service tuning fixes it, and <code>connectionPoolString</code> is the right
+    answer. <span class="hf-mark">The tell is the error:</span>
+    <code>too many clients already</code> comes from Postgres, not from your app, so the
+    shortage is on the database side of the wire.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">My free database expired. Is the data really gone?</p>
+    <p class="a">After the grace period, yes — and this is the part to internalise <em>before</em>
+    it happens rather than after. The 30 days start at creation and the 14-day grace period is
+    your window to upgrade; miss both and the database is deleted along with what was in it.
+    Two habits make it a non-event. First, a <code>pg_dump</code> to a file you actually keep,
+    which is one command and can be a monthly calendar reminder. Second, be honest about which
+    projects are demos and which are real: a demo can be re-seeded from a script in your repo,
+    and if it can't, it isn't a demo — it's a production database with no backups and no plan,
+    which is a much more uncomfortable sentence and exactly the right one to say out loud.</p>
+  </div>
+
+  <section>
+    <h2>Where to go next</h2>
+    <ul style="font-size:13px;line-height:1.9">
+      <li><a class="dd-link" data-file="render-blueprints-visualizer.html" href="render-blueprints-visualizer.html">Render Blueprints (render.yaml)</a> — where <code>fromDatabase</code> and <code>sync: false</code> get written down.</li>
+      <li><a class="dd-link" data-file="render-spring-angular-visualizer.html" href="render-spring-angular-visualizer.html">Spring Boot + Angular on Render</a> — this wiring, in a real two-service stack.</li>
+      <li><a class="dd-link" data-file="sql-postgres-visualizer.html" href="sql-postgres-visualizer.html">PostgreSQL Deep Dive</a> — what's on the other end of that connection string.</li>
+      <li><a class="dd-link" data-file="spring-boot-configuration-visualizer.html" href="spring-boot-configuration-visualizer.html">Spring Boot Configuration</a> — how <code>SPRING_DATASOURCE_*</code> becomes a bean.</li>
+      <li><a class="dd-link" data-file="sql-replication-visualizer.html" href="sql-replication-visualizer.html">Replication &amp; High Availability</a> — where a single managed database stops being enough.</li>
+    </ul>
+  </section>
+</div>
+
+<!-- ── Code Walkthrough ── -->
+<div id="cw-rdb"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-rdb',{
+  id:'cw-rdb',
+  title:'Wiring a JVM service to a Render Postgres — without ever typing the password',
+  subtitle:'Most Render database guides show one line: DATABASE_URL from connectionString, done. That works for Node and Python and fails for the JVM, because JDBC will not accept a libpq-style URL with credentials embedded in it. This is the version that actually works for Spring Boot — the pieces pulled separately and reassembled into the shape the driver wants — plus the pool setting that decides whether your third service can connect at all.',
+  steps:[
+    {
+      lines:[1,2,3,4,5,6],
+      note:'The database resource. plan: free is the one to look at hard: a free Postgres is deleted 30 days after CREATION — not after 30 days of disuse — with a 14-day grace period to upgrade first. That clock has no relationship to traffic, so the keep-alive pinger people use for sleeping web services does nothing about it. region matters for a completely different reason: the fast internal connection string only resolves from services in the SAME account and region, so this line and the service region line below have to agree or every query silently takes the long way round over the public internet.',
+      vars:{'30 days from creation':'plus a 14-day grace period to upgrade, then the database and its data are deleted','region must match the service':'internal hostnames are private-network only — same account, same region','name vs databaseName':'name is the Render resource (what fromDatabase points at); databaseName is the Postgres database'},
+      tone:'start'
+    },
+    {
+      lines:[13,14,15,16,17,18,19,20],
+      note:'Here is the JVM-specific part, and the reason this page exists. Render hands you a connection string shaped like postgresql://user:password@host/db — libpq understands that, and so do the Node and Python drivers. JDBC does not: it wants jdbc:postgresql://host/db and it takes the username and password as SEPARATE properties, not embedded in the URL. So instead of pulling connectionString, pull the four pieces — host, database, user, password — and let Spring assemble them. Every one of these is a reference, not a literal: nothing here is a value you typed, and rotating the database credential updates all four at once.',
+      vars:{'why not connectionString':'JDBC rejects embedded credentials and needs the jdbc: scheme prefix','four references, zero secrets':'no password in the repo, in a .env, or in a screenshot in a ticket','rotation is free':'change it in Render and every consumer follows — there is no second copy to update','available properties':'connectionString, connectionPoolString, host, port, user, password, database'},
+      tone:'ok'
+    },
+    {
+      lines:[22,23,24],
+      note:'The assembled JDBC URL, referencing the two variables defined above it. Note what is NOT here: no username, no password. That is not tidiness, it is the requirement — the JDBC driver reads those from spring.datasource.username and spring.datasource.password, which the previous step populated directly. If you have ever pasted a Render connection string straight into spring.datasource.url and watched it fail with a driver error that does not mention credentials at all, this is why.',
+      vars:{'jdbc: prefix is mandatory':'the driver is selected by the scheme; without it, nothing matches','credentials live in their own properties':'not in the URL — that is the libpq convention, not the JDBC one','swap host for the pooled endpoint':'when the SUM of your services exceeds the database connection limit'},
+      tone:'ok'
+    },
+    {
+      lines:[26,27,28],
+      note:'The connection budget, made explicit. A Hikari pool is a reservation rather than a request: it opens up to maximum-pool-size connections and HOLDS them, so the number that matters to the database is your pool size multiplied by your instance count, summed across every service — plus every preview environment, plus the psql window you left open yesterday. Small database plans cap concurrent connections at a surprisingly low number, and when you cross it Postgres answers "FATAL: sorry, too many clients already". Notice that error comes from the DATABASE, not from your app, which is the clue that no amount of restarting the service will help.',
+      vars:{'a pool is a reservation':'Hikari opens connections and keeps them, whether or not requests are arriving','the number to compute':'pool size × instances × services (+ previews) vs the plan connection limit','too many clients already':'a Postgres error, not a Spring one — the shortage is on the database side','when to use connectionPoolString':'when no single service is at fault and the SUM is the problem'},
+      tone:'ok',
+      callout:'Three failures, three completely different fixes. "Driver claims to not accept jdbcUrl" = you gave JDBC a libpq URL; split it into pieces. "Connection timed out" from one service while another is fine = a region mismatch, so you are on the external path or no path at all. "FATAL: sorry, too many clients already" = the connection budget, so count pools across every service before touching any one of them. Read which layer the error came from — driver, network or Postgres — and it tells you which of the three you have.'
+    }
+  ],
+  code:[
+    'databases:',
+    '  - name: devhub-db           # the Render resource — fromDatabase points here',
+    '    databaseName: devhub      # the database inside Postgres',
+    '    user: devhub',
+    '    plan: free                # ← deleted 30 days after CREATION (+14-day grace)',
+    '    region: oregon            # must match the service, or no private network',
+    '',
+    'services:',
+    '  - type: web',
+    '    name: devhub-api',
+    '    region: oregon            # ← same region: this is what enables the internal URL',
+    '    envVars:',
+    '      - key: DB_HOST',
+    '        fromDatabase: { name: devhub-db, property: host }',
+    '      - key: DB_NAME',
+    '        fromDatabase: { name: devhub-db, property: database }',
+    '      - key: SPRING_DATASOURCE_USERNAME',
+    '        fromDatabase: { name: devhub-db, property: user }',
+    '      - key: SPRING_DATASOURCE_PASSWORD',
+    '        fromDatabase: { name: devhub-db, property: password }',
+    '',
+    '      # JDBC needs its own scheme, and credentials kept OUT of the URL',
+    '      - key: SPRING_DATASOURCE_URL',
+    '        value: jdbc:postgresql://${DB_HOST}/${DB_NAME}',
+    '',
+    '      # the connection budget: pool × instances × services vs the plan limit',
+    '      - key: SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE',
+    '        value: "5"'
+  ]
+});
+</script>
+
+<script>
+document.addEventListener('click', function (e) {
+  var a = e.target.closest('a.dd-link'); if (!a || !a.dataset.file) return;
+  if (window.top !== window.self) { e.preventDefault();
+    window.parent.postMessage({ type:'dlh-navigate', file:a.dataset.file }, '*'); }
+});
+</script>
+
+<script>
+(function(){
+  const P='rv', $=id=>document.getElementById(id);
+  const SCEN={
+    urls:{ req:'internal vs external', intro:'One database, two connection strings — and the only part that differs is the hostname.',
+      nodes:[
+        {id:'same',icon:'🏠',nl:'service in the SAME region',ns:'internal URL · private network',who:'NET'},
+        {id:'fast',icon:'⚡',nl:'query in ~1 ms',ns:'never touches the public internet',who:'DB'},
+        {id:'other',icon:'🌍',nl:'service in ANOTHER region',ns:'internal hostname does not resolve',who:'NET'},
+        {id:'ext',icon:'🔐',nl:'external URL · TLS',ns:'works from anywhere — slower',who:'NET'},
+        {id:'laptop',icon:'💻',nl:'your laptop, CI, pg_dump',ns:'external is the only door',who:'APP'},
+      ],
+      steps:[
+        {node:'same',chip:'internal',cap:'Same account, same region — the private path',pay:{host:'dpg-cs4k2h9r0ff-a',domain:'none — not in public DNS',requires:'same account AND same region',render_says:'"use the internal URL wherever possible"'},ins:'A bare hostname with no public domain on it. It resolves only inside Render\'s private network, which is both the performance story and the security story.'},
+        {node:'fast',chip:'~1ms',tone:'ok',cap:'Fast, and off the internet entirely',pay:{latency:'~1.3 ms',tls_handshake:'not needed — the traffic never leaves the private network',egress:'no public internet hop'},ins:'The latency difference is not a micro-optimisation. At a hundred queries per request it is the difference between a page that feels instant and one that feels broken.'},
+        {node:'other',chip:'no route',tone:'bad',cap:'Move one service a region away and it stops resolving',pay:{service_region:'frankfurt',database_region:'oregon',lookup:'dpg-cs4k2h9r0ff-a → NXDOMAIN',cause:'private networking is same-region only'},ins:'This is the puzzle from the top of the page. Nothing is misconfigured and the string is identical — the <em>hostname</em> simply does not exist from where this service is standing.'},
+        {node:'ext',chip:'external',tone:'ok',cap:'The public door: TLS instead of isolation',pay:{host:'dpg-cs4k2h9r0ff-a.oregon-postgres.render.com',encryption:'Render-managed TLS (clients need TLS 1.2+)',latency:'~84 ms across regions',reachable_by:'anyone holding the string'},ins:'Same database, same credentials, a completely different threat model. Protected by <em>what it proves</em> rather than <em>where it is</em> — which is why this string deserves the same care as a password.'},
+        {node:'laptop',chip:'off-platform',tone:'ok',cap:'And plenty of legitimate things are off-platform',pay:{examples:['your laptop','a GitHub Action','pg_dump backups','a BI tool'],can_they_use_internal:'no — the hostname is not in public DNS'},ins:'Which is why the external URL exists at all. Use it deliberately and briefly; for anything running <em>on</em> Render, the internal path is faster and exposes nothing.'},
+      ], result:{cls:'ok',text:'✅ Internal = same account + same region, private, fast. External = anywhere, TLS, slower. Same database, same credentials, one different hostname.'} },
+
+    clock:{ req:'30 days', intro:'The most expensive surprise on the platform, because nothing warns you at the moment it matters.',
+      nodes:[
+        {id:'create',icon:'🗄️',nl:'you create a free Postgres',ns:'March — the clock starts NOW',who:'TIME'},
+        {id:'ship',icon:'🚀',nl:'you ship and link it on your CV',ns:'May — everything works',who:'APP'},
+        {id:'expire',icon:'⏰',nl:'30 days after CREATION',ns:'not 30 days of disuse',who:'TIME'},
+        {id:'grace',icon:'🪫',nl:'14-day grace to upgrade',ns:'then deleted, with the data',who:'TIME'},
+        {id:'dump',icon:'💾',nl:'pg_dump — one command',ns:'"it vanished" → "I restored it"',who:'SEC'},
+      ],
+      steps:[
+        {node:'create',chip:'day 0',cap:'The clock starts at creation, not at last use',pay:{created:'2026-03-04',plan:'free',expires:'2026-04-03',basis:'creation date — traffic is irrelevant'},ins:'Read that <code>basis</code> line twice. Every other free-tier limit on this platform is about <em>activity</em>; this one is a calendar date fixed the moment you clicked create.'},
+        {node:'ship',chip:'shipped',tone:'ok',cap:'Everything works, which is the problem',pay:{app:'live',database:'healthy',link:'on your CV and in your portfolio',warning_visible_here:'none'},ins:'Nothing about the running app hints that a countdown exists. The service is fine. The URL is fine. The failure is scheduled for a date you have already forgotten.'},
+        {node:'expire',chip:'expired',tone:'bad',cap:'The web service is still up. The data is not.',pay:{web_service:'still running, still returning 200 on /',pages_needing_data:'500',error:'connection refused / database does not exist',who_noticed_first:'the person you sent the link to'},ins:'The cruellest shape of failure: half the app works. A visitor sees a real site that is subtly, embarrassingly broken, and you find out from them rather than from a monitor.'},
+        {node:'grace',chip:'14 days',tone:'bad',cap:'The window you can still act in',pay:{grace_period:'14 days to upgrade',after_that:'the database is deleted along with its contents',pinger_helps:false},ins:'And note the last line. A keep-alive pinger — the standard fix for a sleeping free web service — does absolutely nothing here, because this clock was never about traffic.'},
+        {node:'dump',chip:'backup',tone:'ok',cap:'One command turns a disaster into an inconvenience',pay:{command:'pg_dump "$EXTERNAL_DATABASE_URL" > devhub-2026-09-05.sql',uses:'the EXTERNAL url — you are off-platform',cadence:'a monthly calendar reminder is enough',honest_question:'is this a demo, or a production database with no backups?'},ins:'That last question is the real one. A demo can be re-seeded from a script in your repo. If it <em>cannot</em> be, it was never a demo — and calling it one is how projects lose data.'},
+      ], result:{cls:'ok',text:'✅ Free Postgres: 30 days from creation, 14 days of grace, then gone. Either pay for it, or be able to recreate it from a dump or a seed script.'} },
+
+    secrets:{ req:'where secrets live', intro:'Three homes, two phases, and one failure that looks exactly like a bad credential.',
+      nodes:[
+        {id:'var',icon:'🔑',nl:'an env var',ns:'one value, one service',who:'SEC'},
+        {id:'grp',icon:'📦',nl:'an env group',ns:'one set, many services',who:'SEC'},
+        {id:'file',icon:'📄',nl:'a secret FILE',ns:'keystores, service-account JSON',who:'SEC'},
+        {id:'build',icon:'🏗️',nl:'build time',ns:'a different environment entirely',who:'APP'},
+        {id:'run',icon:'▶️',nl:'run time',ns:'…and a different one again',who:'APP'},
+      ],
+      steps:[
+        {node:'var',chip:'env var',cap:'The default home, with two useful modes',pay:{'sync: false':'the key is in render.yaml, the value is not',"generateValue: true":'Render invents a random 256-bit value nobody ever types',plain_value:'fine for settings, never for secrets'},ins:'The distinction that matters: <code>sync: false</code> for a secret <em>someone else</em> issues, <code>generateValue</code> for one <em>you</em> get to choose. Between them, the file describes every secret and contains none.'},
+        {node:'grp',chip:'group',tone:'ok',cap:'When two services need the same thing',pay:{name:'shared-config',used_by:['devhub-api','devhub-mailer'],pulled_in_with:'- fromGroup: shared-config',prevents:'two services that slowly stop agreeing'},ins:'Also a scoping decision, not only convenience: a value in a group is readable by every service that pulls the group in, so a secret only one service needs does not belong there.'},
+        {node:'file',chip:'file',tone:'ok',cap:'Some secrets are files, and cramming them into a variable hurts',pay:{examples:['a Java keystore','a service-account JSON','application-prod.yml'],why_not_an_env_var:'newlines, binary content, and 4KB of base64 you now have to decode at startup'},ins:'A secret <b>file</b> is defined once and placed into your service, so your code reads a path instead of decoding a variable. If you have ever base64\'d a keystore into an env var, this is the feature you wanted.'},
+        {node:'build',chip:'build',tone:'bad',cap:'The phase bug that impersonates a bad credential',pay:{phase:'build',needs:'NPM_TOKEN to install a private package',error:'401 Unauthorized from the registry',actual_cause:'the value was not visible to this phase'},ins:'And so you regenerate a token that was never wrong. For Docker services Render turns environment variables into build arguments — but build and run are separate environments, and some values exist in only one of them.'},
+        {node:'run',chip:'run',tone:'ok',cap:'Prove which phase can see it — in thirty seconds',pay:{do_this:'echo ${#NPM_TOKEN}   # print the LENGTH, never the value',length_0:'not visible in this phase → a wiring problem',length_40:'visible → now it really is the credential',never:'echo $NPM_TOKEN — that is a secret in a build log forever'},ins:'<b>The habit worth stealing:</b> print the length, never the value. It distinguishes "not there" from "wrong" instantly, and it cannot leak the secret into a log that outlives the debugging session.'},
+      ], result:{cls:'ok',text:'✅ Env var, env group, or secret file — and always ask which PHASE needs it. Print the length to tell "missing" apart from "wrong".'} },
+
+    pool:{ req:'too many clients', intro:'Nothing changed in your code. You deployed a third service, and the database started refusing connections.',
+      nodes:[
+        {id:'api',icon:'🌍',nl:'devhub-api · pool of 10',ns:'a reservation, not a request',who:'APP'},
+        {id:'worker',icon:'⚙️',nl:'devhub-mailer · pool of 10',ns:'20 connections held',who:'APP'},
+        {id:'third',icon:'🆕',nl:'a third service deploys',ns:'…and the maths runs out',who:'APP'},
+        {id:'fatal',icon:'💥',nl:'FATAL: too many clients already',ns:'a Postgres error, not a Spring one',who:'DB'},
+        {id:'fix2',icon:'🧮',nl:'smaller pools, or the pooled string',ns:'two fixes, two situations',who:'DB'},
+      ],
+      steps:[
+        {node:'api',chip:'10',cap:'A pool holds connections; it does not borrow them',pay:{service:'devhub-api','maximum-pool-size':10,behaviour:'Hikari opens up to 10 and KEEPS them',idle_traffic:'still 10 connections held'},ins:'This is the mental model to correct. A pool is a <em>reservation</em>. At three in the morning with no users, those connections are still checked out from the database\'s point of view.'},
+        {node:'worker',chip:'20',cap:'Add a worker and you have doubled it',pay:{'devhub-api':10,'devhub-mailer':10,total_held:20,plus:'every preview environment does this too'},ins:'And the previews are the part nobody counts. Three open pull requests with automatic previews are three more copies of your whole stack, each opening its own pool.'},
+        {node:'third',chip:'+10',tone:'bad',cap:'The third service is the one that breaks it',pay:{now_requested:30,max_connections:22,headroom:-8,changed_in_your_code:'nothing'},ins:'Which is why this feels so unfair when it happens: the service that fails is usually the one you just deployed, and it is not the one at fault. The <em>sum</em> is at fault.'},
+        {node:'fatal',chip:'FATAL',tone:'bad',cap:'Read who is speaking',pay:{message:'FATAL: sorry, too many clients already',source:'PostgreSQL — not Spring, not Hikari',implication:'restarting your service will not help',also_seen_as:'HikariPool-1 - Connection is not available, request timed out'},ins:'The error comes from the <b>database</b>, and that single observation saves an hour. A shortage on the far side of the wire cannot be fixed by restarting the near side.'},
+        {node:'fix2',chip:'fix',tone:'ok',cap:'Two fixes — and they are for different problems',pay:{if_one_service_is_greedy:'lower its maximum-pool-size (5 is plenty for most services)',if_the_SUM_is_the_problem:'use connectionPoolString — many client connections onto few real ones',also:'count preview environments in the total',rule_of_thumb:'pool × instances × services ≤ the plan limit, with headroom for a psql window'},ins:'Tune the pool when one service is greedy. Reach for the pooled endpoint when everyone is behaving and the total is still too high — that is the case per-service tuning cannot solve.'},
+      ], result:{cls:'ok',text:'✅ pool size × instances × services (+ previews) must fit the plan limit. Lower the pool when one service is greedy; use connectionPoolString when the sum is.'} },
+  };
+
+  let scen='urls', running=false, timers=[];
+  function clearT(){timers.forEach(clearTimeout);timers=[];}
+  function nodeEl(id){return document.querySelector('#'+P+'Diagram .rt-node[data-node="'+id+'"]');}
+  function nodeCenter(id){const n=nodeEl(id);return n?n.offsetTop+n.offsetHeight/2:0;}
+  function renderNodes(k){
+    let h='<div class="rt-rail"></div><div class="rt-chip" id="'+P+'Chip">→</div>';
+    SCEN[k].nodes.forEach(n=>{ h+='<div class="rt-node" data-node="'+n.id+'"><span class="ic">'+n.icon+'</span><div style="flex:1;min-width:0"><div class="nl">'+n.nl+'</div><div class="ns">'+n.ns+'</div></div><span class="who who-'+n.who+'">'+n.who+'</span></div>'; });
+    $(P+'Diagram').innerHTML=h;
+  }
+  function reset(){
+    renderNodes(scen); const s=SCEN[scen];
+    const chip=$(P+'Chip'); chip.style.transition='none'; chip.style.top=nodeCenter(s.steps[0].node)+'px'; chip.style.opacity='0'; chip.classList.remove('ok','bad'); void chip.offsetWidth; chip.style.transition='';
+    $(P+'Res').className='rt-result';
+    $(P+'Dir').textContent='▶ READY'; $(P+'Dir').className='rt-dir';
+    $(P+'Cap').textContent=s.intro;
+    $(P+'Pay').textContent='';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>— strings, timers and error messages appear here per step —';
+    $(P+'Pill').textContent=s.req;
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false;
+  }
+  function applyStep(steps,i){
+    const st=steps[i];
+    document.querySelectorAll('#'+P+'Diagram .rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
+    const n=nodeEl(st.node); n.classList.remove('vchk','vskip'); n.classList.add(st.tone==='bad'?'vskip':'vchk'); n.classList.add('cur'); if(st.tone==='bad')n.classList.add('curbad'); void n.offsetWidth; n.classList.add('rtpulse');
+    const chip=$(P+'Chip'); chip.textContent=st.chip||'→'; chip.classList.remove('ok','bad'); if(st.tone)chip.classList.add(st.tone==='bad'?'bad':'ok'); chip.style.opacity='1'; chip.style.top=nodeCenter(st.node)+'px';
+    $(P+'Dir').textContent=st.dir||('STEP '+(i+1)+' / '+steps.length); $(P+'Dir').className='rt-dir'+(st.tone==='bad'?' bad':'');
+    $(P+'Cap').textContent=st.cap;
+    $(P+'Pay').textContent=st.pay?JSON.stringify(st.pay,null,2):'';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>'+st.ins;
+  }
+  function run(){
+    if(running)return; running=true; clearT(); reset();
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=true); $(P+'Run').disabled=true;
+    $(P+'Pill').textContent='running…';
+    const s=SCEN[scen]; let i=0;
+    (function tick(){
+      if(i>=s.steps.length){ const r=$(P+'Res'); r.className='rt-result show '+(s.result.cls||'ok'); r.textContent=s.result.text; running=false; document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false; $(P+'Pill').textContent='done'; return; }
+      applyStep(s.steps,i); i++; timers.push(setTimeout(tick,2000));
+    })();
+  }
+  document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.onclick=()=>{ if(running)return; scen=b.dataset.s; document.querySelectorAll('#'+P+'Seg button').forEach(x=>x.classList.toggle('on',x===b)); reset(); });
+  $(P+'Run').onclick=run;
+  reset();
+})();
+</script>
+<script src="tracks-data.js"></script>
+<script src="devhub-chapters.js"></script>
+<script src="devhub-hf-theme.js"></script>
+<script src="devhub-hf-check.js"></script>
+<script src="devhub-lesson.js"></script>
+<script src="devhub-notebook.js"></script>
+<script src="devhub-syntax.js"></script>
+<script src="devhub-transitions.js"></script>
+</body>
+</html>
