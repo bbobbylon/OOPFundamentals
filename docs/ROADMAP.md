@@ -181,6 +181,43 @@ page. That is a much better problem to have than "the content is wrong" — see
 > they carry no per-lesson refs, only a track index link, so decks can only be
 > surfaced track-wide and that is still open.
 
+> **#6 (the individually broken pages) LANDED 2026-09-05.** (a) material-cdk's
+> Google-Fonts `<link>` — the site's only render-blocking external resource —
+> replaced with three inline Material SVG paths, so the 13-second blank
+> rectangle cannot happen. (b) The appsec XSS page no longer XSSes itself:
+> node labels and inspector text are escaped-on-output — the exact defense the
+> page teaches (its reflected scenario's literal `<script>` label used to open
+> a real script element, swallow four diagram nodes, and dead-lock every
+> control). (c) typescript-declarations' hero — the one dead ▶ Run in the
+> 438-engine sweep — got a real four-scenario engine (bundled .d.ts / @types
+> fallback / global augmentation / hand-written drift), click-verified in
+> Chromium: 5 distinct inspector states per scenario, correct green/red
+> endings, controls re-enable. (d) The decorators Try It now teaches that a
+> failed write to a non-writable property THROWS in module strict mode,
+> instead of promising "silently ignored" and then contradicting itself with a
+> red TypeError. And the gate learned the lesson: **tmp_smoke now flags any
+> render-blocking external stylesheet or sync script in `<head>` as a real
+> problem even when the fetch succeeds** — the structure is the bug, today's
+> network is weather — verified red against a seeded page. (e), the clipped
+> text, was already fixed in the 2026-09-03 overflow-wrap pass.
+
+> **#7 (shared-file accessibility) LANDED 2026-09-05.** Four fixes, each in
+> one shared file. A global `prefers-reduced-motion: reduce` collapse in
+> devhub.css blanket-overrides the ~300 pages of unguarded per-page
+> @keyframes/transitions CSS could never reach rule-by-rule — engines are
+> timer-driven so the step walk keeps its pacing, only the glide stills, and
+> tmp_shot screenshots become deterministic as a bonus. devhub-transitions.js
+> (the one script effectively every page loads) sets `role="status"` +
+> `aria-live` on every `.rt-inspect`, so the per-step payload on 437 pages is
+> announced instead of updating in silence. Both code editors
+> (devhub-codegrade.js, devhub-tryit.js) got the standard Esc-then-Tab escape
+> hatch and codegrade lost its render-time `ta.focus()` steal — the keyboard
+> trap is gone from every editor-bearing page, and the hint line says so.
+> Quiz choices are now real radio/checkbox semantics (role, tabindex,
+> aria-checked, Space/Enter to answer) inside a labelled radiogroup, and the
+> 1–8/arrow shortcuts that existed invisibly since v1 are finally printed on
+> screen — a shortcut nobody is told about is a feature nobody has.
+
 #### 4. Wire lessons forward into practice by inverting the exam refs you already have
 
 *1-2 days* — Three of the seven audits found this independently, which makes it the best-corroborated finding in the set. The recall machinery all works — 19 exams, 16 decks, 9 graded IDEs, all verified end to end in a browser — and it is reachable only from a sidebar track sitting 33rd of 34. A learner who finishes a lesson has nowhere to go. The data to fix it is already in the repo and already 100% valid, so the first 123 lessons cost zero new content.

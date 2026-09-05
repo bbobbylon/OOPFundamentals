@@ -15,7 +15,8 @@
  *
  * WHAT IT CHECKS, per page: uncaught exceptions, console errors, horizontal
  * overflow at phone width (the site is read on a phone), TEXT CLIPPED INSIDE a
- * non-scrolling element, and that the page rendered something at all.
+ * non-scrolling element, that the page rendered something at all, and that
+ * nothing render-blocking in <head> points at another origin (see below).
  *
  * The default width is 320, not 390. 390 is a comfortable modern phone; 320 is
  * the iPhone SE and a folded foldable, and it is where a rigid grid track
@@ -125,12 +126,36 @@ async function run(list) {
               ? '.' + el.className.trim().split(/\s+/)[0] : '') +
             ' +' + (el.scrollWidth - el.clientWidth) + 'px');
         }
+        /* Render-blocking external resources in <head> are flagged as REAL
+           problems even when the fetch succeeds (or fails as netOnly). Lesson
+           learned from angular-material-cdk: its Google Fonts <link> failure
+           filed under "expected in a sandbox" and the page printed clean —
+           while for a real learner on a slow/blocked host it was a solid dark
+           rectangle for 13 seconds (FCP 13,112ms vs a 312ms site median),
+           because rendering WAITS on a head stylesheet. The structure is the
+           bug; whether the request happened to succeed today is weather.
+           A sync external <script> in <head> blocks the parser the same way,
+           so it is flagged too (defer/async/module do not block). */
+        const blocking = [];
+        for (const l of document.querySelectorAll('head link[rel="stylesheet"]')) {
+          if (l.disabled) continue;
+          const media = (l.getAttribute('media') || '').trim().toLowerCase();
+          if (media && media !== 'all' && media !== 'screen') continue;   // print etc.
+          if (/^https?:/.test(l.href) && new URL(l.href).origin !== location.origin)
+            blocking.push('link ' + l.href);
+        }
+        for (const s of document.querySelectorAll('head script[src]')) {
+          if (s.defer || s.async || s.type === 'module') continue;
+          if (/^https?:/.test(s.src) && new URL(s.src).origin !== location.origin)
+            blocking.push('script ' + s.src);
+        }
         return {
           overflow: document.documentElement.scrollWidth > window.innerWidth + 2,
           sw: document.documentElement.scrollWidth,
           empty: (document.body.innerText || '').trim().length < 40,
           clipped: clipped.slice(0, 3),
           clippedCount: clipped.length,
+          blocking,
         };
       });
       const netOnly = errs.length && errs.every((e) => /ERR_(CONNECTION|TUNNEL|NAME|CERT|ABORTED)|net::/.test(e));
@@ -138,6 +163,7 @@ async function run(list) {
       if (errs.length && !netOnly) issues.push(errs.find((e) => !/net::/.test(e)) || errs[0]);
       if (m.overflow) issues.push(`horizontal overflow (${m.sw}px at ${width}px)`);
       if (m.empty) issues.push('rendered almost no text');
+      if (m.blocking.length) issues.push(`render-blocking external resource in <head>: ${m.blocking.join(', ')}`);
       /* Clipping is reported SEPARATELY, not as a page failure. The shared
          components are fixed, but ~450 pages carry hand-written per-page CSS
          with its own narrow boxes, and failing the sweep on every one of them

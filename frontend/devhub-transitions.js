@@ -25,10 +25,17 @@
  *      href directly in that case (grep `dlh-navigate` in this repo); this
  *      script must never race that existing, working pattern.
  *
+ *   3. Live-region wiring for the step inspector — every .rt-inspect panel
+ *      (437 pages) gets role="status", so the per-step payload the engines
+ *      write there is announced to screen readers instead of updating in
+ *      silence. Lives here because this is the one script effectively every
+ *      page loads, and the fix must not require per-page edits.
+ *
  * USAGE: <link rel="stylesheet" href="devhub.css">  (ripple/fade keyframes)
  *        <script src="devhub-transitions.js"></script>
  *
- * Both features individually no-op under prefers-reduced-motion.
+ * Features 1-2 individually no-op under prefers-reduced-motion; feature 3 is
+ * not motion and applies always.
  * ========================================================================== */
 (function (global, doc) {
   'use strict';
@@ -110,5 +117,21 @@
     global.addEventListener('pageshow', function (e) {
       if (e.persisted) doc.documentElement.classList.remove('dh-leaving');
     });
+  }
+
+  // ── 3. The live inspector announces its per-step data ────────────────────
+  // The engines rewrite .rt-inspect every step with the real payload — the
+  // HttpRequest, the JWT claims, the bound SQL parameter. Visually that is
+  // the whole point of the site; to a screen reader it was silence (437
+  // pages, zero live regions). role="status" implies polite+atomic; the
+  // explicit aria-live doubles as a belt for older pairings. Skipped if a
+  // page already chose its own role. This script runs at the end of <body>,
+  // after every static inspector exists.
+  var inspectors = doc.querySelectorAll('.rt-inspect');
+  for (var i = 0; i < inspectors.length; i++) {
+    if (!inspectors[i].hasAttribute('role')) {
+      inspectors[i].setAttribute('role', 'status');
+      inspectors[i].setAttribute('aria-live', 'polite');
+    }
   }
 })(window, document);

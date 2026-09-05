@@ -159,6 +159,8 @@
 .dq-choice.correct{border-color:var(--dq-good);background:rgba(52,211,153,.10)}
 .dq-choice.wrong{border-color:var(--dq-bad);background:rgba(248,113,113,.10)}
 .dq-choice.locked{cursor:default}
+.dq-choice:focus-visible{outline:2px solid var(--dq-accent);outline-offset:2px}
+.dq-kbd{margin-top:10px;font-size:11px;color:var(--dq-muted);text-align:center;font-family:ui-monospace,monospace}
 .dq-key{flex-shrink:0;width:24px;height:24px;border-radius:6px;border:1px solid var(--dq-border);
     display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--dq-muted)}
 .dq-choice.sel .dq-key{background:var(--dq-accent);color:#0b1020;border-color:var(--dq-accent)}
@@ -352,18 +354,26 @@
         }
       }
 
-      // choices
+      // choices — real radio/checkbox semantics, not bare styled divs: across
+      // 19 exams / 560 questions these had no role, no tabindex and no checked
+      // state, so a screen reader heard prose and a keyboard could not answer.
       const keys = 'ABCDEFGH';
       const choiceEls = q.choices.map((text, i) => {
         const body = h('span', { style: 'flex:1' }, text);
-        const el = h('div', { class: 'dq-choice' },
+        const selected = q.multi ? (Array.isArray(given) && given.includes(i)) : given === i;
+        const el = h('div', {
+          class: 'dq-choice',
+          role: q.multi ? 'checkbox' : 'radio',
+          'aria-checked': selected ? 'true' : 'false',
+          tabindex: locked ? null : 0,
+        },
           h('span', { class: 'dq-key' }, keys[i]),
           body
         );
-        const selected = q.multi ? (Array.isArray(given) && given.includes(i)) : given === i;
         if (selected) el.classList.add('sel');
         if (locked) {
           el.classList.add('locked');
+          el.setAttribute('aria-disabled', 'true');
           const correct = q.multi ? q.answer.includes(i) : q.answer === i;
           if (correct) el.classList.add('correct');
           else if (selected) el.classList.add('wrong');
@@ -373,6 +383,9 @@
               (correct ? '✓ ' : '✗ ') + q.why[i]));
         } else {
           el.addEventListener('click', () => choose(i));
+          el.addEventListener('keydown', ev => {
+            if (ev.key === ' ' || ev.key === 'Enter') { ev.preventDefault(); choose(i); }
+          });
         }
         return el;
       });
@@ -381,7 +394,10 @@
         h('span', { class: 'dq-dchip' }, q.domain + (q.difficulty ? ' · ' + q.difficulty : '')),
         h('p', { class: 'dq-stem' }, q.stem + (q.multi ? '  (select all that apply)' : '')),
         q.code ? h('pre', { class: 'dq-code' }, q.code) : null,
-        ...choiceEls
+        h('div', {
+          role: q.multi ? 'group' : 'radiogroup',
+          'aria-label': q.multi ? 'Answer choices — select all that apply' : 'Answer choices',
+        }, ...choiceEls)
       );
 
       // practice-mode explanation after answering
@@ -404,6 +420,9 @@
           : h('button', { class: 'dq-btn primary', onclick: finish }, 'Finish & score')
       );
       card.appendChild(nav);
+      // These shortcuts existed since v1 (see onKey below) — invisibly.
+      // A shortcut nobody is told about is a feature nobody has.
+      card.appendChild(h('div', { class: 'dq-kbd' }, '⌨ 1–8 pick an answer · ← → change question'));
       screen(card);
     }
 

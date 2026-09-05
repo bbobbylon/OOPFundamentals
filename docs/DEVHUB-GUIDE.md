@@ -419,8 +419,17 @@ visualizers).
   document navigation — it's a no-op inside `app.html`'s `#viewer` iframe,
   where several pages already `postMessage` a `dlh-navigate` event to the
   parent hub instead of following the link directly (grep `dlh-navigate` if
-  touching that pattern). Everything here is inert under
-  `prefers-reduced-motion: reduce`.
+  touching that pattern). Since 2026-09-05 it also carries the site's
+  **live-region wiring**: every `.rt-inspect` panel (437 pages) gets
+  `role="status"` + `aria-live="polite"`, so the per-step payload the engines
+  write there is announced to screen readers — it lives here precisely because
+  this is the one script effectively every page loads, so the fix needs no
+  per-page edits. The motion features are inert under
+  `prefers-reduced-motion: reduce`; the live region is not motion and applies
+  always. (Sitewide, devhub.css now also blanket-collapses ALL
+  animation/transition durations to .01ms under reduced-motion — per-page
+  `<style>` blocks included — state changes still land, they just stop
+  moving.)
 - **The hub sidebar is keyboard-operable, and staying that way needs three
   things together** (`frontend/app.html`). Lesson links are real `<a href>` with
   a `preventDefault` on plain left-click — so the SPA behaviour is kept while
@@ -483,9 +492,12 @@ visualizers).
   is the CI gate (`deploy.yml` blocks the Pages deploy on it): encoding, registry
   both ways, required shared scripts, internal links, duplicate registrations,
   inline-`<script>` parse, and CSS theme-selector shape. `tmp_smoke.mjs` opens
-  every page in Chromium at 320px and reports uncaught errors and horizontal
-  overflow (network-only failures listed separately — a sandbox with no CDN fails
-  every CDN load). `tmp_assetcheck.mjs <ref>` fails on any LOSS of a teaching asset
+  every page in Chromium at 320px and reports uncaught errors, horizontal
+  overflow, and — since 2026-09-05 — any **render-blocking external resource in
+  `<head>`** (a cross-origin stylesheet or sync script), flagged even when the
+  fetch succeeds: rendering waits on it, so the structure is the bug and
+  today's network is weather (network-only failures on lazy resources are still
+  listed separately — a sandbox with no CDN fails every CDN load). `tmp_assetcheck.mjs <ref>` fails on any LOSS of a teaching asset
   versus a git ref. `tmp_contrast.mjs` measures text contrast in a theme
   (`--theme=cream|dark`, `--inject=candidate.css` to try a fix without editing the
   site); it composites translucent backgrounds and exempts `aria-hidden` ornament

@@ -895,14 +895,24 @@ __results
       saveProgress(bank.id, progress);
     });
     ta.addEventListener('scroll', () => { gutter.scrollTop = ta.scrollTop; });
+    // Tab indents — but with an escape hatch. Without one this textarea is a
+    // keyboard trap: focus lands here and 15 Tab presses later is still here,
+    // having typed indentation into the code, with Run and the language tabs
+    // unreachable. Esc arms ONE focus-moving Tab (the standard editor pattern);
+    // any other key re-arms indentation capture.
+    let tabEscapes = false;
     ta.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { tabEscapes = true; return; }
       if (e.key === 'Tab') {
+        if (tabEscapes) { tabEscapes = false; return; }   // browser default: focus moves on
         e.preventDefault();
         const unit = (lang === 'python' || lang === 'java') ? '    ' : '  ';
         const s = ta.selectionStart, en = ta.selectionEnd;
         ta.value = ta.value.slice(0, s) + unit + ta.value.slice(en);
         ta.selectionStart = ta.selectionEnd = s + unit.length;
         refreshGutter();
+      } else {
+        tabEscapes = false;
       }
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runBtn.click(); }
     });
@@ -979,7 +989,7 @@ __results
     panel.appendChild(tabsEl);
     panel.appendChild(sigEl);
     panel.appendChild(editorWrap);
-    panel.appendChild(h('div', { class: 'cg-keytab' }, 'Tab inserts indentation · Ctrl/⌘ + Enter runs the tests'));
+    panel.appendChild(h('div', { class: 'cg-keytab' }, 'Tab inserts indentation · Esc then Tab moves focus out · Ctrl/⌘ + Enter runs the tests'));
     panel.appendChild(h('div', { class: 'cg-toolbar' }, runBtn, resetBtn, statusEl));
     panel.appendChild(resultsEl);
     panel.appendChild(hintsWrap);
@@ -987,7 +997,9 @@ __results
     root.innerHTML = '';
     root.appendChild(panel);
     loadLang(lang);
-    ta.focus();
+    // No ta.focus() here: stealing focus into a Tab-capturing editor on render
+    // meant anyone Tabbing through the page fell straight into the trap. Focus
+    // stays where the user had it; the Reset button still focuses deliberately.
   }
 
   /* ---- main render entry point ------------------------------------------ */
