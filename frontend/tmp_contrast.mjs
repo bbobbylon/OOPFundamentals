@@ -33,15 +33,13 @@
 import { createServer } from 'node:http';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join, extname, resolve } from 'node:path';
-import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import { loadChromium, browserExecutablePath } from './tmp_pw.mjs';
 
-const require = createRequire(import.meta.url);
-const GLOBAL_MODULES = '/opt/node22/lib/node_modules';
-let chromium;
-try { ({ chromium } = require('playwright')); }
-catch { ({ chromium } = require(join(GLOBAL_MODULES, 'playwright'))); }
+const chromium = loadChromium();
 
-const ROOT = resolve(new URL('.', import.meta.url).pathname);
+// fileURLToPath, not URL.pathname: the latter yields "/B:/…" on Windows.
+const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const arg  = (k, d) => { const m = process.argv.find(a => a.startsWith(`--${k}=`)); return m ? m.slice(k.length + 3) : d; };
 const THEME = arg('theme', 'cream');
 const MIN   = parseFloat(arg('min', '2.2'));
@@ -145,7 +143,7 @@ function probe(min) {
   return out;
 }
 
-const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' });
+const browser = await chromium.launch({ executablePath: browserExecutablePath() });
 const ctx = await browser.newContext({ viewport: { width: WIDTH, height: 900 } });
 await ctx.addInitScript(`try{localStorage.setItem('devhub-theme',${JSON.stringify(THEME)})}catch(e){}`);
 const injectCss = INJECT ? await readFile(join(ROOT, INJECT), 'utf8') : '';

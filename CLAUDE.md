@@ -57,7 +57,11 @@ standing goal, not a one-time task. The full Head First rollout state lives in
 - Register pages in `frontend/tracks-data.js` + the `TRACKS`/`CATEGORIES` wiring in
   `frontend/app.html`; update page/track counts in `README.md` + `docs/DEVHUB-GUIDE.md`.
 - Exams: length-bracketed choices, no position/length tells — audit with
-  `frontend/tmp_examtell_audit.mjs` after any bank edit.
+  `frontend/tmp_examtell_audit.mjs` after any bank edit. Also rerun
+  `node frontend/tmp_genpracticemap.mjs` after any bank edit: the lesson →
+  practice map inside `tracks-data.js` is DERIVED from the banks' `ref:{label,file}`
+  entries, and `--check` fails if it is stale. Hand-editing that block is how a
+  lesson silently loses its "Test yourself" strip.
 - Validate pages with `node frontend/tmp_vcheck.mjs` (encoding, registry both ways,
   required shared scripts, internal links, duplicate registrations — under a second for
   the whole site). `.github/workflows/deploy.yml` gates the Pages deploy on it, so a red
@@ -94,11 +98,26 @@ standing goal, not a one-time task. The full Head First rollout state lives in
   that a bare root selector plus a light-only rule, so the cream half matches nothing and
   the declarations leak onto `<html>`. It silently killed the entire component half of the
   cream variant once already.
-- The cream theme has TWO halves: `devhub-hf.css`'s cream block + repair layer
-  (shared components), and the runtime pass in `devhub-hf-theme.js` (per-page
+- The cream theme has THREE homes: `devhub-hf.css`'s cream block + repair layer
+  (shared components); the runtime pass in `devhub-hf-theme.js` (per-page
   `<style>` blocks, which CSS cannot reach because it cannot query a computed
-  background). If cream text goes unreadable, check which half owns it before
-  writing a rule — a per-page dark ground is the runtime pass's job, not CSS's.
+  background); and, since 2026-09-04, an inline `:root[data-theme="light"]` block
+  in each of the **13 track landing pages**, which link neither of the other two.
+  If cream text goes unreadable, check which home owns it before writing a rule —
+  a per-page dark ground is the runtime pass's job, not CSS's.
+- The site's default theme is decided in THREE bootstraps that must agree:
+  `app.html`'s head script, `devhub-hf-theme.js`'s `normalise()`, and the inline
+  pre-paint script in each of the 13 landing pages. Change one, change all three —
+  when only the lesson half was restored once, a dark hub opened cream lessons.
+  They store different WORDS for the same palette (`'light'` vs `'cream'`) and each
+  normalises the other's; that is fine, don't "fix" it to one word without checking
+  both readers. `devhub-theme-v3` is the one-time migration flag off the dark default.
+- When theming for cream, measure against `--panel2` (`#e6d7bd`), the DARKEST cream
+  surface — not `--bg`. A colour tuned to 4.6:1 on `--bg` lands at ~4.3:1 on the cards,
+  so it passes on the page background and fails on every card title. And remember a
+  variable override only reaches rules that USE variables: hardcoded hexes (and inline
+  `style=` colours, which beat every rule) need explicit handling — that was half the
+  work on the landing pages.
 - Shared JS engines must be SELF-CONTAINED: inject their own critical CSS (id-guarded
   `<style>`) instead of assuming `devhub.css` is linked — 14 index/landing pages don't link
   it, which is exactly how the giant-ripple layout bug happened.

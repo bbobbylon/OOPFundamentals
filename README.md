@@ -149,6 +149,19 @@ can follow the trace; edits persist per page, and ↺ Reset restores the
 original example. This is the *exploratory* twin of the graded Coding-Practice
 IDE (`devhub-codegrade.js`) — no tests, just "change it and see".
 
+**📖 The Head First design language, sitewide — cream by default.** All 513
+registered pages carry the full book-style design system (`devhub-hf.css` via
+`<html data-hf>`): a warm **cream** colorway by default (dark espresso one tap
+away — the toggle is shared with the hub, one stored preference), Playfair
+Display headlines with the kicker/statement rhythm, the chapter rail, and a
+component vocabulary from Bobby's reference mockups — meta badges, framing
+questions, numbered benefit cards, reference grids, speech bubbles, six
+mechanism diagrams, predict-first napkins, inline knowledge checks
+(`devhub-hf-check.js`), clickable command anatomy and reveal-output terminal
+walkthroughs (`devhub-lesson.js`). The Try It editor renders IDE-colored code
+while you type. Authored exemplars: the Decorator chapter and CLI Basics; the
+site-wide authored sweep is in progress (see `docs/ROADMAP.md`).
+
 **🎨 IDE-grade syntax coloring + the Head First look, sitewide.** Every static
 code block on the site is token-colored automatically (`devhub-syntax.js`, on
 all 231 pre-bearing pages — keywords, strings, types, calls, comments in the
@@ -161,7 +174,7 @@ intro card get a marker sweep automatically.
 
 **📐 The Head First design language.** `devhub-hf.css` is the full
 type-and-layout system on top of that kit, opted into per page with
-`<html data-hf>` (**513 of 528 pages**). Playfair Display + Dancing Script,
+`<html data-hf>` (**516 of 531 pages**). Playfair Display + Dancing Script,
 self-hosted as latin-subset WOFF2; a kicker-and-statement rhythm; problem/fix
 cards; speech bubbles; napkin predict-notes; and **six mechanism diagrams chosen
 by the *shape* of the concept** rather than at random:
@@ -175,11 +188,16 @@ by the *shape* of the concept** rather than at random:
 | `.hf-steps` | an ordered pipeline, each step gating the next | evaluation order, request paths |
 | `.hf-cycle` | a state machine returning to where it started | change detection, retry loops |
 
-It ships a **cream colorway** as well as the dark one. The cream variant has two
-halves and it is worth knowing which is which before writing a rule: shared
-components live in `devhub-hf.css`'s cream block, while per-page `<style>` blocks
-are repaired at runtime by `devhub-hf-theme.js`, because CSS cannot query a
-computed background.
+It ships a **cream colorway** as well as the dark one. The cream variant lives in
+three places and it is worth knowing which owns what before writing a rule: shared
+components live in `devhub-hf.css`'s cream block; per-page `<style>` blocks are
+repaired at runtime by `devhub-hf-theme.js`, because CSS cannot query a computed
+background; and the **13 track landing pages** carry their own inline cream block,
+because they link neither of the other two. The default theme is likewise decided
+in three bootstraps that must agree — `app.html`, `devhub-hf-theme.js`, and a
+pre-paint script in each landing page (in `<head>`, so the page never flashes dark
+first). A one-time `devhub-theme-v3` flag moves anyone still carrying the old dark
+default onto cream once, then respects every later choice.
 
 **✍️ 102 pages authored to the nine-point teaching bar** in `CLAUDE.md` — the
 problem card, the "one thing to remember" callout, a three-way dialogue, one
@@ -192,7 +210,7 @@ does not beat guessing.
 
 | Visualizer | What it shows |
 |---|---|
-| [`app.html`](frontend/app.html) | The full Dev Hub — searchable, progress, **512 pages across 34 tracks grouped into categories** (incl. 🍳 *Common Recipes* — practical how-tos like API→form, batch upload, password complexity — the 🟢 *Cloud — GCP*, 🌐 *Web Fundamentals*, 📊 *Data Science & ML*, 🧠 *AI/LLM Engineering*, and 🤖 *AI-Assisted Development* tracks — and 🧑‍💻 *Coding Practice (IDE)*, a real graded-exercise track: write JS/TS/Python/**Java**, run it for real in your browser — Java compiles with the actual `javac` on a WASM JVM (CheerpJ) — pass/fail against hidden tests) (serve it; `index.html` redirects here) |
+| [`app.html`](frontend/app.html) | The full Dev Hub — searchable, progress, **515 pages across 34 tracks grouped into categories** (incl. 🍳 *Common Recipes* — practical how-tos like API→form, batch upload, password complexity — the 🟢 *Cloud — GCP*, 🌐 *Web Fundamentals*, 📊 *Data Science & ML*, 🧠 *AI/LLM Engineering*, and 🤖 *AI-Assisted Development* tracks — and 🧑‍💻 *Coding Practice (IDE)*, a real graded-exercise track: write JS/TS/Python/**Java**, run it for real in your browser — Java compiles with the actual `javac` on a WASM JVM (CheerpJ) — pass/fail against hidden tests) (serve it; `index.html` redirects here) |
 | [`typescript-playground-visualizer.html`](frontend/typescript-playground-visualizer.html) | 🧪 **TypeScript Playground** — loads the **real** `typescript` compiler: type-checks your code (the same red errors as VS Code/`tsc`), shows the emitted JS, and runs it with live console capture; toggle `strict`/`target` and watch errors change |
 | [`python-playground-visualizer.html`](frontend/python-playground-visualizer.html) | 🧪 **Python Playground** — **real CPython** in the browser via Pyodide: `print()`, the stdlib (`json`, `dataclasses`, `itertools`…), real exceptions and full tracebacks — runnable, with presets |
 | [`shell-playground-visualizer.html`](frontend/shell-playground-visualizer.html) | 🧪 **Shell Playground** — a working mini-shell with an in-memory filesystem; flip between **Bash / PowerShell / CMD** modes and watch the prompt, command names, pipes, redirection, and variable syntax change with it |
@@ -568,7 +586,7 @@ resolved.
 
 | command | what it catches | runtime |
 |---|---|---|
-| `node tmp_vcheck.mjs` | encoding, registry both directions, required shared scripts, internal links, duplicate registrations, inline-`<script>` parse errors, `.hf-check` wiring, CSS theme-selector shape | ~0.4s, all 528 pages |
+| `node tmp_vcheck.mjs` | encoding, registry both directions, required shared scripts, internal links, duplicate registrations, inline-`<script>` parse errors, `.hf-check` wiring, CSS theme-selector shape | ~0.4s, all 531 pages |
 | `node tmp_smoke.mjs` | uncaught JS errors and horizontal overflow, in a real browser at **320px** (not 390 — 320 is where a rigid grid track actually breaks). Network-only failures are reported separately, because a sandbox with no CDN fails every CDN load | a few minutes |
 | `node tmp_assetcheck.mjs <ref>` | any **loss** of a teaching asset (Try It Live, CodeWalk, `rt-stage`, quiz, flashcards) versus a git ref — run it after any bulk edit that splices markup | seconds |
 | `node tmp_contrast.mjs --theme=cream` | text under a 2.2:1 contrast floor, grouped by selector so you fix causes not instances. `--inject=candidate.css` tries a fix without editing the site | a few minutes |

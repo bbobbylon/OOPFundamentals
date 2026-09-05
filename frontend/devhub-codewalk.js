@@ -63,7 +63,32 @@
   }
 
   function linesForStep(s) {
-    if (!s || s.line == null) return [];
+    if (!s) return [];
+
+    /* TWO authoring shapes exist across the site and they do NOT mean the same
+       thing — reading them the same way is wrong in both directions:
+
+         line:  7          one line
+         line:  [4, 9]     a RANGE, 4 through 9 inclusive
+         lines: [2,5,9,11] an explicit LIST of lines, not a range
+
+       `lines` was silently ignored until now: this function only ever looked at
+       `s.line`, so on every page authoring `lines` the walk highlighted nothing,
+       and because the engine dims every non-current line the whole block sat at
+       opacity .4 while the step counter advanced over grey text. That is 307 of
+       the 465 CodeWalk pages — the majority — and no gate could see it: the
+       widget renders, throws nothing, and counts as present.
+
+       The list/range distinction is load-bearing. Measured across the site:
+       every `line:[...]` is exactly 2 elements (363/363, so range is right),
+       while `lines:[...]` runs 1-13 elements — 545 steps have exactly 5. Reading
+       `lines` as a range would highlight 2..5 of [2,5,9,11,14] and drop the
+       rest, which looks like it works and quietly teaches the wrong lines. */
+    if (s.lines != null) {
+      return Array.isArray(s.lines) ? s.lines.slice() : [s.lines];
+    }
+
+    if (s.line == null) return [];
     if (Array.isArray(s.line)) {
       var out = [], a = s.line[0], b = s.line[1];
       for (var i = a; i <= b; i++) out.push(i);

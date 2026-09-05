@@ -1,7 +1,7 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 512 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 515 pages.** Pick a *path* below and follow it.
 >
 > **Contributors:** 102 of them are now authored to the nine-point teaching bar in
 > `CLAUDE.md`; the rest carry the design but not yet the rhythm. Run
@@ -10,7 +10,7 @@
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **513 browser visualizers** across **34 tracks** (grouped into
+DevHub is a learning hub: **515 browser visualizers** across **34 tracks** (grouped into
 categories in the sidebar — Languages & Concepts, Frontend, Backend & APIs, DevOps/Cloud & Data, Practice & Prep; several tracks also have a 🍳 **Common Recipes** section of practical how-tos — API→form, batch upload, password complexity), plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
@@ -69,7 +69,7 @@ Or jump straight to any file linked below.
 | ♾️ **DevOps & CI/CD** | **CI/CD pipelines** (GitHub Actions: jobs/steps/artifacts/gated environments) and **Infrastructure as Code** (Terraform plan/apply/state/drift) | [CI/CD Pipelines](../frontend/devops-cicd-pipeline-visualizer.html) |
 | ⎈ **Kubernetes** | pods, deployments, services, config & secrets, Helm, Spring on K8s | [Kubernetes Fundamentals](../frontend/kubernetes-fundamentals-visualizer.html) |
 | 🗄️ **SQL & Databases** | SQL, indexes & query plans, transactions/ACID, CTEs, normalization, Postgres | [SQL Fundamentals](../frontend/sql-fundamentals-visualizer.html) |
-| ⌨️ **Shell & Scripting** | CLI basics, **Bash**, **PowerShell** objects, **CMD/Batch** — three shells side by side | [CLI Basics](../frontend/shell-cli-basics-visualizer.html) |
+| ⌨️ **Shell & Scripting** | CLI basics, **Bash**, **PowerShell** objects, **CMD/Batch** — three shells side by side — plus the three **cloud CLIs** (`aws`, `az`, `gcloud`) taught as one shared grammar | [CLI Basics](../frontend/shell-cli-basics-visualizer.html) |
 | 🌐 **Web Fundamentals** | the true zero-starting-point before Angular/React/TypeScript: **HTML** structure/forms/a11y, **CSS** box model/specificity/Flexbox/Grid, plain **JavaScript** (closures, `this`, the DOM & events), **async JS** (Promises/async-await/`fetch`), and **how browsers actually render a page** | [HTML Fundamentals](../frontend/web-html-fundamentals-visualizer.html) |
 | 📊 **Data Science & ML** | **NumPy/pandas**, data cleaning & **EDA**, **visualization**, ML fundamentals (bias-variance), **regression/classification**, model evaluation, **clustering/PCA**, and **neural networks/PyTorch** | [NumPy & Pandas](../frontend/datasci-numpy-pandas-visualizer.html) |
 | 🧠 **AI / LLM Engineering** | **transformers & attention**, how LLMs work (tokenization/sampling), **prompt engineering**, **embeddings & vector DBs**, **RAG**, **tool-calling agents**, wiring an **LLM API** into a real backend, fine-tuning vs RAG vs prompting & **LLMOps**, and **AI safety/guardrails** (prompt injection, jailbreaks, PII) | [Transformers & Attention](../frontend/genai-transformers-attention-visualizer.html) |
@@ -421,6 +421,37 @@ visualizers).
   parent hub instead of following the link directly (grep `dlh-navigate` if
   touching that pattern). Everything here is inert under
   `prefers-reduced-motion: reduce`.
+- [`frontend/devhub-chapters.js`](../frontend/devhub-chapters.js) — the
+  **chapter rail** (`.hf-rail`) at the top of a lesson: where this page sits in
+  its section, which pages sit either side, and — since 2026-09-05 — where the
+  path continues. Reads `tracks-data.js`, so a page never hand-writes its own
+  position. Three things worth knowing before editing it:
+  **(1) Rail links must not be plain anchors.** The hub renders lessons in an
+  iframe and tracks the current page in its own `currentFile`; a bare
+  `<a href>` navigates the *frame* only, so the hub's breadcrumb, active sidebar
+  link, hash and progress all stay on the page you arrived from — and because
+  progress is keyed off `currentFile`, "Mark as Learned" then credits the page
+  you LEFT. Rail links therefore route through `railClick`, which posts
+  `{type:'dlh-navigate', file}` to the parent (a contract `app.html` has accepted
+  since it was built). The real `href` is kept so middle-click, ctrl-click,
+  copy-link and the keyboard still behave like links; only the plain left-click
+  is intercepted, and only when embedded.
+  **(2) `nextSectionStart()` is what stops sections dead-ending.** On the last
+  page of a section it returns the first page of the next one and the rail
+  renders "Next up · <section> →". It returns `null` on the last section of a
+  track — a real ending, not a dead end. `locate()` filters out empty sections
+  first, or "next" could point at one.
+  **(3) Styles live in `devhub-hf.css`** (`.hf-rail*`, `.hf-practice*`), not
+  injected — the rail only renders on kit pages, which link it.
+  **(4) It also renders the "Test yourself" strip** at the end of a lesson, from
+  `window.DEVHUB_PRACTICE` in `tracks-data.js`. That map is GENERATED by
+  `frontend/tmp_genpracticemap.mjs`, which inverts the 614 `ref:{label,file}`
+  entries the exam and practice banks already carry — the edge only ever pointed
+  from practice to lesson, which is why just 2 of 465 lessons linked forward to
+  any recall. Rerun the generator after editing a bank; `--check` fails on a
+  stale map. 202 lessons (39%) now carry the strip, with no per-page markup:
+  every one of them already loaded this script and `tracks-data.js`.
+
 - [`frontend/devhub-syntax.js`](../frontend/devhub-syntax.js) — sitewide
   **IDE-style syntax highlighting** for static code, on all 231 pages that
   contain `<pre>` blocks. Auto-runs on DOMContentLoaded: any static,
@@ -492,6 +523,27 @@ visualizers).
   `:is([data-theme="cream"],[data-theme="light"])[data-hf] …` — the comma form
   splits into a bare root selector plus a light-only rule and silently matches
   nothing; vcheck fails the build if it reappears.
+- **The 13 landing pages carry their own cream block** (2026-09-04) — a *third*
+  home for cream, separate from the two above. `angular-index`, `aws-index`,
+  `configs-index`, `docker-index`, `ds-index`, `entra-id-index`, `git-index`,
+  `interview-index`, `maven-index`, `ping-idm-index`, `spring-boot-index`,
+  `typescript-index` and `index-legacy` link **neither** `devhub.css` nor
+  `devhub-hf-theme.js`, so neither half above can reach them. Each now has an
+  inline pre-paint `<script>` in `<head>` (it must be in the head — a bootstrap
+  in the end-of-body `devhub-transitions.js` flashes dark first) plus its own
+  `:root[data-theme="light"]` block right after `<style>`, which outranks the
+  page's own `:root` on specificity so source order is irrelevant.
+  **Two things to know before editing them.** (1) A variable override only
+  reaches rules that *use* variables; about half the breakage was in rules that
+  hardcode a hex — `a.back{color:#22d3ee}` at 1.52:1, every h1 brand gradient,
+  and chips whose near-black text sat on a `var()` background that cream had
+  just made dark. Those need explicit higher-specificity rules, and
+  `index-legacy`'s ~40 *inline* colours need `var(--b-<hex>, <hex>)` in the
+  markup, since inline beats any rule. (2) Tune colours against `--panel2`
+  (`#e6d7bd`), the **darkest** cream surface — tuning against `--bg` puts every
+  card title at ~4.3:1, which passes on the page background and fails on the
+  cards. The site default now lives in **three** bootstraps (`app.html`,
+  `devhub-hf-theme.js`, these 13); change one, change all three.
 - **Head First kit** (in [`frontend/devhub.css`](../frontend/devhub.css),
   final section) — the book's visual vocabulary as drop-in classes, all
   tinted by the track's `--accent`: `.hf-big` (gradient big-type mnemonic),

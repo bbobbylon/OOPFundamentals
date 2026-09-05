@@ -41,11 +41,30 @@
   })();
 
   function stored() {
-    try { return localStorage.getItem(KEY); } catch (e) { return null; }
+    try {
+      /* devhub-theme-v3 — ONE-TIME migration, identical to the one in
+         app.html's head script and in each landing page's pre-paint script.
+         Cream only became the default on 2026-09-01, so a user still carrying
+         a stored 'dark' from before would never see the redesign. Flip once,
+         then respect every later choice. All three bootstraps must run this:
+         if only some did, moving between hub, landing page and lesson would
+         flip the theme under the reader. */
+      if (!localStorage.getItem('devhub-theme-v3')) {
+        localStorage.setItem(KEY, 'cream');
+        localStorage.setItem('devhub-theme-v3', '1');
+        return 'cream';
+      }
+      return localStorage.getItem(KEY);
+    } catch (e) { return null; }
   }
 
   // 'light' is the hub's word for "not dark"; on a kit page that means cream.
-  function normalise(v) { return (v === 'cream' || v === 'light') ? 'cream' : 'dark'; }
+  /* CREAM IS THE DEFAULT (Bobby's 2026-09-01 reference mockup is cream): only an
+     explicitly stored 'dark' keeps the espresso colorway. Restored from 2260122 —
+     the merge took the cloud side of this whole file, correctly (it is the 14KB
+     superset carrying the runtime repair), and that discarded this one line with
+     it. 'light' is the hub's word for "not dark", so it maps to cream too. */
+  function normalise(v) { return v === 'dark' ? 'dark' : 'cream'; }
 
   function apply(v) { root.setAttribute('data-theme', normalise(v)); }
 
@@ -296,6 +315,35 @@
     }
     /* Re-evaluate when the theme flips, in either direction. */
     new MutationObserver(schedule).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+
+    /* The pass above is not enough on its own, and the reason is CSS transitions.
+       Much of the site carries `transition: all .3s`, so when the theme's colours
+       land, every colour and background ANIMATES for 300ms. getComputedStyle
+       returns the value mid-flight, so a pass that runs during the animation
+       measures intermediate ink on an intermediate ground — a surface that is
+       not what finally gets painted. Two failures came out of that, both
+       invisible in the dark theme:
+
+         - deterministic: on angular-custom-directives, `.code-live` is still
+           light ink at DOMContentLoaded AND at load, reads fine against its dark
+           panel, so the pass skips it. The transition then completes to
+           rgb(71,66,56) on rgb(5,10,20) — 1.99:1, unreadable, 6 of 6 loads.
+         - the race: on angular-dynamic-components the ground is sampled at
+           whatever frame the pass caught, so relight()'s `bgL < 0.18` fallback
+           flips between light and dark ink — 3-5 of 6 fresh loads unreadable.
+
+       Neither MutationObserver above can see it: an animating value produces no
+       DOM mutation. So listen for the animation actually finishing. Our own
+       writes can re-trigger a transition (property: all), hence the cap — the
+       0.03 ground guard in repair() means repeated passes converge and stop
+       writing, so this is a backstop against a pathological page, not the
+       mechanism. `node tmp_creamrace.mjs` is the test. */
+    var transPasses = 0;
+    document.addEventListener('transitionend', function (e) {
+      if (e.propertyName !== 'color' && e.propertyName !== 'background-color') return;
+      if (transPasses++ > 60) return;
+      schedule();
+    }, true);
   }
 
   function boot() { build(); startRepair(); }

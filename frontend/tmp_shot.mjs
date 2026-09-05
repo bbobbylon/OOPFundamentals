@@ -22,26 +22,20 @@
  * Animations: pages pace their scenario walks at ~800ms/step, so we wait for
  * network-idle plus a settle delay before shooting. --settle=N to override.
  *
- * Requires the globally-installed playwright + the preinstalled Chromium at
- * PLAYWRIGHT_BROWSERS_PATH (/opt/pw-browsers). Do NOT run `playwright install`.
+ * Playwright and the browser binary are located by tmp_pw.mjs — a global
+ * install, $PW_MODULE, or playwright-core paired with your system Chrome/Edge.
  * ========================================================================== */
 import { createServer } from 'node:http';
 import { readFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { extname, join, basename, resolve } from 'node:path';
-import { createRequire } from 'node:module';
+import { loadChromium, browserExecutablePath } from './tmp_pw.mjs';
 
-const require = createRequire(import.meta.url);
-// playwright is installed globally, not in this repo — resolve it from there.
-const GLOBAL_MODULES = '/opt/node22/lib/node_modules';
-let chromium;
-try {
-  ({ chromium } = require('playwright'));
-} catch {
-  ({ chromium } = require(join(GLOBAL_MODULES, 'playwright')));
-}
+const chromium = loadChromium();
 
-const ROOT = resolve(new URL('.', import.meta.url).pathname); // frontend/
+// fileURLToPath, not URL.pathname: the latter yields "/B:/…" on Windows.
+const { fileURLToPath } = await import('node:url');
+const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url))); // frontend/
 
 const WIDTHS = {
   phone: { width: 390, height: 844, deviceScaleFactor: 2, isMobile: true },
@@ -85,6 +79,9 @@ for (const w of widths) {
 // ── static server over frontend/ ──────────────────────────────────────────
 const server = createServer(async (req, res) => {
   try {
+    // See tmp_smoke.mjs: the site ships no favicon, and the browser's probe
+    // would otherwise show up as a console error on the shot report.
+    if (req.url === '/favicon.ico') { res.writeHead(204); return res.end(); }
     const url = decodeURIComponent(req.url.split('?')[0]);
     const file = join(ROOT, url === '/' ? 'index.html' : url);
     if (!file.startsWith(ROOT) || !existsSync(file)) { res.writeHead(404); return res.end('nf'); }
@@ -100,11 +97,7 @@ const port = server.address().port;
 
 await mkdir(outDir, { recursive: true });
 
-const browser = await chromium.launch({
-  executablePath: existsSync('/opt/pw-browsers/chromium/chrome-linux/chrome')
-    ? '/opt/pw-browsers/chromium/chrome-linux/chrome'
-    : undefined,
-});
+const browser = await chromium.launch({ executablePath: browserExecutablePath() });
 
 const written = [];
 for (const page of pages) {

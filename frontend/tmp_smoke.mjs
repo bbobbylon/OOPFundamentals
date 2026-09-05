@@ -37,12 +37,9 @@ import { createServer } from 'node:http';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { extname, join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createRequire } from 'node:module';
+import { loadChromium, browserExecutablePath } from './tmp_pw.mjs';
 
-const require = createRequire(import.meta.url);
-let chromium;
-try { ({ chromium } = require('playwright')); }
-catch { ({ chromium } = require('/opt/node22/lib/node_modules/playwright')); }
+const chromium = loadChromium();
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -56,6 +53,14 @@ const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/jav
   '.png': 'image/png', '.woff2': 'font/woff2', '.wasm': 'application/wasm' };
 
 const server = createServer((req, res) => {
+  /* Chrome probes /favicon.ico once per ORIGIN, not once per page. The site
+     ships no favicon, so that probe used to 404 and land in the console of
+     whichever page happened to load first — one phantom failure per run, on a
+     different page each time (it was blamed on shell-azure, then shell-aws,
+     then shell-powershell, none of which had anything wrong). 204 answers the
+     probe honestly without pretending a file exists, and leaves every real
+     404 still reportable. */
+  if (req.url === '/favicon.ico') { res.writeHead(204); return res.end(); }
   const file = join(HERE, decodeURIComponent(req.url.split('?')[0]));
   if (!file.startsWith(HERE) || !existsSync(file)) { res.writeHead(404); return res.end(); }
   res.writeHead(200, { 'content-type': MIME[extname(file).toLowerCase()] || 'application/octet-stream' });
@@ -67,7 +72,7 @@ const port = server.address().port;
 const pages = (only.length ? only : readdirSync(HERE).filter((f) => f.endsWith('.html'))).sort();
 console.log(`smoke-testing ${pages.length} page(s) at ${width}px…`);
 
-const browser = await chromium.launch();
+const browser = await chromium.launch({ executablePath: browserExecutablePath() });
 const real = [], network = [];
 const clipping = [];   // text cut off inside a non-scrolling box (reported, not fatal)
 let done = 0;

@@ -10,57 +10,51 @@ page/track counts in `README.md` and `DEVHUB-GUIDE.md`, then delete the item fro
 
 ---
 
-## 🐞 KNOWN BUG — cream theme legibility race (found 2026-09-04, NOT fixed)
+## ✅ FIXED — cream theme legibility (was a KNOWN BUG; kept as a record of the diagnosis)
 
-**Reproduce:** `node frontend/tmp_creamrace.mjs` — loads one page fresh six times
-in cream and reports each run's text contrast. Typically **3-5 of 6 runs render
-text at 1.05-1.68:1** against a 0.734-luminance ground, i.e. invisible, and the
-rest at 10-13:1. Nothing about the page changes between runs. Worst known case:
+**Symptom.** In cream, text on pages with their own panel grounds rendered
+unreadable. Two faces, both invisible in dark:
 
-```
-node frontend/tmp_creamrace.mjs angular-dynamic-components-visualizer.html '.body div.desc'
-```
+- *deterministic* — `angular-custom-directives`, `.demo-area div.code-live`:
+  dark ink `rgb(71,66,56)` on a near-black `rgb(5,10,20)` panel, 1.99:1, 6 of 6 loads.
+- *nondeterministic* — `angular-dynamic-components`, `.body div.desc`: 3-5 of every
+  6 FRESH loads at 1.05-1.68:1 against a 0.734-luminance ground; the rest at 10-13:1.
 
-**Cause.** `devhub-hf-theme.js`'s repair pass runs from `boot()` at
-`DOMContentLoaded`. That does not wait for linked CSS to paint, so `groundOf()`
-can measure the *inner* grounds (`.step`, `.panel` — per-page `<style>` classes
-whose colour comes from remapped tokens) while they are still the dark theme's.
-The repair then picks ink for a surface that will not exist a moment later, and
-which way it errs is decided by one threshold in `relight()`'s fallback:
+**Root cause: CSS transitions.** Much of the site carries `transition: all .3s`,
+so when the theme's colours land, every colour and background ANIMATES for 300ms.
+`getComputedStyle` returns the value mid-flight, so the repair pass in
+`devhub-hf-theme.js` measured intermediate ink on an intermediate ground — a
+surface that is not what finally gets painted. The deterministic case saw light
+ink on a dark panel, judged it fine, and skipped; the transition then completed
+to dark-on-dark. The race caught a different animation frame each load, so
+`relight()`'s `bgL < 0.18` fallback flipped between light and dark ink.
 
-```js
-fixed = bgL < 0.18 ? [242,232,219] /* light ink */ : [32,30,29] /* dark ink */;
-```
+Neither MutationObserver in that file could see it: **an animating value produces
+no DOM mutation.**
 
-A stale ground reading 0.12 → light ink → invisible once cream lands. A stale
-0.21 → dark ink → correct *by accident*. That is the whole coin flip.
+**Fix.** Listen for `transitionend` on `color` / `background-color` and schedule
+another pass — i.e. measure once the animation has finished rather than during
+it. Capped at 60 passes as a backstop, since our own writes can re-trigger a
+transition under `transition: all`; the 0.03 ground guard in `repair()` means
+repeated passes converge and stop writing, so the cap is not the mechanism.
 
-Nothing corrects it afterwards: the ground changes because **CSS finished
-applying**, which is not a DOM mutation, so neither MutationObserver in that
-file fires. The re-derive guard
-(`if (done && Math.abs(hfcBg - bgL) <= 0.03) continue`) is sound and simply
-never gets a later pass to run in.
+**Two earlier attempts that did NOT work — do not retry them:**
 
-**Two fixes attempted and reverted — do not just retry these:**
+1. A guaranteed pass on `window.load` plus a double `requestAnimationFrame`.
+   1/6 → 4/6 readable, still flaky. Wrong because the ink is still light at
+   `load` and only settles ~1.4s in — this was never about stylesheet loading.
+2. Gating `run()` on `document.body` luminance > 0.5. Made it **worse** (4/6
+   failing): `body` already carries cream while `.step` / `.panel` do not, so the
+   guard passed at exactly the wrong moment.
 
-1. A guaranteed extra pass on `window.load` plus a double `requestAnimationFrame`.
-   Improved it (1/6 → 4/6 readable) but stayed flaky, because `load` still is not
-   late enough for the inner grounds on every run.
-2. Gating `run()` on `document.body`'s luminance being > 0.5. Made it **worse**
-   (4/6 failing): `body` already carries cream while `.step` / `.panel` do not, so
-   the guard passes at exactly the wrong moment.
+**Regression tested:** both cases 6/6 and 4/4 clean after the fix; dark theme
+unchanged (the one dark failure, `.diagram-toggle div.dtab.active` at 1.86, is
+byte-identical with and without the patch — pre-existing); vcheck 528/528; full
+site smoke at 320px clean.
 
-**Likely real fix** (unverified): stop inferring readiness from a timer or from
-`body`, and make the repair idempotent against a *late* ground change — e.g.
-re-run once `document.styleSheets` are all loaded, or store the measured ground
-per element and re-derive on the first pass where it moves, without the 0.03
-early-out short-circuiting the very first correction. Whoever picks this up:
-`tmp_creamrace.mjs` is the failing test, so fix it until that script exits 0.
-
-**Scope.** Cream only — dark is unaffected. Seen on pages whose per-page
-`<style>` block defines its own panel grounds; `tmp_contrast.mjs` catches it only
-intermittently *for the same reason the bug exists*, which is why the repeat-load
-script had to be written.
+**The test stays.** `node frontend/tmp_creamrace.mjs` loads a page fresh N times
+and reports per-run contrast — a single load proves nothing about a race, which
+is the whole reason it exists. Run it if you touch the repair pass.
 
 ---
 
@@ -79,20 +73,200 @@ script had to be written.
 - **Never force-push this branch.** Eight amend+force-pushes earlier rewrote it under Bobby's
   clone and his next `git pull` conflicted across ~555 files. Ordinary fast-forward commits
   only; his one-commit requirement is satisfied by **squash-merging** the PR at the end.
-- **One commit is stranded on Bobby's machine** — `2260122`, from session
-  `session_01BoEsHjQmczbCEB7dnjGVyT` (a *bridge* session running on his computer, not the
-  cloud; unreachable since 2026-09-01). It is on no remote ref. Recovering it, in this order:
 
-  ```
-  git push origin HEAD:claude/local-session-work    # 1. SAVE first, under a NEW name
-  git fetch origin                                  # 2. then repair the clone
-  git reset --hard origin/claude/app-redesign-scope-cicd-9xi362
-  ```
+### ✅ RESOLVED 2026-09-04 — the divergence is merged, nothing is stranded
 
-  Order matters — step 3 destroys the commit if step 1 has not happened. It cannot push to the
-  same branch name; that push would be rejected.
-- **Open question: which colorway is default.** Bobby's local session made cream default; this
-  branch keeps dark, per his earlier "keep the dark colorway, add mocha/cream later".
+The force-push damage above is repaired. Bobby's clone had diverged **2 local / 34 remote**
+from a merge-base of `9e4de0a` (master), so `git pull` conflicted in **44 files**. It was
+never two rival designs: **12 of the 16 new shared files were byte-identical**, i.e. one
+lineage that the rewrite split in two.
+
+Resolved by a real **merge** (not the `reset --hard` recipe that used to live here — that
+would have destroyed the local-only work below, and a merge needs no force-push):
+
+- **theirs (cloud) ×42** — the cloud branch is the superset: `devhub-hf.css` 42KB → 208KB,
+  `devhub-hf-theme.js` 3.8KB → 14KB, plus the 102 authored pages.
+- **ours (local) ×2** — `shell-cli-basics-visualizer.html` (local authored it to the HF bar,
+  37.1KB → 44.6KB with 15 `hf-walk`/`hf-anatomy` uses; the cloud only swept it, +181 bytes)
+  and `tmp_shot.mjs` (the cloud copy hardcodes `/opt/node22/...` and `URL().pathname`, which
+  yields `/B:/…` on Windows — broken on Bobby's machine).
+- **`devhub-lesson.js` survived on its own** — local-only, and the cloud branch has *zero*
+  occurrences of `hf-walk`/`hf-anatomy`. A plain "take cloud" would have deleted it silently.
+
+**`2260122` is no longer stranded** — it is in this branch's history, and also kept at the
+local branch/tag `backup/local-before-merge-20260904` / `backup-local-20260904`.
+
+- **Colorway: half-restored, deliberately.** Taking the cloud's `app.html` and
+  `devhub-hf-theme.js` wholesale had silently reverted Bobby's `2260122` cream work. The
+  **cream palette is restored** in `app.html` (`:root[data-theme="light"]` — pure CSS, warm
+  `#f5ead8` ground, `#c15c30` accent, no JS involved, so the race below cannot touch it).
+  **Cream is now the DEFAULT again, on both surfaces.** It was briefly held back because
+  cream carried the legibility race above; `26be77b` fixed that race (`transition: all .3s`
+  meant the repair was measuring mid-animation values). Re-verified here after merging it:
+  the same page went **2.93:1 → 4.92:1**, above WCAG AA, 6 of 6 runs, with
+  `repairMeasuredGroundL` no longer a stale reading at all. `tmp_creamrace.mjs` exits 0.
+
+  The default lives in **two** places and they must agree — `862821d` restored only the
+  lesson half (`normalise()` in `devhub-hf-theme.js`), which left a first-time visitor with
+  a **dark hub that opened cream lessons**. The hub half (`|| 'light'` in `app.html`'s
+  pre-paint script) is restored here, so `2260122`'s intent is whole again. If you ever flip
+  one, flip both.
+
+  Still worth doing: `tmp_creamrace.mjs` covers a single page, and the fix under it is new.
+  Widen it before trusting cream everywhere.
+- **Tooling is portable again.** New `frontend/tmp_pw.mjs` is the single place that resolves
+  Playwright and a browser binary; `tmp_shot` / `tmp_smoke` / `tmp_contrast` / `tmp_creamrace`
+  all import it instead of carrying four copies, three of which were cloud-sandbox-only. On a
+  machine with no Playwright they now print one actionable message instead of a
+  `MODULE_NOT_FOUND` on `/opt/node22`. Verified end-to-end on Windows with
+  `PW_MODULE=<dir>/node_modules/playwright-core` against the system Chrome.
+
+---
+
+## 🔍 SEVEN-DIMENSION AUDIT (2026-09-05) — the backlog that came out of it
+
+Everything above this line was found by looking at teaching *rhythm*. This section
+came from auditing the seven dimensions nobody had measured: accessibility,
+performance, learner journey, interactive-feature health, retention mechanics,
+maintainability, and factual correctness of the content. Eight agents, every
+finding required to cite a file path, real command output or a browser
+measurement; anything unevidenced was discarded.
+
+**The theme: the parts all work and are not connected to each other.** The recall
+machinery is built and verified (19/19 exams, 16/16 decks, 9 graded IDEs) and
+reachable from almost nowhere. Navigation loses state between the hub and the
+page. That is a much better problem to have than "the content is wrong" — see
+"measured healthy" below.
+
+### ✅ Fixed 2026-09-05
+
+- **CodeWalk was inert on 307 of 465 pages** (`b088024`). `linesForStep()` read
+  only `s.line`; 307 pages author `lines:`. Every step advanced the counter and
+  highlighted nothing while the whole block sat dimmed at opacity .4. Invisible to
+  every gate — the widget renders, throws nothing, and scores as present.
+  The two keys are NOT interchangeable: `line:[a,b]` is a range (all 363 on the
+  site are exactly 2 elements), `lines:[...]` is an explicit list (1-13 elements,
+  545 steps have exactly 5). Treating either as the other teaches the wrong lines.
+- **The chapter rail credited the wrong page** (`dde21c1`). Rail stops were plain
+  `<a href>`; inside the hub's iframe that navigates the frame only, so
+  `currentFile` stayed stale and "Mark as Learned" credited the page you left.
+  Now routed through the `dlh-navigate` postMessage contract app.html already had.
+- **47 of 514 pages could not be bookmarked** (`fb00663`). The hash is written by
+  stripping both suffixes, so reading it back is ambiguous; the restore assumed
+  `-visualizer.html` and silently dropped every exam, deck and practice page on
+  the welcome screen. Now resolved against the sidebar. Round-tripped all 514:
+  467 → 514.
+- **90 of 124 sections dead-ended** (`90a9329`). The rail now renders
+  "Next up · <next section> →" on the last page of a section, and stays quiet on
+  the last section of a track.
+
+### Remaining, ranked by learner impact per unit of effort
+
+> **#4 (wire lessons forward into practice) LANDED 2026-09-05.**
+> `tmp_genpracticemap.mjs` inverts the 614 `ref:{label,file}` entries the banks
+> already carried into `window.DEVHUB_PRACTICE` in `tracks-data.js`, and
+> `devhub-chapters.js` renders a "Test yourself" strip at the end of the lesson.
+> Lessons linking forward to practice: **2 → 202 (39%)**, with zero per-page
+> edits — all 202 already loaded both scripts. Flashcard decks are NOT in the map:
+> they carry no per-lesson refs, only a track index link, so decks can only be
+> surfaced track-wide and that is still open.
+
+#### 4. Wire lessons forward into practice by inverting the exam refs you already have
+
+*1-2 days* — Three of the seven audits found this independently, which makes it the best-corroborated finding in the set. The recall machinery all works — 19 exams, 16 decks, 9 graded IDEs, all verified end to end in a browser — and it is reachable only from a sidebar track sitting 33rd of 34. A learner who finishes a lesson has nowhere to go. The data to fix it is already in the repo and already 100% valid, so the first 123 lessons cost zero new content.
+
+**Evidence.** I confirmed both directions: `grep -l 'href="exam-\|href="flashcards-\|href="practice-' *visualizer.html` returns 2 of 465 lesson pages (both ds-* pages pointing at exam-dsa-interview.html); `grep -oh "ref:" exam-*.html | wc -l` returns 560, and the retention audit resolved all 560 to existing files with 0 broken, covering 202 distinct lessons. 292 of 465 lessons have no on-page recall of any kind — including 50/53 Spring Boot, 50/74 Angular, 18/19 Identity & Auth and 27/27 React, which is precisely your CIAM job surface. Inverting the existing refs lifts practice-linked lessons from 173 (37%) to 296 (64%) with nothing new authored.
+
+**First step.** Write a one-off script that reads every exam bank's `ref:{label,file}` entries and emits a track→{exam,deck,practice} mapping keyed by lesson file. Then have devhub-chapters.js (already on all 512 pages) render a "Test yourself" footer strip after the last <h2> — one engine change plus one generated table, no per-page edits.
+
+#### 5. Make the hub's 512 lesson links real anchors, and give search an empty state
+
+*Half a day including the CSS reset* — Two auditors measured this separately. Every lesson link in app.html is a styled div with a click handler: no keyboard access, no middle-click-to-new-tab, no copy-link, no browser history, nothing for a crawler. It is one render function, and switching to `<a href>` with a preventDefault click handler keeps the SPA behaviour while restoring all of that at once. The blank-panel search miss is a two-line addition in the same file.
+
+**Evidence.** app.html:171 styles `.page-link` with `cursor: pointer; user-select: none` — the tell of a div standing in for a link, which I confirmed in the source. Measured in Chromium after clicking every track open: {pageLinks: 512, pageLinkTag: ["DIV"], pageLinkHref: 0, secHeaders: 123, secHeaderTag: ["DIV"]}; 34 track-headers, 0 with tabindex, 0 with aria-expanded. A real 400-press Tab walk with everything expanded finds 7 stops total. The instrumented listener scan flags 43 of app.html's 48 click-handled elements as keyboard-unreachable — the worst page on the site. Separately, searching a non-matching string leaves #sidebar-tracks with innerText === "" and no message; `grep -n 'no result\|No match\|nothing found' app.html` returns 0 hits.
+
+**First step.** In app.html:983-1021, build each link as `<a href="<file>" class="page-link">` and call preventDefault in the existing click handler; make .track-header/.sec-header `<button type="button">` carrying aria-expanded alongside the .open class. Add `button{all:unset}`-scale resets — the CSS already targets these by class. Give #search an aria-label while you're there.
+
+#### 6. Fix the handful of individually broken pages
+
+*An afternoon for all five* — Each is a small, self-contained defect on a page that currently teaches nothing or teaches the opposite of its point. Together they are maybe an afternoon, and the material-cdk one is the only page on the entire site that can render a blank screen.
+
+**Evidence.** (a) angular-material-cdk-visualizer.html line 7 — I read it: `<link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons" />`, the only render-blocking external resource across 528 pages. FCP measured 13,112ms against a site median of 312ms; with the host hanging, at 2.5s paintEntries=0 with 979/1010 elements laid out — a solid dark rectangle. It needs exactly three icons (lines 558, 561, 776). tmp_smoke files it as "failed only on OUTBOUND NETWORK — expected in a sandbox" and then prints "✓ 1 page(s) clean". (b) appsec-injection-xss-visualizer.html:397 puts a literal `<script>` in a node label that line 481 concatenates into innerHTML; the real script element swallows 4 of 5 diagram nodes, applyStep throws `Cannot read properties of null (reading 'classList')` at line 499, and because the throw escapes tick() the `disabled=true` set on Play and all five scenario buttons at line 508 is never lifted — the page is dead until reload. (c) typescript-declarations-visualizer.html ships a full rt-* hero including `<button class="rt-run" id="tdRun">` at line 175 that no script references — `grep -n tdRun` returns one line, the markup itself; it was the only page in the 438-page sweep with 1 inspector state on all four scenarios. (d) typescript-decorators-visualizer.html's Try It throws a red TypeError exactly at the line commented "silently ignored", because transpileModule emits "use strict" — the punchline line never runs. (e) tmp_smoke already names 121 clipped text elements on 73 pages (an h2 overflowing by +141px on interview-system-design), where the sentence is simply invisible on a phone.
+
+**First step.** Delete angular-material-cdk-visualizer.html line 7 and swap the three `<span class="material-icons">` glyphs for inline SVG or Unicode ♥ / + / ☰ — that leaves the whole 528-page site free of render-blocking third-party requests. Then teach tmp_smoke to distinguish a network failure on a lazy resource from one on a render-blocking <link> in <head>, so the next one can't hide in the sandbox bucket.
+
+#### 7. Four shared-file accessibility fixes that each cover hundreds of pages
+
+*About an hour total* — These are near-zero-effort because they all live in shared files, and two also help you directly: the reduced-motion block makes tmp_shot screenshots deterministic, and dropping the codegrade autofocus removes a dead end anyone can hit by pressing Tab. Grouped because individually none justifies a slot; together they are an hour.
+
+**Evidence.** (1) prefers-reduced-motion appears in 3 of 528 pages while 300 pages define unguarded @keyframes/transition; under Playwright's reducedMotion:'reduce' across 20 pages, 1,660 elements were still transitioning and `.rt-chip`'s computed transition was byte-identical in both modes. devhub.css:557 already uses the correct `no-preference` polarity for hover-lift, so the intent exists — it just never reached per-page CSS. (2) I confirmed 437 pages carry `.rt-inspect` and 0 have aria-live on it; the per-step payload — the actual HttpRequest, the JWT claims — is announced to nobody. (3) I confirmed devhub-codegrade.js:899 and devhub-tryit.js:419 both capture Tab with no escape hatch; only codegrade calls `ta.focus()` (line 990) on render, so on the 9 practice pages focus lands in the editor on load and 15 Tab presses later is still there, having typed indentation into the code — Run, the language tabs and the back link unreachable. (4) devhub-quiz.js:531-541 has a working 1-8/arrow shortcut that appears nowhere on screen, and `.dq-choice` is a bare div with no role, tabindex or aria-checked across 19 exams / 560 questions.
+
+**First step.** Add the global `@media (prefers-reduced-motion: reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}` block to devhub.css — one edit, 300 pages. Then add three lines to a shared script setting `role="status"` on every `.rt-inspect`, drop the `ta.focus()` at devhub-codegrade.js:990, and gate both Tab handlers behind an Escape flag.
+
+#### 8. Correct four pages that teach something false, and build the harness that found them
+
+*A day for the four pages; another day for the harness* — These are the only findings where a learner comes away actively wrong, and one is a deep-dive page whose entire subject is the thing it gets backwards. The structural lesson matters more than the four fixes: in every case the authored prose was right and the interactive payload — CodeWalk note:/vars:, scenario res:, .intro cards — was wrong. That is the layer the animation says out loud when attention is highest, and no gate reads it as code.
+
+**Evidence.** I reproduced the worst one myself: typescript-generic-inference-deep-visualizer.html:274-278 animates `merge("a", 42)` to a green ✅ reading "T = string|number. TS picks the union when types differ", and `tsc --noEmit --strict` on that exact signature gives `error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'`. The suggested fix `merge<string>("a",42)` is also an error. Same false model at line 336 (`pair(1,"x")`), and the clamp/NoInfer CodeWalk at line 454 has both halves inverted. Angular: I confirmed 7 pages still emit `provideExperimentalZonelessChangeDetection`, removed in v21; five pages give five different stability answers, and angular-zoneless-deep's intro (L85) contradicts its own body (L224). exam-angular.html #12 names the correct API — the exam bank is more current than the lessons. Java: the StructuredTaskScope CodeWalk fails `javac --release 21 --enable-preview` with `Subtask<U> conforms to Future<User>`, and is labelled a stable Java 21 feature when it is preview. SQL: sql-transactions-visualizer.html says phantoms are prevented at REPEATABLE READ in its table (L283) and prose (L120) and not prevented in its CodeWalk (L359-360).
+
+**First step.** Start with typescript-generic-inference-deep-visualizer.html:274-278 — the green ✅ on non-compiling code is the most misleading single thing found in the whole audit. Recast it as a red scenario ending in TS2345, and move the union example onto the page's existing `paint(["red","blue"],"green")` case, which is correct and compiles. Then consider a hand-run frontend/tmp_codecheck.mjs that extracts <pre> and CodeWalk `code:` arrays and compiles the TS/Java ones, ignoring blocks adjacent to an ❌ marker — it caught all four defects at 30 candidates read for 4 real hits.
+
+#### 9. Fix the dark theme's genuinely invisible text, then darken ~10 shared tokens for AA
+
+*Half a day for the dark 2.2 fixes; another half for the AA tokens* — Two separate problems the same tool measures. The first is unambiguous: text below the site's own "is it invisible" floor, on the theme nobody has ever run the gate against. The second is a policy call — 1,816 selectors sounds catastrophic but is really about ten shared components, and the code comments carrying your line-by-line explanations are among the least legible text on the page.
+
+**Evidence.** `tmp_contrast.mjs --theme=dark --min=2.2` over all 528 pages: "✗ 31 distinct selector(s) under 2.2:1, across 57 page(s)" — .topbar span at 1.37:1 on 12 pages, .cw-head span.cw-title (the CodeWalk's own title) at 1.95:1, .panel button at 1.81:1 (white on white), .cg-editor .cg-gutter at 2.19:1 on 9. Cream is clean at 2.2 on all 528, and the tool defaults to cream (tmp_contrast.mjs:44), which is why the espresso half was never measured. At the real AA bar: cream 1,816 selectors / 524 pages, dark 546 / 495, and the head of both lists is shared components — .hf-rail a 3.61:1 on 483 pages, .cw-line .cw-ln 4.45 cream / 2.24 dark on 464, .rt-ctlbar .rt-pill 3.25 on 428, .rt-inspect .rt-dir 3.94 on 424, .userseg button.on (the SELECTED chip) 2.77 on 155. Font sizes were measured against html{zoom:1.12} — .hf-rail a 10px/400, .rt-pill 11px/400, .cw-ln 12.5px — none qualifies for the large-text exemption, so 4.5 is the right bar.
+
+**First step.** Run `node frontend/tmp_contrast.mjs --theme=dark --min=2.2` and fix those 31 selectors — mark the deliberately faint connector glyphs (.lc-arrow, .hier-arrow, .pg-arrow) aria-hidden rather than recolouring, since the tool already exempts those. Then darken .cw-ln and the .cm comment colour first: they carry the line-by-line explanation and are the widest-reaching offenders in both themes.
+
+#### 10. Make the streak count retrieval, and let learners retake the questions they missed
+
+*A day for both; the due-date clock is a separate, larger piece* — Both are small changes to existing engines and both target the thing the site is for. Today a day spent re-drilling Spring flashcards breaks your streak, and after scoring 27% on an exam you are told which domain was weakest but can never see or re-attempt the 16 specific questions you failed — the next attempt reshuffles a fresh random draw, so hitting them again is chance.
+
+**Evidence.** I confirmed `touchStreak()` has exactly one call site: app.html:688, inside setStatus, which only fires from autoVisit's `if (!progressCache[file])` first-visit branch or the Mark-as-Learned toggle. Measured: a 5-day streak plus one day of pure review collapses to {"lastDate":"...","count":1}. A full 22-question timed exam and a flashcard session both wrote their own stores and left dlh_streak_v1 untouched. For misses: devhub-quiz.js:472 persists `{at, mode, pct, correct, total, domains}` and nothing else — a real run produced dlh-quiz:git with domain tallies and no question ids; `grep -niE "retry|missed questions" devhub-quiz.js` → 0 hits. The bank entries already carry stable `id` fields. Related and worth knowing: `grep -c "Date\|getTime\|now()" devhub-flashcards.js` returns 0 — the Leitner boxes have no clock, so nothing is ever "due", and README/DEVHUB-GUIDE's "spaced repetition" is currently weakness-ordered practice.
+
+**First step.** Add `missed: [qid]` to the attempt object in devhub-quiz.js finish() and a third mode beside Practice/Exam that draws from that id set. Then export a small DevHubStreak.touch() and call it from quiz finish(), flashcards grade(), devhub-hf-check on first answer, and codegrade on a passing run — and from autoVisit on any visit, not just the first.
+
+#### 11. Surface learning-paths.html and paint completion state on its steps
+
+*Half a day for surfacing plus step state; a day more to author the CIAM path* — It is the only ordered curriculum on the site, its own subtitle says "a library has no finish line; a path does", and no page links to it. Fixing discoverability is a card on the welcome screen; fixing the steps is one localStorage read. The CIAM path you actually care about exists only in a markdown file a learner never opens.
+
+**Evidence.** `grep -n "learning-paths" frontend/*.html frontend/*.js` returns exactly one hit — tracks-data.js:900, its own registration. Zero inbound links from any of 528 pages, including exam-readiness.html in the same section. Measured sidebar position: category 6 of 6 → track 5 of 5 → section 1 of 10, with both accordions defaulting closed. The welcome screen measured anyStartHereText: false, pathsLinkOnWelcome: []. The page reads DevHubQuiz.loadHistory for its capstone but never reads dlh_progress_v1, so a learner ten steps into a twelve-step path sees the day-one screen. Coverage is also inverted against your job: Azure/GCP/K8s/DataSci/AI all 100%, but Identity & Auth 4/19 (21%), Angular 17/74 (23%), Spring Boot 17/53 (32%); and DEVHUB-GUIDE's 11-step featured CIAM path has 4 steps that appear in no in-app path at all.
+
+**First step.** Add a "New here? Start with a path →" card at the top of #welcome in app.html above the progress card, and cross-link exam-readiness.html. Then in learning-paths.html's step renderer (lines 391-400) read dlh_progress_v1 and paint ✓ learned / ● visited / ○ untouched using the same three-state vocabulary app.html:refreshUI() already uses.
+
+#### 12. Split devhub-hf-theme.js's contrast repair into a read phase and a write phase
+
+*A day* — It is the largest main-thread cost on every lesson page and the fix is a well-understood refactor, not a redesign. Ranked last of the real items because it costs responsiveness on mid-range phones rather than breaking anything, and because CLAUDE.md documents the pass as load-bearing for cream legibility — so this is optimisation, not removal.
+
+**Evidence.** Ablation at 4x CPU throttle with the script stubbed to an empty body: typescript-fundamentals-visualizer.html goes from 10,458 getComputedStyle calls / TBT 1,060ms / 284ms style recalc to 0 calls / TBT 603ms / 143ms — 457ms of blocking time from this one script. angular-rxjs 313ms attributable, collections 180ms. CPU profiling agrees: 467ms self-time versus 85ms for the next-largest script on the page. The ratio is the tell — angular-rxjs makes 13,378 getComputedStyle calls over 2,135 nodes to apply 156 inline colour writes. Cause is repair() at devhub-hf-theme.js:198-246: getComputedStyle at 203, groundOf walking ancestors with more getComputedStyle at 143, then style.setProperty at 245 inside the same loop, so each write invalidates style and the next read forces a synchronous recalc. Google's "good" TBT bar is 200ms. Worth noting this cost is partly downstream of per-page .who-* colours living in inline <style> where CSS can't reach them.
+
+**First step.** Split repair() into two loops: collect every element's computed colour and ground into an array first (pure reads), then apply all style.setProperty writes in a second pass. Also widen the groundOf cache — line 152 only caches when stack.length is 0, so translucent-panel subtrees re-walk to the root for every child.
+
+### Measured healthy — do not spend effort here
+
+- Registry integrity is immaculate — 512 registered entries, 512 unique files, 0 duplicates, 0 registered-but-missing, 0 orphan lesson pages (the 16 unregistered files on disk are all infrastructure). tracks-data.js is a genuine single source of truth.
+- Page-level robustness: loading all 512 registered pages in Chromium produced 0 uncaught page errors and 0 load failures. tmp_vcheck passes cleanly at 528 pages / 512 registered.
+- Caching and page weight are far healthier than expected. Five lesson navigations in one session hit every shared asset exactly once; the warm second navigation transfers 4.4KB with 446KB served from cache. Median lesson page: FCP 312ms, max DOM depth 12 across all 77 sampled pages, and exactly one render-blocking external resource on the whole site (item 6 removes it).
+- The scenario engines work. 436 of 438 rt-* pages animate with distinct per-step inspector states across multiple scenarios — the two exceptions are named in item 6. The pacing is wrong; the mechanism is not.
+- The assessment layer is verified working end to end in a browser: 19/19 exams (560 questions, all with per-choice reasoning, all 560 refs resolving to existing files), 16/16 flashcard decks (459 cards, Leitner boxes persisting), 9/9 graded practice IDEs across 4 languages with real test diffs. The notebook round-trips too.
+- Shared-script wiring has zero drift in both directions: 231/231 <pre>-bearing pages load devhub-syntax.js and 0 load it without a <pre>; 465/465 CodeWalk, 119/119 Try It, 21/21 quiz, 9/9 codegrade pages all load their engine. The 15 pages that link no devhub.css load only the self-injecting devhub-transitions.js, so the self-containment rule is holding.
+- Code samples are overwhelmingly correct where it counts: 43/43 extracted Java snippets compile on JDK 21 (0 needing anything newer than CheerpJ's Java 8 target), 22/23 Python snippets run, 29/30 TypeScript widgets transpile and run clean.
+- Security and framework content held up under scrutiny — NIST SP 800-63B-aligned password guidance with no weak-hashing advice anywhere, implicit flow marked dead on all 6 pages that mention it, PKCE as default, and correct Spring Security 6 migration facts across rbac-deep, method-security-deep and oauth2-resource-server. All 25 exam-typescript and 27 exam-angular explanations read end to end with zero errors.
+- Offline degradation is honest and fast. Every playground and Try It widget prints a clear message within ~0.6s and re-enables its Run button; nothing hangs. The CDN loads for pyodide/sql.js/typescript/CheerpJ are all lazy and off the critical path.
+- The cream theme passes its own 2.2 floor on all 528 pages, every page sets lang="en", the focus ring at devhub.css:441 is real and no stylesheet anywhere sets outline:none, and the cream-legibility race documented in ROADMAP.md no longer reproduces (6/6 runs at 4.92:1).
+- Pages are genuinely distinct hand-authored material, not template clones — only 27 of 528 pages fall into near-duplicate pairs, and those are the deliberately generated flashcard/practice/index families. The inline JS is mostly per-page teaching DATA (only 10.3% duplicated logic), and 82% of the 438 scenario pages already share one uniform data contract.
+
+### Known, deliberately deferred
+
+- The `.hf-rail` "you are here" label is centre-aligned rather than positioned
+  over the current stop, so on a section-final page it floats above the wrong
+  dot. Cosmetic, pre-existing, noticed while shipping the Next-up link.
+- Discarded for weak or out-of-scope evidence: the heading-order sweep, splitting
+  `devhub-hf.css`, the nginx `immutable` bug (the live site is GitHub Pages, so
+  that config is not in the serving path), dead per-page CSS, consolidating the
+  458 hand-rolled stage engines, `.who-*` palette drift, and cross-device sync.
+  Full reasoning in the audit output; none was dropped for being fabricated.
 
 ---
 
@@ -105,7 +279,7 @@ syntax coloring on ALL code, the Head First brain-friendly aesthetic on ALL subj
 the Java patterns pages), colored/manipulated text as a deliberate memory device.
 
 ### 1. Head First rhythm — sitewide rollout (design landed, ~363 pages still to author)
-The design language shipped and is opted into on **513 of 528 pages** (`<html data-hf>`), and
+The design language shipped and is opted into on **515 of 530 pages** (`<html data-hf>`), and
 **102 pages are authored to the full nine-point rhythm**: deck line, problem/fix cards, a
 "one thing to remember" principle callout, a three-way dialogue, ONE shape-matched mechanism
 diagram, a knowledge check, "where you've seen this before", back-row Q&A, napkin predict-note.
@@ -964,6 +1138,176 @@ into a page scrollbar. Fixed at the cause with `minmax(min(280px,100%),1fr)` —
 280px, verified 3 columns unchanged at 1280px — plus a self-contained phone net for the 13
 landing pages that link no `devhub.css`. **The smoke gate's default width is now 320**, so the
 class cannot come back: 390 is a comfortable phone, 320 is where the arithmetic actually fails.
+
+### 13. Cloud-CLI lessons — ✅ ALL THREE LANDED (2026-09-04)
+
+All three ship under **Shell & Scripting → Cloud CLIs**:
+[`shell-aws-cli-visualizer.html`](../frontend/shell-aws-cli-visualizer.html),
+[`shell-azure-cli-visualizer.html`](../frontend/shell-azure-cli-visualizer.html), and
+[`shell-gcloud-cli-visualizer.html`](../frontend/shell-gcloud-cli-visualizer.html) — all
+`data-hf`, all authored, each routed through the identity surface of its cloud (`az ad`,
+IAM, `gcloud iam`) so they land on Bobby's actual CIAM day job rather than generic compute.
+
+The gcloud page closes the item. Both sibling pages' "Where to go next" entries — plain text
+marked *(not written yet)* since the page was linked before it existed, which is what turned
+`tmp_vcheck.mjs` red — are now real links again.
+
+**How it was written, since the same shape suits any "third of a set" page.** Cloned the Azure
+page's structure verbatim (same vertical chip engine, prefix `gc`) and then spent the effort on
+the **delta**, not the overlap: the page opens by telling the reader that group → verb is
+already familiar and that only two things are genuinely new. Those two carry the lesson:
+
+1. **Named configurations** (`gcloud config configurations activate`) — the differentiator this
+   item called for. Framed against the other two: AWS's `--profile` swaps credentials only and
+   `az account set` swaps the subscription only, so both let you end up *half*-switched — right
+   person, wrong project. `activate` swaps account + project + region atomically.
+2. **Two logins** — `gcloud auth login` (for the human) vs `gcloud auth application-default
+   login` (for client libraries). This is the actual first-day failure on GCP, and it is
+   scenario ① plus a knowledge check, because "my terminal works but my app says *Could not
+   automatically determine credentials*" is the moment the distinction has to land.
+
+Three smaller `az`→`gcloud` traps are called out where they bite: the read-one verb is
+`describe`, not `show`; names are positional, not `--name`; and `--format`/`--filter` are
+gcloud's own languages, **not** the JMESPath `--query` that AWS and Azure share. That last one
+is the page's memory hook — *two clouds query, the third one formats and filters* — and it is
+the kind of contrast only the third page in a set can make.
+
+CIAM payoff, which no other page in the track can show as cleanly: `gcloud auth
+print-access-token` vs `print-identity-token` makes **authorization vs authentication** two
+runnable commands rather than a diagram, and scenario ④ ends on workload identity federation
+as the reason `gcloud iam service-accounts keys create` is the command you should never run.
+
+**Verification, honestly.** `tmp_vcheck` green (531 pages, 515 registered), `tmp_assetcheck`
+clean, `tmp_hfaudit` scores it **65** — level with its Azure sibling (65) and above AWS (61.5).
+The browser gates did **not** run: Playwright is still not installed on the Windows box. In
+their place a scratchpad script checked the things parsing cannot see — every scenario step
+references a node that exists, every node drawn is actually visited, every `who-*` badge has a
+CSS rule, both `hf-check` blocks have an in-range `data-answer` with a `.why` per option, and
+every non-blank CodeWalk line is covered by a step. That is not a substitute for rendering the
+page; it is a substitute for *this class of bug*. **Still worth doing when Playwright exists:**
+`tmp_smoke` and `tmp_contrast` on this page, in both themes.
+
+*(A third bug found in the earlier AWS/Azure pass: `entra-id-overview-visualizer.html` was
+linked from the Azure page but the file is `entra-overview-visualizer.html` — a typo, fixed
+then.)*
+
+**Also fixed here:** `DEVHUB-GUIDE.md`'s Shell track row never mentioned the Cloud CLIs at all —
+the AWS/Azure pass updated the registry but not the navigator, so the section was invisible to
+anyone reading the guide rather than the hub.
+
+*(A third bug the same pass: `entra-id-overview-visualizer.html` was linked from the Azure
+page but the file is `entra-overview-visualizer.html` — a typo, now fixed.)*
+
+### 14. The 13 track landing pages ignore the theme — ✅ LANDED (2026-09-04)
+
+Now that cream is the default, the journey **hub → track index → lesson** went
+**cream → dark navy → cream**. Verified by screenshot on `angular-index.html`.
+
+Why they are stranded: of the 530 pages, 15 carry no `data-hf`. `app.html` has its own
+cream palette and `index.html` is only a redirect, so the real set is the **13 landing
+pages** (`angular-index`, `aws-index`, `configs-index`, `docker-index`, `ds-index`,
+`entra-id-index`, `git-index`, `interview-index`, `maven-index`, `ping-idm-index`,
+`spring-boot-index`, `typescript-index`, `index-legacy`). None of them link `devhub.css`
+and none load `devhub-hf-theme.js`, so **nothing sets `data-theme` on them at all** — and
+their dark colours are inline, so setting it alone would not be enough either.
+
+Both halves are needed: something must set the attribute, *and* these pages need light-theme
+values to answer it. All 13 do load **`devhub-transitions.js`**, which makes it the natural
+place for the attribute half (it already must be self-contained per `CLAUDE.md`).
+
+*Found via a 2026-08-31 stash (`stash-backup-20260904`) that tried exactly this. Its
+implementation is superseded — an older "paper" palette (`#f0e9da`/`#bf5f1f`, since replaced
+by cream `#f5ead8`/`#c15c30`), Fraunces instead of Playfair/Caprasimo, and a Google Fonts
+`@import` where the repo now self-hosts all four `.woff2` files. Don't restore it; it only
+identified the gap.*
+
+**APPROVED 2026-09-04 — do both halves, plus the migration flag.** Written down before
+starting so a session cut cannot lose the plan.
+
+1. **Set the attribute.** Add a theme bootstrap to **`devhub-transitions.js`** — the only
+   shared script all 13 load. It must be **self-contained** (`CLAUDE.md`: these pages link no
+   `devhub.css`, which is exactly how the giant-ripple bug happened), so it injects its own
+   id-guarded `<style>` rather than assuming any stylesheet. Read `localStorage`
+   `devhub-theme`, default **cream/light**, set `<html data-theme>` before first paint.
+   Must agree with the other two defaults — `app.html`'s `|| 'light'` and
+   `devhub-hf-theme.js`'s `normalise()`. **Three places now; change one, change all three.**
+2. **Give them light values to answer with.** The 13 pages' dark colours are inline, so the
+   attribute alone changes nothing. Each needs cream equivalents under
+   `:root[data-theme="light"]` — matching the hub's tokens (`--bg:#f5ead8`,
+   `--accent:#c15c30`, `--text:#2e2318`), not the stash's older paper ones.
+3. **One-time migration — `devhub-theme-v3`.** Without it, anyone already storing `'dark'`
+   (Bobby included) never sees the cream redesign. Flip stored `'dark'` → cream **once**,
+   set the flag, and respect every choice made after that. Put it in the same bootstrap so
+   hub and standalone pages migrate identically.
+4. **Verify by screenshot, not by reading**: `hub → angular-index → an Angular lesson` must
+   be continuous cream, and the dark toggle must still carry across all three.
+
+The 13: `angular-index`, `aws-index`, `configs-index`, `docker-index`, `ds-index`,
+`entra-id-index`, `git-index`, `interview-index`, `maven-index`, `ping-idm-index`,
+`spring-boot-index`, `typescript-index`, `index-legacy`.
+
+#### What actually shipped (2026-09-04)
+
+All four steps done, with **one deliberate deviation from step 1**: the bootstrap did *not*
+go in `devhub-transitions.js`. That script loads at **end of body**, so a bootstrap there
+paints the dark palette first and flips to cream after — a visible flash of the wrong theme
+on every landing page. Instead each page got an inline pre-paint `<script>` in `<head>`,
+right after `</title>`. Cost: the default now lives in **three** places (`app.html`'s head
+script, `devhub-hf-theme.js`'s `normalise()`, and these 13 inline scripts) — *change one,
+change all three*. That is written in the comment at each site.
+
+Note the two bootstraps store **different words for the same palette**: `app.html` stores
+`'light'`, `devhub-hf-theme.js` stores `'cream'`. Each normalises the other's word, so they
+interoperate — verified live: hub paints `data-theme="light"`, a lesson paints
+`data-theme="cream"`, and both compute `--bg: #f5ead8`.
+
+**The part that was not in the plan, and mattered most.** Step 2 said "give them light
+values to answer with", which reads like a CSS-variable job. It is not — roughly half the
+breakage was in rules that **hardcode a hex**, which no variable override can reach. Found by
+loading all 13 pages in same-origin iframes and measuring the *computed* colour of all 1202
+text nodes against each one's real effective background. Three distinct kinds:
+
+1. **Real failures.** `a.back` was `#22d3ee` cyan = **1.52:1** on cream (10 pages). Every h1
+   brand gradient failed, worst stop **1.10–2.50:1** — the page title on all 12 that have one.
+2. **Failures the fix itself introduced.** `.tier-num` is `color:#0f172a` near-black on
+   `background:var(--beg)`; fine when `--beg` was bright green, unreadable once cream made it
+   dark. Same for interview's four `.diff-*` chips (var text on a hardcoded near-black tint)
+   and aws's `.card:hover{background:#1e293b}`, which turned a hovered card navy under cream.
+   A variable-only sweep would have shipped all of these.
+3. **Visual seams that were not contrast bugs.** Tag chips hardcode `background:#0b1426`, so
+   dark navy chips floated on cream cards — readable, but obviously wrong.
+
+**Tune against the darkest surface, not the lightest.** The first pass tuned every accent to
+4.6:1 on `--bg` (`#f5ead8`). Card titles sit on `--panel` (`#efe2cc`) and chips on `--panel2`
+(`#e6d7bd`), so they landed at **4.28–4.38** — under AA by a hair, on ~500 card titles, on
+every page. Retuned against `--panel2`: one value is then safe on all three surfaces. Worth
+remembering for any future cream work.
+
+**`index-legacy` needed a different technique.** It sets ~40 brand colours as *inline* styles,
+which beat any stylesheet rule; on cream they ran **1.10–2.65:1**, the worst text in the sweep.
+Rather than `!important` whack-a-mole across 20 hexes, each inline colour became
+`var(--b-<hex>, <hex>)`: cream defines `--b-*` as a darkened equivalent, and the dark theme
+falls through to the fallback and renders exactly as before. The hook lives in the markup and
+each theme answers for itself. `#0f172a` was deliberately **excluded** — it is dark text on a
+bright chip and is correct in both themes.
+
+Verified: **light 3 failures, dark 0** across 1202 text nodes. Dark was re-checked through the
+real path (set `localStorage`, reload, read what the page painted) and is unchanged — screenshot
+of `angular-index` in dark is pixel-for-pixel the original. The migration was exercised both
+ways: a dark-era visitor is flipped to cream once and the flag set, and a dark choice made
+*after* the migration is respected.
+
+**Known-remaining (3, all pre-existing, none introduced here).** White text on a bright brand
+chip, identical in both themes, so they are a site-wide brand-chip question rather than a cream
+regression: `span.logo` white on Spring green `#6db33f` (2.57:1), and two `index-legacy`
+`span.tier-num` "+" markers whose colour is set *inline* — white on `#2496ed` (3.15) and on
+`#f05032` (3.56). Fixing them means deciding whether brand tiles may deviate from brand colour.
+
+Tooling note: `tmp_shot.mjs`/`tmp_smoke.mjs`/`tmp_contrast.mjs` could not run — **Playwright is
+not installed on the Windows box** (`npm i -g playwright`, or set `PW_MODULE`). The
+iframe-based audit above was the substitute and is arguably stronger for this particular
+question, since it measures computed colour against real effective backgrounds; but it is
+ad-hoc and lives in the scratchpad, not in the gates.
 
 ---
 
