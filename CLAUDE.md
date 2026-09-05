@@ -57,7 +57,11 @@ standing goal, not a one-time task. The full Head First rollout state lives in
 - Register pages in `frontend/tracks-data.js` + the `TRACKS`/`CATEGORIES` wiring in
   `frontend/app.html`; update page/track counts in `README.md` + `docs/DEVHUB-GUIDE.md`.
 - Exams: length-bracketed choices, no position/length tells — audit with
-  `frontend/tmp_examtell_audit.mjs` after any bank edit.
+  `frontend/tmp_examtell_audit.mjs` after any bank edit. Also rerun
+  `node frontend/tmp_genpracticemap.mjs` after any bank edit: the lesson →
+  practice map inside `tracks-data.js` is DERIVED from the banks' `ref:{label,file}`
+  entries, and `--check` fails if it is stale. Hand-editing that block is how a
+  lesson silently loses its "Test yourself" strip.
 - Validate pages with `node frontend/tmp_vcheck.mjs` (encoding, registry both ways,
   required shared scripts, internal links, duplicate registrations — under a second for
   the whole site). `.github/workflows/deploy.yml` gates the Pages deploy on it, so a red

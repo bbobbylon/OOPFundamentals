@@ -162,6 +162,15 @@ page. That is a much better problem to have than "the content is wrong" — see
 
 ### Remaining, ranked by learner impact per unit of effort
 
+> **#4 (wire lessons forward into practice) LANDED 2026-09-05.**
+> `tmp_genpracticemap.mjs` inverts the 614 `ref:{label,file}` entries the banks
+> already carried into `window.DEVHUB_PRACTICE` in `tracks-data.js`, and
+> `devhub-chapters.js` renders a "Test yourself" strip at the end of the lesson.
+> Lessons linking forward to practice: **2 → 202 (39%)**, with zero per-page
+> edits — all 202 already loaded both scripts. Flashcard decks are NOT in the map:
+> they carry no per-lesson refs, only a track index link, so decks can only be
+> surfaced track-wide and that is still open.
+
 #### 4. Wire lessons forward into practice by inverting the exam refs you already have
 
 *1-2 days* — Three of the seven audits found this independently, which makes it the best-corroborated finding in the set. The recall machinery all works — 19 exams, 16 decks, 9 graded IDEs, all verified end to end in a browser — and it is reachable only from a sidebar track sitting 33rd of 34. A learner who finishes a lesson has nowhere to go. The data to fix it is already in the repo and already 100% valid, so the first 123 lessons cost zero new content.
