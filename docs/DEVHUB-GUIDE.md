@@ -421,6 +421,18 @@ visualizers).
   parent hub instead of following the link directly (grep `dlh-navigate` if
   touching that pattern). Everything here is inert under
   `prefers-reduced-motion: reduce`.
+- **The hub sidebar is keyboard-operable, and staying that way needs three
+  things together** (`frontend/app.html`). Lesson links are real `<a href>` with
+  a `preventDefault` on plain left-click — so the SPA behaviour is kept while
+  middle-click, ctrl-click, copy-link and the status-bar preview all work. The
+  track and section headers are real `<button aria-expanded>`. Both matter: as
+  divs the sidebar had **zero** focusable elements, and fixing only the leaf
+  links would change nothing, because a collapsed branch keeps its anchors
+  `display:none`. Buttons need `appearance:none; background:none; border:0;
+  width:100%; text-align:left; font-family:inherit` or the UA restyles the
+  sidebar, and both header types and `.page-link` carry a `:focus-visible`
+  outline — a tab order you cannot see is worse than none.
+
 - [`frontend/devhub-chapters.js`](../frontend/devhub-chapters.js) — the
   **chapter rail** (`.hf-rail`) at the top of a lesson: where this page sits in
   its section, which pages sit either side, and — since 2026-09-05 — where the

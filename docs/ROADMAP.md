@@ -162,6 +162,16 @@ page. That is a much better problem to have than "the content is wrong" — see
 
 ### Remaining, ranked by learner impact per unit of effort
 
+> **#5 (real anchors in the hub) LANDED 2026-09-05 — and was bigger than the
+> audit framed it.** The audit said "make the 512 lesson links real `<a href>`".
+> Doing only that would have measured better and helped nobody: the sidebar had
+> **zero focusable elements at all**, because the track and section headers were
+> divs too, so a collapsed branch keeps its anchors `display:none` and
+> unreachable however well-formed they are. Fixed all three: lesson links are
+> anchors with href, and both header levels are real `<button aria-expanded>`.
+> Sidebar focusables **0 → 34**; the full Tab → Enter → Tab → Enter → Tab →
+> Enter path now opens a lesson by keyboard alone.
+
 > **#4 (wire lessons forward into practice) LANDED 2026-09-05.**
 > `tmp_genpracticemap.mjs` inverts the 614 `ref:{label,file}` entries the banks
 > already carried into `window.DEVHUB_PRACTICE` in `tracks-data.js`, and
