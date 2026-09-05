@@ -74,6 +74,29 @@
     return { from: Math.max(0, from), to: to };
   }
 
+  /* The hub (app.html) renders lessons in an iframe and tracks which page you are
+     on in its own `currentFile`. A plain <a href> inside that iframe navigates the
+     FRAME only — the hub never learns, so its breadcrumb, active sidebar link, hash
+     and progress all stay on the page you arrived from. The visible consequence:
+     walk a section with the rail, press "Mark as Learned", and the hub credits the
+     page you LEFT. Reproduced: open head-first-strategy, rail to head-first-observer,
+     mark learned -> {"head-first-strategy-visualizer.html":"learned"}.
+
+     app.html already accepts `dlh-navigate` over postMessage (it is how in-page
+     cross-links work), so the rail just has to use it. We keep the real href — so
+     middle-click, ctrl-click, copy-link and the keyboard all still behave like
+     links — and only take over the plain left-click, and only when embedded. */
+  function railClick(e) {
+    if (window.top === window.self) return;                 // standalone: let the href work
+    if (e.defaultPrevented) return;
+    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    var file = this.getAttribute('href');
+    if (!file) return;
+    e.preventDefault();
+    try { window.parent.postMessage({ type: 'dlh-navigate', file: file }, '*'); }
+    catch (err) { window.location.href = file; }            // cross-origin: fall back
+  }
+
   function build(loc) {
     var pages = loc.pages, index = loc.index;
     var w = windowed(pages, index);
@@ -106,7 +129,7 @@
       var li = document.createElement('li');
       var isCurrent = i === index;
       var el = document.createElement(isCurrent ? 'span' : 'a');
-      if (!isCurrent) el.href = pages[i].file;
+      if (!isCurrent) { el.href = pages[i].file; el.addEventListener('click', railClick); }
       el.textContent = shortLabel(pages[i].title);
       if (isCurrent) li.setAttribute('aria-current', 'page');
       li.appendChild(el);
