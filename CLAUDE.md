@@ -54,6 +54,12 @@ standing goal, not a one-time task. The full Head First rollout state lives in
 
 - New visualizer pages: clone a recent VERTICAL chip-engine page (node-auth, aspnet-auth,
   mulesoft, laravel, rails, rust-web) — not go-http-server's horizontal engine.
+  **When you clone, change `<body class="track-…">` to the new page's track.** It is not
+  decoration: `devhub.css` and `devhub-hf.css` key each track's accent colours off it in
+  both themes, and `tmp_hfaudit.mjs` reads the track from it. vcheck cannot see a wrong
+  one — the page is perfectly valid, it just wears another track's palette. Four Render
+  pages shipped as `track-shell` this way. Clone-and-adapt inherits more than the skeleton:
+  check the body class, the `<title>`, and the "Where to go next" links.
 - Register pages in `frontend/tracks-data.js` + the `TRACKS`/`CATEGORIES` wiring in
   `frontend/app.html`; update page/track counts in `README.md` + `docs/DEVHUB-GUIDE.md`.
 - Exams: length-bracketed choices, no position/length tells — audit with
