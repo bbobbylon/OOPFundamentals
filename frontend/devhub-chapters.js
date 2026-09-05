@@ -52,17 +52,37 @@
 
   function locate(tracks, file) {
     for (var t = 0; t < tracks.length; t++) {
-      var secs = tracks[t].sections || [];
+      /* Skip sections with no real pages when numbering, or "the next section"
+         below can point at an empty one and the rail dead-ends anyway. */
+      var secs = (tracks[t].sections || []).filter(function (sec) {
+        return (sec.pages || []).some(function (p) { return p && p.file; });
+      });
       for (var s = 0; s < secs.length; s++) {
         var pages = (secs[s].pages || []).filter(function (p) { return p && p.file; });
         for (var i = 0; i < pages.length; i++) {
           if (pages[i].file === file) {
-            return { track: tracks[t], section: secs[s], pages: pages, index: i };
+            return { track: tracks[t], section: secs[s], pages: pages, index: i,
+                     sections: secs, sectionIndex: s };
           }
         }
       }
     }
     return null;
+  }
+
+  /* Where a learner goes after the last page of a section. Without this the rail
+     simply stops: 90 of the site's 124 sections end on a page with no forward
+     link of any kind, which is most of why 512 pages read as a library rather
+     than the "zero to hero" path they are meant to be. Returns null on the last
+     section of a track — that is a real end, not a dead end, and says so. */
+  function nextSectionStart(loc) {
+    if (!loc || !loc.sections) return null;
+    if (loc.index !== loc.pages.length - 1) return null;       // not at a boundary
+    var next = loc.sections[loc.sectionIndex + 1];
+    if (!next) return null;                                     // end of track
+    var pages = (next.pages || []).filter(function (p) { return p && p.file; });
+    if (!pages.length) return null;
+    return { section: next, page: pages[0] };
   }
 
   function windowed(pages, index) {
@@ -143,6 +163,17 @@
       count.className = 'hf-railcount';
       count.textContent = (index + 1) + ' of ' + pages.length;
       rail.appendChild(count);
+    }
+
+    // At a section boundary, say where the path continues.
+    var nxt = nextSectionStart(loc);
+    if (nxt) {
+      var na = document.createElement('a');
+      na.className = 'hf-railnext';
+      na.href = nxt.page.file;
+      na.textContent = 'Next up · ' + shortLabel(nxt.section.label) + ' →';
+      na.addEventListener('click', railClick);
+      rail.appendChild(na);
     }
     return rail;
   }
