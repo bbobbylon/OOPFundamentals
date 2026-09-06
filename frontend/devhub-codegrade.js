@@ -180,7 +180,7 @@
 .cg-tab.on{background:#04070f;color:var(--cg-accent);border-color:var(--cg-accent)}
 .cg-editor{display:flex;background:#04070f;font-family:'Cascadia Code',ui-monospace,Consolas,monospace;
     font-size:13px;line-height:1.55;min-height:200px;border:1px solid var(--cg-border);border-radius:0 8px 8px 8px}
-.cg-gutter{padding:12px 8px 12px 12px;text-align:right;color:#3a4a63;user-select:none;background:#060b16;
+.cg-gutter{padding:12px 8px 12px 12px;text-align:right;color:var(--cg-muted);user-select:none;background:#060b16;
     border-right:1px solid var(--cg-border);white-space:pre;overflow:hidden;border-radius:0 0 0 8px}
 .cg-ta{flex:1;background:transparent;color:#dbe4f0;border:none;outline:none;resize:vertical;padding:12px 14px;
     font-family:inherit;font-size:inherit;line-height:inherit;white-space:pre;overflow-x:auto;tab-size:2;min-height:200px}

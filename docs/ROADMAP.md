@@ -227,6 +227,16 @@ page. That is a much better problem to have than "the content is wrong" — see
 - **90 of 124 sections dead-ended** (`90a9329`). The rail now renders
   "Next up · <next section> →" on the last page of a section, and stays quiet on
   the last section of a track.
+- **31 selectors under 2.2:1 in the dark theme — never gated before, since the
+  contrast tool defaults to cream.** All fixed; root cause for 8+4 of them was
+  a "track-accent leak" (a track's `body.track-*{--accent}` always beats both
+  a page's own `:root` override and the kit's theme remap) pairing white text
+  with light accents like teal/cyan at 1.81–1.86:1. Also darkened `.cw-ln` and
+  both `.cm` comment rules (the line-by-line explanation text), and fixed 3
+  more pre-existing cream failures the re-check surfaced on pages outside the
+  31 — two of them only visible while a demo animation is mid-step. See
+  audit item #9 below for the full breakdown; the ~10-shared-token AA sweep
+  it also names is still open.
 
 ### Remaining, ranked by learner impact per unit of effort
 
@@ -415,13 +425,21 @@ page. That is a much better problem to have than "the content is wrong" — see
 
 **First step.** Start with typescript-generic-inference-deep-visualizer.html:274-278 — the green ✅ on non-compiling code is the most misleading single thing found in the whole audit. Recast it as a red scenario ending in TS2345, and move the union example onto the page's existing `paint(["red","blue"],"green")` case, which is correct and compiles. Then consider a hand-run frontend/tmp_codecheck.mjs that extracts <pre> and CodeWalk `code:` arrays and compiles the TS/Java ones, ignoring blocks adjacent to an ❌ marker — it caught all four defects at 30 candidates read for 4 real hits.
 
-#### 9. Fix the dark theme's genuinely invisible text, then darken ~10 shared tokens for AA
+#### 9. Fix the dark theme's genuinely invisible text, then darken ~10 shared tokens for AA — ✅ 2.2-FLOOR LANDED (2026-09-05), AA TOKEN SWEEP STILL OPEN
 
 *Half a day for the dark 2.2 fixes; another half for the AA tokens* — Two separate problems the same tool measures. The first is unambiguous: text below the site's own "is it invisible" floor, on the theme nobody has ever run the gate against. The second is a policy call — 1,816 selectors sounds catastrophic but is really about ten shared components, and the code comments carrying your line-by-line explanations are among the least legible text on the page.
 
 **Evidence.** `tmp_contrast.mjs --theme=dark --min=2.2` over all 528 pages: "✗ 31 distinct selector(s) under 2.2:1, across 57 page(s)" — .topbar span at 1.37:1 on 12 pages, .cw-head span.cw-title (the CodeWalk's own title) at 1.95:1, .panel button at 1.81:1 (white on white), .cg-editor .cg-gutter at 2.19:1 on 9. Cream is clean at 2.2 on all 528, and the tool defaults to cream (tmp_contrast.mjs:44), which is why the espresso half was never measured. At the real AA bar: cream 1,816 selectors / 524 pages, dark 546 / 495, and the head of both lists is shared components — .hf-rail a 3.61:1 on 483 pages, .cw-line .cw-ln 4.45 cream / 2.24 dark on 464, .rt-ctlbar .rt-pill 3.25 on 428, .rt-inspect .rt-dir 3.94 on 424, .userseg button.on (the SELECTED chip) 2.77 on 155. Font sizes were measured against html{zoom:1.12} — .hf-rail a 10px/400, .rt-pill 11px/400, .cw-ln 12.5px — none qualifies for the large-text exemption, so 4.5 is the right bar.
 
 **First step.** Run `node frontend/tmp_contrast.mjs --theme=dark --min=2.2` and fix those 31 selectors — mark the deliberately faint connector glyphs (.lc-arrow, .hier-arrow, .pg-arrow) aria-hidden rather than recolouring, since the tool already exempts those. Then darken .cw-ln and the .cm comment colour first: they carry the line-by-line explanation and are the widest-reaching offenders in both themes.
+
+**Landed 2026-09-05 — the 31-selector floor.** All 31 are fixed; `tmp_contrast.mjs --theme=dark --min=2.2` is clean across all 535 pages. Root causes, not instances: (1) seven decorative connector glyphs (.topbar's ›, .twig, .pg-arrow, .lc-arrow, .hier-arrow, .pecs-arrow, .lconn) marked `aria-hidden="true"` — two (.hier-arrow, .lconn) carry real text ("↓ extends", "▲ …▲") and were recoloured instead, per the standing rule. (2) The site-wide "track-accent leak" (devhub.css's `body.track-*{--accent}` re-declares one level below `:root`/`[data-hf]`, so a track's own hue always wins over both a page's local `:root` override and the kit's cream/mocha remap) was silently pairing white text with light track accents (teal #2dd4bf on track-tools, cyan #22d3ee on track-identity) at 1.81–1.86:1 on 8 badge/tab/button components across 8 pages, plus the generic `button{background:var(--accent);color:#fff}` pattern on 4 more (this was the "flaky .panel button" cluster from an earlier pass in this session — it isn't flaky, a broken local probe script made it look that way; static cascade analysis reproduced it exactly). Fixed with a fixed dark-navy `color:#04263f`, which clears every candidate accent the leak can produce. (3) Four `*-gutter` line-number columns (`.cg-gutter`, `.pp-gutter`, `.sp-gutter`, `.tsp-gutter`) shared one hardcoded `#3a4a63`; repointed to existing muted tokens. (4) `.cw-btn:disabled` lost its background/color to a page-local `button:disabled` rule on specificity alone; restated both. (5) `body.track-csharp`'s `--accent2` (the literal #512bd4 .NET logo) measured 1.95:1 as text; lightened at the same hue. (6) `.hf-note code`/`.styled-box code` were repainted by the kit's `[data-hf] code:not(pre code)` regardless of the note's own light background; both inherit the note's ink now. (7) Six more single-page hardcoded-hex mismatches (star ratings, a check-mark column, an empty-log caption, a runner's muted line, a debug-table cell, a portal icon).
+
+Also done, per "First step"'s second half: `.cw-ln` (2.24:1 dark) and both `.cm` comment-token rules (`.cw .cm` 3.73:1, `pre .cm` 4.23:1) were stepped up in hue — `.cw-ln` to 2.93:1 (kept deliberately muted, matching cream's own .cw-ln repair philosophy: furniture text, not competing with the code), the two `.cm` rules to 4.78:1 / 4.89:1 (full AA — comments carry the teacher's own words, unlike gutter numbers). Verified these changes don't regress cream: cream's `[data-hf]` repair layer for `.cw-code .cm`/`.cw-ln` overrides them anyway on kit pages, and the ~15 non-kit legacy-light pages, which have no such repair, measured a net *improvement* under cream too (same hardcoded-dark console background in every theme).
+
+A full cream re-run surfaced three unrelated pre-existing failures on pages outside the 31 (added since the audit's 528-page count, at 535 now) — `.demo-area .code-live` and two components whose state classes swap in a hardcoded near-black background (`.svc-node`/`.flow-node`, `.saga-step.comp/.done/.active-step`) where the label text still rode a var(--text)/var(--muted)/var(--bad) token tuned for a pale ground. Fixed the same way as (2) above: hardcode to the dark theme's own light tones for the hardcoded-dark states, leave the token alone everywhere else. The saga case only shows up while the demo is mid-step, which is why a plain page-load scan missed it — a `--settle=` bump would catch this class of bug more reliably than re-running and hoping.
+
+**Still open — the ~10 shared AA tokens.** Only .cw-ln and .cm were addressed above; the rest of the "another half day" — .hf-rail a, .rt-ctlbar .rt-pill, .rt-inspect .rt-dir, .userseg button.on and the remaining shared components in the 1,816/546-selector AA lists — is untouched. That's a policy call (raise real components above 4.5:1, not just above "invisible"), not a bug fix, and belongs in its own pass.
 
 #### 10. Make the streak count retrieval, and let learners retake the questions they missed
 
