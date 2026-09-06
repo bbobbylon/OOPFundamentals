@@ -12,7 +12,36 @@
  * Hand-maintaining the inverse would drift the first time someone edits a bank,
  * and the failure would be silent — a lesson quietly losing its "Test yourself"
  * strip. So it is derived, and --check runs in the gate suite.
+ *
+ * FLASHCARD DECKS (2026-09-06). Decks carry no per-card `ref` — a card is a
+ * fact ("Amazon S3"), not a question tied to one lesson, so there is nothing
+ * to invert at that granularity. But every deck already corresponds 1:1 to an
+ * existing EXAM (flashcards-aws.html ~ exam-aws-developer.html, etc.) — this
+ * is editorial judgment, not something derivable from the banks, so it is the
+ * one hand-maintained table here. Once a deck is pinned to an exam, it rides
+ * that exam's ALREADY-DERIVED lesson set for free: every lesson that exam
+ * already cites gets the deck too, at the exact same precision as the exam
+ * link — not a coarser "track-wide" fallback.
  */
+const DECK_FOR_EXAM = {
+  'exam-aws-developer.html': 'flashcards-aws.html',
+  'exam-azure-developer.html': 'flashcards-azure.html',
+  'exam-gcp-ace.html': 'flashcards-gcp.html',
+  'exam-dsa-interview.html': 'flashcards-bigo.html',
+  'exam-http-rest.html': 'flashcards-http.html',
+  'exam-spring-professional.html': 'flashcards-spring.html',
+  'exam-identity-access.html': 'flashcards-oauth.html',
+  'exam-typescript.html': 'flashcards-typescript.html',
+  'exam-angular.html': 'flashcards-angular.html',
+  'exam-sql.html': 'flashcards-sql.html',
+  'exam-git.html': 'flashcards-git.html',
+  'exam-docker.html': 'flashcards-docker.html',
+  'exam-kubernetes.html': 'flashcards-kubernetes.html',
+  'exam-web-fundamentals.html': 'flashcards-web-fundamentals.html',
+  'exam-data-science.html': 'flashcards-data-science.html',
+  'exam-ai-engineering.html': 'flashcards-ai-engineering.html',
+};
+
 import { readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -54,6 +83,28 @@ if (broken.length) {
   process.exit(1);
 }
 
+/* Ride each exam's already-derived lesson set: every lesson citing that exam
+   also gets its paired deck, at the exact same precision as the exam link. */
+const deckBroken = [];
+for (const deck of Object.values(DECK_FOR_EXAM)) {
+  if (!existsSync(join(HERE, deck))) deckBroken.push(deck);
+}
+if (deckBroken.length) {
+  console.error(`✗ DECK_FOR_EXAM names ${deckBroken.length} file(s) that do not exist:`);
+  deckBroken.forEach(b => console.error('   ' + b));
+  process.exit(1);
+}
+let deckHits = 0;
+for (const entry of Object.values(map)) {
+  const deck = entry.exam && DECK_FOR_EXAM[entry.exam];
+  if (deck) { entry.deck = deck; deckHits++; }
+}
+for (const deck of new Set(Object.values(DECK_FOR_EXAM))) {
+  const src = readFileSync(join(HERE, deck), 'utf8');
+  const t = src.match(/<title>([^<]*)<\/title>/);
+  titles[deck] = (t ? t[1] : deck).split('—')[0].split('·')[0].replace(/\s*\|\s*.*$/, '').trim();
+}
+
 /* Only emit titles the map actually cites, so the block does not carry dead weight. */
 const cited = new Set(Object.values(map).flatMap(v => Object.values(v)));
 const usedTitles = Object.fromEntries(Object.entries(titles).filter(([k]) => cited.has(k)));
@@ -75,9 +126,9 @@ const next = has
 
 const lessons = Object.keys(map).length;
 if (CHECK) {
-  if (next === td) { console.log(`✓ practice map is current — ${lessons} lessons, ${refs} refs`); process.exit(0); }
+  if (next === td) { console.log(`✓ practice map is current — ${lessons} lessons, ${refs} refs, ${deckHits} deck links`); process.exit(0); }
   console.error('✗ practice map in tracks-data.js is STALE — run: node tmp_genpracticemap.mjs');
   process.exit(1);
 }
 writeFileSync(tdPath, next);
-console.log(`✓ wrote practice map — ${lessons} lessons from ${refs} refs across ${files.length} banks`);
+console.log(`✓ wrote practice map — ${lessons} lessons from ${refs} refs across ${files.length} banks, ${deckHits} deck links`);

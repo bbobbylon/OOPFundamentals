@@ -210,7 +210,7 @@ does not beat guessing.
 
 | Visualizer | What it shows |
 |---|---|
-| [`app.html`](frontend/app.html) | The full Dev Hub — searchable, progress, **519 pages across 34 tracks grouped into categories** (incl. 🍳 *Common Recipes* — practical how-tos like API→form, batch upload, password complexity — the 🟢 *Cloud — GCP*, 🌐 *Web Fundamentals*, 📊 *Data Science & ML*, 🧠 *AI/LLM Engineering*, and 🤖 *AI-Assisted Development* tracks — and 🧑‍💻 *Coding Practice (IDE)*, a real graded-exercise track: write JS/TS/Python/**Java**, run it for real in your browser — Java compiles with the actual `javac` on a WASM JVM (CheerpJ) — pass/fail against hidden tests) (serve it; `index.html` redirects here) |
+| [`app.html`](frontend/app.html) | The full Dev Hub — searchable, progress, **521 pages across 34 tracks grouped into categories** (incl. 🍳 *Common Recipes* — practical how-tos like API→form, batch upload, password complexity — the 🟢 *Cloud — GCP*, 🌐 *Web Fundamentals*, 📊 *Data Science & ML*, 🧠 *AI/LLM Engineering*, and 🤖 *AI-Assisted Development* tracks — and 🧑‍💻 *Coding Practice (IDE)*, a real graded-exercise track: write JS/TS/Python/**Java**, run it for real in your browser — Java compiles with the actual `javac` on a WASM JVM (CheerpJ) — pass/fail against hidden tests) (serve it; `index.html` redirects here) |
 | [`typescript-playground-visualizer.html`](frontend/typescript-playground-visualizer.html) | 🧪 **TypeScript Playground** — loads the **real** `typescript` compiler: type-checks your code (the same red errors as VS Code/`tsc`), shows the emitted JS, and runs it with live console capture; toggle `strict`/`target` and watch errors change |
 | [`python-playground-visualizer.html`](frontend/python-playground-visualizer.html) | 🧪 **Python Playground** — **real CPython** in the browser via Pyodide: `print()`, the stdlib (`json`, `dataclasses`, `itertools`…), real exceptions and full tracebacks — runnable, with presets |
 | [`shell-playground-visualizer.html`](frontend/shell-playground-visualizer.html) | 🧪 **Shell Playground** — a working mini-shell with an in-memory filesystem; flip between **Bash / PowerShell / CMD** modes and watch the prompt, command names, pipes, redirection, and variable syntax change with it |
@@ -586,7 +586,7 @@ resolved.
 
 | command | what it catches | runtime |
 |---|---|---|
-| `node tmp_vcheck.mjs` | encoding, registry both directions, required shared scripts, internal links, duplicate registrations, inline-`<script>` parse errors, `.hf-check` wiring, CSS theme-selector shape | ~0.4s, all 535 pages |
+| `node tmp_vcheck.mjs` | encoding, registry both directions, required shared scripts, internal links, duplicate registrations, inline-`<script>` parse errors, `.hf-check` wiring, CSS theme-selector shape | ~0.4s, all 537 pages |
 | `node tmp_smoke.mjs` | uncaught JS errors and horizontal overflow, in a real browser at **320px** (not 390 — 320 is where a rigid grid track actually breaks). Network-only failures are reported separately, because a sandbox with no CDN fails every CDN load | a few minutes |
 | `node tmp_assetcheck.mjs <ref>` | any **loss** of a teaching asset (Try It Live, CodeWalk, `rt-stage`, quiz, flashcards) versus a git ref — run it after any bulk edit that splices markup | seconds |
 | `node tmp_contrast.mjs --theme=cream` | text under a 2.2:1 contrast floor, grouped by selector so you fix causes not instances. `--inject=candidate.css` tries a fix without editing the site | a few minutes |

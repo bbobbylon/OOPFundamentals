@@ -57,6 +57,7 @@
       btn.addEventListener('click', function () {
         reset();
         box.classList.add('answered');
+        if (window.DevHubStreak) window.DevHubStreak.touch();
         var right = i === answer;
         btn.className = right ? 'right' : 'wrong';
         btn.setAttribute('aria-pressed', 'true');

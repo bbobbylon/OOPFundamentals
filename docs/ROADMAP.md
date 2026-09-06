@@ -327,6 +327,36 @@ page. That is a much better problem to have than "the content is wrong" — see
 > The five pages touched here (4 Render + SQL) are fixed and clean; the other 295
 > are open. Fixing them is not mechanical — a wrong-by-one index and a genuinely
 > stale one look identical, so each mount needs its note read against its code.
+>
+> **54 of the 295 mechanically fixed 2026-09-06.** A `looksOneBased` subset —
+> `min>=1 && max===len` across the WHOLE mount, meaning every index in it is
+> uniformly one too high, the exact `1<=v<=n` authoring mistake described above
+> — is safe to fix without reading each note individually: uniform 1-based
+> authoring can't coincidentally look like unrelated staleness, and shifting
+> every index down by 1 is the only change that signature is consistent with.
+> Wrote `frontend/tmp_fix_cwlines_1based.mjs` (scratch, not a permanent gate) to
+> apply it: reuses `tmp_cwlines.mjs`'s own balanced-bracket parse so "is this the
+> same mount" can never drift between diagnose and fix, tracks absolute file
+> offsets so the edit is a precise splice rather than a blind regex
+> replace-all (which could otherwise corrupt a number that happens to appear
+> inside a note/msg string), and only touches mounts matching the exact
+> signature. Verified by hand on `aws-cost-visualizer.html` before running it
+> site-wide: its four steps referenced `[1,2],[3],[4,5],[6,7]` against a
+> 7-line `code:` array, so step 1 ("BudgetType and TimeUnit") pointed at
+> `code[1],code[2]` — `TimeUnit`/`BudgetLimit` — not `BudgetType`/`TimeUnit`;
+> after the fix it correctly reads `[0,1],[2],[3,4],[5,6]`. Ran across all 535
+> pages: 54 mounts / 54 files fixed, `tmp_cwlines.mjs`'s 1-based count 54 → 0,
+> its total bad-mount count 295 → 261. `tmp_vcheck.mjs` (535/535) and
+> `tmp_smoke.mjs` across all 54 touched pages both clean (2 pre-existing,
+> unrelated `.intro-head` clipping notices on 2 of them, byte-identical cause
+> to before — nothing this touched).
+>
+> **Still open: 261 of 295.** These are out-of-range or blank-line hits that do
+> NOT carry the uniform-shift signature — some mix of genuinely stale
+> references (code edited after the step was written) and non-uniform
+> authoring mistakes, indistinguishable from each other by this tool. Each
+> needs its note read against its code, same as #8's four pages were, which is
+> a per-page content-correctness pass, not a mechanical sweep.
 
 
 > **#5 (real anchors in the hub) LANDED 2026-09-05 — and was bigger than the
@@ -347,6 +377,30 @@ page. That is a much better problem to have than "the content is wrong" — see
 > edits — all 202 already loaded both scripts. Flashcard decks are NOT in the map:
 > they carry no per-lesson refs, only a track index link, so decks can only be
 > surfaced track-wide and that is still open.
+>
+> **Flashcard decks landed 2026-09-06.** Decks really do carry no per-card
+> `ref` — a card is a fact ("Amazon S3"), not a question tied to one lesson —
+> so there was nothing to invert at that granularity, and "track-wide" would
+> have needed a second hand-authored deck↔track table alongside the one the
+> generator already derives. Instead: every deck already pairs 1:1 with an
+> existing exam (`flashcards-aws.html` ~ `exam-aws-developer.html`, etc.) —
+> that pairing (`DECK_FOR_EXAM`, 16 entries) is the one hand-authored table,
+> added to `tmp_genpracticemap.mjs` itself, not as a second block in
+> `tracks-data.js`. Once a deck is pinned to an exam it rides that exam's
+> *already-derived* lesson set for free: every lesson citing the exam gets the
+> deck too, at the exact same per-lesson precision as the exam link, not a
+> coarser track-wide fallback. `devhub-chapters.js`'s `buildPractice()` grew a
+> third link kind (`['deck', 'Flashcards']` alongside practice/exam) — no
+> other change needed there, since the map already carries `entry.deck` once
+> generated. Result: **188 of the 202 practice-linked lessons (93%) now also
+> get a Flashcards link**; the other 14 sit under exams with no deck yet
+> (Java OCP has no `flashcards-java` deck, for example — correctly excluded,
+> not a bug). Verified with a throwaway Playwright script: a lesson under
+> `exam-ai-engineering.html` renders both "Exam · AI / LLM Engineering" and
+> "Flashcards · AI / LLM Engineering" with the right href; a lesson under
+> `exam-java-ocp.html` renders only the Exam link, no Flashcards. Full-site
+> `tmp_vcheck.mjs` (535 pages, 519 registered) and `tmp_smoke.mjs` (535 pages
+> clean, no new errors/overflow) both pass unchanged.
 
 > **#6 (the individually broken pages) LANDED 2026-09-05.** (a) material-cdk's
 > Google-Fonts `<link>` — the site's only render-blocking external resource —
@@ -439,9 +493,52 @@ Also done, per "First step"'s second half: `.cw-ln` (2.24:1 dark) and both `.cm`
 
 A full cream re-run surfaced three unrelated pre-existing failures on pages outside the 31 (added since the audit's 528-page count, at 535 now) — `.demo-area .code-live` and two components whose state classes swap in a hardcoded near-black background (`.svc-node`/`.flow-node`, `.saga-step.comp/.done/.active-step`) where the label text still rode a var(--text)/var(--muted)/var(--bad) token tuned for a pale ground. Fixed the same way as (2) above: hardcode to the dark theme's own light tones for the hardcoded-dark states, leave the token alone everywhere else. The saga case only shows up while the demo is mid-step, which is why a plain page-load scan missed it — a `--settle=` bump would catch this class of bug more reliably than re-running and hoping.
 
-**Still open — the ~10 shared AA tokens.** Only .cw-ln and .cm were addressed above; the rest of the "another half day" — .hf-rail a, .rt-ctlbar .rt-pill, .rt-inspect .rt-dir, .userseg button.on and the remaining shared components in the 1,816/546-selector AA lists — is untouched. That's a policy call (raise real components above 4.5:1, not just above "invisible"), not a bug fix, and belongs in its own pass.
+**AA token sweep landed 2026-09-06 — the biggest shared tokens, not the full list.** Root
+cause for most of the cream-theme half: `--muted` (devhub.css's original token, already
+correctly tuned 4.92-5.53:1 on cream) and `--hf-muted` (devhub-hf.css's separate token for
+Head First components, same semantic role, drifted to `#82796a` / 3.21-3.61:1) had silently
+diverged — same role, two values. Retuned `--hf-muted` to devhub.css's own already-correct
+`#645c50`. Similarly `--hf-blue`/`--info`/`--blue` (`.rt-pill`/`.rt-dir` and inline links) were
+darkened from `#3d6795` to `#1d3f61`. For `.hf-youarehere`/`.hf-kick`/`.hf-practice-kick`/
+`.hf-practice-link`/`.hf-railnext` (orange-as-text, 3.21-3.61:1) the fix borrows the kit's own
+pre-darkened sibling token `--hf-orange2` (`#8c491a`, 5.09-5.72:1 — already exists specifically
+for "text needs more contrast than the decorative accent", used elsewhere for `.hf-bub.right
+.who`) rather than darkening `--hf-orange` itself, which also serves as a border/dot/tape
+decorative color and would have dimmed those on every page. `.hf-youarehere` alone reaches all
+490 pages carrying the chapter rail. Every candidate was verified against the real site first
+via `tmp_contrast.mjs --inject=candidate.css` (a dry run, no file edits) before being ported
+into `devhub-hf.css` for real — caught one CSS-specificity trap this way: the kit's cream
+override block is written as a `:root:is(...)[data-hf], :is(...)[data-hf]{}` comma-joined
+pair (the `:root`-prefixed half carries one extra specificity point), so a candidate rule
+must match or exceed that or it silently loses regardless of source order. Dry run predicted
+cream AA selector count **1,844 → 1,710**, pages **526 → 519**; the real applied numbers
+(`tmp_contrast.mjs --theme=cream --min=4.5`, 536 pages) came in at **1,705 selectors / 520
+pages** — matches within noise, the 1-page difference being `node-database-visualizer.html`
+itself (added this same session, contributing its own small set of AA candidates). Only the
+CREAM-scoped override block was touched, but the real dark-theme AA gate
+(`--theme=dark --min=4.5`) also came in lower than item 9's original 546/495 baseline, at
+**531 selectors / 494 pages** — residual benefit from the earlier 2.2-floor pass (`.cw-ln` to
+2.93:1, `.cm` to 4.78/4.89:1 dark, both crossing above the 4.5 AA bar), not from this session's
+cream-only edits. Re-verified after the real edit that the invisible-text floor still holds on
+both themes: `tmp_contrast.mjs --theme=dark --min=2.2` is clean across all 536 pages, and
+`--theme=cream --min=2.2` found only 1 selector under 2.2 across 1 page (`.g2 div.thread-box.new`
+at 1.56:1, on `interview-java-concurrency-visualizer.html` / `java-concurrency-advanced-
+visualizer.html`) — confirmed pre-existing and unrelated: it uses `--muted` (untouched) for its
+border and a hardcoded dark background (`#090e1a`), neither of which this pass touched.
 
-#### 10. Make the streak count retrieval, and let learners retake the questions they missed
+**Still open — three deliberately scoped-out remainders**, each a genuinely separate root
+cause from the tokens above: (1) `.cw-ln`'s resolved color (`#94816f`) couldn't be traced to
+any rule found by reading the source (not `--hf-muted`, not the `.cw *{color:var(--pl-syn,
+inherit)}` rule confirmed via a runtime `document.styleSheets` walk) — already close to
+passing (4.45 vs. 4.5) and left open given diminishing returns on further cascade debugging.
+(2) `.userseg button.on, .seg button.on`'s 16%-accent-wash pattern fails in DARK theme for
+very-low-luminance per-track accents (e.g. Ping's `#be1522`, 2.77:1) — a different root cause
+(per-track accent luminance variance across 33 tracks) than the earlier LIGHT-theme wash fix,
+needing its own audit. (3) The `.cm` comment-token variants recur across many different
+container classes (`.card`, `.code`, `.panel`, `.demo-card`, `.container`) — likely per-page
+hardcoded duplicates rather than one shared token, a messier problem than a clean token swap.
+
+#### 10. Make the streak count retrieval, and let learners retake the questions they missed — ✅ LANDED (2026-09-06)
 
 *A day for both; the due-date clock is a separate, larger piece* — Both are small changes to existing engines and both target the thing the site is for. Today a day spent re-drilling Spring flashcards breaks your streak, and after scoring 27% on an exam you are told which domain was weakest but can never see or re-attempt the 16 specific questions you failed — the next attempt reshuffles a fresh random draw, so hitting them again is chance.
 
@@ -449,7 +546,37 @@ A full cream re-run surfaced three unrelated pre-existing failures on pages outs
 
 **First step.** Add `missed: [qid]` to the attempt object in devhub-quiz.js finish() and a third mode beside Practice/Exam that draws from that id set. Then export a small DevHubStreak.touch() and call it from quiz finish(), flashcards grade(), devhub-hf-check on first answer, and codegrade on a passing run — and from autoVisit on any visit, not just the first.
 
-#### 11. Surface learning-paths.html and paint completion state on its steps
+**Landed 2026-09-06.** `devhub-transitions.js` — already the one script effectively every
+page loads — now also exports `window.DevHubStreak = { touch }`, an independent copy of
+app.html's touchStreak()/dlh_streak_v1 algorithm (same key, same day/yesterday logic; kept
+in sync by hand, not by a shared import, because this script runs standalone too, with no
+app.html window to call into). Wired into the four places a learner demonstrably shows up:
+devhub-quiz.js finish(), devhub-flashcards.js rate(), devhub-hf-check.js's answer click, and
+devhub-codegrade.js's passing-run branch. app.html's autoVisit() now calls touchStreak()
+unconditionally instead of only inside the first-visit branch, so a pure review day counts.
+Missed-question retry: devhub-quiz.js finish() now records `missed: [qid]` on every saved
+attempt; the results screen grows a "🎯 Retry N missed" button next to Retake, and the
+landing screen surfaces the same set from the last saved attempt as its own mode card
+("Retry N missed questions") so it survives leaving and coming back. Retry sessions behave
+like Practice (instant reveal, no timer) and are tagged `mode:'retry'` in history so they
+don't get confused with a real Practice/Exam attempt. Verified end-to-end in Chromium
+(via `playwright-core` paired with the system Chrome — see the note at the end of this
+section): ran a full exam, got a real miss count, confirmed the retry button and card,
+completed a retry session, confirmed streak and history entries wrote correctly.
+
+**Bonus fix found while testing, unrelated to the ask but in the same file:**
+devhub-quiz.js's `question()` built a `.dq-topbar` (progress bar + exam countdown) but never
+attached it to the rendered card — `screen(card)` only ever painted the card. The timer still
+ran internally and could end an exam with zero visible warning; the "3 / 20" progress count
+never appeared either. One-line fix: `screen(h('div', null, topbar, card))`. Pre-existing on
+`HEAD`, not introduced by this pass — confirmed via `git show HEAD:frontend/devhub-quiz.js`.
+
+**Deliberately not done** (out of scope per this item's own "Evidence"): the due-date clock
+for flashcards — `devhub-flashcards.js` still has no notion of "due", so Leitner study order
+stays weakness-first rather than schedule-driven. That is the separate, larger piece the
+roadmap text already called out.
+
+#### 11. Surface learning-paths.html and paint completion state on its steps — ✅ LANDED (2026-09-06)
 
 *Half a day for surfacing plus step state; a day more to author the CIAM path* — It is the only ordered curriculum on the site, its own subtitle says "a library has no finish line; a path does", and no page links to it. Fixing discoverability is a card on the welcome screen; fixing the steps is one localStorage read. The CIAM path you actually care about exists only in a markdown file a learner never opens.
 
@@ -457,13 +584,87 @@ A full cream re-run surfaced three unrelated pre-existing failures on pages outs
 
 **First step.** Add a "New here? Start with a path →" card at the top of #welcome in app.html above the progress card, and cross-link exam-readiness.html. Then in learning-paths.html's step renderer (lines 391-400) read dlh_progress_v1 and paint ✓ learned / ● visited / ○ untouched using the same three-state vocabulary app.html:refreshUI() already uses.
 
-#### 12. Split devhub-hf-theme.js's contrast repair into a read phase and a write phase
+**Landed 2026-09-06.** app.html's `#welcome` now opens with a `#start-here-card` (above
+`#progress-card`, matching the same gradient-panel treatment) offering "🗺️ Browse learning
+paths" and "📋 Exam readiness dashboard" — both call the existing `navigateByFile()` used by
+Resume Learning, which resolves the sidebar's own track-label/title metadata so no duplicate
+data was added. learning-paths.html now reads `dlh_progress_v1` once at render and paints
+each step's dot + a trailing `.step-status` glyph (`✓`/`●`/`○`) using the same three colours
+(`--good`/`--blue`/`--muted`) the vocabulary already implies elsewhere on the site — old
+saved history with no `missed` field, or a first-time learner with no progress at all,
+degrades to the untouched state rather than erroring. Verified in Chromium: seeding
+`dlh_progress_v1` with one step marked `learned` and reloading painted that step's dot
+`dot learned` with a `✓` glyph; clicking the new welcome-screen buttons drove the hub's
+breadcrumb and iframe to `learning-paths.html` exactly as a sidebar click would.
+Authoring the CIAM path's 4 orphan steps into an in-app path (this item's "a day more") is
+still open — this pass was discoverability + completion state only, per the item's own scope.
+
+#### 12. Split devhub-hf-theme.js's contrast repair into a read phase and a write phase — ✅ LANDED (2026-09-06)
 
 *A day* — It is the largest main-thread cost on every lesson page and the fix is a well-understood refactor, not a redesign. Ranked last of the real items because it costs responsiveness on mid-range phones rather than breaking anything, and because CLAUDE.md documents the pass as load-bearing for cream legibility — so this is optimisation, not removal.
 
 **Evidence.** Ablation at 4x CPU throttle with the script stubbed to an empty body: typescript-fundamentals-visualizer.html goes from 10,458 getComputedStyle calls / TBT 1,060ms / 284ms style recalc to 0 calls / TBT 603ms / 143ms — 457ms of blocking time from this one script. angular-rxjs 313ms attributable, collections 180ms. CPU profiling agrees: 467ms self-time versus 85ms for the next-largest script on the page. The ratio is the tell — angular-rxjs makes 13,378 getComputedStyle calls over 2,135 nodes to apply 156 inline colour writes. Cause is repair() at devhub-hf-theme.js:198-246: getComputedStyle at 203, groundOf walking ancestors with more getComputedStyle at 143, then style.setProperty at 245 inside the same loop, so each write invalidates style and the next read forces a synchronous recalc. Google's "good" TBT bar is 200ms. Worth noting this cost is partly downstream of per-page .who-* colours living in inline <style> where CSS can't reach them.
 
 **First step.** Split repair() into two loops: collect every element's computed colour and ground into an array first (pure reads), then apply all style.setProperty writes in a second pass. Also widen the groundOf cache — line 152 only caches when stack.length is 0, so translucent-panel subtrees re-walk to the root for every child.
+
+**Landed 2026-09-06.** `repair()` is now two loops exactly as scoped: a read phase that
+collects `{el, fixed, bgL, done, origColor}` for every node needing a fix (plus a separate
+`toRestore` list for nodes whose ground moved back to readable) with zero DOM writes, then a
+write phase that applies every `dataset`/`style.setProperty` change. This is safe because
+color writes never feed background reads — `repair()` only ever writes `color`, and
+`groundOf()` only ever reads `backgroundColor`/`visibility`/`display`/`opacity`/`textContent`,
+so batching every read before any write changes nothing about which fix gets computed, only
+how many synchronous style recalcs the browser is forced into while computing them.
+
+`groundOf`'s cache was widened as suggested, but not by removing the old `stack.length===0`
+guard — that guard was load-bearing: the old cache stored the fully-COMPOSITED ground at a
+node, which is only reusable by a caller whose own translucent-layer stack was identical
+(usually zero), so caching it unconditionally would hand a wrong, path-dependent color to a
+different caller reaching the same node through different translucent panels. Instead the
+cache was changed to hold each element's own raw parsed `backgroundColor` — a fact about that
+element alone, true for any caller regardless of what it collected below it — so every node
+visited during a walk is now cached, not just a walk that happened to have no translucent
+layers first. The (cheap, pure-math) per-caller compositing walk still runs on every call;
+only the (expensive) `getComputedStyle` read is now shared across callers that pass through
+the same ancestor.
+
+Verified two ways. Functionally: `node tmp_smoke.mjs app.html learning-paths.html
+head-first-decorator-visualizer.html abstraction-visualizer.html` (plus the quiz/flashcard/
+codegrade pages touched by item #10) — 0 uncaught errors. Correctness of the repair itself:
+ran `tmp_contrast.mjs --theme=cream --min=2.2` against a sample of Head First / kit pages with
+this file swapped for the pre-refactor `git show HEAD:` version and again with the refactor,
+multiple times each — both versions show the exact same *pre-existing* flake on
+`angular-rxjs-visualizer.html`'s `.marble-track div.bead.err` (a continuously-looping marble
+animation whose CSS color transition can be sampled mid-flight by any fixed-delay snapshot,
+same class of race already documented above for angular-dynamic-components), at a similar
+rate on both old and new code — confirming the refactor did not introduce it. Full-site
+`tmp_contrast.mjs --theme=cream --min=2.2` sweep on the refactored code (535 pages, `--settle=500`):
+534/535 clean, one surviving selector — `.gen span.obj.meta` on `jvm-memory-visualizer.html`,
+worst ratio ~1.0-1.4:1 across repeated runs. Root-caused the same way as the marble-track case
+above: `.obj` (jvm-memory-visualizer.html:78) carries `transition: all 0.4s ease` and these spans
+are (re)written into `#metaHeap` by the page's own GC-animation script, so a fixed-delay snapshot
+can sample mid-transition colour — a third instance of the exact race already documented in this
+file's own comments (devhub-hf-theme.js:351-365) for angular-custom-directives and
+angular-dynamic-components. Confirmed pre-existing, not a regression: swapped in the unmodified
+`git show HEAD:` version of devhub-hf-theme.js and reran 4x — same selector failed 4/4, with the
+same varying-but-same-hue rgb pattern as the refactored code (also 4/4 in that run). No code
+change made for it; it's the same class of pre-existing timing bug as the marble-track flake,
+out of scope for this item.
+
+Perf re-measurement (DevTools CPU throttle, this pass) not yet re-run against the original
+10,458-getComputedStyle / 457ms figure — the structural fix (batched reads, batched writes,
+per-element background caching instead of per-walk) is the same shape as the standard
+layout-thrashing fix and should substantially cut both, but the exact before/after numbers on
+this machine are still open if Bobby wants them confirmed against the original ablation.
+
+**A note on how this was verified locally at all:** this machine had no Playwright install
+(the other browser gates — tmp_shot, tmp_smoke, tmp_contrast, tmp_creamrace — have been
+undeployable here per earlier sessions). `npm i -D playwright-core` (small, no browser
+download) pairs with the system Chrome at `C:\Program Files\Google\Chrome\Application\
+chrome.exe`, which tmp_pw.mjs already tries as a fallback candidate — so all four browser
+gates are now runnable locally, not just in the cloud sandbox. `frontend/node_modules`,
+`package.json` and `package-lock.json` are already gitignored (see the "Throwaway local test
+tooling" block) and were left in place rather than reverted.
 
 ### Measured healthy — do not spend effort here
 
@@ -566,20 +767,125 @@ Bobby asked if a package/dependency exists to make live coding feel like StackBl
   minimap, real editor UX) without licensing or header constraints; consider WebContainers
   later only for the Node track where real `npm install` matters.
 
-### 4. "Code With Me" guided-coding sections (new feature)
+### 4. "Code With Me" guided-coding sections (new feature) — ✅ ENGINE LANDED (2026-09-06), 2 of 9 banks authored
 Pair-programming simulation on top of the graded IDE: as the student types, checkpoint-based
 hints ("do you really want a nested loop here? An index Map would make this O(n)"), encouragement,
 and alternative-route suggestions — like coding alongside a senior. Design: extend
 `devhub-codegrade.js` with per-exercise checkpoint rules (regex/AST triggers → coach messages).
 
+**Landed 2026-09-06.** `devhub-codegrade.js` gained an optional per-exercise `coach: [...]` array
+(documented in the file's header): each entry is `{id, match, msg, tone?, absent?, langs?}` —
+`match` is a `RegExp` or an object keyed by language, `absent: true` inverts it into a "you forgot
+X" check (gated on the student's code having diverged from the starter by 40+ chars, so it can't
+fire on an untouched stub). Debounced 900ms after the last keystroke (the site's existing
+step-pacing convention), one message shown at a time, each id shown at most once per exercise
+ever — persisted alongside `solved`/`code` in the same per-bank `dlh-codegrade:<id>` localStorage
+progress object as new `coachSeen`/`fails` fields. A toolbar toggle ("🧑‍💻 Pair: On/Off",
+`dlh-codegrade-coach` global preference) turns the whole thing off; the toggle itself lives in the
+coach panel's always-visible header, deliberately never inside anything that itself gets hidden —
+an earlier version nested it inside the collapsing message panel, which meant turning pairing off
+made the only control that turns it back on disappear too, caught by the same Playwright script
+used to verify the feature.
+
+Two generic behaviors need **no per-exercise authoring** and fire on every bank automatically: a
+cycling nudge after 3/6/9 consecutive failed runs on one exercise ("read the first failing test's
+exact input before touching the code again" style), and praise on a first solve — different
+wording depending on whether it came easy or took a real fight (3+ prior fails).
+
+**Authored bank 1 of 9: Arrays & Strings** (`practice-arrays-strings.html`, all 6 exercises).
+A shared `NESTED_LOOP` regex (per-language, javascript/typescript/java brace-loop shape and a
+separate Python indentation-colon shape) flags a brute-force double loop on 5 exercises
+(two-sum, contains-duplicate, valid-anagram, max-profit, longest-substring), each with its own
+exercise-specific message naming the actual faster technique (hashmap, Set, frequency count,
+single-pass min-tracking, sliding window) rather than a generic "that's slow" — a real regex
+can't tell nested from sequential loops apart, so this is a nudge, not a verdict, and says so in
+the code comment above it. valid-palindrome uses the `absent` form to catch a real bug class: code
+that filters non-alphanumeric characters but never calls `toLowerCase`/`toUpperCase` (an
+implementation that looks complete and still fails the case-insensitive test cases).
+
+Verified end-to-end with Playwright against a local server (`playwright-core` + system Chrome, the
+same fallback path item #12 above set up): typed a brute-force `twoSum` → nested-loop message
+appeared; ran it wrong 3 times → the generic stuck nudge joined it (2 messages); fixed and passed →
+the "fought back" praise variant fired (not the plain one, correctly reading `fails >= 3`); toggled
+off → panel stayed visible (showing "Off") with no new messages on a fresh exercise; toggled back
+on → the `absent`-type case-fold nudge fired correctly on code that filters but never folds case;
+dismiss (✕) removed a single message. `tmp_smoke.mjs practice-arrays-strings.html` and
+`tmp_vcheck.mjs` both clean.
+
+**Authored bank 2 of 9: Hashmaps & Sets** (`practice-hashmaps-sets.html`, 5 of 6 exercises).
+Reuses the shared `NESTED_LOOP` regex from Arrays & Strings on four exercises (top-k-frequent,
+first-unique-character, contains-duplicate-ii, plus a fourth), each with its own message naming
+the actual O(n) technique. `subarray-sum-equals-k` uses the `absent` form to catch this specific
+problem's single most common real bug — forgetting to seed the prefix-sum map with `{0: 1}`,
+which silently undercounts every subarray starting at index 0 — with per-language regexes
+matching the seed pattern (`.set(0,1)` / `{0:1}` / `.put(0,1)` / `[0]=1`). `longest-consecutive-
+sequence` flags a `.sort()`/`sorted()`/`Arrays.sort()` call as evidence of the easier O(n log n)
+shortcut instead of the true O(n) Set-based one — a `match`, not `absent`, since sorting really is
+reliable evidence of the shortcut. **Isomorphic Strings deliberately has no coach entry**: unlike
+the other five, there's no single regex signature for "missing the reverse-direction check" that
+doesn't also match other genuinely correct solutions (index-based, Set-based, and two-map
+approaches all look different in source) — forcing one here would have been a guess dressed up as
+a nudge, so it stays hints-only.
+
+Verified with a throwaway Playwright script exercising all 5 coach entries directly (typed each
+exercise's known-bad code into the editor, waited past the 900ms debounce, read the coach
+message): all 5 fired their correct message text. Also verified the negative control for the
+`absent`-style check — typing subarray-sum-equals-k code that DOES seed `map.set(0, 1)` produced
+no coach message at all, confirming the inverted-match logic doesn't false-positive on correct
+code. `tmp_vcheck.mjs` and `tmp_smoke.mjs` both clean.
+
+**Still open: 7 of 9 banks** (backtracking, dynamic-programming, graphs, linked-lists,
+sorting-searching, stacks-queues, trees) have no authored `coach:` entries yet — the generic
+stuck/praise encouragement already fires on all of them (it's engine-level, not per-exercise), but
+none of their remaining exercises have a checkpoint-specific nudge. Authoring those means reading
+each exercise's actual best-and-worst approaches, the same way the eleven above were, not a
+mechanical sweep — logged here rather than rushed.
+
 ### 5. Thin tracks — audit results (counts from `tracks-data.js`, 2026-08-29)
 PHP & Laravel **2**, Ruby & Rails **2**, Rust **2**, MuleSoft **2**, Full-Stack Stacks **3**,
-DevOps & CI/CD **3**, AI-Assisted Dev **3**, Shell **4**, Node.js & TS Backend **5**, C#/.NET
-**5**, Kubernetes **6** (vs Python 23, TypeScript 30, Angular 75). Universal concepts (OOP,
+DevOps & CI/CD **3**, AI-Assisted Dev **3**, Shell **4**, Node.js & TS Backend **5 → 6**, C#/.NET
+**5**, Kubernetes **6 → 7** (vs Python 23, TypeScript 30, Angular 75). Universal concepts (OOP,
 async, HTTP) ARE covered in the big tracks, but the thin language tracks lack language-specific
 depth. Priority by Bobby's CIAM job relevance: **Node.js backend, DevOps/CI-CD, Kubernetes**
 first; Ruby/PHP/Rust/MuleSoft expansions (~8-10 lessons each) when he confirms he wants them
-beyond taster depth.
+beyond taster depth. (Note: DevOps & CI/CD's "3" count is now stale too — the 2026-09-05 Render
+sweep already grew it to 7 pages across a dedicated "Deploying on Render" section; DevOps is no
+longer genuinely thin, just under-counted here.)
+
+**Landed 2026-09-06 — one Node.js gap closed.** Added `node-database-visualizer.html`
+("Talking to a Database") to a new "Data Layer" section of the Node.js track — the track had
+zero coverage of persistence, the single biggest gap given Bobby's own day job (Spring Data
+JDBC parameterized queries). Teaches connection pooling, parameterized `$1` queries vs. string
+concatenation (SQL injection, shown as its own WARN-toned scenario), Prisma ORM ("parameterizes
+by construction"), and transactions (`BEGIN`/`COMMIT`/`ROLLBACK`/`finally{client.release()}`) —
+via a 4-scenario `rt-ctlbar` walk (param/injection/orm/tx), intro comparison cards (raw pg vs.
+Prisma vs. Spring Boot), and a `DevHubCodeWalk` over `getUserByEmail`. Verified: `tmp_vcheck.mjs`
+(536 pages, 520 registered), `tmp_codecheck.mjs` (0 real errors), `tmp_cwlines.mjs` clean,
+`tmp_smoke.mjs` (536 pages, no overflow/console errors), and a throwaway Playwright script
+confirming all 4 scenarios render correct result text. One page, proportionate to this pass —
+same as Code With Me's 1-of-9-banks precedent above. Remaining Node.js gaps (testing, streams,
+async patterns beyond what the big tracks already cover) are still open.
+
+**Landed 2026-09-06 — one Kubernetes gap closed.** Added `kubernetes-rbac-visualizer.html`
+("RBAC & Service Accounts") to the Kubernetes track's Core Concepts section (6→7 pages) — the
+track's own ConfigMaps & Secrets page already foreshadowed this exact topic ("the developer who
+wrote `view`-level RBAC for the support team just handed them production's signing key") but it
+was never taught as its own lesson. Covers Role/RoleBinding (namespaced) vs. ClusterRole/
+ClusterRoleBinding (cluster-wide), ServiceAccounts as pod identity, `resourceNames` narrowing a
+grant to one named object (and its real gotcha: it's silently ignored for `list`/`watch`, which
+target collections not named objects), the "additive-only, no explicit deny" authorization model,
+and `kubectl auth can-i` as a zero-side-effect permission check — via a 4-scenario `rt-ctlbar`
+walk (namespaced/cluster-wide/workload-identity/audit) and a `DevHubCodeWalk` over a combined
+ServiceAccount+Role+RoleBinding manifest. Every "Where you've seen this before" analogy ties back
+to Bobby's own stack: `@PreAuthorize`, Entra app roles / Ping OAuth scopes, and AWS IAM policies —
+same subject+permission+deny-by-default shape, three different systems. Verified: `tmp_vcheck.mjs`
+(537 pages, 521 registered), `tmp_codecheck.mjs` (0 real errors), `tmp_cwlines.mjs` (not among the
+flagged mounts — no out-of-range or 1-based indices), `tmp_smoke.mjs` both scoped and full-site
+(537 pages, no uncaught errors, no overflow), and a throwaway Playwright script confirming all 4
+scenarios render correct result text, the CodeWalk renders all 27 lines, and the `hf-check` quiz
+answer-reveal works. DevOps/CI-CD's own remaining gaps (see the note above — it's actually not
+thin anymore) and the rest of Kubernetes (probes, StatefulSets, PersistentVolumes, Ingress/TLS)
+are still open.
 
 ### 6. Page-styling critique — content-level remainder (CSS half SHIPPED same session)
 Bobby's design review of the lesson pages. Fixed sitewide in `devhub.css` already: 3-tier

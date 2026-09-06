@@ -1,7 +1,7 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 519 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 521 pages.** Pick a *path* below and follow it.
 >
 > **Contributors:** 102 of them are now authored to the nine-point teaching bar in
 > `CLAUDE.md`; the rest carry the design but not yet the rhythm. Run
@@ -10,7 +10,7 @@
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **519 browser visualizers** across **34 tracks** (grouped into
+DevHub is a learning hub: **521 browser visualizers** across **34 tracks** (grouped into
 categories in the sidebar — Languages & Concepts, Frontend, Backend & APIs, DevOps/Cloud & Data, Practice & Prep; several tracks also have a 🍳 **Common Recipes** section of practical how-tos — API→form, batch upload, password complexity), plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a

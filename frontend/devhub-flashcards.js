@@ -186,6 +186,7 @@
     function rate(idx, known) {
       boxes[keyOf(idx)] = known ? Math.min(5, boxOf(idx) + 1) : 1;
       saveBoxes(deck.id, boxes);
+      if (global.DevHubStreak) global.DevHubStreak.touch();
       state.reviewed++;
       state.flipped = false; state.pos++;
       study();

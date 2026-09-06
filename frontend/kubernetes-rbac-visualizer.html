@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="en" data-hf>
+<head>
+<meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Kubernetes RBAC &amp; Service Accounts — DevHub</title>
+<style>
+.who-SA{background:rgba(167,139,250,.18);color:#c4b5fd}
+.who-ROLE{background:rgba(50,108,229,.22);color:#93bbff}
+.who-BIND{background:rgba(245,158,11,.18);color:#fcd34d}
+.who-API{background:rgba(45,212,191,.18);color:#5eead4}
+.who-POD{background:rgba(74,222,128,.18);color:#86efac}
+</style>
+<link rel="stylesheet" href="devhub.css"/>
+  <link rel="stylesheet" href="devhub-hf.css"/>
+</head>
+<body class="track-kubernetes">
+<div class="page">
+<a class="back" href="javascript:history.back()">← Back</a>
+<h1>RBAC &amp; Service Accounts</h1>
+<p class="subtitle">Who is allowed to do what, to which resources, in which namespace — Kubernetes' own IAM.</p>
+
+  <!-- ── INTRO ── -->
+  <div class="intro">
+    <div class="intro-head"><span class="ico">🔐</span> What is RBAC — and why did a "view" Role once hand out your Secrets?</div>
+    <p class="intro-lead">
+      Every request that reaches the Kubernetes API server — your <code>kubectl</code>, a Deployment
+      controller, a CSI driver, your own pod calling the API — is checked against
+      <strong>Role-Based Access Control</strong> before anything happens. A <strong>Role</strong> is a
+      namespaced allow-list: a set of <code>verbs</code> (get, list, watch, create, update, patch, delete)
+      on <code>resources</code> (pods, secrets, deployments). A <strong>RoleBinding</strong> attaches that
+      Role to a subject — a <strong>ServiceAccount</strong>, a User, or a Group — inside one namespace.
+      Need the same shape cluster-wide? <strong>ClusterRole</strong> + <strong>ClusterRoleBinding</strong>
+      is the identical model with no namespace field at all. This is the actual security boundary the
+      previous lesson pointed at: a Secret's base64 encoding stops nobody, but RBAC is what decides who
+      may ever run <code>kubectl get secret</code> in the first place.
+    </p>
+    <ul class="intro-gist">
+      <li><b>Role</b> = a namespaced allow-list: verbs on resources. Grants nothing by itself.</li>
+      <li><b>RoleBinding</b> attaches a Role to a subject, in ONE namespace — the only thing that connects identity to permission.</li>
+      <li><b>ClusterRole + ClusterRoleBinding</b> = same shape, but reaches every namespace (present and future).</li>
+      <li><b>Every pod runs as a ServiceAccount</b> — <code>default</code> unless you say otherwise, and <code>default</code> should never be granted anything.</li>
+    </ul>
+    <div class="intro-cards">
+      <div class="intro-mini">
+        <h4>Role + RoleBinding (namespaced)</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code>apiVersion: rbac.authorization.k8s.io/v1 &#10;kind: Role &#10;metadata: &#10;  name: ciam-app-role &#10;  namespace: ciam-prod &#10;rules: &#10;- apiGroups: [""] &#10;  resources: ["secrets"] &#10;  resourceNames: ["ciam-secrets"] &#10;  verbs: ["get"] &#10;--- &#10;apiVersion: rbac.authorization.k8s.io/v1 &#10;kind: RoleBinding &#10;metadata: &#10;  name: ciam-app-binding &#10;  namespace: ciam-prod &#10;subjects: &#10;- kind: ServiceAccount &#10;  name: ciam-app &#10;  namespace: ciam-prod &#10;roleRef: &#10;  kind: Role &#10;  name: ciam-app-role &#10;  apiGroup: rbac.authorization.k8s.io</code></p>
+      </div>
+      <div class="intro-mini">
+        <h4>ClusterRole + ClusterRoleBinding (cluster-wide)</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code>apiVersion: rbac.authorization.k8s.io/v1 &#10;kind: ClusterRole &#10;metadata: &#10;  name: secret-reader &#10;rules: &#10;- apiGroups: [""] &#10;  resources: ["secretproviderclasses"] &#10;  verbs: ["get","list","watch"] &#10;--- &#10;apiVersion: rbac.authorization.k8s.io/v1 &#10;kind: ClusterRoleBinding &#10;metadata: &#10;  name: secret-reader-binding &#10;subjects: &#10;- kind: ServiceAccount &#10;  name: csi-secrets-driver &#10;  namespace: kube-system &#10;roleRef: &#10;  kind: ClusterRole &#10;  name: secret-reader &#10;  apiGroup: rbac.authorization.k8s.io &#10;# no "namespace:" field anywhere above —&#10;# that absence IS the cluster-wide reach</code></p>
+      </div>
+      <div class="intro-mini">
+        <h4>Audit a permission before you deploy</h4>
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.7"><code># does ciam-app's ServiceAccount &#10;# have this permission right now? &#10;kubectl auth can-i get secrets \ &#10;  --as=system:serviceaccount:ciam-prod:ciam-app \ &#10;  -n ciam-prod &#10;# → yes / no — the REAL authorizer, &#10;# not a simulation, zero side effects &#10;&#10;# what CAN this identity do, full list: &#10;kubectl auth can-i --list \ &#10;  --as=system:serviceaccount:ciam-prod:ciam-app \ &#10;  -n ciam-prod</code></p>
+      </div>
+    </div>
+    <div class="intro-ciam"><span class="tag">CIAM's own RBAC shape:</span> The Secrets Store CSI driver's ServiceAccount needs a <b>ClusterRole</b> — it fetches <code>SecretProviderClass</code> objects across every namespace, not just one. Your <code>ciam-app</code> ServiceAccount needs the opposite: a <b>Role</b> scoped to <code>ciam-prod</code> alone, with <code>resourceNames</code> narrowing it to the one Secret it actually reads. Grant the CSI driver's breadth to your own app's ServiceAccount by mistake — copy-pasting a platform team's ClusterRoleBinding is the single most common way this happens — and every namespace on the cluster can now read <code>ciam-secrets</code>.</div>
+  </div>
+
+<p class="hf-deck">or, the day "we'll tighten it later" became load-bearing infrastructure</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">RBAC errors look exactly like broken YAML, and the fastest fix is always the worst one.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">"I gave the pipeline's ServiceAccount cluster-admin — the demo was in ten minutes"</div>
+  <p>Your GitHub Actions runner authenticates to the cluster as a ServiceAccount, tries to
+  <code>helm upgrade</code>, and gets <code>Error: secrets is forbidden</code>. Ten minutes before a
+  demo, the fix that compiles fastest is <code>kubectl create clusterrolebinding ci-admin
+  --clusterrole=cluster-admin --serviceaccount=ci:pipeline</code>. The demo works. Nobody removes it,
+  because nothing ever breaks again to remind you it exists:</p>
+  <div class="hf-scatter">
+    <span>cluster-admin = every verb, every resource, every namespace ⚠</span>
+    <span>a leaked CI token is now a leaked cluster ⚠</span>
+    <span>the token sits in a GitHub Actions secret, readable by any workflow in the repo ⚠</span>
+    <span>the actual missing permission was one line: get on one Secret ⚠</span>
+  </div>
+  <p class="hf-foot">And the sting: six months later a dependency-confusion attack compromises one
+  npm package the pipeline installs, and it doesn't just poison a build — it has
+  <code>cluster-admin</code>, so it deletes every Secret in every namespace on its way out.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Three real dials, and RBAC only has these</div>
+  <div class="hf-ladder">
+    <b>Verb scope — get/list/watch is not create/update/patch/delete</b>
+    <i>↓ because "can this identity ever change something" is a different question from "can it read"</i>
+    <b>Resource scope — resourceNames narrows "all secrets" to "this one secret"</b>
+    <i>↓ because most identities need exactly one Secret, not the collection</i>
+    <b>Namespace scope — Role stays in one namespace; ClusterRole reaches all of them</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>RBAC is deny-by-default and additive-only — there is no "deny" rule, only the presence or
+  absence of an allow.</b> If two RoleBindings disagree, the more permissive one silently wins.
+  "Tightening" one binding while a broader one still exists changes nothing at all.
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">Role</span>
+    <p>I'm just a list: these verbs, on these resources, in this namespace. I grant nothing to
+    anyone by myself — I'm not even attached to an identity yet.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">RoleBinding</span>
+    <p>That's me. I'm the wire between a Role and a ServiceAccount. Delete me and the Role is
+    just YAML sitting in etcd, doing nothing — a very common "why doesn't this work" dead end.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">ServiceAccount</span>
+    <p>And I'm the identity your pod authenticates as — auto-mounted, auto-rotated token, no
+    human's kubeconfig involved. If nobody names me in the pod spec, I'm <code>default</code>,
+    and <code>default</code> should own precisely zero RoleBindings.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one API request from your terminal to a yes/no, and watch exactly where identity ends and authorization begins.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li class="open"><span>you (or a pod) present a client cert or a ServiceAccount token</span><span class="tag">authentication</span></li>
+    <li><span>the API server resolves that to an identity — a User, or <code>system:serviceaccount:ns:name</code></span><span class="tag">who</span></li>
+    <li><span>every Role/ClusterRole bound to that identity is checked for one matching rule</span><span class="tag">authorization</span></li>
+    <li><span>ANY single matching rule, in ANY binding, is enough — there is no override, no priority</span><span class="tag">union, not ranking</span></li>
+    <li><span>no rule matches → <code>403 Forbidden</code>, with no hint about which binding was missing</span><span class="tag">deny by silence</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the one that surprises people who know Spring Security or IAM policy
+  evaluation, where an explicit deny can beat an allow. Kubernetes RBAC has no deny rules at all —
+  only allows. A narrow Role you wrote carefully today does nothing to shrink a broad ClusterRole
+  someone bound to the same ServiceAccount last year; both are simply unioned.</p>
+</div>
+
+<p><b>The 403 tells you nothing about why.</b> It does not name the missing verb, the missing
+resource, or which of your bindings almost worked. Two tools close that gap without deploying
+anything: <code>kubectl auth can-i &lt;verb&gt; &lt;resource&gt; --as=&lt;identity&gt; -n
+&lt;namespace&gt;</code> asks the real authorizer a yes/no question with zero side effects, and
+<code>kubectl auth can-i --list --as=&lt;identity&gt;</code> dumps everything that identity can do.
+Both use <code>--as</code> impersonation, which itself needs an <code>impersonate</code> RBAC grant
+on your own account — so the audit tool is gated by the same system it audits.</p>
+
+<div class="hf-check" data-answer="1">
+  <p class="q"><code>ciam-app</code>'s ServiceAccount has one RoleBinding, to a Role granting
+  <code>get, list, watch</code> on <code>configmaps</code> in <code>ciam-prod</code>. It calls the API
+  to <code>get</code> a <code>secret</code> in that same namespace. What happens?</p>
+  <button type="button">Allowed — it's the same namespace, and namespace is what RBAC checks first</button>
+  <button type="button">Denied — the Role's resource list is "configmaps", and resource must match too, not just namespace</button>
+  <button type="button">Allowed, but only for secrets whose name starts with the ServiceAccount's own name</button>
+  <p class="why" data-for="0">Namespace is one of three things that must match, not the only one. This
+  Role's rule names <code>configmaps</code> — a completely different resource type from
+  <code>secrets</code> in the same API group. Being in the right namespace buys nothing if the
+  resource itself was never listed.</p>
+  <p class="why" data-for="1">Right. A rule matches only when verb, resource, AND (if present)
+  resourceNames all line up. This Role's only rule lists <code>configmaps</code>; <code>secrets</code>
+  never appears anywhere in it, so the request has no matching rule in any binding and comes back
+  <code>403 Forbidden</code>.</p>
+  <p class="why" data-for="2">There's no such implicit naming convention — RBAC never infers a
+  resource name from the identity that's asking. A rule either lists the resource type at all (and
+  optionally narrows it with an explicit <code>resourceNames</code>), or it grants nothing for that
+  resource, full stop.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Same shape, three different rooms you already work in.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4><code>@PreAuthorize("hasRole('ADMIN')")</code></h4>
+    <p>Identical model at method scope: a subject (the authenticated principal), a permission check
+    (does it hold the required authority), deny-by-default if the check fails. One annotation guards
+    one endpoint the same way one RoleBinding guards one verb — and just like RBAC, stacking two
+    <code>@PreAuthorize</code> rules from different base classes unions rather than overrides.</p>
+    <div class="hf-scatter"><span>subject + check</span><span>deny by default</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Entra app roles &amp; Ping OAuth scopes</h4>
+    <p>An Entra app role assigned to a service principal, or a Ping OAuth scope granted to a client,
+    is the CIAM-shaped version of a RoleBinding: it's the record of "this identity may do this" that
+    a resource server checks on every request. The token carries the claim; RBAC checks the binding
+    live against etcd — different storage, same question being asked.</p>
+    <div class="hf-scatter"><span>role → claim</span><span>checked per-request</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>AWS IAM policy + a trust policy</h4>
+    <p>An IAM policy's <code>Action</code>/<code>Resource</code> pair is a Role's
+    <code>verbs</code>/<code>resources</code> wearing a different name, and a trust policy binding a
+    role to a principal is a RoleBinding. Workload Identity / IRSA is the literal bridge: it lets a
+    Kubernetes ServiceAccount assume a cloud IAM role, so the two systems' authorization checks chain
+    instead of duplicating credentials.</p>
+    <div class="hf-scatter"><span>same shape</span><span>bridged by workload identity</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Why does a pod need a ServiceAccount at all — why not just "the pod"?</p>
+  <p class="a">Because every call a pod makes to the Kubernetes API — and plenty of platform
+  components do this constantly — needs an identity to authenticate as. A ServiceAccount gives it
+  one: an auto-mounted, auto-rotated token Kubernetes manages for you, so a Deployment controller, a
+  CSI driver, or your own app's code can call the API without a human's kubeconfig anywhere near it.
+  Leave it unspecified and the pod gets <code>default</code> — which is why <code>default</code>
+  should never hold a RoleBinding.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Can I check a permission without actually trying the request for real?</p>
+  <p class="a">Yes — <code>kubectl auth can-i get secrets --as=system:serviceaccount:ciam-prod:ciam-app
+  -n ciam-prod</code> impersonates that identity for exactly one authorization check and answers
+  yes/no with zero side effects. It runs the same authorizer a real request would hit, so the answer
+  is exactly what production would do — not a guess, not a simulation of one.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">I just replaced a broad RoleBinding with a narrower one — did I just tighten access?</p>
+  <p class="a">Only if the broad one is gone, not just replaced in your mental model. RBAC unions
+  every binding pointing at an identity; deleting one binding while a second, more permissive one
+  still exists changes nothing that second binding already covers. Confirm with <code>kubectl get
+  rolebindings,clusterrolebindings -A -o json | grep -B4 ciam-app</code> before declaring victory —
+  <code>can-i --list</code> on the identity is the faster version of the same check.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you run it.</p>
+<div class="hf-napkin">
+  <code>ciam-app</code> has <b>two</b> RoleBindings in <code>ciam-prod</code>: one to a Role you wrote
+  yourself, granting only <code>get, watch</code> on <code>configmaps</code>; the other to the
+  built-in <code>view</code> ClusterRole (bound namespace-locally via a RoleBinding), which includes
+  read access to <code>secrets</code>. The pod calls the API to <code>get</code> a Secret. Write down
+  your answer before you look: allowed, or denied — and which of the two bindings decides it?
+</div>
+
+<div class="rt-ctlbar">
+  <span class="lbl">scenario:</span>
+  <span class="userseg" id="krScen">
+    <button data-s="namespaced" class="on">Role + RoleBinding</button>
+    <button data-s="clusterwide">ClusterRole + Binding</button>
+    <button data-s="workloadidentity">workload identity</button>
+    <button data-s="audit">can-i audit</button>
+  </span>
+  <button class="rt-run" id="krRun">▶ Play</button>
+  <span class="rt-pill" id="krPill">Role + RoleBinding — scoped to one namespace</span>
+</div>
+<div class="rt-stage">
+  <div class="rt-diagram" id="krDiagram"></div>
+  <div class="rt-inspect">
+    <div class="rt-dir" id="krDir">▶ READY</div>
+    <div class="rt-cap" id="krCap">Choose a scenario and press ▶</div>
+    <pre class="rt-payload" id="krPay"></pre>
+    <pre class="rt-headers" id="krHdr"></pre>
+    <div class="rt-result" id="krRes"></div>
+  </div>
+</div>
+<div class="rt-legend">
+  <span>ServiceAccount · Role/ClusterRole · RoleBinding · API server authorizer · Pod</span>
+  <span><span style="color:#fca5a5">⚠ RBAC is additive-only — there is no rule that removes a permission another binding grants</span></span>
+</div>
+
+<section>
+<h2>1 — ServiceAccount</h2>
+<div class="card">
+<pre><code><span class="kw">apiVersion</span>: v1
+<span class="kw">kind</span>: ServiceAccount
+<span class="kw">metadata</span>:
+  <span class="kw">name</span>: ciam-app
+  <span class="kw">namespace</span>: ciam-prod
+<span class="cm"># referenced from a pod spec:</span>
+<span class="kw">spec</span>:
+  <span class="kw">serviceAccountName</span>: ciam-app   <span class="cm"># omit this and you get "default"</span></code></pre>
+</div>
+</section>
+
+<section>
+<h2>2 — Role + RoleBinding (namespaced)</h2>
+<div class="card card-blue">
+<pre><code><span class="kw">apiVersion</span>: rbac.authorization.k8s.io/v1
+<span class="kw">kind</span>: Role
+<span class="kw">metadata</span>:
+  <span class="kw">name</span>: ciam-app-role
+  <span class="kw">namespace</span>: ciam-prod
+<span class="kw">rules</span>:
+- <span class="kw">apiGroups</span>: [<span class="str">""</span>]
+  <span class="kw">resources</span>: [<span class="str">"secrets"</span>]
+  <span class="kw">resourceNames</span>: [<span class="str">"ciam-secrets"</span>]   <span class="cm"># only THIS one, not all secrets</span>
+  <span class="kw">verbs</span>: [<span class="str">"get"</span>]
+---
+<span class="kw">apiVersion</span>: rbac.authorization.k8s.io/v1
+<span class="kw">kind</span>: RoleBinding
+<span class="kw">metadata</span>:
+  <span class="kw">name</span>: ciam-app-binding
+  <span class="kw">namespace</span>: ciam-prod
+<span class="kw">subjects</span>:
+- <span class="kw">kind</span>: ServiceAccount
+  <span class="kw">name</span>: ciam-app
+  <span class="kw">namespace</span>: ciam-prod
+<span class="kw">roleRef</span>: { <span class="kw">kind</span>: Role, <span class="kw">name</span>: ciam-app-role, <span class="kw">apiGroup</span>: rbac.authorization.k8s.io }</code></pre>
+<div class="note">⚠ <code>resourceNames</code> only narrows verbs that target one named object —
+<code>get</code>, <code>update</code>, <code>patch</code>, <code>delete</code>. It does nothing for
+<code>list</code> or <code>watch</code>, which always operate on the whole collection.</div>
+</div>
+</section>
+
+<section>
+<h2>3 — ClusterRole + ClusterRoleBinding (cluster-wide)</h2>
+<div class="card card-red">
+<pre><code><span class="kw">apiVersion</span>: rbac.authorization.k8s.io/v1
+<span class="kw">kind</span>: ClusterRole
+<span class="kw">metadata</span>:
+  <span class="kw">name</span>: secretproviderclasses-reader   <span class="cm"># no "namespace:" field — it can't have one</span>
+<span class="kw">rules</span>:
+- <span class="kw">apiGroups</span>: [<span class="str">"secrets-store.csi.x-k8s.io"</span>]
+  <span class="kw">resources</span>: [<span class="str">"secretproviderclasses"</span>]
+  <span class="kw">verbs</span>: [<span class="str">"get"</span>, <span class="str">"list"</span>, <span class="str">"watch"</span>]
+---
+<span class="kw">apiVersion</span>: rbac.authorization.k8s.io/v1
+<span class="kw">kind</span>: ClusterRoleBinding
+<span class="kw">metadata</span>:
+  <span class="kw">name</span>: secretproviderclasses-reader-binding
+<span class="kw">subjects</span>:
+- <span class="kw">kind</span>: ServiceAccount
+  <span class="kw">name</span>: csi-secrets-driver
+  <span class="kw">namespace</span>: kube-system
+<span class="kw">roleRef</span>: { <span class="kw">kind</span>: ClusterRole, <span class="kw">name</span>: secretproviderclasses-reader, <span class="kw">apiGroup</span>: rbac.authorization.k8s.io }</code></pre>
+<div class="note">⚠ A ClusterRole can also be bound with a plain <code>RoleBinding</code> instead of a
+ClusterRoleBinding — that reuses a shared permission SET (like the built-in <code>view</code>/
+<code>edit</code>/<code>admin</code> roles) while still scoping it to one namespace. The binding
+type controls the reach, not the role type.</div>
+</div>
+</section>
+
+<section>
+<h2>4 — Workload identity + auditing a permission</h2>
+<div class="card card-green">
+<pre><code><span class="cm"># ServiceAccount annotated for Azure AD Workload Identity —</span>
+<span class="cm"># no client secret stored in the cluster at all</span>
+<span class="kw">apiVersion</span>: v1
+<span class="kw">kind</span>: ServiceAccount
+<span class="kw">metadata</span>:
+  <span class="kw">name</span>: ciam-app
+  <span class="kw">namespace</span>: ciam-prod
+  <span class="kw">annotations</span>:
+    <span class="kw">azure.workload.identity/client-id</span>: <span class="str">"&lt;managed-identity-client-id&gt;"</span>
+  <span class="kw">labels</span>:
+    <span class="kw">azure.workload.identity/use</span>: <span class="str">"true"</span>
+
+<span class="cm"># check a permission WITHOUT deploying anything:</span>
+kubectl auth can-i get secrets \
+  --as=system:serviceaccount:ciam-prod:ciam-app \
+  -n ciam-prod
+<span class="cm"># → yes | no   (the real authorizer, zero side effects)</span>
+
+kubectl auth can-i --list \
+  --as=system:serviceaccount:ciam-prod:ciam-app -n ciam-prod</code></pre>
+<p>Workload Identity answers "who is this pod to Azure" — it says nothing about "what may this
+pod do inside the cluster". You still need the Role from section 2 for that; the two checks are
+independent and both must pass.</p>
+</div>
+</section>
+</div>
+
+<!-- ── Code Walkthrough: Kubernetes RBAC ── -->
+<div id="cw-k8srbac"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-k8srbac',{
+  id:'cw-k8srbac',
+  title:'Kubernetes RBAC — ServiceAccount, Role, and RoleBinding working together',
+  subtitle:'Three objects, three jobs: a ServiceAccount is an identity, a Role is an allow-list of verbs on resources (namespaced), and a RoleBinding is the only thing that connects the two. Delete any one of the three and the whole chain grants nothing.',
+  steps:[
+    {
+      lines:[1,2,3],
+      note:'ServiceAccount: the identity a pod authenticates to the API server as. Kubernetes auto-mounts a token for it and rotates that token automatically — no static credential to leak. Every pod has one; a pod spec with no serviceAccountName gets "default", and default should never be the subject of any RoleBinding.',
+      vars:{'ServiceAccount':'namespaced identity, one per pod (or shared across many)','auto-mounted token':'projected into the pod filesystem, rotated by the kubelet, never a long-lived secret you manage yourself'},
+      tone:'start'
+    },
+    {
+      lines:[6,7,8,9,10,11,12],
+      note:'Role: a namespaced allow-list. This one grants nothing on its own — it is just data in etcd until a RoleBinding attaches it to a subject. The rule below reads as "on the core API group, for the secrets resource, only get is allowed" — list and watch are not granted, so an attempt to list all secrets in the namespace still comes back 403 even with this Role bound.',
+      vars:{'apiGroups: [""]':'the empty string means the CORE API group — pods, secrets, configmaps, services all live here','verbs':'get/list/watch (read), create/update/patch (write), delete — each must be granted explicitly, nothing is implied by another'},
+      tone:'ok'
+    },
+    {
+      lines:[13,14,15,16],
+      note:'resourceNames narrows the rule from "every Secret in this namespace" down to one named object — a meaningful reduction in blast radius if this ServiceAccount is ever compromised. The gotcha: resourceNames only works for verbs that target a single named object (get, update, patch, delete). It is silently ignored for list and watch, because those verbs operate on the whole collection and there is no single name to check it against.',
+      vars:{'resourceNames':'restricts get/update/patch/delete to specific named objects — does nothing for list/watch/create','blast radius':'a compromised ServiceAccount scoped to resourceNames:["ciam-secrets"] cannot read any OTHER secret in the namespace, even ones created tomorrow'},
+      tone:'ok'
+    },
+    {
+      lines:[19,20,21,22,23,24,25,26],
+      note:'RoleBinding: the wire between the Role and the ServiceAccount, and the only thing that actually grants anything. subjects names WHO (a ServiceAccount, User, or Group); roleRef names WHAT (a Role, or a ClusterRole reused inside this one namespace — the apiGroup field there is mandatory and easy to typo into silent failure). Delete this object and ciam-app-role becomes inert YAML that grants nobody anything.',
+      vars:{'subjects':'a list — one RoleBinding can attach a Role to several identities at once','roleRef.kind':'"Role" or "ClusterRole" — binding a ClusterRole here reuses a shared permission set but still scopes the GRANT to this one namespace'},
+      tone:'ok',
+      callout:'CIAM: your app\'s ServiceAccount should look exactly like this — a Role scoped to one namespace, resourceNames narrowed to the one Secret it actually reads, bound by exactly one RoleBinding. The platform team\'s Secrets Store CSI driver needs the broader ClusterRole/ClusterRoleBinding shape from section 3 instead — copying that shape onto your own app\'s ServiceAccount is the single most common way a CIAM app ends up able to read every namespace\'s secrets.'
+    }
+  ],
+  code:[
+    '# ServiceAccount — the identity every pod authenticates as',
+    'apiVersion: v1',
+    'kind: ServiceAccount',
+    'metadata: { name: ciam-app, namespace: ciam-prod }',
+    '',
+    '# Role — the allow-list, scoped to ciam-prod only',
+    'apiVersion: rbac.authorization.k8s.io/v1',
+    'kind: Role',
+    'metadata: { name: ciam-app-role, namespace: ciam-prod }',
+    'rules:',
+    '- apiGroups: [""]',
+    '  resources: ["configmaps"]',
+    '  verbs: ["get", "list", "watch"]',
+    '- apiGroups: [""]',
+    '  resources: ["secrets"]',
+    '  resourceNames: ["ciam-secrets"]   # only THIS secret, not all of them',
+    '  verbs: ["get"]',
+    '',
+    '# RoleBinding — the only thing that connects identity to permission',
+    'apiVersion: rbac.authorization.k8s.io/v1',
+    'kind: RoleBinding',
+    'metadata: { name: ciam-app-binding, namespace: ciam-prod }',
+    'subjects:',
+    '- kind: ServiceAccount',
+    '  name: ciam-app',
+    '  namespace: ciam-prod',
+    'roleRef: { kind: Role, name: ciam-app-role, apiGroup: rbac.authorization.k8s.io }'
+  ]
+});
+</script>
+
+<script>
+(function(){
+const pfx='kr';
+const NODES=['SA','ROLE','BIND','API','POD'];
+function posOf(n){return 10+NODES.indexOf(n)*18;}
+const SCEN={
+  namespaced:{
+    pill:'Role + RoleBinding — scoped to one namespace',
+    steps:[
+      {node:'SA',hdr:'ServiceAccount ciam-app created in ciam-prod',pay:{name:'ciam-app',namespace:'ciam-prod',automountServiceAccountToken:true},ins:'Every pod authenticates to the API server as a ServiceAccount — this one, unless a pod spec says otherwise, or "default" if none is named.',tone:null},
+      {node:'ROLE',hdr:'Role ciam-deployer defines the allow-list',pay:{kind:'Role',metadata:{name:'ciam-deployer',namespace:'ciam-prod'},rules:[{apiGroups:[''],resources:['pods'],verbs:['get','list','watch']}]},ins:'A Role is namespaced — this list of verbs and resources means nothing outside ciam-prod, no matter what else is true.',tone:null},
+      {node:'BIND',hdr:'RoleBinding attaches the Role to the ServiceAccount',pay:{kind:'RoleBinding',subjects:[{kind:'ServiceAccount',name:'ciam-app',namespace:'ciam-prod'}],roleRef:{kind:'Role',name:'ciam-deployer'}},ins:'The binding is the only thing connecting an identity to a permission — a Role with no RoleBinding grants nothing to anyone.',tone:null},
+      {node:'API',hdr:'ciam-app lists pods in ciam-prod — allowed',pay:{request:'GET /api/v1/namespaces/ciam-prod/pods',as:'system:serviceaccount:ciam-prod:ciam-app',decision:'ALLOWED'},ins:'The same ServiceAccount tries the SAME verb in namespace ciam-staging next → 403 Forbidden. The RoleBinding never mentioned that namespace.',tone:'ok'}
+    ],
+    result:'✓ list pods: allowed in ciam-prod, forbidden everywhere else'
+  },
+  clusterwide:{
+    pill:'ClusterRole + ClusterRoleBinding — every namespace',
+    steps:[
+      {node:'SA',hdr:'ServiceAccount csi-secrets-driver in kube-system',pay:{name:'csi-secrets-driver',namespace:'kube-system'},ins:'A cluster-level component (like the Secrets Store CSI driver) needs to act across every namespace, not just its own.',tone:null},
+      {node:'ROLE',hdr:'ClusterRole grants read access cluster-wide',pay:{kind:'ClusterRole',metadata:{name:'secretproviderclasses-reader'},rules:[{apiGroups:['secrets-store.csi.x-k8s.io'],resources:['secretproviderclasses'],verbs:['get','list','watch']}]},ins:'Same shape as a Role — apiGroups/resources/verbs — but with no namespace field at all, because a ClusterRole has none.',tone:null},
+      {node:'BIND',hdr:'ClusterRoleBinding — no namespace to restrict it',pay:{kind:'ClusterRoleBinding',subjects:[{kind:'ServiceAccount',name:'csi-secrets-driver',namespace:'kube-system'}],roleRef:{kind:'ClusterRole',name:'secretproviderclasses-reader'}},ins:'This is the dangerous combination to copy-paste: ClusterRole + ClusterRoleBinding reaches ciam-prod, ciam-staging, and every namespace created tomorrow.',tone:null},
+      {node:'API',hdr:'Driver reads SecretProviderClass in ANY namespace',pay:{request:'GET /apis/secrets-store.csi.x-k8s.io/v1/namespaces/*/secretproviderclasses',decision:'ALLOWED everywhere'},ins:'Correct for a genuinely cluster-wide platform controller — and wrong for almost everything else you will be tempted to bind this way.',tone:'ok'}
+    ],
+    result:'✓ cluster-wide read access — appropriate for a platform controller, not an app'
+  },
+  workloadidentity:{
+    pill:'ServiceAccount → cloud IAM identity, zero static credentials',
+    steps:[
+      {node:'SA',hdr:'ServiceAccount annotated for Azure AD Workload Identity',pay:{name:'ciam-app',namespace:'ciam-prod',annotations:{'azure.workload.identity/client-id':'<managed-identity-client-id>'},labels:{'azure.workload.identity/use':'true'}},ins:'The annotation links this ServiceAccount to an Azure Managed Identity — no client secret stored anywhere in the cluster.',tone:null},
+      {node:'ROLE',hdr:'RBAC still governs the K8s-side permissions',pay:{kind:'Role',rules:[{apiGroups:[''],resources:['secrets'],resourceNames:['ciam-secrets'],verbs:['get']}]},ins:'Workload Identity answers "who am I to Azure" — it says nothing about "what may I do inside the cluster". You still need a Role for that, independently.',tone:null},
+      {node:'BIND',hdr:'The webhook injects a federated token at pod start',pay:{injectedVolume:'/var/run/secrets/azure/tokens/azure-identity-token',tokenType:'federated OIDC token, auto-rotated'},ins:'The Azure Workload Identity mutating webhook edits the pod spec on admission — no code change needed in your app.',tone:null},
+      {node:'API',hdr:'App calls Key Vault using the federated token',pay:{call:'GET https://ciam-kv.vault.azure.net/secrets/PingClientSecret',auth:'federated token → Azure AD token exchange',result:'PING_CLIENT_SECRET'},ins:'Azure AD trusts the Kubernetes OIDC issuer directly — the app never handles a long-lived Azure credential at all.',tone:'ok'}
+    ],
+    result:'✓ Key Vault secret fetched — no client secret ever stored in the cluster'
+  },
+  audit:{
+    pill:'kubectl auth can-i — check a permission without using it',
+    steps:[
+      {node:'SA',hdr:'You impersonate the ServiceAccount from your own terminal',pay:{command:'kubectl auth can-i get secrets --as=system:serviceaccount:ciam-prod:ciam-app -n ciam-prod'},ins:'--as impersonates an identity for exactly one request — your own kubeconfig needs "impersonate" permission on serviceaccounts to use it at all.',tone:null},
+      {node:'API',hdr:'API server runs the SAME RBAC check a real request would hit',pay:{evaluated:['Role ciam-deployer (no secrets rule)','RoleBinding ciam-deployer-binding'],decision:'no'},ins:'This is a dry run of the real authorizer, not a simulation — the answer is exactly what a genuine request would get back.',tone:null},
+      {node:'POD',hdr:'Result: no — and now you know BEFORE deploying',pay:{output:'no'},ins:'Compare with the alternative: deploy, watch the pod CrashLoop on a 403, read three log lines to realize it was RBAC all along.',tone:'ok'}
+    ],
+    result:'✓ can-i answered "no" — fix the Role, not the code'
+  }
+};
+let cur='namespaced',T=[];
+const $=id=>document.getElementById(pfx+id);
+function renderNodes(){$('Diagram').innerHTML=NODES.map(n=>`<div class="rt-node who-${n}" id="${pfx}N${n}" style="left:${posOf(n)}%">${n}</div>`).join('');}
+function chip(){let c=document.getElementById(pfx+'chip');if(!c){c=document.createElement('div');c.id=pfx+'chip';c.className='rt-chip';$('Diagram').appendChild(c);}return c;}
+function clearT(){T.forEach(clearTimeout);T=[];}
+function reset(){clearT();renderNodes();chip().style.left=posOf(NODES[0])+'%';chip().className='rt-chip';$('Dir').textContent='▶ READY';$('Cap').textContent='Choose a scenario and press ▶';$('Pay').textContent='';$('Hdr').textContent='';$('Res').textContent='';$('Run').disabled=false;document.querySelectorAll('#'+pfx+'Diagram .rt-node').forEach(n=>n.className=n.className.replace(/ ?(vchk|vskip|curbad|rt-cur)/g,''));}
+function applyStep(s){document.querySelectorAll('#'+pfx+'Diagram .rt-node').forEach(n=>n.classList.remove('rt-cur','vchk','vskip','curbad'));const nd=document.getElementById(pfx+'N'+s.node);if(nd){nd.classList.add('rt-cur');if(s.tone==='ok')nd.classList.add('vchk');if(s.tone==='bad')nd.classList.add('vskip','curbad');chip().style.left=posOf(s.node)+'%';chip().className='rt-chip'+(s.tone==='ok'?' ok':s.tone==='bad'?' bad':'');}$('Dir').textContent=s.hdr;$('Cap').textContent=s.ins;$('Pay').textContent=JSON.stringify(s.pay,null,2);$('Hdr').textContent='';}
+function run(){const sc=SCEN[cur];reset();$('Run').disabled=true;$('Pill').textContent=sc.pill;document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.disabled=true);sc.steps.forEach((s,i)=>T.push(setTimeout(()=>{applyStep(s);if(i===sc.steps.length-1)T.push(setTimeout(()=>{$('Res').textContent=sc.result;$('Run').disabled=false;document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.disabled=false);},2000));},300+i*2000)));}
+document.querySelectorAll('#'+pfx+'Scen button').forEach(b=>b.addEventListener('click',function(){document.querySelectorAll('#'+pfx+'Scen button').forEach(x=>x.classList.remove('on'));this.classList.add('on');cur=this.dataset.s;reset();$('Pill').textContent=SCEN[cur].pill;}));
+$('Run').addEventListener('click',run);renderNodes();chip();
+})();
+</script>
+<script src="tracks-data.js"></script>
+<script src="devhub-chapters.js"></script>
+<script src="devhub-hf-theme.js"></script>
+<script src="devhub-notebook.js"></script>
+<script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
+<script src="devhub-transitions.js"></script>
+</body>
+</html>

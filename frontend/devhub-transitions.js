@@ -31,6 +31,18 @@
  *      silence. Lives here because this is the one script effectively every
  *      page loads, and the fix must not require per-page edits.
  *
+ *   4. window.DevHubStreak — app.html owns dlh_streak_v1 and its own
+ *      touchStreak()/getStreak(), but only calls touch() from setStatus()
+ *      (first visit or Mark as Learned), so a day spent purely re-drilling a
+ *      quiz or flashcard deck never counts. Those engines run inside this
+ *      page (standalone or in app.html's #viewer iframe), a different JS
+ *      realm from app.html's window — but same origin, so localStorage is
+ *      shared either way. This is that engine's writer: same key, same
+ *      day/streak algorithm as app.html's copy (kept in sync by hand — it is
+ *      five lines). Call DevHubStreak.touch() from any place a learner just
+ *      demonstrably showed up: quiz finish(), flashcard rate(), an hf-check
+ *      answer, a passing codegrade run.
+ *
  * USAGE: <link rel="stylesheet" href="devhub.css">  (ripple/fade keyframes)
  *        <script src="devhub-transitions.js"></script>
  *
@@ -134,4 +146,23 @@
       inspectors[i].setAttribute('aria-live', 'polite');
     }
   }
+
+  // ── 4. Cross-page streak writer ───────────────────────────────────────────
+  // Deliberately duplicated, not shared via a function call into app.html:
+  // this script runs standalone too (a lesson opened outside the hub iframe
+  // has no app.html window to call into). Must stay algorithmically identical
+  // to app.html's touchStreak() — same key, same "today/yesterday" logic.
+  var STREAK_KEY = 'dlh_streak_v1';
+  function touchStreak() {
+    try {
+      var today = new Date().toISOString().slice(0, 10);
+      var s; try { s = JSON.parse(global.localStorage.getItem(STREAK_KEY)) || { lastDate: null, count: 0 }; } catch (e) { s = { lastDate: null, count: 0 }; }
+      if (s.lastDate === today) return s.count;
+      var yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+      var count = s.lastDate === yesterday ? s.count + 1 : 1;
+      global.localStorage.setItem(STREAK_KEY, JSON.stringify({ lastDate: today, count: count }));
+      return count;
+    } catch (e) { return null; }
+  }
+  global.DevHubStreak = { touch: touchStreak };
 })(window, document);

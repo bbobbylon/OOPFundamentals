@@ -148,13 +148,25 @@
 
   /* Backgrounds composite: an 11%-alpha wash over a dark panel is not the wash,
      it is a slightly tinted dark. Walk up collecting translucent layers until
-     something opaque, then paint them back down onto it. */
+     something opaque, then paint them back down onto it.
+
+     The cache holds each element's OWN parsed backgroundColor (opaque,
+     translucent, or none) — a fact about that element alone, true no matter
+     which descendant's walk reaches it or how many translucent layers that
+     walk already collected below it. That is why this can cache every node
+     it visits, not just a walk that happened to have zero translucent layers
+     first (the previous version's cache only ever held the fully-composited
+     RESULT, which — unlike a raw read — genuinely does depend on the caller's
+     path, so it could only be reused by a caller with an identical, empty
+     stack). A translucent-panel subtree with many text children previously
+     re-read getComputedStyle for every shared ancestor once per child; this
+     reads each ancestor's own background at most once per repair() pass. */
   function groundOf(el, cache){
     var stack = [], e = el, base = null;
     while (e && e.nodeType === 1){
-      var hit = cache.get(e);
-      if (hit){ base = hit; break; }
-      var c = parse(getComputedStyle(e).backgroundColor);
+      var c;
+      if (cache.has(e)) { c = cache.get(e); }
+      else { c = parse(getComputedStyle(e).backgroundColor); cache.set(e, c); }
       if (c && c[3] > 0){
         if (c[3] >= 0.999){ base = c; break; }
         stack.push(c);
@@ -163,7 +175,6 @@
     }
     if (!base) base = [255,255,255,1];
     for (var i = stack.length - 1; i >= 0; i--) base = over(stack[i], base);
-    if (!stack.length && e && e.nodeType === 1) cache.set(e, base);
     return base;
   }
 
@@ -208,8 +219,22 @@
     return best;
   }
 
+  /* Two passes, not one interleaved loop. The original walked every node and,
+     for each, READ getComputedStyle (visibility, color, groundOf's own reads)
+     then immediately WROTE el.style.setProperty(color). That write invalidates
+     style for the next node's read, so every fix forced a synchronous
+     recalc on whatever came after it — measured at 10,458 getComputedStyle
+     calls / 457ms of blocking time on one page's first pass. Collecting every
+     decision first (pure reads + math, zero DOM writes) and applying them
+     in a second loop (pure writes) means the browser can batch all the reads
+     against one stable layout and all the writes against one repaint, same as
+     the classic "read phase / write phase" fix for layout thrashing. */
   function repair(root, cache){
     var nodes = root.querySelectorAll('*');
+    var toRestore = [];   // elements whose ground moved back to readable
+    var toFix = [];        // {el, fixed:[r,g,b], bgL, done, origColor}
+
+    // ---- READ PHASE: no DOM writes, safe to batch ----
     for (var i = 0; i < nodes.length; i++){
       var el = nodes[i];
       if (!el.firstChild || el.firstChild.nodeType !== 3) continue;
@@ -234,7 +259,7 @@
       var fg = parse(done ? el.dataset.hfcFg : s.color); if (!fg) continue;
       if (fg[3] < 0.999) fg = over(fg, bg);
       if (ratio(lum(fg), bgL) >= MIN){
-        if (done){ restore(el); }                 /* the ground moved and it reads now */
+        if (done) toRestore.push(el);              /* the ground moved and it reads now */
         continue;
       }
 
@@ -242,13 +267,20 @@
       if (!fixed || ratio(lum(fixed), bgL) < MIN){
         fixed = bgL < 0.18 ? [242,232,219] : [32,30,29];          /* ramp fallback */
       }
-      if (!done){
-        el.dataset.hfcWas = el.style.getPropertyValue('color');
-        el.dataset.hfcPri = el.style.getPropertyPriority('color');
-        el.dataset.hfcFg  = s.color;
+      toFix.push({ el: el, fixed: fixed, bgL: bgL, done: done, origColor: s.color });
+    }
+
+    // ---- WRITE PHASE: no DOM reads, safe to batch ----
+    for (var r = 0; r < toRestore.length; r++) restore(toRestore[r]);
+    for (var f = 0; f < toFix.length; f++){
+      var item = toFix[f], node = item.el;
+      if (!item.done){
+        node.dataset.hfcWas = node.style.getPropertyValue('color');
+        node.dataset.hfcPri = node.style.getPropertyPriority('color');
+        node.dataset.hfcFg  = item.origColor;
       }
-      el.dataset.hfcBg = bgL.toFixed(4);
-      el.style.setProperty('color', 'rgb(' + fixed[0] + ',' + fixed[1] + ',' + fixed[2] + ')', 'important');
+      node.dataset.hfcBg = item.bgL.toFixed(4);
+      node.style.setProperty('color', 'rgb(' + item.fixed[0] + ',' + item.fixed[1] + ',' + item.fixed[2] + ')', 'important');
     }
   }
 
