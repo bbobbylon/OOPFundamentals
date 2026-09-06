@@ -78,6 +78,18 @@ standing goal, not a one-time task. The full Head First rollout state lives in
   CDN load). `node frontend/tmp_assetcheck.mjs <ref>` fails on any LOSS of a teaching
   asset (tryit/CodeWalk/rt-stage/quiz/flashcards) versus a git ref — run it after any
   bulk edit that splices markup.
+- Code on a page is CODE: `node frontend/tmp_codecheck.mjs` extracts every
+  `<pre>` and CodeWalk `code:` array and compiles the TS/Java ones. Needs
+  `npm i --no-save typescript@5.6.3` (match the version the Try It editor loads
+  from the CDN, not the newest) and `javac`; either missing = skip, not fail.
+  It reports from an ALLOW list, and a ❌ excuses ONE LINE, not the block.
+- **CodeWalk `line:`/`lines:` indices are ZERO-based** — `devhub-codewalk.js`
+  uses them as raw indices into the rendered lines and prints `idx+1` in the
+  gutter. Authoring them 1-based highlights one line low on every step and
+  drops the last one off the end, and no other gate can see it: the page is
+  valid, the widget renders, nothing throws. Check with
+  `node frontend/tmp_cwlines.mjs`. The invariant is `0 <= v < n`, NOT
+  `1 <= v <= n` — I shipped four pages on the wrong one.
 - Find thin lessons with `node frontend/tmp_hfaudit.mjs` (`--track=`, `--top=`, `--json=`).
   It scores every lesson page against the nine-point standard above and ranks the thinnest
   first. It reads MARKUP, not meaning — a low score means "go look", never a verdict, and a

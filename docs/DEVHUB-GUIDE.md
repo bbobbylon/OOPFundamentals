@@ -513,6 +513,18 @@ visualizers).
   and gradient-clipped headings, because an earlier version did neither and
   invented ~1860 phantom failures. `tmp_shot.mjs` screenshots any page at phone and
   desktop; `tmp_hfapply.mjs` opts a page into the kit.
+- **Does the code compile?** (`frontend/tmp_codecheck.mjs`) — pulls every `<pre>`
+  and every CodeWalk `code:` array out of the HTML and runs the TypeScript and
+  Java through a real compiler, because a snippet inside a string array inside
+  an HTML file is not code to any other tool in the repo. It reports from an
+  allow list (only errors a missing fragment context cannot explain), and a ❌
+  marker excuses that one line rather than the whole block. Clean means
+  "nothing provably wrong" — never "correct".
+- **Do the CodeWalk highlights land?** (`frontend/tmp_cwlines.mjs`) — `line:` and
+  `lines:` are RAW indices into the rendered lines, so they are **zero-based**
+  while the gutter prints `idx+1`. A mount whose smallest index is 1 and whose
+  largest equals the array length was authored one-based: every step highlights
+  one line low and the last one falls off the end, and nothing else can see it.
 - **Head First bar audit** (`frontend/tmp_hfaudit.mjs`) — scores every lesson
   page against CLAUDE.md's nine-point teaching standard and ranks the thinnest
   first, so the standing "scan for thin lessons" directive is a command rather

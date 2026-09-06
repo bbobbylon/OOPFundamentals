@@ -592,12 +592,20 @@ resolved.
 | `node tmp_contrast.mjs --theme=cream` | text under a 2.2:1 contrast floor, grouped by selector so you fix causes not instances. `--inject=candidate.css` tries a fix without editing the site | a few minutes |
 | `node tmp_hfaudit.mjs --top=20` | ranks lesson pages against the nine-point teaching bar, thinnest first | ~1s |
 | `node tmp_examtell_audit.mjs` | position and length tells in the exam banks — run after any bank edit | ~1s |
+| `node tmp_codecheck.mjs` | **code on the page that does not compile.** Extracts every `<pre>` and CodeWalk `code:` array and runs the TypeScript and Java through a real compiler. Reports from an allow list — only errors a missing fragment context cannot explain — and a ❌ excuses one LINE, not the block | ~4 min (javac spawns) |
+| `node tmp_cwlines.mjs` | CodeWalk `line:`/`lines:` values that point outside the code array, at a blank line, or carry the 1-based signature. The indices are **ZERO-based** while the gutter renders `idx+1` | ~1s |
 
 Two caveats worth knowing before you act on output:
 
 - **vcheck proves inline scripts *parse*, not that they run.** That is why
   `tmp_smoke.mjs` exists and why "vcheck is green" is not the same as "the page
   works".
+- **`tmp_codecheck.mjs` clean means "nothing provably wrong", never "correct".**
+  It cannot check a fragment whose types are all unknown, and it cannot check
+  whether a claim is *true* — `identity(42) // T = number` compiles perfectly
+  and is still wrong. It needs `npm i --no-save typescript@5.6.3` (the version
+  the Try It editor loads from the CDN) and `javac` on PATH; either one missing
+  downgrades to a skip, not a failure.
 - **`tmp_hfaudit.mjs` reads markup, not meaning.** A low score means *go look*,
   never a verdict, and a high score means "has the parts", never "is good". Its
   `explain` dimension in particular divides by `<pre>` count, so a page of

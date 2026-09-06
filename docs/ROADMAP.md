@@ -230,6 +230,95 @@ page. That is a much better problem to have than "the content is wrong" — see
 
 ### Remaining, ranked by learner impact per unit of effort
 
+> **#8 (the four pages that teach something false, plus the harness) LANDED 2026-09-05.**
+> All four corrected, every replacement claim compiler-verified against
+> `typescript@5.6.3` — deliberately the version the Try It editor loads from the
+> CDN, not the newest — and JDK 24. **TypeScript:** the green ✅ on
+> `merge("a", 42)` is now a red scenario ending in the real TS2345, the union
+> example moved onto a new fourth scenario `fromArray([1, "x"])` that shows a
+> union arriving from ONE already-union site, and the clamp/NoInfer CodeWalk was
+> replaced with a verified `pick` / `pickSafe` role example. A fifth false claim
+> the audit did not catch went with them: `identity(42)` infers `T = 42`, the
+> LITERAL type — `number` only appears once a `let` binding widens it.
+> **Angular:** one canonical timeline (experimental v18-19 → renamed and stable
+> v20.2 → default in v21+) applied across 10 files, checked against angular.dev
+> rather than against the site's own five disagreeing pages. **Java:** the
+> StructuredTaskScope walk now says PREVIEW in the code, the step note and a
+> `status:` var, and carries the Java 21 `Future<U>` → Java 22+ `Subtask<U>`
+> shape change. **SQL:** the CodeWalk was stating the ANSI answer, unqualified,
+> on a page whose table and prose both give the PostgreSQL one; it now teaches
+> the fork explicitly (the standard PERMITS phantoms at REPEATABLE READ; Postgres
+> implements it as snapshot isolation and prevents them, which the standard
+> allows because it only says which anomalies must NOT occur), and a note under
+> the table says which answer the exam wants. That page's five CodeWalk steps
+> also referenced lines 1-32 of a 14-line array — three of the five highlighted
+> nothing at all — and are remapped.
+>
+> **Two corrections to the audit's own evidence, both found by trying to
+> reproduce it.** `javac --release 21 --enable-preview` cannot be run at all on
+> JDK 24 ("preview language features are only supported for release 24"), so the
+> Java finding is real but the cited command is impossible; re-derived with
+> `--release 24`. And the clamp claim was half wrong — the *without-NoInfer* half
+> (`T = 1|5|10`) was correct; only the *with-NoInfer* half was wrong, on both
+> counts.
+>
+> **The harness — `frontend/tmp_codecheck.mjs`.** Extracts every `<pre>` and every
+> CodeWalk `code:` array, classifies the language, and puts the TypeScript and
+> Java through a real compiler. Two design decisions are the whole thing. First,
+> it reports from an **allow list, not a deny list**: denying the known noise
+> still left 1,711 findings, almost all of them a fragment complaining that its
+> page's context is missing, and a gate nobody runs catches nothing. It now
+> reports only errors an absent context cannot explain — the compiler resolved
+> both sides and they still do not fit. Second, a ❌ excuses **one line, not the
+> block**: one deliberate error must not buy silence for the twenty lines around
+> it, which is exactly how these four shipped.
+>
+> Validated the only way that means anything: run against the **pre-fix** files
+> from `git show HEAD:`, it reproduces all three compiler findings on its own —
+> `pair(1,"x")` TS2345, the inverted clamp TS2345, and
+> `Subtask<U> conforms to Future<User>`. Site-wide it now reads **669 blocks (482
+> TS, 187 Java), 191 lines excused, 0 real errors**, and it found one defect
+> nobody had reported: typescript-type-patterns' fluent `ResultChain` example
+> called a static `ResultChain.of(...)` the class never declared. Fixed by adding
+> the factory.
+>
+> Getting there meant killing seven false-positive families, each now encoded as
+> a rule rather than a page exception: plain JavaScript judged by `--strict`
+> (a DOM lesson is not TypeScript — classification now needs a TS-EXCLUSIVE
+> marker, since `const`, `=>` and `console.log` are not evidence); a block that
+> does not parse (a montage of a call, a bare method and three prose comments is
+> not a program, so its inferred types are guesses); a block that declares the
+> same name twice (a before/after contrast, checked against the wrong half);
+> `lib.dom` globals outranking a page's own `Range` or `Node`; a library class
+> sharing a name with a built-in global (`new Function(...)` is the CDK's);
+> `parameter of type 'never'`, which is what a generic looks like when nothing
+> could be inferred; and Java's wildcard imports answering for types the
+> classpath lacks — `@EventListener` resolving to `java.util.EventListener`,
+> `implements Observer` to `java.util.Observer`, and `List<Object>` standing in
+> for an unresolved domain type.
+>
+> Also worth knowing for the next Java gate: JDK 24 does not reject a class
+> followed by loose usage lines — it silently rewrites the file as an implicitly
+> declared class, which makes the class INNER and every `new Foo()` in a static
+> method an error about an enclosing instance.
+
+> **NEW, found while fixing #8: 295 of 453 CodeWalk mounts point at lines that
+> are not there.** `frontend/tmp_cwlines.mjs` (also new) walks every mount
+> SEPARATELY — a page can carry several, and comparing one mount's indices
+> against another's code array produces a scary number that means nothing.
+> `devhub-codewalk.js` uses `line:`/`lines:` as RAW indices into the rendered
+> lines, so they are **ZERO-based**, while the gutter renders `idx + 1`; 54
+> mounts have the exact 1-based signature (`min >= 1 && max === len`), where
+> every step highlights one line low and the last index falls off the end.
+> This is the same failure mode as the b088024 fix above — the widget renders,
+> throws nothing, and scores as present — and it is bigger than #8's scope, so
+> it is logged rather than swept. **I authored four of them myself last session
+> and did not notice**, because my check was `1 <= v <= n`: the wrong invariant.
+> The five pages touched here (4 Render + SQL) are fixed and clean; the other 295
+> are open. Fixing them is not mechanical — a wrong-by-one index and a genuinely
+> stale one look identical, so each mount needs its note read against its code.
+
+
 > **#5 (real anchors in the hub) LANDED 2026-09-05 — and was bigger than the
 > audit framed it.** The audit said "make the 512 lesson links real `<a href>`".
 > Doing only that would have measured better and helped nobody: the sidebar had
