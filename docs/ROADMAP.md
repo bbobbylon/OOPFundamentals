@@ -479,7 +479,7 @@ page. That is a much better problem to have than "the content is wrong" — see
 
 **First step.** Start with typescript-generic-inference-deep-visualizer.html:274-278 — the green ✅ on non-compiling code is the most misleading single thing found in the whole audit. Recast it as a red scenario ending in TS2345, and move the union example onto the page's existing `paint(["red","blue"],"green")` case, which is correct and compiles. Then consider a hand-run frontend/tmp_codecheck.mjs that extracts <pre> and CodeWalk `code:` arrays and compiles the TS/Java ones, ignoring blocks adjacent to an ❌ marker — it caught all four defects at 30 candidates read for 4 real hits.
 
-#### 9. Fix the dark theme's genuinely invisible text, then darken ~10 shared tokens for AA — ✅ 2.2-FLOOR LANDED (2026-09-05), AA TOKEN SWEEP STILL OPEN
+#### 9. Fix the dark theme's genuinely invisible text, then darken ~10 shared tokens for AA — ✅ 2.2-FLOOR LANDED (2026-09-05), BIGGEST AA TOKENS LANDED (2026-09-06), 3 remainders still open
 
 *Half a day for the dark 2.2 fixes; another half for the AA tokens* — Two separate problems the same tool measures. The first is unambiguous: text below the site's own "is it invisible" floor, on the theme nobody has ever run the gate against. The second is a policy call — 1,816 selectors sounds catastrophic but is really about ten shared components, and the code comments carrying your line-by-line explanations are among the least legible text on the page.
 
