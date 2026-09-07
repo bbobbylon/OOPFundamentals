@@ -351,12 +351,52 @@ page. That is a much better problem to have than "the content is wrong" — see
 > unrelated `.intro-head` clipping notices on 2 of them, byte-identical cause
 > to before — nothing this touched).
 >
-> **Still open: 261 of 295.** These are out-of-range or blank-line hits that do
-> NOT carry the uniform-shift signature — some mix of genuinely stale
-> references (code edited after the step was written) and non-uniform
-> authoring mistakes, indistinguishable from each other by this tool. Each
-> needs its note read against its code, same as #8's four pages were, which is
-> a per-page content-correctness pass, not a mechanical sweep.
+> **✅ CLOSED 2026-09-07 — all 261 done. `tmp_cwlines.mjs` reports 0 of 455
+> mounts bad.** The remaining 261 were finished in two passes.
+>
+> *Pass 1 (180 mounts, 161 files)* — steps remapped onto the blocks their notes
+> actually describe. Verified by hand on `aws-ec2`: its five steps had drifted
+> across the blank separators, so "instance types" highlighted `TimeUnit`, not
+> the type list.
+>
+> *Pass 2 (81 mounts)* — these split into three shapes, and the split is the
+> useful part, because only the first was mechanical:
+>
+> - **12 blank-at-an-edge.** A range that opened or closed on a blank separator.
+>   Trimmed automatically: a blank INSIDE a range is deliberate (a step spanning
+>   a whole block crosses its own separators), a blank at an EDGE only pads the
+>   highlight. `tmp_cwlines.mjs` was taught that distinction in the same pass, so
+>   it no longer reports the deliberate case at all.
+> - **2 the `min>=1 && max===len` signature MISSED.** `spring-boot-grpc` was
+>   uniformly 1-based but its max fell short of `len`, so the mechanical fixer
+>   skipped it; provable only by reading the notes (the `@GrpcService` note
+>   pointed at `public class`). `spring-boot-rate-limiting-deep` was *mixed* —
+>   first two steps 1-based, last four correct. **A uniform-shift signature
+>   cannot find either.** Reading the note against the code is what found them.
+> - **69 one boilerplate template.** Every one carried the *identical* plan
+>   `1-7 9-14 16-20 22-26 28-32` against code arrays of 9-30 lines — five steps
+>   authored for a 32-line block layout that no page actually had. Not 69
+>   independent mistakes; one template pasted 69 times and never adapted.
+>
+> **What the template pages needed was authoring, not arithmetic.** Only 8 of
+> the 69 had five code blocks to receive five steps. The rest had 1-7 blocks, so
+> each note had to be read and pointed at the lines it teaches. On ~35 pages a
+> step taught something the `code:` array never showed — `python-itertools`
+> explained `product`/`combinations` with no such code, `react-styling` named
+> four styling strategies and showed only Tailwind, `sorting` described bubble,
+> selection and quicksort and showed only merge sort. Those got the missing
+> block appended rather than the note pointed at unrelated code, which would
+> have reproduced backlog #8's "page teaches something false".
+>
+> One note that looked wrong was not: `python-collections`' step 3 leads with
+> `namedtuple` but also covers `heapq`, which is what the code shows — worth
+> checking before "fixing" a mismatch.
+>
+> Gates after: `tmp_cwlines.mjs` 0 bad, `tmp_vcheck.mjs` 537/521,
+> `tmp_assetcheck.mjs` vs HEAD clean, `tmp_genpracticemap.mjs --check` current,
+> and `tmp_codecheck.mjs` **with TypeScript actually installed** — 671 blocks
+> (482 TS, 189 Java), 0 errors. Installing `typescript@5.6.3` matters here: the
+> default skip would have silently waved through every TS line added.
 
 
 > **#5 (real anchors in the hub) LANDED 2026-09-05 — and was bigger than the

@@ -525,6 +525,13 @@ visualizers).
   while the gutter prints `idx+1`. A mount whose smallest index is 1 and whose
   largest equals the array length was authored one-based: every step highlights
   one line low and the last one falls off the end, and nothing else can see it.
+  That signature is a hint, not the whole set — it misses a mount that is
+  uniformly one-based but stops short of the array end, and it misses a *mixed*
+  mount whose first steps are one-based and the rest correct. Both shapes turned
+  up in the 2026-09-07 sweep and both were found only by reading each note
+  against its code. The checker also distinguishes blank lines: one INSIDE a
+  range is deliberate (a step spanning a block crosses its separators), one at
+  an EDGE is the tell, so only edges are reported.
 - **Head First bar audit** (`frontend/tmp_hfaudit.mjs`) — scores every lesson
   page against CLAUDE.md's nine-point teaching standard and ranks the thinnest
   first, so the standing "scan for thin lessons" directive is a command rather

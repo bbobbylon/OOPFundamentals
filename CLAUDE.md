@@ -90,6 +90,13 @@ standing goal, not a one-time task. The full Head First rollout state lives in
   valid, the widget renders, nothing throws. Check with
   `node frontend/tmp_cwlines.mjs`. The invariant is `0 <= v < n`, NOT
   `1 <= v <= n` — I shipped four pages on the wrong one.
+  When you clone a CodeWalk, the `lines:` arrays are NOT part of the skeleton —
+  rewrite them against the new `code:` array. 69 pages shipped carrying the
+  identical pasted plan `1-7 9-14 16-20 22-26 28-32`, five steps sized for a
+  32-line layout none of them had. Write the `code:` array FIRST, then index it.
+  And when a step teaches something the code array never shows, append the
+  block — never repoint the note at unrelated code, which is how a page ends up
+  teaching something false.
 - Find thin lessons with `node frontend/tmp_hfaudit.mjs` (`--track=`, `--top=`, `--json=`).
   It scores every lesson page against the nine-point standard above and ranks the thinnest
   first. It reads MARKUP, not meaning — a low score means "go look", never a verdict, and a

@@ -82,22 +82,26 @@ export function scanPage(src, file) {
     const stepsBody = balanced(obj, obj.indexOf('[', stepsIdx));
     if (stepsBody == null) return;
 
+    /* A blank line INSIDE a multi-line ref is fine — `line:[0,12]` spanning a whole
+       block crosses its own blank separators on purpose. A blank at an EDGE, or a
+       single ref on a blank, is the off-by-one tell, so only those are counted. */
     const refs = [];
-    for (const m of stepsBody.matchAll(/\blines:\s*\[([-0-9,\s]*)\]/g))
-      m[1].split(',').map((x) => x.trim()).filter(Boolean)
-        .forEach((v) => refs.push({ kind: 'lines', v: +v }));
+    for (const m of stepsBody.matchAll(/\blines:\s*\[([-0-9,\s]*)\]/g)) {
+      const vs = m[1].split(',').map((x) => x.trim()).filter(Boolean).map(Number);
+      vs.forEach((v, i) => refs.push({ kind: 'lines', v, edge: i === 0 || i === vs.length - 1 }));
+    }
     for (const m of stepsBody.matchAll(/\bline:\s*\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]/g)) {
       const a = +m[1], b = +m[2];
-      for (let v = a; v <= b; v++) refs.push({ kind: 'range', v });
+      for (let v = a; v <= b; v++) refs.push({ kind: 'range', v, edge: v === a || v === b });
     }
     for (const m of stepsBody.matchAll(/\bline:\s*(-?\d+)\s*[,}]/g))
-      refs.push({ kind: 'single', v: +m[1] });
+      refs.push({ kind: 'single', v: +m[1], edge: true });
 
     if (!refs.length) return;
     const vals = refs.map((r) => r.v);
     const min = Math.min(...vals), max = Math.max(...vals);
     const oob = refs.filter((r) => r.v < 0 || r.v >= len);
-    const blank = refs.filter((r) => r.v >= 0 && r.v < len && lines[r.v].trim() === '');
+    const blank = refs.filter((r) => r.edge && r.v >= 0 && r.v < len && lines[r.v].trim() === '');
 
     findings.push({
       file, mount: n, codeLen: len, min, max,
