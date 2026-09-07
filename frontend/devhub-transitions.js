@@ -25,10 +25,29 @@
  *      href directly in that case (grep `dlh-navigate` in this repo); this
  *      script must never race that existing, working pattern.
  *
+ *   3. Live-region wiring for the step inspector — every .rt-inspect panel
+ *      (437 pages) gets role="status", so the per-step payload the engines
+ *      write there is announced to screen readers instead of updating in
+ *      silence. Lives here because this is the one script effectively every
+ *      page loads, and the fix must not require per-page edits.
+ *
+ *   4. window.DevHubStreak — app.html owns dlh_streak_v1 and its own
+ *      touchStreak()/getStreak(), but only calls touch() from setStatus()
+ *      (first visit or Mark as Learned), so a day spent purely re-drilling a
+ *      quiz or flashcard deck never counts. Those engines run inside this
+ *      page (standalone or in app.html's #viewer iframe), a different JS
+ *      realm from app.html's window — but same origin, so localStorage is
+ *      shared either way. This is that engine's writer: same key, same
+ *      day/streak algorithm as app.html's copy (kept in sync by hand — it is
+ *      five lines). Call DevHubStreak.touch() from any place a learner just
+ *      demonstrably showed up: quiz finish(), flashcard rate(), an hf-check
+ *      answer, a passing codegrade run.
+ *
  * USAGE: <link rel="stylesheet" href="devhub.css">  (ripple/fade keyframes)
  *        <script src="devhub-transitions.js"></script>
  *
- * Both features individually no-op under prefers-reduced-motion.
+ * Features 1-2 individually no-op under prefers-reduced-motion; feature 3 is
+ * not motion and applies always.
  * ========================================================================== */
 (function (global, doc) {
   'use strict';
@@ -111,4 +130,39 @@
       if (e.persisted) doc.documentElement.classList.remove('dh-leaving');
     });
   }
+
+  // ── 3. The live inspector announces its per-step data ────────────────────
+  // The engines rewrite .rt-inspect every step with the real payload — the
+  // HttpRequest, the JWT claims, the bound SQL parameter. Visually that is
+  // the whole point of the site; to a screen reader it was silence (437
+  // pages, zero live regions). role="status" implies polite+atomic; the
+  // explicit aria-live doubles as a belt for older pairings. Skipped if a
+  // page already chose its own role. This script runs at the end of <body>,
+  // after every static inspector exists.
+  var inspectors = doc.querySelectorAll('.rt-inspect');
+  for (var i = 0; i < inspectors.length; i++) {
+    if (!inspectors[i].hasAttribute('role')) {
+      inspectors[i].setAttribute('role', 'status');
+      inspectors[i].setAttribute('aria-live', 'polite');
+    }
+  }
+
+  // ── 4. Cross-page streak writer ───────────────────────────────────────────
+  // Deliberately duplicated, not shared via a function call into app.html:
+  // this script runs standalone too (a lesson opened outside the hub iframe
+  // has no app.html window to call into). Must stay algorithmically identical
+  // to app.html's touchStreak() — same key, same "today/yesterday" logic.
+  var STREAK_KEY = 'dlh_streak_v1';
+  function touchStreak() {
+    try {
+      var today = new Date().toISOString().slice(0, 10);
+      var s; try { s = JSON.parse(global.localStorage.getItem(STREAK_KEY)) || { lastDate: null, count: 0 }; } catch (e) { s = { lastDate: null, count: 0 }; }
+      if (s.lastDate === today) return s.count;
+      var yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+      var count = s.lastDate === yesterday ? s.count + 1 : 1;
+      global.localStorage.setItem(STREAK_KEY, JSON.stringify({ lastDate: today, count: count }));
+      return count;
+    } catch (e) { return null; }
+  }
+  global.DevHubStreak = { touch: touchStreak };
 })(window, document);

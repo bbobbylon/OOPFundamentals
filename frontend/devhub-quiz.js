@@ -159,6 +159,8 @@
 .dq-choice.correct{border-color:var(--dq-good);background:rgba(52,211,153,.10)}
 .dq-choice.wrong{border-color:var(--dq-bad);background:rgba(248,113,113,.10)}
 .dq-choice.locked{cursor:default}
+.dq-choice:focus-visible{outline:2px solid var(--dq-accent);outline-offset:2px}
+.dq-kbd{margin-top:10px;font-size:11px;color:var(--dq-muted);text-align:center;font-family:ui-monospace,monospace}
 .dq-key{flex-shrink:0;width:24px;height:24px;border-radius:6px;border:1px solid var(--dq-border);
     display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--dq-muted)}
 .dq-choice.sel .dq-key{background:var(--dq-accent);color:#0b1020;border-color:var(--dq-accent)}
@@ -254,6 +256,10 @@
         statBox(hist.length ? best + '%' : '—', 'Your best')
       );
 
+      // Last attempt's misses, surfaced here so a learner who left and came
+      // back can still jump straight to exactly what tripped them up.
+      const lastMissed = hist.length && Array.isArray(hist[0].missed) ? hist[0].missed : [];
+
       const modes = h('div', { class: 'dq-modes' },
         h('button', { class: 'dq-mode', onclick: () => start('practice') },
           h('span', { class: 'ico' }, '📚'),
@@ -266,6 +272,13 @@
           h('p', null, `${examN} random questions, ${bank.timeLimitMin || 30}-minute timer, scored at the end against the ${bank.passPct}% pass mark — just like the real thing.`)
         )
       );
+      const retryMode = lastMissed.length
+        ? h('button', { class: 'dq-mode', style: 'margin-top:12px', onclick: () => startRetry(lastMissed) },
+            h('span', { class: 'ico' }, '🎯'),
+            h('h4', null, `Retry ${lastMissed.length} missed question${lastMissed.length === 1 ? '' : 's'}`),
+            h('p', null, 'From your last attempt — the exact ones you got wrong, not a fresh random draw.')
+          )
+        : null;
 
       const domainNames = [...new Set(bank.questions.map(q => q.domain))];
       const domainList = h('div', { class: 'dq-domains' },
@@ -283,7 +296,7 @@
       const card = h('div', { class: 'dq-card' },
         h('h2', { class: 'dq-h' }, bank.title),
         h('p', { class: 'dq-sub' }, bank.cert || ''),
-        meta, modes, domainList
+        meta, modes, retryMode, domainList
       );
 
       const children = [card];
@@ -302,7 +315,7 @@
         h('div', { class: 'dq-hist' },
           ...hist.slice(0, 6).map(a => h('div', null,
             h('span', { class: a.pct >= bank.passPct ? 'g' : 'r', style: 'width:54px;font-weight:700' }, a.pct + '%'),
-            h('span', { style: 'width:80px' }, a.mode === 'exam' ? '⏱️ Exam' : '📚 Practice'),
+            h('span', { style: 'width:80px' }, a.mode === 'exam' ? '⏱️ Exam' : a.mode === 'retry' ? '🎯 Retry' : '📚 Practice'),
             h('span', { style: 'flex:1' }, `${a.correct}/${a.total} correct`),
             h('span', null, new Date(a.at).toLocaleDateString())
           ))
@@ -325,13 +338,32 @@
       question();
     }
 
+    /* ---------------- RETRY JUST THE MISSED QUESTIONS ---------------- */
+    // Draws from an explicit id set (either the attempt just finished, in
+    // this same session, or the last saved attempt's `missed` list from the
+    // landing screen) rather than a fresh random draw — hitting them again
+    // used to be pure chance, since a retake reshuffles the whole bank.
+    function startRetry(ids) {
+      const set = new Set(ids);
+      const pool = bank.questions.filter(q => set.has(q.id));
+      if (!pool.length) return landing();
+      state.mode = 'retry';
+      state.idx = 0;
+      state.flags = new Set();
+      state.qs = shuffle(pool).map(prepare);
+      state.answers = state.qs.map(() => null);
+      question();
+    }
+
     /* ---------------- QUESTION SCREEN ---------------- */
     function question() {
       state.screen = 'question';
       const q = state.qs[state.idx];
       const given = state.answers[state.idx];
       const answered = given != null;
-      const isPractice = state.mode === 'practice';
+      // Retry mode is a learning tool like practice: reveal instantly, don't
+      // gate behind a timer or a final score.
+      const isPractice = state.mode === 'practice' || state.mode === 'retry';
       const locked = isPractice && answered;   // practice locks after answering
 
       // top bar: progress + (exam) timer
@@ -352,18 +384,26 @@
         }
       }
 
-      // choices
+      // choices — real radio/checkbox semantics, not bare styled divs: across
+      // 19 exams / 560 questions these had no role, no tabindex and no checked
+      // state, so a screen reader heard prose and a keyboard could not answer.
       const keys = 'ABCDEFGH';
       const choiceEls = q.choices.map((text, i) => {
         const body = h('span', { style: 'flex:1' }, text);
-        const el = h('div', { class: 'dq-choice' },
+        const selected = q.multi ? (Array.isArray(given) && given.includes(i)) : given === i;
+        const el = h('div', {
+          class: 'dq-choice',
+          role: q.multi ? 'checkbox' : 'radio',
+          'aria-checked': selected ? 'true' : 'false',
+          tabindex: locked ? null : 0,
+        },
           h('span', { class: 'dq-key' }, keys[i]),
           body
         );
-        const selected = q.multi ? (Array.isArray(given) && given.includes(i)) : given === i;
         if (selected) el.classList.add('sel');
         if (locked) {
           el.classList.add('locked');
+          el.setAttribute('aria-disabled', 'true');
           const correct = q.multi ? q.answer.includes(i) : q.answer === i;
           if (correct) el.classList.add('correct');
           else if (selected) el.classList.add('wrong');
@@ -373,6 +413,9 @@
               (correct ? '✓ ' : '✗ ') + q.why[i]));
         } else {
           el.addEventListener('click', () => choose(i));
+          el.addEventListener('keydown', ev => {
+            if (ev.key === ' ' || ev.key === 'Enter') { ev.preventDefault(); choose(i); }
+          });
         }
         return el;
       });
@@ -381,7 +424,10 @@
         h('span', { class: 'dq-dchip' }, q.domain + (q.difficulty ? ' · ' + q.difficulty : '')),
         h('p', { class: 'dq-stem' }, q.stem + (q.multi ? '  (select all that apply)' : '')),
         q.code ? h('pre', { class: 'dq-code' }, q.code) : null,
-        ...choiceEls
+        h('div', {
+          role: q.multi ? 'group' : 'radiogroup',
+          'aria-label': q.multi ? 'Answer choices — select all that apply' : 'Answer choices',
+        }, ...choiceEls)
       );
 
       // practice-mode explanation after answering
@@ -404,7 +450,13 @@
           : h('button', { class: 'dq-btn primary', onclick: finish }, 'Finish & score')
       );
       card.appendChild(nav);
-      screen(card);
+      // These shortcuts existed since v1 (see onKey below) — invisibly.
+      // A shortcut nobody is told about is a feature nobody has.
+      card.appendChild(h('div', { class: 'dq-kbd' }, '⌨ 1–8 pick an answer · ← → change question'));
+      // topbar was built above but never attached to anything, so the
+      // progress bar / count and the exam countdown never rendered — the
+      // countdown still ran and could end the exam with no visible warning.
+      screen(h('div', null, topbar, card));
     }
 
     function explanation(q) {
@@ -451,12 +503,14 @@
     function finish() {
       state.screen = 'results';
       if (state.timerId) { clearInterval(state.timerId); state.timerId = null; }
+      if (global.DevHubStreak) global.DevHubStreak.touch();
 
       let correct = 0;
+      const missed = [];
       const byDomain = {};
       state.qs.forEach((q, i) => {
         const ok = isCorrect(q, state.answers[i]);
-        if (ok) correct++;
+        if (ok) correct++; else missed.push(q.id);
         const d = byDomain[q.domain] || (byDomain[q.domain] = { c: 0, n: 0 });
         d.n++; if (ok) d.c++;
       });
@@ -469,7 +523,7 @@
       const domSnapshot = {};
       Object.keys(byDomain).forEach(d => { domSnapshot[d] = { c: byDomain[d].c, n: byDomain[d].n }; });
       saveAttempt(bank.id, {
-        at: Date.now(), mode: state.mode, pct, correct, total, domains: domSnapshot
+        at: Date.now(), mode: state.mode, pct, correct, total, domains: domSnapshot, missed
       });
 
       const domainRows = Object.keys(byDomain).sort().map(d => {
@@ -492,6 +546,10 @@
           ...domainRows),
         h('div', { class: 'dq-nav', style: 'justify-content:center;margin-top:22px' },
           h('button', { class: 'dq-btn primary', onclick: () => start(state.mode) }, '↻ Retake'),
+          missed.length
+            ? h('button', { class: 'dq-btn', onclick: () => startRetry(missed) },
+                `🎯 Retry ${missed.length} missed`)
+            : null,
           h('button', { class: 'dq-btn', onclick: landing }, 'Back to overview'))
       );
 

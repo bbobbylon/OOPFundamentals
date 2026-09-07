@@ -223,7 +223,7 @@
 
     var row = document.createElement('div');
     row.className = 'hf-practice-row';
-    [['practice', 'Practice'], ['exam', 'Exam']].forEach(function (pair) {
+    [['practice', 'Practice'], ['exam', 'Exam'], ['deck', 'Flashcards']].forEach(function (pair) {
       var target = entry[pair[0]];
       if (!target) return;
       var a = document.createElement('a');

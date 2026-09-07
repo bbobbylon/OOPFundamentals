@@ -415,8 +415,14 @@ window.addEventListener('unhandledrejection', e=>{ __send('line',{text:'Unhandle
       autosize();
       syncHl();
     });
+    // Tab indents, Esc-then-Tab leaves — same escape hatch as the graded IDE
+    // (devhub-codegrade.js): a Tab-capturing editor with no way out is a
+    // keyboard trap on all 119 Try It pages.
+    let tabEscapes = false;
     ed.addEventListener('keydown', e => {
-      if (e.key !== 'Tab') return;
+      if (e.key === 'Escape') { tabEscapes = true; return; }
+      if (e.key !== 'Tab') { tabEscapes = false; return; }
+      if (tabEscapes) { tabEscapes = false; return; }   // browser default: focus moves on
       e.preventDefault();
       const pad = ' '.repeat(meta.indent);
       const s = ed.selectionStart, epos = ed.selectionEnd;
@@ -425,6 +431,7 @@ window.addEventListener('unhandledrejection', e=>{ __send('line',{text:'Unhandle
       try { localStorage.setItem(lsKey, ed.value); } catch (err) { /* ignore */ }
       syncHl();
     });
+    ed.title = 'Tab indents — press Esc then Tab to move focus out';
 
     resetBtn.addEventListener('click', () => {
       ed.value = original;

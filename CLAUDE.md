@@ -54,6 +54,12 @@ standing goal, not a one-time task. The full Head First rollout state lives in
 
 - New visualizer pages: clone a recent VERTICAL chip-engine page (node-auth, aspnet-auth,
   mulesoft, laravel, rails, rust-web) — not go-http-server's horizontal engine.
+  **When you clone, change `<body class="track-…">` to the new page's track.** It is not
+  decoration: `devhub.css` and `devhub-hf.css` key each track's accent colours off it in
+  both themes, and `tmp_hfaudit.mjs` reads the track from it. vcheck cannot see a wrong
+  one — the page is perfectly valid, it just wears another track's palette. Four Render
+  pages shipped as `track-shell` this way. Clone-and-adapt inherits more than the skeleton:
+  check the body class, the `<title>`, and the "Where to go next" links.
 - Register pages in `frontend/tracks-data.js` + the `TRACKS`/`CATEGORIES` wiring in
   `frontend/app.html`; update page/track counts in `README.md` + `docs/DEVHUB-GUIDE.md`.
 - Exams: length-bracketed choices, no position/length tells — audit with
@@ -72,6 +78,25 @@ standing goal, not a one-time task. The full Head First rollout state lives in
   CDN load). `node frontend/tmp_assetcheck.mjs <ref>` fails on any LOSS of a teaching
   asset (tryit/CodeWalk/rt-stage/quiz/flashcards) versus a git ref — run it after any
   bulk edit that splices markup.
+- Code on a page is CODE: `node frontend/tmp_codecheck.mjs` extracts every
+  `<pre>` and CodeWalk `code:` array and compiles the TS/Java ones. Needs
+  `npm i --no-save typescript@5.6.3` (match the version the Try It editor loads
+  from the CDN, not the newest) and `javac`; either missing = skip, not fail.
+  It reports from an ALLOW list, and a ❌ excuses ONE LINE, not the block.
+- **CodeWalk `line:`/`lines:` indices are ZERO-based** — `devhub-codewalk.js`
+  uses them as raw indices into the rendered lines and prints `idx+1` in the
+  gutter. Authoring them 1-based highlights one line low on every step and
+  drops the last one off the end, and no other gate can see it: the page is
+  valid, the widget renders, nothing throws. Check with
+  `node frontend/tmp_cwlines.mjs`. The invariant is `0 <= v < n`, NOT
+  `1 <= v <= n` — I shipped four pages on the wrong one.
+  When you clone a CodeWalk, the `lines:` arrays are NOT part of the skeleton —
+  rewrite them against the new `code:` array. 69 pages shipped carrying the
+  identical pasted plan `1-7 9-14 16-20 22-26 28-32`, five steps sized for a
+  32-line layout none of them had. Write the `code:` array FIRST, then index it.
+  And when a step teaches something the code array never shows, append the
+  block — never repoint the note at unrelated code, which is how a page ends up
+  teaching something false.
 - Find thin lessons with `node frontend/tmp_hfaudit.mjs` (`--track=`, `--top=`, `--json=`).
   It scores every lesson page against the nine-point standard above and ranks the thinnest
   first. It reads MARKUP, not meaning — a low score means "go look", never a verdict, and a

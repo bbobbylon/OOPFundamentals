@@ -1,0 +1,628 @@
+<!doctype html>
+<html lang="en" data-hf>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Render — From Git Push to Live URL — DevHub</title>
+  <link rel="stylesheet" href="devhub.css"/>
+  <link rel="stylesheet" href="devhub-hf.css"/>
+  <style>
+    .who-row{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 0}
+    .who-badge{font-size:10.5px;font-weight:700;letter-spacing:.04em;padding:3px 10px;border-radius:12px;font-family:ui-monospace,monospace}
+    .who-GIT{background:rgba(148,163,184,.18);color:#cbd5e1}
+    .who-BUILD{background:rgba(255,212,121,.16);color:#ffe07a}
+    .who-RUN{background:rgba(63,185,80,.18);color:#7ee787}
+    .who-EDGE{background:rgba(88,166,255,.18);color:#a5d0ff}
+    .who-YOU{background:rgba(167,139,250,.18);color:#c4b5fd}
+  </style>
+</head>
+<body class="track-devops">
+<div class="container">
+  <a class="back" href="app.html">← back to Dev Hub</a>
+
+  <div class="hf-meta">
+    <span class="hf-badge level">Beginner</span>
+    <span class="hf-badge">16 min read</span>
+    <span class="hf-badge">PORT · health checks · zero-downtime</span>
+  </div>
+
+  <h1>Render — from git push to live URL</h1>
+  <p class="hf-deck">or, the two ways a perfectly good app comes up dead on a platform that promised to do everything for you</p>
+  <div class="intro">
+    <div class="intro-head"><span class="ico">🚀</span> What is Render, and what is it actually doing between your <code>git push</code> and a working URL?</div>
+    <p class="intro-lead">
+      Render is a <strong>PaaS — a Platform as a Service</strong>. You hand it a repo; it hands you back an HTTPS URL. In between it clones your code, runs your build, starts your app in a container, and waits for that app to prove it is alive before sending anyone to it. Compare that to the AWS/GCP way, where you'd assemble a VM or a cluster, a load balancer, a TLS certificate and a deploy pipeline yourself: <b>the pieces still exist here — you just don't own them.</b> That is the trade, and it's a good one right up until something fails, at which point you need to know which piece failed and you can't SSH in to look.
+    </p>
+    <ul class="intro-gist">
+      <li><b>A "service" is your app, running.</b> A web service takes HTTP traffic; a static site is just files on a CDN.</li>
+      <li><b>Render picks the port, not you.</b> It sets <code>$PORT</code> and you must bind it — on <code>0.0.0.0</code>, not <code>localhost</code>.</li>
+      <li><b>The health check is the gate.</b> Until your app answers it, the new version gets zero traffic and the old one keeps serving.</li>
+      <li><b>Free instances sleep after 15 idle minutes.</b> The next visitor waits about a minute for the container to come back.</li>
+    </ul>
+    <div class="intro-cards">
+      <div class="intro-mini">
+        <h4>Why "it works locally" proves nothing</h4>
+        <p>Locally you choose the port and <code>localhost</code> is reachable because you're already inside the machine. In a container, "localhost" means <em>inside that container</em> — a listener bound there is invisible to everything outside it, which is exactly the failure that produces "no open ports detected".</p>
+      </div>
+      <div class="intro-mini">
+        <h4>A deploy that fails is not an outage</h4>
+        <p>This is the part worth internalising early: Render only switches traffic to the new version <em>after</em> it passes the health check. A broken push leaves the previous version serving. The bad news is the same rule cancels a deploy when the health check is merely <em>unreachable</em> — a protected endpoint, for instance.</p>
+      </div>
+    </div>
+    <div class="intro-ciam"><span class="tag">Spring / CIAM:</span> two lines of <code>application.properties</code> decide whether your Spring Boot app survives contact with a platform: <code>server.address=0.0.0.0</code> and <code>server.port=${PORT:8080}</code>. The <code>${PORT:8080}</code> form reads the platform's variable in production and falls back to 8080 on your laptop, so one file works in both places.</div>
+  </div>
+
+
+  <div class="hf-question">
+    <span class="ico">&gt;_</span>
+    <p>Your build went green. The dashboard says <b>Live</b>. You open the URL and get a
+    <b>502</b> — or worse, a page that hangs for fifty seconds and then works perfectly.
+    Neither is random. Each one is Render telling you something specific about your app,
+    and by the end of this page you'll read both at a glance.</p>
+  </div>
+
+  <!-- ── THE IDEA ────────────────────────────────────────────────────────── -->
+  <div class="hf-kick">The idea</div>
+  <p class="hf-say">A platform is a trade: you give up choices and get back everything you'd otherwise have to assemble.</p>
+  <p>Put a Spring Boot app on the internet with AWS and "deploy" expands into a shopping list:
+  a registry for the image, a service to run it, a load balancer in front, a certificate,
+  DNS, a log destination, and an IAM role tying them together. Every one of those is a thing
+  you can get wrong. <b>Render collapses that list into two commands and a repo URL.</b> It
+  builds your code, runs it in a container, puts HTTPS in front of it, watches a health check,
+  rolls each new version out without dropping a request, and — the part people don't expect —
+  <em>refuses</em> to send traffic to a version that won't come up.</p>
+  <p>The price is that you get Render's opinions instead of your own. That is a genuinely good
+  deal right up until the day it isn't, and knowing exactly where the line sits is most of what
+  this section is for.</p>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">You</span>
+      <p>git push origin main</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">Render</span>
+      <p>Saw commit 4f1c2ab. Building… image made. Ran your pre-deploy. Started the process — something is listening on 10000. Health check on /actuator/health came back 200. Traffic is yours. I'll SIGTERM the old instance in sixty seconds.</p>
+    </div>
+  </div>
+
+  <div class="hf-big">Bind 0.0.0.0:$PORT — or you don't exist.</div>
+  <p>Say it out loud now and save yourself an evening. Render hands every web service a
+  <code>PORT</code> environment variable — <span class="hf-mark">the default value is
+  <code>10000</code></span> — and forwards inbound requests to whatever is listening there.
+  There are exactly two ways to fail this, and almost every first-time Render deploy in every
+  language fails one of them:</p>
+  <ul style="font-size:14px;line-height:1.85">
+    <li><b>Hardcoding a different port.</b> Your app listens on 8080 because it always has.
+    Render looks for a listener, can usually find an alternate port, and when it can't, the
+    <em>deploy itself fails</em> with a port-detection error in the logs — the service never
+    goes live at all.</li>
+    <li><b>Binding to <code>localhost</code>.</b> This is the sneaky one, because it works
+    perfectly on your laptop. <code>127.0.0.1</code> means "this machine's own loopback, and
+    nothing outside it". Render's proxy lives outside the container, knocks on the door, and
+    nobody answers. Same symptom, completely different cause.</li>
+  </ul>
+
+  <!-- ── MOTIVATION ──────────────────────────────────────────────────────── -->
+  <div class="hf-card">
+    <ol class="hf-steps">
+      <li class="open"><span>you push a commit — Render sees it and starts a <b>deploy</b></span><span class="tag">trigger</span>
+        <small>the old version is still serving every request, and will be for the whole of this list</small></li>
+      <li><span>your <b>build command</b> runs on a build machine that is not your laptop</span><span class="tag">build</span>
+        <small>which is why a dependency you only have installed locally fails here, and nowhere else</small></li>
+      <li><span>the artifact is packaged and a fresh container is started</span><span class="tag">start</span>
+        <small>your <b>start command</b> runs; nothing is listening yet as far as Render knows</small></li>
+      <li><span>Render scans for a process listening on <code>$PORT</code></span><span class="tag">the gate</span>
+        <small>bound to <code>localhost</code> instead of <code>0.0.0.0</code>? Invisible. "No open ports detected."</small></li>
+      <li><span>it requests your <b>health check path</b> and waits for a 2xx or 3xx</span><span class="tag">prove it</span>
+        <small>a 401 is a 4xx, so a health endpoint behind auth reads as unhealthy — and cancels the deploy</small></li>
+      <li><span>only now does traffic switch to the new version</span><span class="tag">the payoff</span>
+        <small>the old container gets <code>SIGTERM</code> 60 seconds later, so in-flight requests can finish</small></li>
+    </ol>
+    <p class="hf-annot">Read steps 4 and 5 together, because they are the two places a
+    <em>perfectly working</em> application fails here. Both are the same kind of mistake:
+    your app is doing exactly what you told it to, and what you told it to do is invisible
+    to the platform. Nothing in your logs will look wrong — the app started fine, because
+    from the app's point of view it <b>did</b>.</p>
+  </div>
+
+  <div class="hf-kick">Motivation</div>
+  <p class="hf-say">Why spend a page on a platform whose whole pitch is that it needs no explaining?</p>
+
+  <div class="hf-numcards">
+    <div><b class="num">01</b><h5>It's the shortest path from repo to HTTPS</h5>
+      <p>Nothing else in this track gets a real certificate and a real URL in front of your
+      code with as little ceremony. That makes it the right place to <em>host</em> the
+      projects you build here.</p></div>
+    <div><b class="num">02</b><h5>Three commands are the entire model</h5>
+      <p><code>build</code> → <code>pre-deploy</code> → <code>start</code>. Once you know
+      which of the three a problem lives in, you've already halved the debugging.</p></div>
+    <div><b class="num">03</b><h5>The shape transfers</h5>
+      <p>Cloud Run and App Runner work the same way — read a port from the environment, answer
+      a health probe, get traffic. Learn it here where there's nothing else in the way.</p></div>
+    <div><b class="num">04</b><h5>The failures are few and famous</h5>
+      <p>The port, the health check, the fifteen-minute nap, and the database with a
+      thirty-day fuse. Four traps. This page defuses all four.</p></div>
+  </div>
+
+  <!-- ── ANATOMY ─────────────────────────────────────────────────────────── -->
+  <div class="hf-kick">Anatomy of a Render web service</div>
+  <p class="hf-say">Five settings. Click each one — the last two are where the interesting failures live.</p>
+
+  <div class="hf-anatomy">
+    <button class="tok on" data-part="repo">github.com/you/devhub-api @ main</button>
+    <button class="tok" data-part="rt">runtime: docker</button>
+    <button class="tok" data-part="bc">buildCommand</button>
+    <button class="tok" data-part="sc">startCommand</button>
+    <button class="tok" data-part="hc">healthCheckPath</button>
+    <div class="hf-anatomy-info" data-part="repo">
+      <b>the repo and branch — this <em>is</em> the pipeline</b>
+      <p>Connecting a repo and naming a branch is the whole trigger. There is no workflow file
+      to write for the <em>deploy</em> half: push to that branch and Render rebuilds. You can
+      change when that happens — <code>autoDeployTrigger: commit</code> (the default, deploy on
+      every push), <code>checksPass</code> (wait for your CI to go green first, which is how
+      you keep a failing test suite out of production), or <code>off</code> for deploy-on-demand
+      only. A commit message containing <code>[skip render]</code> is skipped entirely, which is
+      the polite way to push a README fix.</p>
+    </div>
+    <div class="hf-anatomy-info" data-part="rt" hidden>
+      <b>the runtime — and the one that isn't there</b>
+      <p>Render has native runtimes for <code>node</code>, <code>python</code>,
+      <code>ruby</code>, <code>go</code>, <code>rust</code> and <code>elixir</code>: point at
+      the repo and it knows how to build it. <span class="hf-mark">There is no native Java
+      runtime.</span> JVM apps — Spring Boot, Kotlin, Scala — go through
+      <code>runtime: docker</code> and a Dockerfile you write yourself. That sounds like a
+      downgrade and mostly isn't: you get the exact JDK you asked for, and the image is
+      reproducible. (Two other special values: <code>image</code> pulls a prebuilt container
+      from a registry, and <code>static</code> is a CDN-hosted static site.)</p>
+    </div>
+    <div class="hf-anatomy-info" data-part="bc" hidden>
+      <b>the build command — one shot, then it's gone</b>
+      <p>Compilation and dependency install: <code>npm ci &amp;&amp; npm run build</code>,
+      <code>./mvnw -DskipTests package</code>. It runs on a <em>build machine</em>, not on the
+      instance that will serve traffic, with a 120-minute ceiling. The consequence people trip
+      on: anything you install or generate here that doesn't end up in the image or the repo is
+      not there at run time. Build writes; start reads.</p>
+    </div>
+    <div class="hf-anatomy-info" data-part="sc" hidden>
+      <b>the start command — the one rule lives here</b>
+      <p><code>java -jar target/app.jar</code>, <code>node server.js</code>,
+      <code>gunicorn app:app</code>. Render runs this and then watches for something to accept
+      a connection. You get 15 minutes to be listening. This is where
+      <code>0.0.0.0:$PORT</code> is either honoured or quietly ignored — and on a Docker
+      service, the Docker Command (if you set one) overrides your Dockerfile's
+      <code>CMD</code>, so check both before blaming the app.</p>
+    </div>
+    <div class="hf-anatomy-info" data-part="hc" hidden>
+      <b>the health check — the gate on every deploy</b>
+      <p>A path starting with <code>/</code> that answers <b>any 2xx or 3xx</b> when the app is
+      ready, and <b>any 4xx or 5xx</b> when it isn't. It must answer <b>within five seconds</b>.
+      Nothing else on this page changes behaviour as much: until this returns healthy, the new
+      instance gets <em>zero</em> traffic, and if it never does, Render gives up after 15
+      minutes, cancels the deploy, and keeps the old version serving. Leave it unset and you
+      lose that safety net — a broken build can go live simply because it managed to open a
+      socket.</p>
+    </div>
+  </div>
+
+  <div class="hf-check" data-answer="1">
+    <p class="q">Your Spring Boot app runs fine locally on 8080. On Render the deploy fails with a port error and the service never starts. What's the actual fix?</p>
+    <button type="button">Move to a bigger instance type — it ran out of memory before it could bind</button>
+    <button type="button">Read the PORT variable and bind every interface: <code>server.port=${PORT:8080}</code> with <code>server.address=0.0.0.0</code></button>
+    <button type="button">Add <code>EXPOSE 8080</code> to the Dockerfile so the port is published</button>
+    <p class="why" data-for="0">A memory problem shows up as an OOM kill in the logs, not a port error — and the message you got named the port specifically. Paying for a bigger instance to fix a one-line config bug is a bad afternoon.</p>
+    <p class="why" data-for="1">Right, and note that it's <em>two</em> fixes in one line of config. <code>${PORT:8080}</code> uses Render's port when it's there and 8080 on your laptop when it isn't, so you don't need a separate profile. <code>0.0.0.0</code> makes the app answer on every interface rather than only its own loopback.</p>
+    <p class="why" data-for="2"><code>EXPOSE</code> is <b>documentation</b>. It records which port the image intends to use and publishes absolutely nothing — the container behaves identically with it, without it, or with the wrong number in it. This is one of the most widely believed false things about Docker.</p>
+  </div>
+
+  <!-- ── HERO ── -->
+  <div class="hf-kick">See it move</div>
+  <p class="hf-say">A clean deploy, the port failure, the free-tier nap, and a bad push that hurts nobody.</p>
+  <div class="card" style="border-color:var(--accent)">
+    <h2 id="hero" style="margin-top:0;border:0;padding:0;color:var(--accent2)">▶ What Render does with your commit</h2>
+    <p class="note top">Pick a scenario and press ▶ — the inspector shows the real phases,
+    timeouts and signals at every step, including the exact numbers Render's docs commit to.</p>
+    <div class="rt-ctlbar">
+      <span class="lbl">scenario:</span>
+      <span class="userseg" id="rdSeg">
+        <button data-s="push" class="on">① push → live</button>
+        <button data-s="port">② no open ports</button>
+        <button data-s="sleep">③ the 15-minute nap</button>
+        <button data-s="bad">④ a bad deploy</button>
+      </span>
+      <button class="rt-run" id="rdRun">▶ Play</button>
+      <span class="rt-pill" id="rdPill">ready</span>
+    </div>
+    <div class="rt-stage">
+      <div class="rt-diagram" id="rdDiagram"></div>
+      <div class="rt-inspect">
+        <span class="rt-dir" id="rdDir">▶ READY</span>
+        <div class="rt-cap" id="rdCap">Pick a scenario and press ▶ Play</div>
+        <div class="rt-payload" id="rdPay"></div>
+        <div class="rt-headers" id="rdHdr"></div>
+        <div class="rt-result" id="rdRes"></div>
+      </div>
+    </div>
+    <div class="who-row">
+      <span class="who-badge who-GIT">GIT — the trigger</span>
+      <span class="who-badge who-BUILD">BUILD — the build machine</span>
+      <span class="who-badge who-RUN">RUN — your instance</span>
+      <span class="who-badge who-EDGE">EDGE — Render's proxy</span>
+      <span class="who-badge who-YOU">YOU — a human decision</span>
+    </div>
+  </div>
+
+  <!-- ── REFERENCE ───────────────────────────────────────────────────────── -->
+  <div class="hf-kick">The reference</div>
+  <p class="hf-say">The settings, the variables and the buttons that cover a working month.</p>
+
+  <h5 class="hf-refhead">The three commands, in the order they run</h5>
+  <div class="hf-refgrid">
+    <div><code>buildCommand</code><span>Compile and install. On a build machine, 120-minute ceiling. Writes the artifact.</span></div>
+    <div><code>preDeployCommand</code><span>Optional. After the build, <b>before</b> any traffic, on its own one-off instance — 30-minute ceiling. This is the migration slot.</span></div>
+    <div><code>startCommand</code><span>Runs your process on the real instance. 15 minutes to be listening on <code>0.0.0.0:$PORT</code>.</span></div>
+    <div><code>dockerCommand</code><span>Docker services only — overrides the image's <code>CMD</code>. Check it before you blame the Dockerfile.</span></div>
+  </div>
+
+  <h5 class="hf-refhead">Variables Render sets for you, on every service</h5>
+  <div class="hf-refgrid">
+    <div><code>PORT</code><span>The port to bind. Defaults to <code>10000</code>. The single most important variable on this page.</span></div>
+    <div><code>RENDER</code><span>Always the string <code>"true"</code> — how code detects it's running on Render at all.</span></div>
+    <div><code>RENDER_EXTERNAL_URL</code><span>Your full <code>onrender.com</code> URL. Handy for absolute links and OAuth redirect URIs.</span></div>
+    <div><code>RENDER_GIT_COMMIT</code><span>The deployed commit SHA — put it in <code>/actuator/info</code> and never guess what's live again.</span></div>
+    <div><code>IS_PULL_REQUEST</code><span><code>"true"</code> inside a preview environment. Every value is a string, including this one.</span></div>
+    <div><code>RENDER_SERVICE_NAME</code><span>Which service you are. Useful in logs when three services share a log drain.</span></div>
+  </div>
+
+  <h5 class="hf-refhead">When a deploy goes wrong</h5>
+  <div class="hf-refgrid">
+    <div><code>Rollback</code><span>Re-deploy a previous successful deploy. The fastest correct move at 2am — fix forward in the morning.</span></div>
+    <div><code>Clear build cache &amp; deploy</code><span>Cached layers are usually a gift and occasionally a lie. Reach for this when a build succeeds locally and not here.</span></div>
+    <div><code>[skip render]</code><span>In a commit message: don't deploy this one. For README and comment-only commits.</span></div>
+    <div><code>Suspend</code><span>Stop the service without deleting it — keeps the URL, the env vars and the disk.</span></div>
+  </div>
+
+  <div class="hf-check" data-answer="1">
+    <p class="q">Spring Security is protecting everything, so <code>/actuator/health</code> answers <b>401</b> to Render's health check. You push a perfectly good commit.</p>
+    <p class="q" style="font-weight:400;opacity:.8">Predict before you pick: what do your <em>users</em> experience?</p>
+    <button type="button">The service goes live and users start getting 401s from the new version</button>
+    <button type="button">Nothing at all — the deploy is cancelled after 15 minutes and the old version keeps serving</button>
+    <button type="button">The new instance restarts in a loop, and requests fail intermittently while it flaps</button>
+    <p class="why" data-for="0">This is the intuition to unlearn. A failing health check doesn't produce a <em>degraded</em> live version — it produces <b>no</b> live version. Traffic is never handed over, so the 401 is invisible to users and visible only to you, in the deploy log.</p>
+    <p class="why" data-for="1">Exactly. 401 is a 4xx, 4xx means unhealthy, and an unhealthy new instance never receives traffic. After 15 minutes Render cancels the deploy and keeps routing to the instances already running. <b>Your users see the old version, working.</b> The bug is real and costs you a deploy, not an outage — which is precisely the trade a health check exists to make.</p>
+    <p class="why" data-for="2">Restart-looping is what happens to a service that <em>crashes</em>. This one starts fine and answers every request correctly; it just answers the health check with a 401. Render's response to unhealthy-on-deploy is to withhold traffic, not to restart.</p>
+  </div>
+
+  <!-- ── WALKTHROUGH ─────────────────────────────────────────────────────── -->
+  <div class="hf-kick">Put it together</div>
+  <p class="hf-say">Take an app that only runs locally and make it deployable — predict each output before you reveal it.</p>
+
+  <div class="hf-walk">
+    <div class="hf-walk-step">
+      <h6>Make the port a variable, not a constant</h6>
+      <p>One line covers both environments: Render's <code>PORT</code> when it exists, 8080 on
+      your laptop when it doesn't. The <code>address</code> line is the half everyone forgets,
+      and it's the half that makes the container reachable from outside itself.</p>
+      <pre>server:
+  address: 0.0.0.0
+  port: ${PORT:8080}</pre>
+      <pre class="hf-walk-out" data-nohl>$ PORT=10000 java -jar target/app.jar
+Tomcat started on port 10000 (http) with context path '/'
+$ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:10000/actuator/health
+200</pre>
+      <div class="hf-arrow">two lines, and they fail differently. <b>Drop <code>address</code></b> and the app runs perfectly while Render reports "no open ports" — it is listening, just not anywhere reachable. <b>Drop the <code>${PORT:8080}</code> fallback</b> and it is production that works and your laptop that breaks.</div>
+    </div>
+    <div class="hf-walk-step">
+      <h6>Give Render something to ask "are you alive?"</h6>
+      <p>The endpoint has to be reachable <em>without credentials</em> — Render's prober has no
+      token and no cookie. If your filter chain protects everything by default, this one line
+      is the difference between a deploy that ships and a deploy that silently cancels.</p>
+      <pre>http.authorizeHttpRequests(a -&gt; a
+    .requestMatchers("/actuator/health").permitAll()
+    .anyRequest().authenticated());</pre>
+      <pre class="hf-walk-out" data-nohl>$ curl -s -o /dev/null -w '%{http_code}\n' https://devhub-api.onrender.com/actuator/health
+200
+
+# and the rest of the API is still protected:
+$ curl -s -o /dev/null -w '%{http_code}\n' https://devhub-api.onrender.com/api/users
+401</pre>
+      <div class="hf-arrow">the <code>permitAll</code> line is the whole step. Everything above it just makes the endpoint exist; that one line is what lets an unauthenticated prober reach it, and without it the endpoint returns 401 — a 4xx, which reads as unhealthy.</div>
+    </div>
+    <div class="hf-walk-step">
+      <h6>Push, and watch the phases go by</h6>
+      <p>The log is the state machine. Each of the three commands announces itself, and the
+      phase a failure appears in tells you where to look — a stack trace during
+      <em>build</em> is a compile problem, the same trace during <em>start</em> is a config
+      problem.</p>
+      <pre data-nohl>$ git commit -m "bind PORT, open the health endpoint" &amp;&amp; git push</pre>
+      <pre class="hf-walk-out" data-nohl>==&gt; Cloning from https://github.com/you/devhub-api (commit 4f1c2ab)
+==&gt; Running build command './mvnw -B -DskipTests package'...
+    BUILD SUCCESS
+==&gt; Running pre-deploy command 'psql "$DATABASE_URL" -f schema.sql'...
+    CREATE TABLE
+==&gt; Running 'java -jar target/app.jar'
+    Tomcat started on port 10000
+==&gt; Your service is live 🎉</pre>
+      <div class="hf-arrow">the interesting gap is between <em>Build successful</em> and <em>Live</em>. Almost every real failure happens in there, which is why "the build passed" tells you much less than it feels like it should.</div>
+    </div>
+    <div class="hf-walk-step">
+      <h6>Prove the zero-downtime claim instead of believing it</h6>
+      <p>Hammer the service with one request a second, then trigger a deploy from the
+      dashboard. If the rollout works the way the docs describe, you will not see a single
+      failure — the old instance keeps answering right up until the new one is healthy.</p>
+      <pre data-nohl>$ while true; do
+    curl -s -o /dev/null -w '%{http_code} ' https://devhub-api.onrender.com/actuator/health
+    sleep 1
+  done</pre>
+      <pre class="hf-walk-out" data-nohl>200 200 200 200 200 200 200 200 200 200 200 200 200 200
+#        ^ deploy started here          ^ traffic switched here
+# zero non-200s: the old instance served every request until the
+# new one passed its health check, then got SIGTERM 60 seconds later.</pre>
+      <div class="hf-arrow">the result is the line that <em>is not there</em>: no non-200 in the whole run. That is the health check doing its job — traffic only ever moved to a container that had already answered.</div>
+    </div>
+  </div>
+
+  <div class="hf-note"><b>The CIAM version of this page:</b> the single most common way a
+  Spring Security app fails to deploy on any platform is that the health endpoint is behind
+  the filter chain. Render's prober arrives with no <code>Authorization</code> header, your
+  chain does exactly what you told it to, and a 401 comes back — which the platform reads as
+  <em>"this instance is not ready"</em>. Nothing is broken; two correct systems disagreed.
+  <span class="hf-mark">The one to remember: a health check is an <b>unauthenticated</b>
+  endpoint by design.</span> Keep it boring — liveness only, no user data, no database
+  round-trip you can't afford under five seconds.</div>
+
+  <!-- ── NO DUMB QUESTIONS ───────────────────────────────────────────────── -->
+  <div class="hf-kick">There are no dumb questions</div>
+  <div class="hf-ask">
+    <p class="q">Isn't this just Heroku with a different logo?</p>
+    <p class="a">The lineage is real and the shape is deliberately familiar — but three things
+    differ enough to matter. Render's <b>Blueprint</b> (<code>render.yaml</code>) describes
+    your whole environment as a file in your repo, so an environment can be recreated rather
+    than remembered; that's the next page. <b>Preview environments</b> clone the entire stack
+    per pull request, database included. And services talk over a <b>private network</b>, so a
+    database or an internal API can be genuinely unreachable from the public internet rather
+    than merely undocumented. The free tier also behaves differently: it sleeps, where
+    Heroku's simply stopped existing.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">If it builds a container anyway, why not just run Docker or Kubernetes myself?</p>
+    <p class="a">Because you'd be rebuilding the parts of this page you didn't have to think
+    about. Render's rollout — start the new instance, health-check it, switch traffic, SIGTERM
+    the old one after 60 seconds, purge the edge cache — is roughly a Kubernetes Deployment
+    with a readiness probe and a rolling update strategy, and you get it without writing or
+    maintaining any of it. The honest answer to "when should I graduate?" is: when you need
+    something Render doesn't have an opinion about. Multi-region traffic policies, a service
+    mesh, GPU scheduling, a custom autoscaler. Until then, the platform is doing real work and
+    the complexity you'd be adding buys nothing. <span class="hf-mark">Pick the smallest thing
+    that will hold your app</span> — and know why you'd move.</p>
+  </div>
+  <div class="hf-ask">
+    <p class="q">What actually happens while my free service is "asleep"?</p>
+    <p class="a">The container is <b>stopped</b>, not paused. Fifteen minutes without inbound
+    traffic and it spins down; the next request has to wait roughly a minute for it to start
+    again, and Render shows a loading page in the meantime. Three consequences worth internalising.
+    <b>In-memory state is gone</b> — sessions, caches, that <code>Map</code> you were using as a
+    database. <b>Scheduled work doesn't run</b>: a <code>@Scheduled</code> job inside a sleeping
+    web service simply doesn't happen, which is what a cron service is for. And
+    <b>first impressions suffer</b> — a recruiter clicking your portfolio link at 9pm waits a
+    minute on a blank-ish screen and concludes the app is broken. The fix is a paid instance,
+    not a clever keep-alive pinger; the pinger keeps the service awake and does nothing at all
+    about the free database's 30-day clock.</p>
+  </div>
+
+  <section>
+    <h2>Where to go next</h2>
+    <ul style="font-size:13px;line-height:1.9">
+      <li><a class="dd-link" data-file="render-blueprints-visualizer.html" href="render-blueprints-visualizer.html">Render Blueprints (render.yaml)</a> — put everything on this page into a file your repo owns.</li>
+      <li><a class="dd-link" data-file="render-databases-env-visualizer.html" href="render-databases-env-visualizer.html">Render — Postgres, Env Vars &amp; Secrets</a> — the 30-day clock, and the two connection strings.</li>
+      <li><a class="dd-link" data-file="render-spring-angular-visualizer.html" href="render-spring-angular-visualizer.html">Spring Boot + Angular on Render</a> — the whole stack, your stack.</li>
+      <li><a class="dd-link" data-file="devops-cicd-pipeline-visualizer.html" href="devops-cicd-pipeline-visualizer.html">CI/CD Pipelines (GitHub Actions)</a> — what <code>autoDeployTrigger: checksPass</code> is waiting for.</li>
+      <li><a class="dd-link" data-file="docker-dockerfile-visualizer.html" href="docker-dockerfile-visualizer.html">Dockerfiles</a> — required reading, since the JVM has no native runtime here.</li>
+      <li><a class="dd-link" data-file="gcp-serverless-visualizer.html" href="gcp-serverless-visualizer.html">GCP Serverless (Cloud Run)</a> — the same contract at a different address.</li>
+    </ul>
+  </section>
+</div>
+
+<!-- ── Code Walkthrough ── -->
+<div id="cw-rdeploy"></div>
+<script src="devhub-codewalk.js"></script>
+<script>
+DevHubCodeWalk.mount('#cw-rdeploy',{
+  id:'cw-rdeploy',
+  title:'A deployable service — the blueprint, and the one rule in four languages',
+  subtitle:'Everything on this page reduced to config you can paste. The top half is the service itself: which runtime, which commands, and the health check that gates every future deploy. The bottom half is the port rule, written out in Spring Boot, Node, Python and a Dockerfile, because the shape of the mistake is identical in all four and the fix looks slightly different in each.',
+  steps:[
+    {
+      lines:[0,1,2,3,4,5,6],
+      note:'The service header. type: web is the only type that gets a public URL (the others are pserv for private services, worker for background processes, cron for scheduled jobs, keyvalue for a Redis-compatible store). runtime: docker is not a preference here — it is required, because Render has native runtimes for node, python, ruby, go, rust and elixir but NOT for Java, so every Spring Boot service on this platform is a Docker service. plan and region are the two settings you cannot casually change later; region especially, because a service can only reach a database over the fast private network if BOTH sit in the same region.',
+      vars:{'why docker for Java':'no native JVM runtime exists; you supply the Dockerfile, which also means you pin the exact JDK','region is load-bearing':'internal database URLs only work within one region and one account — pick once, deliberately','plan changes are easy, region changes are not':'instance size is a dropdown; moving region means a new service and a new URL'},
+      tone:'start'
+    },
+    {
+      lines:[8,9],
+      note:'The two settings that decide what a bad push costs you. healthCheckPath must answer 2xx or 3xx within five seconds; anything 4xx or 5xx marks the instance unhealthy, and an unhealthy NEW instance never receives traffic — after 15 minutes Render cancels the deploy and leaves the running version alone. autoDeployTrigger: checksPass is the other guard: instead of deploying on every push, Render waits for your CI checks to go green first. Together they mean a broken commit costs you a red deploy log rather than an outage.',
+      vars:{'2xx or 3xx = healthy':'anything else, including a 401 from your own security filter chain, means "not ready"','five seconds':'the response deadline — so no expensive database round-trip inside the health endpoint','15 minutes then cancel':'the deploy is abandoned and existing instances keep serving; this is the safety net','commit | checksPass | off':'the three autoDeployTrigger values; autoDeploy is the deprecated older spelling'},
+      tone:'ok'
+    },
+    {
+      lines:[11,12],
+      note:'The pre-deploy command is the migration slot, and it exists to solve an ordering problem. A schema change has to land AFTER the build that produced it but BEFORE any instance running the new code. Render runs this on a separate one-off instance with a 30-minute ceiling, once per deploy. Put migrations in your start command instead and every instance races every other instance to migrate the same database on every restart. Note that $DATABASE_URL is not typed in here — it is wired from the database resource, which is the subject of the Blueprints page. dockerCommand is the other line worth knowing: it overrides the image CMD, so when a Docker service starts the wrong process, check this before you go editing the Dockerfile.',
+      vars:{'once, not once per instance':'the whole reason a separate pre-deploy phase exists','runs before traffic':'the new code never sees the old schema','fails loudly':'a failed pre-deploy fails the deploy and the old version keeps serving — exactly what you want from a bad migration','30-minute ceiling':'a long backfill belongs in a one-off job, not here'},
+      tone:'ok'
+    },
+    {
+      lines:[16,17,18,19,21,22,24,25,27,28],
+      note:'The one rule, four ways. Every line below is doing the same two things: take the port from the environment instead of hardcoding it, and bind 0.0.0.0 (every interface) rather than localhost (this container only). Spring Boot needs both lines, because server.address is frequently pinned to localhost in a config someone copied from a tutorial. Node takes the host as the SECOND argument to app.listen, and omitting it is the classic Node version of this bug. Gunicorn takes them together in -b. And the Dockerfile line is the punchline: EXPOSE publishes nothing — it documents intent, and deleting it changes no behaviour whatsoever.',
+      vars:{'${PORT:8080}':"Render's port in production, 8080 on your laptop, no second profile needed",'0.0.0.0 vs 127.0.0.1':"every interface vs this container's own loopback — and the proxy lives outside the container",'EXPOSE is documentation':'it publishes no port; the runtime decides. Believing otherwise is near-universal','reserved ports':'18012, 18013 and 19099 belong to Render — do not bind them'},
+      tone:'ok',
+      callout:'Read the error, not the tea leaves. A port-detection failure means nothing was listening where Render looked — check the bind ADDRESS before you touch anything else. A deploy that sits at "in progress" and then cancels is a HEALTH CHECK failure, so curl the health path yourself with no auth header. A service that goes live and then 502s intermittently is the app crashing after start, which is a logs problem, not a config one. Three symptoms, three different files to open.'
+    }
+  ],
+  code:[
+    '# render.yaml — the service, described by the repo it deploys',
+    'services:',
+    '  - type: web                    # web | pserv | worker | cron | keyvalue',
+    '    name: devhub-api',
+    '    runtime: docker              # no native Java runtime: the JVM goes via Docker',
+    '    plan: starter                # free sleeps after 15 idle minutes',
+    '    region: oregon               # must match the database for private networking',
+    '',
+    '    healthCheckPath: /actuator/health   # 2xx/3xx within 5s, or no traffic',
+    '    autoDeployTrigger: checksPass       # deploy only after CI goes green',
+    '',
+    '    preDeployCommand: psql "$DATABASE_URL" -f schema.sql',
+    '    dockerCommand: java -jar /app/app.jar    # overrides the image CMD',
+    '',
+    '# ── The one rule, in four dialects ──────────────────────────────────',
+    '',
+    '# Spring Boot — application.yml',
+    'server:',
+    '  address: 0.0.0.0',
+    '  port: ${PORT:8080}',
+    '',
+    '# Node',
+    "app.listen(process.env.PORT || 3000, '0.0.0.0')",
+    '',
+    '# Python',
+    'gunicorn -b 0.0.0.0:$PORT app:app',
+    '',
+    '# Dockerfile — EXPOSE documents, it does NOT publish',
+    'EXPOSE 10000'
+  ]
+});
+</script>
+
+<script>
+document.addEventListener('click', function (e) {
+  var a = e.target.closest('a.dd-link'); if (!a || !a.dataset.file) return;
+  if (window.top !== window.self) { e.preventDefault();
+    window.parent.postMessage({ type:'dlh-navigate', file:a.dataset.file }, '*'); }
+});
+</script>
+
+<script>
+(function(){
+  const P='rd', $=id=>document.getElementById(id);
+  const SCEN={
+    push:{ req:'git push → live', intro:'One commit, five phases, and an old instance that keeps working until the new one earns the traffic.',
+      nodes:[
+        {id:'commit',icon:'🔔',nl:'push to main',ns:'connecting the repo IS the trigger',who:'GIT'},
+        {id:'build',icon:'🏗️',nl:'buildCommand',ns:'on a build machine · 120 min cap',who:'BUILD'},
+        {id:'pre',icon:'🧪',nl:'preDeployCommand',ns:'once, before any traffic · 30 min cap',who:'BUILD'},
+        {id:'start',icon:'▶️',nl:'startCommand',ns:'15 min to listen on 0.0.0.0:$PORT',who:'RUN'},
+        {id:'hc',icon:'🩺',nl:'health check',ns:'2xx/3xx within 5 seconds',who:'RUN'},
+        {id:'live',icon:'🌍',nl:'traffic switched',ns:'old instance: SIGTERM in 60s',who:'EDGE'},
+      ],
+      steps:[
+        {node:'commit',chip:'push',cap:'The push is the whole pipeline',pay:{branch:'main',commit:'4f1c2ab',autoDeployTrigger:'commit',skip_this_one_with:'[skip render] in the message'},ins:'There is no workflow file to write for the deploy itself — connecting the repo <em>is</em> the trigger. Set <code>checksPass</code> instead and Render waits for your CI to go green, which is how a failing test suite stays out of production.'},
+        {node:'build',chip:'build',tone:'ok',cap:'Compile and install — then throw the machine away',pay:{command:'./mvnw -B -DskipTests package',runs_on:'a build machine, not your instance',produces:'target/app.jar',timeout:'120 minutes'},ins:'Anything you install here that does not end up in the image or the repo is <em>gone</em> by the time your app starts. Build writes; start reads. Cached layers make the second build much faster — and occasionally make it lie, which is what "Clear build cache &amp; deploy" is for.'},
+        {node:'pre',chip:'migrate',tone:'ok',cap:'The migration slot, and why it is its own phase',pay:{command:'psql "$DATABASE_URL" -f schema.sql',runs_on:'a separate one-off instance',how_often:'once per deploy, not once per instance',timeout:'30 minutes'},ins:'A schema change must land <em>after</em> the build that produced it and <em>before</em> the new code that needs it. Put migrations in your start command instead and every instance races every other instance to migrate the same database on every restart.'},
+        {node:'start',chip:'listen',tone:'ok',cap:'Your process — and the one rule',pay:{command:'java -jar /app/app.jar',must_bind:'0.0.0.0:$PORT',PORT:10000,deadline:'15 minutes to be listening'},ins:'Render now watches for something to accept a connection. Bind <code>127.0.0.1</code> and the proxy — which lives outside your container — knocks and gets no answer. Same symptom as the wrong port, completely different cause.'},
+        {node:'hc',chip:'200',tone:'ok',cap:'The gate: prove you are ready',pay:{path:'/actuator/health',healthy:'any 2xx or 3xx',unhealthy:'any 4xx or 5xx',must_answer_within:'5 seconds',render_gives_up_after:'15 minutes'},ins:'Until this returns healthy, the new instance receives <b>zero</b> traffic. This is the difference between a bad deploy that costs you a deploy and a bad deploy that costs you an outage.'},
+        {node:'live',chip:'live',tone:'ok',cap:'Traffic moves — and the old one is still running',pay:{traffic:'100% to the new instance',old_instance:'SIGTERM after 60 seconds',then:'SIGKILL after the shutdown delay (default 30s)',edge_cache:'purged'},ins:'Zero-downtime is the <em>default</em>, not a setting you enable. That 60-second grace is why your app should handle SIGTERM by finishing in-flight requests and then exiting — ignore the signal and Render eventually kills you mid-request.'},
+      ], result:{cls:'ok',text:'✅ push → build → pre-deploy → start → health check → traffic. The previous version serves every request until the new one proves it can answer.'} },
+
+    port:{ req:'no open ports detected', intro:'The most common first deploy on Render, in every language — and the reason it works perfectly on your laptop.',
+      nodes:[
+        {id:'cfg',icon:'🧱',nl:'server.port=8080',ns:'hardcoded, and fine locally',who:'RUN'},
+        {id:'bind',icon:'🚪',nl:'bound to 127.0.0.1:8080',ns:'loopback only',who:'RUN'},
+        {id:'probe',icon:'🔎',nl:'Render looks for a listener',ns:'on $PORT — nothing there',who:'EDGE'},
+        {id:'fail',icon:'💥',nl:'deploy failed',ns:'no open ports detected',who:'EDGE'},
+        {id:'fix',icon:'✅',nl:'0.0.0.0 : ${PORT:8080}',ns:'one line, both bugs',who:'RUN'},
+      ],
+      steps:[
+        {node:'cfg',chip:'8080',cap:'A port that has always worked',pay:{'application.yml':'server.port: 8080',on_your_laptop:'http://localhost:8080 — perfect',on_render:'PORT=10000 is being ignored'},ins:'Nothing here is <em>wrong</em>, exactly. It is a constant where the platform needs a variable. Render sets <code>PORT</code> for every web service and expects you to read it.'},
+        {node:'bind',chip:'127.0.0.1',tone:'bad',cap:'And the second bug, hiding under the first',pay:{bound_to:'127.0.0.1:8080',means:"this container's own loopback interface",reachable_from:'processes inside this container only'},ins:'This is the one that survives fixing the port number. <code>localhost</code> inside a container means <em>inside that container</em> — a perfectly healthy app, listening on an interface nothing else can reach.'},
+        {node:'probe',chip:'probe',tone:'bad',cap:'Render knocks; nobody answers',pay:{expected:'a listener on 0.0.0.0:10000',found:'nothing',note:'Render can often detect an alternate port — but not one bound to loopback'},ins:'The proxy that terminates TLS and forwards your traffic runs <em>outside</em> the container. From where it stands, a loopback-bound process and a crashed process look identical.'},
+        {node:'fail',chip:'failed',tone:'bad',cap:'The deploy fails — the service never goes live',pay:{status:'deploy failed',log:'No open ports detected',consequence:'previous version keeps serving',reserved_ports:'18012, 18013, 19099 belong to Render'},ins:'Worth noticing: this is a <em>deploy</em> failure, not an outage. Whatever was running before is still running. The platform refused to promote something it could not reach.'},
+        {node:'fix',chip:'fixed',tone:'ok',cap:'Both bugs, one line of config',pay:{'server.address':'0.0.0.0','server.port':'${PORT:8080}',locally:'still 8080, no profile needed',on_render:'10000, automatically'},ins:'<code>${PORT:8080}</code> is "use PORT if it exists, otherwise 8080" — so one config file is correct in both places. <b>The memory hook: bind 0.0.0.0:$PORT, or you do not exist.</b>'},
+      ], result:{cls:'ok',text:'✅ Two distinct bugs with one symptom: the wrong port, and the right port on the wrong interface. server.address=0.0.0.0 plus port=${PORT:8080} fixes both.'} },
+
+    sleep:{ req:'free tier · 15 min', intro:'Your app is not broken. It is asleep — and the difference matters to whoever just clicked your link.',
+      nodes:[
+        {id:'idle',icon:'😴',nl:'15 minutes, no inbound traffic',ns:'Free instances spin DOWN',who:'RUN'},
+        {id:'stop',icon:'💤',nl:'container stopped',ns:'in-memory state: gone',who:'RUN'},
+        {id:'hit',icon:'🔔',nl:'someone opens your link',ns:'the first request in an hour',who:'EDGE'},
+        {id:'cold',icon:'🥶',nl:'spin-up ≈ one minute',ns:'Render shows a loading page',who:'EDGE'},
+        {id:'plan',icon:'💳',nl:'paid instances never sleep',ns:'the fix is a plan, not code',who:'YOU'},
+      ],
+      steps:[
+        {node:'idle',chip:'15 min',cap:'The clock everyone forgets',pay:{applies_to:'Free web services',trigger:'15 minutes with no inbound traffic',action:'spin down'},ins:'Note the precise condition: <em>inbound</em> traffic. Your own background threads ticking away inside the process do not count and will not keep it awake.'},
+        {node:'stop',chip:'stopped',tone:'bad',cap:'Stopped, not paused',pay:{in_memory_sessions:'gone',caches:'cold',scheduled_jobs:'did not run while asleep',disk:'ephemeral unless you attached one'},ins:'The distinction is load-bearing. A stopped container does not resume — it <em>starts</em>. Anything you were keeping in a field, a <code>Map</code>, or an in-memory session store is gone, and a <code>@Scheduled</code> job inside a sleeping web service simply never happened.'},
+        {node:'hit',chip:'request',cap:'The first visitor pays for everyone',pay:{visitor:'a recruiter, at 9pm, on their phone',request:'GET /',service_state:'spun down'},ins:'This is the scenario that actually costs you something. The person clicking a portfolio link has no idea a free tier exists; they just see a site that takes a minute to do nothing.'},
+        {node:'cold',chip:'≈60s',tone:'bad',cap:'Cold start: about a minute',pay:{spin_up:'about one minute',shown_to_browser:'a Render loading page',then:'the request is served normally',plus:'your JVM still has to warm up after that'},ins:'Render holds the connection and shows a loading page rather than failing outright — but for a JVM app the platform\'s minute is only part of it. Cold start is <em>spin-up plus</em> Spring context refresh.'},
+        {node:'plan',chip:'fix',tone:'ok',cap:'The honest fix, and the fake one',pay:{real_fix:'a paid instance — Starter and up never spin down',fake_fix:'an external cron pinging your URL every 10 minutes',why_fake:'it keeps the service awake and does nothing about the free database 30-day clock'},ins:'The pinger is a rite of passage and it half-works. It burns your free instance hours on synthetic traffic, and it does not touch the trap on the next page: <b>a free Postgres database expires 30 days after creation.</b>'},
+      ], result:{cls:'ok',text:'✅ Free web services sleep after 15 idle minutes and take about a minute to wake. Fine for a demo you control; wrong for a link you hand to someone else.'} },
+
+    bad:{ req:'a bad deploy', intro:'You push something broken. Watch how little happens — this is the whole reason a health check exists.',
+      nodes:[
+        {id:'push2',icon:'🔔',nl:'you push a bad commit',ns:'typo in the datasource URL',who:'GIT'},
+        {id:'new',icon:'🆕',nl:'new instance starts',ns:'old one still serving 100%',who:'RUN'},
+        {id:'hcf',icon:'🩺',nl:'health check → 503',ns:'4xx/5xx = unhealthy',who:'RUN'},
+        {id:'cancel',icon:'🛑',nl:'15 minutes, then cancelled',ns:'traffic never moved',who:'EDGE'},
+        {id:'roll',icon:'↩️',nl:'rollback, or fix forward',ns:'your call — nothing is on fire',who:'YOU'},
+      ],
+      steps:[
+        {node:'push2',chip:'push',cap:'A commit that will not run',pay:{commit:'9c31ffe',change:'SPRING_DATASOURCE_URL typo',build:'succeeds — it compiles fine'},ins:'The build has no opinion about whether your database URL is correct, which is exactly why "the build passed" is not the same claim as "it works".'},
+        {node:'new',chip:'starting',cap:'Two versions are alive at once',pay:{new_instance:'starting',old_instance:'serving 100% of traffic',users_affected:0},ins:'This overlap is the mechanism behind zero-downtime. Nothing is taken away before the replacement has proven itself.'},
+        {node:'hcf',chip:'503',tone:'bad',cap:'The app starts, then fails its own health check',pay:{path:'/actuator/health',status:503,body:'{"status":"DOWN","components":{"db":{"status":"DOWN"}}}',verdict:'unhealthy'},ins:'Actuator does the right thing here: it can serve HTTP but it cannot reach the database, so it reports itself <b>DOWN</b>. A health check that only proved "the process is up" would have shipped this.'},
+        {node:'cancel',chip:'cancelled',tone:'bad',cap:'Render gives up, and changes nothing',pay:{waited:'15 minutes',action:'deploy cancelled',traffic:'still 100% on the previous instance',users_affected:0},ins:'The failure is visible to <em>you</em>, in the deploy log, and invisible to everyone else. This is the trade a health check buys: a bad push costs you a deploy instead of an outage.'},
+        {node:'roll',chip:'choose',tone:'ok',cap:'Nothing is on fire, so choose calmly',pay:{option_1:'Rollback — redeploy the last good deploy',option_2:'Fix forward — push the corrected env var',at_2am:'roll back first, debug after coffee'},ins:'Because production never changed, "rollback" here really means "stop trying". The genuinely useful habit is treating the <em>next</em> deploy as the risky one and watching the log until it says live.'},
+      ], result:{cls:'ok',text:'✅ A broken commit never reached a user. Build → start → unhealthy → cancelled, with the old version serving throughout. Health checks are not paperwork.'} },
+  };
+
+  let scen='push', running=false, timers=[];
+  function clearT(){timers.forEach(clearTimeout);timers=[];}
+  function nodeEl(id){return document.querySelector('#'+P+'Diagram .rt-node[data-node="'+id+'"]');}
+  function nodeCenter(id){const n=nodeEl(id);return n?n.offsetTop+n.offsetHeight/2:0;}
+  function renderNodes(k){
+    let h='<div class="rt-rail"></div><div class="rt-chip" id="'+P+'Chip">→</div>';
+    SCEN[k].nodes.forEach(n=>{ h+='<div class="rt-node" data-node="'+n.id+'"><span class="ic">'+n.icon+'</span><div style="flex:1;min-width:0"><div class="nl">'+n.nl+'</div><div class="ns">'+n.ns+'</div></div><span class="who who-'+n.who+'">'+n.who+'</span></div>'; });
+    $(P+'Diagram').innerHTML=h;
+  }
+  function reset(){
+    renderNodes(scen); const s=SCEN[scen];
+    const chip=$(P+'Chip'); chip.style.transition='none'; chip.style.top=nodeCenter(s.steps[0].node)+'px'; chip.style.opacity='0'; chip.classList.remove('ok','bad'); void chip.offsetWidth; chip.style.transition='';
+    $(P+'Res').className='rt-result';
+    $(P+'Dir').textContent='▶ READY'; $(P+'Dir').className='rt-dir';
+    $(P+'Cap').textContent=s.intro;
+    $(P+'Pay').textContent='';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>— phases, timeouts and signals appear here per step —';
+    $(P+'Pill').textContent=s.req;
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false;
+  }
+  function applyStep(steps,i){
+    const st=steps[i];
+    document.querySelectorAll('#'+P+'Diagram .rt-node').forEach(n=>n.classList.remove('cur','curbad','rtpulse'));
+    const n=nodeEl(st.node); n.classList.remove('vchk','vskip'); n.classList.add(st.tone==='bad'?'vskip':'vchk'); n.classList.add('cur'); if(st.tone==='bad')n.classList.add('curbad'); void n.offsetWidth; n.classList.add('rtpulse');
+    const chip=$(P+'Chip'); chip.textContent=st.chip||'→'; chip.classList.remove('ok','bad'); if(st.tone)chip.classList.add(st.tone==='bad'?'bad':'ok'); chip.style.opacity='1'; chip.style.top=nodeCenter(st.node)+'px';
+    $(P+'Dir').textContent=st.dir||('STEP '+(i+1)+' / '+steps.length); $(P+'Dir').className='rt-dir'+(st.tone==='bad'?' bad':'');
+    $(P+'Cap').textContent=st.cap;
+    $(P+'Pay').textContent=st.pay?JSON.stringify(st.pay,null,2):'';
+    $(P+'Hdr').innerHTML='<span class="ht">live inspector</span>'+st.ins;
+  }
+  function run(){
+    if(running)return; running=true; clearT(); reset();
+    document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=true); $(P+'Run').disabled=true;
+    $(P+'Pill').textContent='running…';
+    const s=SCEN[scen]; let i=0;
+    (function tick(){
+      if(i>=s.steps.length){ const r=$(P+'Res'); r.className='rt-result show '+(s.result.cls||'ok'); r.textContent=s.result.text; running=false; document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.disabled=false); $(P+'Run').disabled=false; $(P+'Pill').textContent='done'; return; }
+      applyStep(s.steps,i); i++; timers.push(setTimeout(tick,2000));
+    })();
+  }
+  document.querySelectorAll('#'+P+'Seg button').forEach(b=>b.onclick=()=>{ if(running)return; scen=b.dataset.s; document.querySelectorAll('#'+P+'Seg button').forEach(x=>x.classList.toggle('on',x===b)); reset(); });
+  $(P+'Run').onclick=run;
+  reset();
+})();
+</script>
+<script src="tracks-data.js"></script>
+<script src="devhub-chapters.js"></script>
+<script src="devhub-hf-theme.js"></script>
+<script src="devhub-hf-check.js"></script>
+<script src="devhub-lesson.js"></script>
+<script src="devhub-notebook.js"></script>
+<script src="devhub-syntax.js"></script>
+<script src="devhub-transitions.js"></script>
+</body>
+</html>

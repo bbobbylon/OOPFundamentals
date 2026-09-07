@@ -61,6 +61,32 @@
  *     ref: { label: 'Two-pointer & hashmap technique', file: 'interview-arrays-strings-visualizer.html' }
  *   }
  *
+ * OPTIONAL "CODE WITH ME" COACH (per-exercise, entirely optional):
+ *   coach: [
+ *     { id: 'nested-loop',                 // stable id — a triggered message is
+ *                                          // shown once per exercise, ever (persisted)
+ *       match: { javascript: /for[\s\S]*?for\s*\(/, python: /for [^\n]*:\n[\s\S]*?for / },
+ *                                          // RegExp (tested against all languages) OR
+ *                                          // an object keyed by language (langs missing
+ *                                          // from the object never trigger this entry)
+ *       msg: 'A nested loop checks every pair — O(n²). A hashmap gets this to O(n).',
+ *       tone: 'tip' },                     // 'tip' (default) | 'praise' — styling only
+ *     { id: 'forgot-case-fold', absent: true,
+ *       match: { javascript: /toLowerCase|toUpperCase/ },
+ *       msg: "Don't forget this needs to be case-insensitive." }
+ *   ]
+ * `absent: true` inverts the match — it fires when the pattern is MISSING, for
+ * catching a forgotten requirement rather than a wrong technique, and only
+ * evaluates once the student's code has diverged meaningfully from the
+ * starter (a few keystrokes in, not on the empty stub). Debounced ~900ms
+ * after the last keystroke, one message at a time, each shown at most once
+ * per exercise (tracked in the same per-bank localStorage progress as solved
+ * state). A learner can turn the whole thing off with the toolbar's
+ * "🧑‍💻 Pair" toggle (one global preference, `dlh-codegrade-coach`). Separately,
+ * the engine also raises its own generic encouragement — a nudge after
+ * several failed runs in a row, praise on a solve that took a real fight —
+ * with no per-exercise authoring required.
+ *
  * OPTIONAL SHAPE ADAPTERS (for data-structure exercises like linked lists):
  * plain JSON test data (arrays, objects, numbers) is all __eq() can compare, but some
  * problems need the user's own function to receive/return real node objects. Set
@@ -118,6 +144,40 @@
     return String(v);
   }
   function fmtArgs(args) { return args.map(fmt).join(', '); }
+
+  /* ---- "Code With Me" coach: global on/off preference ------------------- */
+  const COACH_KEY = 'dlh-codegrade-coach';
+  function coachEnabled() {
+    try { return localStorage.getItem(COACH_KEY) !== '0'; } catch (e) { return true; }
+  }
+  function setCoachEnabled(v) {
+    try { localStorage.setItem(COACH_KEY, v ? '1' : '0'); } catch (e) { /* ignore */ }
+  }
+
+  /* An `absent` trigger ("you forgot X") only evaluates once the student has
+   * written a real amount of their own code — checking it against the bare
+   * starter would fire before a single keystroke. */
+  const COACH_ABSENT_MIN_EXTRA = 40;
+  function matchCoachEntry(c, code, lang, starterCode) {
+    if (c.absent && code.length < starterCode.length + COACH_ABSENT_MIN_EXTRA) return false;
+    let re = c.match;
+    if (re && !(re instanceof RegExp)) re = re[lang];
+    if (!re) return false;
+    const hit = re.test(code);
+    return c.absent ? !hit : hit;
+  }
+
+  /* Generic encouragement that needs no per-exercise authoring: a nudge after
+   * several failed runs in a row (re-read the failing test, don't re-guess),
+   * and praise on a solve that took a real fight. Cycled, not repeated
+   * verbatim, so re-hitting the same threshold on a later exercise doesn't
+   * read like a canned line. */
+  const STUCK_MESSAGES = [
+    "Still red — that's normal. Read the FIRST failing test's exact input and expected output before touching the code again; the gap between what you returned and what was expected usually points right at the bug.",
+    'A few tests still failing? Trace through the smallest failing case by hand, one line at a time — slower than guessing, but it always finds it.',
+    "Worth checking: are you handling the edge cases in the test list (empty input, one element, all-the-same) or only the 'normal' case?"
+  ];
+  const STUCK_THRESHOLDS = [3, 6, 9];
 
   /* ---- localStorage progress (per bank id) ------------------------------ */
   const lsKey = id => 'dlh-codegrade:' + id;
@@ -180,7 +240,7 @@
 .cg-tab.on{background:#04070f;color:var(--cg-accent);border-color:var(--cg-accent)}
 .cg-editor{display:flex;background:#04070f;font-family:'Cascadia Code',ui-monospace,Consolas,monospace;
     font-size:13px;line-height:1.55;min-height:200px;border:1px solid var(--cg-border);border-radius:0 8px 8px 8px}
-.cg-gutter{padding:12px 8px 12px 12px;text-align:right;color:#3a4a63;user-select:none;background:#060b16;
+.cg-gutter{padding:12px 8px 12px 12px;text-align:right;color:var(--cg-muted);user-select:none;background:#060b16;
     border-right:1px solid var(--cg-border);white-space:pre;overflow:hidden;border-radius:0 0 0 8px}
 .cg-ta{flex:1;background:transparent;color:#dbe4f0;border:none;outline:none;resize:vertical;padding:12px 14px;
     font-family:inherit;font-size:inherit;line-height:inherit;white-space:pre;overflow-x:auto;tab-size:2;min-height:200px}
@@ -207,6 +267,20 @@
 .cg-hint{font-size:12.5px;color:#cbd5e1;background:#0b1426;border:1px solid var(--cg-border);border-radius:8px;
     padding:8px 12px;margin:6px 0}
 .cg-keytab{font-size:11.5px;color:var(--cg-muted);margin-top:8px}
+.cg-coach{margin-top:16px;padding-top:14px;border-top:1px dashed var(--cg-border)}
+.cg-coach-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.cg-coach-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--cg-muted)}
+.cg-coach-msg{display:flex;align-items:flex-start;gap:9px;background:#0b1426;border:1px solid var(--cg-border);
+    border-left:3px solid var(--cg-accent);border-radius:8px;padding:9px 12px;margin:6px 0;font-size:12.5px;
+    line-height:1.55;color:#cbd5e1;animation:cgFadeIn .25s ease}
+.cg-coach-msg.praise{border-left-color:var(--cg-good)}
+.cg-coach-msg .av{flex-shrink:0;font-size:15px;line-height:1.4}
+.cg-coach-msg .tx{flex:1}
+.cg-coach-msg .x{flex-shrink:0;background:none;border:none;color:var(--cg-muted);cursor:pointer;font-size:13px;
+    padding:0 2px;line-height:1.4}
+.cg-coach-msg .x:hover{color:var(--cg-text)}
+@keyframes cgFadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+.cg-btn.coach-off{opacity:.55}
     `;
     document.head.appendChild(h('style', { id: 'dlh-codegrade-styles', html: css }));
   }
@@ -867,6 +941,52 @@ __results
     const resetBtn = h('button', { class: 'cg-btn ghost' }, 'Reset');
     const resultsEl = h('div', { class: 'cg-results' });
     const hintsWrap = h('div', { class: 'cg-hints' });
+    const coachToggle = h('button', { class: 'cg-btn ghost' }, '🧑‍💻 Pair: On');
+    const coachMsgs = h('div');
+    // The toggle lives in the ALWAYS-visible header, never inside anything that
+    // itself gets hidden — a control that can vanish while off is a control
+    // nobody can turn back on.
+    const coachWrap = h('div', { class: 'cg-coach' },
+      h('div', { class: 'cg-coach-head' }, h('span', { class: 'cg-coach-label' }, '🧑‍💻 Pairing with a senior'), coachToggle),
+      coachMsgs
+    );
+
+    function paintCoachToggle() {
+      const on = coachEnabled();
+      coachToggle.textContent = on ? '🧑‍💻 Pair: On' : '🧑‍💻 Pair: Off';
+      coachToggle.classList.toggle('coach-off', !on);
+    }
+    coachToggle.onclick = () => {
+      setCoachEnabled(!coachEnabled());
+      paintCoachToggle();
+      if (coachEnabled()) evaluateCoach();
+    };
+
+    function addCoachMsg(text, tone) {
+      coachMsgs.appendChild(h('div', { class: 'cg-coach-msg' + (tone === 'praise' ? ' praise' : '') },
+        h('span', { class: 'av' }, tone === 'praise' ? '🎉' : '🧑‍💻'),
+        h('span', { class: 'tx' }, text),
+        h('button', { class: 'x', type: 'button', 'aria-label': 'Dismiss', onclick: (e) => { e.target.closest('.cg-coach-msg').remove(); } }, '✕')
+      ));
+    }
+
+    let coachTimer = null;
+    function evaluateCoach() {
+      if (!coachEnabled() || !ex.coach || !ex.coach.length) return;
+      const code = ta.value, starterCode = ex.starter[lang] || '';
+      if (code.trim() === starterCode.trim()) return;
+      const seen = (progress[ex.id] && progress[ex.id].coachSeen) || [];
+      for (const c of ex.coach) {
+        if (seen.indexOf(c.id) !== -1) continue;
+        if (c.langs && c.langs.indexOf(lang) === -1) continue;
+        if (!matchCoachEntry(c, code, lang, starterCode)) continue;
+        addCoachMsg(c.msg, c.tone);
+        progress[ex.id] = progress[ex.id] || {};
+        progress[ex.id].coachSeen = seen.concat(c.id);
+        saveProgress(bank.id, progress);
+        break; // one at a time — don't dump a wall of messages on a single pass
+      }
+    }
 
     function refreshGutter() {
       const n = ta.value.split('\n').length;
@@ -893,16 +1013,28 @@ __results
       progress[ex.id] = progress[ex.id] || {};
       progress[ex.id].code = stored;
       saveProgress(bank.id, progress);
+      clearTimeout(coachTimer);
+      coachTimer = setTimeout(evaluateCoach, 900); // same step-pacing the site's animations use
     });
     ta.addEventListener('scroll', () => { gutter.scrollTop = ta.scrollTop; });
+    // Tab indents — but with an escape hatch. Without one this textarea is a
+    // keyboard trap: focus lands here and 15 Tab presses later is still here,
+    // having typed indentation into the code, with Run and the language tabs
+    // unreachable. Esc arms ONE focus-moving Tab (the standard editor pattern);
+    // any other key re-arms indentation capture.
+    let tabEscapes = false;
     ta.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { tabEscapes = true; return; }
       if (e.key === 'Tab') {
+        if (tabEscapes) { tabEscapes = false; return; }   // browser default: focus moves on
         e.preventDefault();
         const unit = (lang === 'python' || lang === 'java') ? '    ' : '  ';
         const s = ta.selectionStart, en = ta.selectionEnd;
         ta.value = ta.value.slice(0, s) + unit + ta.value.slice(en);
         ta.selectionStart = ta.selectionEnd = s + unit.length;
         refreshGutter();
+      } else {
+        tabEscapes = false;
       }
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runBtn.click(); }
     });
@@ -953,10 +1085,24 @@ __results
 
       if (passCount === results.length) {
         progress[ex.id] = progress[ex.id] || {};
+        const priorFails = progress[ex.id].fails || 0;
+        const firstSolve = !progress[ex.id].solved;
         progress[ex.id].solved = true;
         progress[ex.id].code = stored;
         saveProgress(bank.id, progress);
+        if (global.DevHubStreak) global.DevHubStreak.touch();
+        if (coachEnabled() && firstSolve) {
+          if (priorFails >= 3) addCoachMsg('That one fought back and you got it anyway — nice work sticking with it.', 'praise');
+          else if (priorFails === 0) addCoachMsg('Clean solve, first try.', 'praise');
+        }
         if (onSolved) onSolved();
+      } else {
+        progress[ex.id] = progress[ex.id] || {};
+        progress[ex.id].fails = (progress[ex.id].fails || 0) + 1;
+        saveProgress(bank.id, progress);
+        if (coachEnabled() && STUCK_THRESHOLDS.indexOf(progress[ex.id].fails) !== -1) {
+          addCoachMsg(STUCK_MESSAGES[STUCK_THRESHOLDS.indexOf(progress[ex.id].fails) % STUCK_MESSAGES.length]);
+        }
       }
     };
 
@@ -979,15 +1125,19 @@ __results
     panel.appendChild(tabsEl);
     panel.appendChild(sigEl);
     panel.appendChild(editorWrap);
-    panel.appendChild(h('div', { class: 'cg-keytab' }, 'Tab inserts indentation · Ctrl/⌘ + Enter runs the tests'));
+    panel.appendChild(h('div', { class: 'cg-keytab' }, 'Tab inserts indentation · Esc then Tab moves focus out · Ctrl/⌘ + Enter runs the tests'));
     panel.appendChild(h('div', { class: 'cg-toolbar' }, runBtn, resetBtn, statusEl));
     panel.appendChild(resultsEl);
     panel.appendChild(hintsWrap);
+    panel.appendChild(coachWrap); // always mounted: generic stuck/praise nudges fire with no per-exercise authoring
 
     root.innerHTML = '';
     root.appendChild(panel);
+    paintCoachToggle();
     loadLang(lang);
-    ta.focus();
+    // No ta.focus() here: stealing focus into a Tab-capturing editor on render
+    // meant anyone Tabbing through the page fell straight into the trap. Focus
+    // stays where the user had it; the Reset button still focuses deliberately.
   }
 
   /* ---- main render entry point ------------------------------------------ */

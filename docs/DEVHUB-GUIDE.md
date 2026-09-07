@@ -1,7 +1,7 @@
 
 # DevHub — a Guided Tour
 
-> **New here? Don't try to read all 515 pages.** Pick a *path* below and follow it.
+> **New here? Don't try to read all 521 pages.** Pick a *path* below and follow it.
 >
 > **Contributors:** 102 of them are now authored to the nine-point teaching bar in
 > `CLAUDE.md`; the rest carry the design but not yet the rhythm. Run
@@ -10,7 +10,7 @@
 > Every page is a single, self-contained interactive visualizer — open it, press the
 > button, watch the concept animate. No build step, no account required.
 
-DevHub is a learning hub: **515 browser visualizers** across **34 tracks** (grouped into
+DevHub is a learning hub: **521 browser visualizers** across **34 tracks** (grouped into
 categories in the sidebar — Languages & Concepts, Frontend, Backend & APIs, DevOps/Cloud & Data, Practice & Prep; several tracks also have a 🍳 **Common Recipes** section of practical how-tos — API→form, batch upload, password complexity), plus a
 small Spring Boot backend that adds optional accounts + progress sync. This guide is
 the map. To *run* it (locally or deployed), see the main [README](../README.md); for a
@@ -66,7 +66,7 @@ Or jump straight to any file linked below.
 | 🦀 **Rust** | ownership, borrowing & the **borrow checker** (memory safety, no GC), then the **async web stack** — Tokio + Axum, type-driven extractors | [Ownership, Borrowing & the Borrow Checker](../frontend/rust-fundamentals-visualizer.html) |
 | 🏗️ **Full-Stack Stacks** | how the layers combine into real stacks — **SPA + REST** (Angular + Spring/CIAM), **MERN**, server-rendered **monoliths** (Rails/Laravel), **compiled API + SPA** (Go/Rust) | [Full-Stack Web Stacks Compared](../frontend/web-stacks-visualizer.html) |
 | 🔌 **MuleSoft** | enterprise integration with Anypoint — **Mule flows**, the Mule Event &amp; **DataWeave**, then **API-led connectivity** and the **Anypoint API Gateway** (JWT/rate-limit policies) | [Flows, the Mule Event &amp; DataWeave](../frontend/mulesoft-fundamentals-visualizer.html) |
-| ♾️ **DevOps & CI/CD** | **CI/CD pipelines** (GitHub Actions: jobs/steps/artifacts/gated environments) and **Infrastructure as Code** (Terraform plan/apply/state/drift) | [CI/CD Pipelines](../frontend/devops-cicd-pipeline-visualizer.html) |
+| ♾️ **DevOps & CI/CD** | **CI/CD pipelines** (GitHub Actions: jobs/steps/artifacts/gated environments), **Infrastructure as Code** (Terraform plan/apply/state/drift), and **deploying on Render** — the PaaS deploy lifecycle, Blueprints (`render.yaml`), managed Postgres &amp; secrets, and a real Spring Boot + Angular stack | [CI/CD Pipelines](../frontend/devops-cicd-pipeline-visualizer.html) |
 | ⎈ **Kubernetes** | pods, deployments, services, config & secrets, Helm, Spring on K8s | [Kubernetes Fundamentals](../frontend/kubernetes-fundamentals-visualizer.html) |
 | 🗄️ **SQL & Databases** | SQL, indexes & query plans, transactions/ACID, CTEs, normalization, Postgres | [SQL Fundamentals](../frontend/sql-fundamentals-visualizer.html) |
 | ⌨️ **Shell & Scripting** | CLI basics, **Bash**, **PowerShell** objects, **CMD/Batch** — three shells side by side — plus the three **cloud CLIs** (`aws`, `az`, `gcloud`) taught as one shared grammar | [CLI Basics](../frontend/shell-cli-basics-visualizer.html) |
@@ -166,6 +166,15 @@ accounts are seeded in dev: **`demo` / `demo12345`** (USER) and **`admin` / `adm
 - **"Building the auth-aware Angular app"** → 🅰️ [Auth State (Signals)](../frontend/angular-auth-state-signals-deep-visualizer.html)
   · [Reactive Forms (Auth)](../frontend/angular-auth-forms-deep-visualizer.html) (live, typeable)
   · [Lazy Loading & Preloading](../frontend/angular-lazy-loading-deep-visualizer.html).
+- **"I'm deploying my project on Render"** → ♾️ [From git push to live URL](../frontend/render-deploys-visualizer.html)
+  (the port rule, the health check, the 15-minute nap) → [Blueprints (`render.yaml`)](../frontend/render-blueprints-visualizer.html)
+  (the whole environment in one reviewable file, plus preview environments per PR)
+  → [Postgres, Env Vars & Secrets](../frontend/render-databases-env-visualizer.html)
+  (internal vs external connection strings, the free-tier 30-day clock, the connection budget)
+  → [Spring Boot + Angular on Render](../frontend/render-spring-angular-visualizer.html)
+  (a Docker web service and a static site, joined by the rewrite rule that deletes CORS).
+  Read alongside [Docker for Spring Boot](../frontend/docker-spring-boot-visualizer.html)
+  and [Deployment Strategies](../frontend/devops-deployment-strategies-visualizer.html).
 
 ---
 
@@ -419,8 +428,29 @@ visualizers).
   document navigation — it's a no-op inside `app.html`'s `#viewer` iframe,
   where several pages already `postMessage` a `dlh-navigate` event to the
   parent hub instead of following the link directly (grep `dlh-navigate` if
-  touching that pattern). Everything here is inert under
-  `prefers-reduced-motion: reduce`.
+  touching that pattern). Since 2026-09-05 it also carries the site's
+  **live-region wiring**: every `.rt-inspect` panel (437 pages) gets
+  `role="status"` + `aria-live="polite"`, so the per-step payload the engines
+  write there is announced to screen readers — it lives here precisely because
+  this is the one script effectively every page loads, so the fix needs no
+  per-page edits. The motion features are inert under
+  `prefers-reduced-motion: reduce`; the live region is not motion and applies
+  always. (Sitewide, devhub.css now also blanket-collapses ALL
+  animation/transition durations to .01ms under reduced-motion — per-page
+  `<style>` blocks included — state changes still land, they just stop
+  moving.)
+- **The hub sidebar is keyboard-operable, and staying that way needs three
+  things together** (`frontend/app.html`). Lesson links are real `<a href>` with
+  a `preventDefault` on plain left-click — so the SPA behaviour is kept while
+  middle-click, ctrl-click, copy-link and the status-bar preview all work. The
+  track and section headers are real `<button aria-expanded>`. Both matter: as
+  divs the sidebar had **zero** focusable elements, and fixing only the leaf
+  links would change nothing, because a collapsed branch keeps its anchors
+  `display:none`. Buttons need `appearance:none; background:none; border:0;
+  width:100%; text-align:left; font-family:inherit` or the UA restyles the
+  sidebar, and both header types and `.page-link` carry a `:focus-visible`
+  outline — a tab order you cannot see is worse than none.
+
 - [`frontend/devhub-chapters.js`](../frontend/devhub-chapters.js) — the
   **chapter rail** (`.hf-rail`) at the top of a lesson: where this page sits in
   its section, which pages sit either side, and — since 2026-09-05 — where the
@@ -471,15 +501,37 @@ visualizers).
   is the CI gate (`deploy.yml` blocks the Pages deploy on it): encoding, registry
   both ways, required shared scripts, internal links, duplicate registrations,
   inline-`<script>` parse, and CSS theme-selector shape. `tmp_smoke.mjs` opens
-  every page in Chromium at 320px and reports uncaught errors and horizontal
-  overflow (network-only failures listed separately — a sandbox with no CDN fails
-  every CDN load). `tmp_assetcheck.mjs <ref>` fails on any LOSS of a teaching asset
+  every page in Chromium at 320px and reports uncaught errors, horizontal
+  overflow, and — since 2026-09-05 — any **render-blocking external resource in
+  `<head>`** (a cross-origin stylesheet or sync script), flagged even when the
+  fetch succeeds: rendering waits on it, so the structure is the bug and
+  today's network is weather (network-only failures on lazy resources are still
+  listed separately — a sandbox with no CDN fails every CDN load). `tmp_assetcheck.mjs <ref>` fails on any LOSS of a teaching asset
   versus a git ref. `tmp_contrast.mjs` measures text contrast in a theme
   (`--theme=cream|dark`, `--inject=candidate.css` to try a fix without editing the
   site); it composites translucent backgrounds and exempts `aria-hidden` ornament
   and gradient-clipped headings, because an earlier version did neither and
   invented ~1860 phantom failures. `tmp_shot.mjs` screenshots any page at phone and
   desktop; `tmp_hfapply.mjs` opts a page into the kit.
+- **Does the code compile?** (`frontend/tmp_codecheck.mjs`) — pulls every `<pre>`
+  and every CodeWalk `code:` array out of the HTML and runs the TypeScript and
+  Java through a real compiler, because a snippet inside a string array inside
+  an HTML file is not code to any other tool in the repo. It reports from an
+  allow list (only errors a missing fragment context cannot explain), and a ❌
+  marker excuses that one line rather than the whole block. Clean means
+  "nothing provably wrong" — never "correct".
+- **Do the CodeWalk highlights land?** (`frontend/tmp_cwlines.mjs`) — `line:` and
+  `lines:` are RAW indices into the rendered lines, so they are **zero-based**
+  while the gutter prints `idx+1`. A mount whose smallest index is 1 and whose
+  largest equals the array length was authored one-based: every step highlights
+  one line low and the last one falls off the end, and nothing else can see it.
+  That signature is a hint, not the whole set — it misses a mount that is
+  uniformly one-based but stops short of the array end, and it misses a *mixed*
+  mount whose first steps are one-based and the rest correct. Both shapes turned
+  up in the 2026-09-07 sweep and both were found only by reading each note
+  against its code. The checker also distinguishes blank lines: one INSIDE a
+  range is deliberate (a step spanning a block crosses its separators), one at
+  an EDGE is the tell, so only edges are reported.
 - **Head First bar audit** (`frontend/tmp_hfaudit.mjs`) — scores every lesson
   page against CLAUDE.md's nine-point teaching standard and ranks the thinnest
   first, so the standing "scan for thin lessons" directive is a command rather
