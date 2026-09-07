@@ -532,6 +532,20 @@ visualizers).
   against its code. The checker also distinguishes blank lines: one INSIDE a
   range is deliberate (a step spanning a block crosses its separators), one at
   an EDGE is the tell, so only edges are reported.
+
+- **Is the pair-programming coach right?** (`frontend/tmp_coachcheck.mjs`) — a
+  `coach:` entry on a practice exercise is a regex with an opinion, and it is the
+  only thing on the site that can be WRONG while every other gate stays green:
+  the page parses, the snippet compiles, and the learner is simply told their
+  correct code is wrong. This pulls each bank out of its page with `vm` and
+  replays the engine's real `matchCoachEntry()` against two samples per entry —
+  one that should trip it and a correct solution that must not. It reports three
+  outcomes, and NUDGE is the interesting one: a regex cannot tell two sequential
+  loops from a nested pair, so an entry that fires on correct code is surfaced
+  rather than hidden behind a pass. What it cannot see is whether the MESSAGE is
+  true — only that the regex fires — and it says nothing at all about an
+  exercise with no entry, which for isomorphic-strings and graph-valid-tree is a
+  deliberate decision rather than a gap.
 - **Head First bar audit** (`frontend/tmp_hfaudit.mjs`) — scores every lesson
   page against CLAUDE.md's nine-point teaching standard and ranks the thinnest
   first, so the standing "scan for thin lessons" directive is a command rather

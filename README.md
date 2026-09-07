@@ -594,6 +594,7 @@ resolved.
 | `node tmp_examtell_audit.mjs` | position and length tells in the exam banks — run after any bank edit | ~1s |
 | `node tmp_codecheck.mjs` | **code on the page that does not compile.** Extracts every `<pre>` and CodeWalk `code:` array and runs the TypeScript and Java through a real compiler. Reports from an allow list — only errors a missing fragment context cannot explain — and a ❌ excuses one LINE, not the block | ~4 min (javac spawns) |
 | `node tmp_cwlines.mjs` | CodeWalk `line:`/`lines:` values that point outside the code array, at a blank line, or carry the 1-based signature. The indices are **ZERO-based** while the gutter renders `idx+1` | ~1s |
+| `node tmp_coachcheck.mjs` | **a "Code With Me" coach entry that is wrong.** Every other gate stays green when a `coach:` regex misfires — the page parses, the code compiles, and the learner is told their correct solution is wrong. Replays the engine's real matcher against a should-fire and a must-not-fire sample per entry; reports NUDGE separately for entries that knowingly fire on correct code | ~1s |
 
 Two caveats worth knowing before you act on output:
 
