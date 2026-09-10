@@ -46,6 +46,52 @@
  * GIT NOTE: gitignored by `frontend/tmp*`; a new gate needs its own
  * `!frontend/tmp_<name>.mjs` allowlist line in .gitignore or git never sees it.
  */
+import { createServer } from 'node:http';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { extname, join, dirname, basename } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { loadChromium, browserExecutablePath } from './tmp_pw.mjs';
+
+const chromium = loadChromium();
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const args = process.argv.slice(2);
+const flags = Object.fromEntries(args.filter((a) => a.startsWith('--'))
+  .map((a) => { const [k, v] = a.replace(/^--/, '').split('='); return [k, v ?? true]; }));
+const width = Number(flags.width || 320);   // see the header: 320 finds what 390 hides
+const only = args.filter((a) => !a.startsWith('--')).map((a) => basename(a));
+
+const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript',
+  '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml',
+  '.png': 'image/png', '.woff2': 'font/woff2', '.wasm': 'application/wasm' };
+
+const server = createServer((req, res) => {
+  /* Chrome probes /favicon.ico once per ORIGIN, not once per page. The site
+     ships no favicon, so that probe used to 404 and land in the console of
+     whichever page happened to load first — one phantom failure per run, on a
+     different page each time (it was blamed on shell-azure, then shell-aws,
+     then shell-powershell, none of which had anything wrong). 204 answers the
+     probe honestly without pretending a file exists, and leaves every real
+     404 still reportable. */
+  if (req.url === '/favicon.ico') { res.writeHead(204); return res.end(); }
+  const file = join(HERE, decodeURIComponent(req.url.split('?')[0]));
+  if (!file.startsWith(HERE) || !existsSync(file)) { res.writeHead(404); return res.end(); }
+  res.writeHead(200, { 'content-type': MIME[extname(file).toLowerCase()] || 'application/octet-stream' });
+  res.end(readFileSync(file));
+});
+await new Promise((r) => server.listen(0, '127.0.0.1', r));
+const port = server.address().port;
+
+const pages = (only.length ? only : readdirSync(HERE).filter((f) => f.endsWith('.html'))).sort();
+console.log(`smoke-testing ${pages.length} page(s) at ${width}px…`);
+
+const browser = await chromium.launch({ executablePath: browserExecutablePath() });
+const real = [], network = [];
+const clipping = [];   // text cut off inside a non-scrolling box (reported, not fatal)
+let done = 0;
+
+// A page-per-context is slower but keeps one page's storage/errors out of the next.
+const CONCURRENCY = 4;
 async function run(list) {
   for (const f of list) {
     const ctx = await browser.newContext({ viewport: { width, height: 844 }, isMobile: width < 500 });
