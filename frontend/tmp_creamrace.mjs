@@ -12,6 +12,22 @@
  * Typically 4-5 of 6 runs come back at 1.05-1.68:1 against a 0.734-luminance
  * ground — i.e. invisible text — and the rest at 10-13:1. Nothing about the
  * page changes between runs.
+ *
+ * WHAT A FAILURE MEANS
+ *   Runs that disagree with each other. A spread (some runs legible, some not)
+ *   is the race reproducing; a uniformly low number is an ordinary contrast bug
+ *   and belongs to tmp_contrast.mjs instead.
+ *
+ * WHAT IT CANNOT SEE
+ *   Absence of the race. Passing six runs does NOT mean the race is fixed — it
+ *   means it did not fire six times, which is exactly what a timing bug does on
+ *   the machine that is about to ship it. Only a mechanism you can point at
+ *   (an ordering guarantee in devhub-hf-theme.js) proves it gone.
+ *   It measures ONE selector on ONE page per invocation, so it cannot find a
+ *   racing element you did not already suspect, and it reads the COMPOSITED
+ *   ground — an element made legible by an ancestor that is itself wrong still
+ *   scores fine. It needs Playwright + a browser (see tmp_pw.mjs); with neither
+ *   installed it cannot run at all, and it is not wired into CI for that reason.
  */
 import { createServer } from 'node:http'; import { readFile } from 'node:fs/promises';
 import { join, extname, dirname } from 'node:path'; import { fileURLToPath } from 'node:url';

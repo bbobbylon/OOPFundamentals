@@ -309,6 +309,11 @@ app with user accounts and cross-device progress sync:
 >
 > Also: **[docs/API-REFERENCE.md](docs/API-REFERENCE.md)** (every endpoint, payloads, curl) and **[docs/SECURITY.md](docs/SECURITY.md)** (token model, RBAC, secrets, threat model, deploy checklist).
 
+> **🗺️ Reading the code, not just running it?** See **[docs/CODE-MAP.md](docs/CODE-MAP.md)** — every
+> file in the repo in one page: what it is, who loads it, what it persists, which gate proves it, and
+> the traps that look fine and are not. The engines, gates and backend classes are documented in-code
+> to the same bar (`node frontend/tmp_doccheck.mjs` fails when a function loses its doc comment).
+
 You can run it three ways. Pick the one you need:
 
 | Mode | Backend | Accounts? | Use it for |

@@ -48,10 +48,36 @@
  *
  * Features 1-2 individually no-op under prefers-reduced-motion; feature 3 is
  * not motion and applies always.
+ *
+ * WHO LOADS IT: 536 of the 537 pages — effectively every page, which is why
+ * feature 3 lives here. It assumes nothing about the page: no devhub.css, no
+ * data-hf, no particular markup — and it depends on no other engine.
+ *
+ * SELF-CONTAINED CSS (standing engine rule): the press-pulse keyframes are
+ * injected in an id-guarded <style id="dh-press-css"> rather than assumed
+ * from devhub.css, because 14 index/landing pages load this script without
+ * that stylesheet. The giant-ripple layout bug was exactly an engine that
+ * assumed the stylesheet was there. The fade keyframes (.dh-leaving) ARE in
+ * devhub.css only — acceptable because a missing fade is invisible, while a
+ * missing pulse style used to leave an unstyled span in the document flow.
+ *
+ * PERSISTS: localStorage dlh_streak_v1 ({lastDate, count}), via DevHubStreak.
+ *
+ * WHO DEPENDS ON IT: window.DevHubStreak is read (optionally — every caller
+ * guards on its existence) by devhub-codegrade.js (a passing run),
+ * devhub-flashcards.js (a rating), devhub-hf-check.js (an answer) and
+ * devhub-quiz.js (a finished attempt). Because of that, this script must be
+ * loaded on any page that carries one of those engines, or their activity
+ * silently stops counting toward the streak. tmp_vcheck.mjs's required-
+ * scripts check is what enforces its presence.
  * ========================================================================== */
 (function (global, doc) {
   'use strict';
 
+  /**
+   * OS-level "reduce motion". Gates features 1 and 2 entirely; feature 3 (an ARIA
+   * attribute) and 4 (storage) are not motion and ignore it.
+   */
   var reduceMotion = global.matchMedia && global.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   // ── 1. Press pulse ────────────────────────────────────────────────────────
@@ -63,6 +89,10 @@
   // element's exact border-radius, so pills, circles, and cards all pulse in
   // their own shape.
   if (!reduceMotion) {
+    /**
+     * What counts as a pressable control. Add a class here, not a per-page handler,
+     * when a new kind of clickable card appears — the pulse must look the same sitewide.
+     */
     var PRESS_SELECTOR = 'button, .tab, [role="button"], .page-link, .track-card, .tc-dot, a.card';
 
     // Critical CSS ships here, not (only) in devhub.css — some pages (the
@@ -95,6 +125,10 @@
 
   // ── 2. Page-to-page fade ──────────────────────────────────────────────────
   if (!reduceMotion && global.top === global.self) {
+    /**
+     * Fade length before the real navigation fires; must match .dh-leaving's
+     * transition in devhub.css or the page jumps mid-fade.
+     */
     var FADE_MS = 220;
 
     doc.addEventListener('click', function (e) {
@@ -152,7 +186,13 @@
   // this script runs standalone too (a lesson opened outside the hub iframe
   // has no app.html window to call into). Must stay algorithmically identical
   // to app.html's touchStreak() — same key, same "today/yesterday" logic.
+  /** Same key app.html writes. CODE-MAP §4 lists both owners. */
   var STREAK_KEY = 'dlh_streak_v1';
+  /**
+   * Records "the learner showed up today" and returns the new streak length (null
+   * if storage is unavailable). Idempotent within a day; a gap of more than one day
+   * resets to 1. Exposed as DevHubStreak.touch() — the ONLY public API of this file.
+   */
   function touchStreak() {
     try {
       var today = new Date().toISOString().slice(0, 10);

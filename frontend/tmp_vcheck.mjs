@@ -1,12 +1,49 @@
 /* ============================================================================
  * tmp_vcheck.mjs — DevHub's pre-deploy validator.
  *
- * CLAUDE.md has told every session to "validate pages with tmp_vcheck.mjs"
- * for a long time, but the file did not exist — so the documented validation
- * step silently passed. This is that file, for real.
+ * THE QUESTION IT ANSWERS
+ *   "Is every page in frontend/ structurally sound and reachable?" — valid
+ *   UTF-8, registered in tracks-data.js (and every registration resolves to a
+ *   file), loading the shared scripts it needs, linking only to files that
+ *   exist, registered in exactly one section, and carrying inline <script>
+ *   blocks that at least PARSE. Plus one CSS check on the three stylesheets.
  *
- * Zero dependencies, pure node, runs the whole 528-page site in about a
- * second. .github/workflows/deploy.yml gates the Pages deploy on it.
+ * HOW TO RUN
+ *   node frontend/tmp_vcheck.mjs            # human output, exit 1 on any error
+ *   node frontend/tmp_vcheck.mjs --quiet    # errors only, warnings suppressed
+ *   No prerequisites: pure node, no npm packages, no browser. Whole site in
+ *   about a second. .github/workflows/deploy.yml runs it on every push and a
+ *   red run BLOCKS the Pages deploy.
+ *
+ * WHAT A FAILURE MEANS
+ *   An ERROR is a page a learner will hit broken: a missing file it links to,
+ *   a registry entry pointing nowhere, a duplicate home in the rail, a script
+ *   with a syntax error (which kills every interactive widget after it), or a
+ *   CSS selector list that silently styles <html>. A WARNING is drift that is
+ *   not yet clean (unregistered page, missing devhub-syntax.js, an unresolved
+ *   demo asset) — reported so it can be fixed, not fatal, so the gate could
+ *   land before every page was perfect. A clean run means the site is
+ *   well-formed. It does NOT mean any page works.
+ *
+ * WHAT IT CANNOT SEE
+ *   - That a script RUNS. Check 6 proves inline JS parses; `{type:Button}` on
+ *     an undefined identifier, or a Spring `${app.cron}` placeholder inside a
+ *     template literal, parse perfectly and throw on load. Both shipped. That
+ *     is tmp_smoke.mjs's job (a real browser).
+ *   - A wrong `<body class="track-…">`. A page cloned from another track is
+ *     perfectly valid HTML wearing the wrong palette; four Render pages
+ *     shipped as track-shell and nothing here can tell.
+ *   - Whether the code ON the page compiles (tmp_codecheck.mjs), whether a
+ *     CodeWalk highlights the right line (tmp_cwlines.mjs), or whether an
+ *     edit silently deleted a widget (tmp_assetcheck.mjs). "Valid" here is
+ *     the floor, never the bar.
+ *
+ * GIT NOTE: gitignored by `frontend/tmp*`; a new gate needs its own
+ * `!frontend/tmp_<name>.mjs` allowlist line in .gitignore or git never sees it.
+ *
+ * HISTORY: CLAUDE.md told every session to "validate pages with
+ * tmp_vcheck.mjs" long before the file existed — so the documented validation
+ * step silently passed. This is that file, for real.
  *
  * CHECKS
  *   1  encoding      every .html is valid UTF-8 with no control bytes
@@ -239,6 +276,7 @@ for (const cssFile of ['devhub.css', 'devhub-hf.css', 'devhub-warm.css']) {
 }
 
 /* ── report ────────────────────────────────────────────────────────────── */
+/** Bucket {file,msg} findings by file so the report prints one heading per page. */
 const group = (list) => {
   const by = new Map();
   for (const { file, msg } of list) {

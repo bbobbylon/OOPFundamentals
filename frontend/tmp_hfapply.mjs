@@ -18,6 +18,20 @@
  *   node tmp_hfapply.mjs <page.html> [...]     apply
  *   node tmp_hfapply.mjs --check <page.html>   report only, change nothing
  *   node tmp_hfapply.mjs --revert <page.html>  undo all four edits
+ *
+ * WHAT IT CANNOT SEE
+ *   Whether the page is any BETTER for having the kit. This is a plumbing
+ *   codemod, not a teaching pass: it lands the colorway, the type, the
+ *   roundness and the chapter rail, and a page can carry all four and still
+ *   teach a concept exactly once, with no memory hook and no active recall.
+ *   That gap is what tmp_hfaudit.mjs scores and what a human then has to
+ *   author — running this on 300 pages does not move the Head First bar.
+ *   It also cannot see a WRONG `<body class="track-…">`: the kit keys its
+ *   accents off that class, so a clone carrying its parent's track gets a
+ *   perfectly valid page wearing the wrong palette, and neither this nor
+ *   vcheck will say a word.
+ *   Idempotence is by marker, so hand-editing one of the four insertions
+ *   afterwards can leave --revert unable to undo it cleanly.
  * ========================================================================== */
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { basename, join, dirname, resolve } from 'node:path';

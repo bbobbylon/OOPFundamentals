@@ -17,7 +17,9 @@ the map. To *run* it (locally or deployed), see the main [README](../README.md);
 copy-paste **command-line runbook** (build/run, the auth round-trip via curl, and
 deployment troubleshooting), see [HELP.md](../HELP.md#command-line-runbook). For the
 **architecture, data flows, and diagrams** (C4 + a sequence diagram per use case), see
-[ARCHITECTURE.md](ARCHITECTURE.md). For **what's planned but not built yet** — new pages,
+[ARCHITECTURE.md](ARCHITECTURE.md). For **the files themselves** — what each engine, gate
+and backend class is, who loads it, where state lives, and the traps that look fine and are
+not — see [CODE-MAP.md](CODE-MAP.md). For **what's planned but not built yet** — new pages,
 content gaps found by audits, polish passes — see [ROADMAP.md](ROADMAP.md).
 
 **Quick-start options** (all from the project root):

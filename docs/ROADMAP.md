@@ -1947,7 +1947,7 @@ ad-hoc and lives in the scratchpad, not in the gates.
 
 ---
 
-### 15. Document the code itself — every file, method and variable (Bobby, 2026-09-07)
+### 15. Document the code itself — ✅ COMPLETE (Bobby, 2026-09-07; landed 2026-09-09)
 
 > "Make sure all the methods/variables, everything, is documented in comments in the code as
 > well as an overall concise doc for the app. Each file explained thoroughly, and how it
@@ -2004,6 +2004,56 @@ code is worse than none, because it rots silently.
 **Suggested gate:** a `tmp_doccheck.mjs` that fails when a shared engine exports a function
 with no preceding doc comment — cheap, and it keeps the pass from decaying the way the
 CodeWalk indices did.
+
+#### ✅ What landed (2026-09-09)
+
+All five scope items are done and **`node frontend/tmp_doccheck.mjs` is green at 326/326
+symbols**, wired into `.github/workflows/deploy.yml` so it gates the Pages deploy.
+
+| scope item | state |
+|---|---|
+| 1. `docs/CODE-MAP.md` | written — 10 sections, cross-linked with ARCHITECTURE.md |
+| 2. 17 shared engines | every function documented; the CLAUDE.md invariants now live in the code they govern |
+| 3. 17 gates | every one opens with a banner carrying a **WHAT IT CANNOT SEE** section |
+| 4. 537 lesson pages | anatomy walkthrough in CODE-MAP §2, not 537 file comments |
+| 5. `backend/` | every type and public method carries relationship-explaining Javadoc |
+
+**Three gate bugs the pass surfaced** — all found by disbelieving a green result, and all
+fixed in `tmp_doccheck.mjs`:
+
+1. **It could not tell code from a string containing code.** `devhub-tryit.js` builds the
+   iframe sandbox bootstrap as a template literal; its `__send`/`__fmt` were reported as
+   undocumented functions of the file. Now skipped as the payload they are.
+2. **Backtick parity was the wrong tool for finding those strings.** `devhub-syntax.js` and
+   `devhub-codewalk.js` each build a highlighter regex as a single-quoted string containing
+   one backtick. A parity counter flipped there and never flipped back — silently skipping
+   **159 lines of `devhub-codewalk.js` and 64 of `devhub-syntax.js` and reporting every
+   symbol in them as documented.** Replaced with a scanner that tracks quote state, plus a
+   self-test that fails loudly if a file ever ends mid-template. *A gate that under-reports
+   is worse than no gate.*
+3. **It could not walk up past a multi-line annotation.** `@Table(name = …,` continues onto a
+   line starting `uniqueConstraints`, so `TopicProgress` was reported undocumented while
+   carrying a perfectly good Javadoc block. The upward walk now tracks bracket depth.
+
+It also gained a deliberate exemption: a **one-line DOM event wire-up**
+(`s.onerror = () => resolve(false);`) no longer needs a comment. Demanding one produced
+exactly the `// increment i` noise this item forbids. A handler with a real body still has
+to say why it exists.
+
+**Two real defects the documenting turned up** (documented in place, not silently changed —
+both are Bobby's call):
+
+- `ProgressService.TOTAL_TOPICS` is hard-coded to **200**, but `tracks-data.js` registers
+  **521** pages. Every completion percentage the stats endpoint returns is therefore
+  inflated, and a thorough learner can exceed 100%. Real fix: count from the registry
+  instead of a constant.
+- `app.exec.enabled` (env `EXEC_ENABLED`) **defaults to `true`** — server-side execution of
+  learner-supplied code as a real OS process is on unless a deployment turns it off. Bounded
+  by the timeout/output/code-size caps and an authenticated-caller requirement, but the
+  default is "on" for the backend's most dangerous capability.
+- Minor asymmetry, left as-is: `devhub-codegrade.js`'s `pyBooting` latch is never cleared on
+  failure (its `javaBooting` sibling and `devhub-tryit.js`'s version both are), so a Pyodide
+  boot that fails wedges Python grading until reload.
 
 ---
 

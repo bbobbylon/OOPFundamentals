@@ -1,25 +1,53 @@
 /* ============================================================================
  * tmp_hfaudit.mjs — score every lesson page against the Head First bar.
  *
- * CLAUDE.md sets a nine-point teaching standard and a standing directive: on
- * any sweep, "scan for thin lessons — pages that teach a concept only one way,
- * have no memory hooks, or read like documentation instead of teaching."
- * Doing that by opening 500 pages is not a plan. This scores them.
+ * THE QUESTION IT ANSWERS
+ *   "Which lesson pages are THIN — missing the ingredients of the nine-point
+ *   Head First teaching standard in CLAUDE.md?" Every lesson page (one with
+ *   an .intro card, a <pre>, or an rt-stage; landing pages, exams, decks and
+ *   practice pages are skipped) gets a 0-100 score across seven weighted
+ *   dimensions — explain, recall, hooks, multi, visual, voice, structure —
+ *   and the site is ranked thinnest first. It is a WORKLIST generator, not a
+ *   pass/fail gate: it never exits non-zero.
  *
- * WHAT IT CANNOT DO, said plainly: this reads markup, not meaning. It cannot
- * tell a brilliant analogy from a limp one. What it CAN do is find the pages
- * that do not even have the ingredients — no memory hooks, no recall beat, one
- * explanation and out — which is exactly the "thin lesson" the directive is
- * about. Treat a low score as "go look at this", never as a verdict, and treat
- * a high score as "has the parts", never as "is good".
+ *   CLAUDE.md sets the standard and a standing directive: on any sweep,
+ *   "scan for thin lessons — pages that teach a concept only one way, have no
+ *   memory hooks, or read like documentation instead of teaching." Doing that
+ *   by opening 500 pages is not a plan. This scores them.
  *
- * The weights follow CLAUDE.md's own emphasis: line-by-line code explanation
- * and active recall are the two Bobby has asked for most, so they carry most.
+ * HOW TO RUN
+ *   node frontend/tmp_hfaudit.mjs                    # ranked worklist
+ *   node frontend/tmp_hfaudit.mjs --track=angular    # one track (body.track-*)
+ *   node frontend/tmp_hfaudit.mjs --top=40           # how many to list (30)
+ *   node frontend/tmp_hfaudit.mjs --json=out.json    # every row, all parts
+ *   No prerequisites: pure node, static markup scan. The `--json` path is
+ *   written RELATIVE TO frontend/, not the cwd.
  *
- *   node tmp_hfaudit.mjs                 # ranked worklist, thinnest first
- *   node tmp_hfaudit.mjs --track=angular # one track
- *   node tmp_hfaudit.mjs --top=40
- *   node tmp_hfaudit.mjs --json=out.json
+ * WHAT A LOW SCORE MEANS
+ *   The page lacks the PARTS: no CodeWalk or annotation beside its code, no
+ *   knowledge check, no memory-hook markup, one explanation and out. Treat a
+ *   low score as "go look at this", never as a verdict, and treat a high
+ *   score as "has the parts", never as "is good". The weights follow
+ *   CLAUDE.md's own emphasis: line-by-line code explanation and active recall
+ *   are the two Bobby has asked for most, so they carry most.
+ *
+ * WHAT IT CANNOT SEE
+ *   - MEANING. It reads markup, not teaching. It cannot tell a brilliant
+ *     analogy from a limp one, a true note from a false one, or a memory
+ *     hook that lands from one that does not.
+ *   - Explain-score distortion: `explain` divides by <pre> COUNT, so a page of
+ *     one-line snippets is punished as though they were unexplained programs
+ *     (`streams` scores 25 with exactly ONE substantial block). The honest
+ *     measure for that audit is blocks of 6+ lines with no walk nearby —
+ *     see ROADMAP item 2 — not this dimension.
+ *   - Which track a page BELONGS to. It reads `body.track-*`, so a page
+ *     cloned with the wrong class is filed under the wrong track here too.
+ *   - Whether the parts it counts WORK: a CodeWalk with mis-pointed lines
+ *     (tmp_cwlines.mjs) or an inert .hf-check (tmp_vcheck.mjs) scores the
+ *     same as a working one.
+ *
+ * GIT NOTE: gitignored by `frontend/tmp*`; a new gate needs its own
+ * `!frontend/tmp_<name>.mjs` allowlist line in .gitignore or git never sees it.
  * ========================================================================== */
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';

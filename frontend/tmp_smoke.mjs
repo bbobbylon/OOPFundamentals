@@ -1,85 +1,51 @@
 /* ============================================================================
  * tmp_smoke.mjs — load every page in a real browser and report what breaks.
  *
- * WHY, GIVEN vcheck EXISTS. vcheck is static: it proved every inline script
- * PARSES. It cannot know that `{type:Button}` references an identifier that
- * does not exist, or that `"${app.cleanup.cron}"` inside a template literal
- * makes JS evaluate a Spring property placeholder. Both of those shipped, both
- * killed the page's interactive engine, and both are invisible until something
- * actually runs the code.
+ * THE QUESTION IT ANSWERS
+ *   "Does every page actually RUN — no uncaught exception, no console error,
+ *   no horizontal overflow at phone width, something rendered — and does its
+ *   <head> avoid render-blocking cross-origin resources?" Text clipped inside
+ *   a non-scrolling box is measured too and reported as a separate,
+ *   non-fatal section.
  *
- * So: vcheck gates CI (fast, no dependencies), and this runs a browser over
- * the whole site when you want certainty — before a merge, or after any bulk
- * edit. It is deliberately NOT wired into deploy.yml, because a browser
- * download is a heavy dependency for a gate that runs on every push.
+ * HOW TO RUN
+ *   node frontend/tmp_smoke.mjs                   # every page, 320px wide
+ *   node frontend/tmp_smoke.mjs head-first-*      # a subset (shell-globbed)
+ *   node frontend/tmp_smoke.mjs --width=390       # a roomier phone
+ *   node frontend/tmp_smoke.mjs --width=1440      # desktop instead of phone
+ *   Needs a browser: tmp_pw.mjs resolves playwright (global install, or
+ *   $PW_MODULE, or playwright-core paired with system Chrome/Edge). Serves
+ *   frontend/ over a local http server, 4 pages in parallel. Exit 1 on any
+ *   real problem. NOT wired into deploy.yml (a browser download is a heavy
+ *   dependency for a per-push gate) — run it before a merge or after any
+ *   bulk edit.
  *
- * WHAT IT CHECKS, per page: uncaught exceptions, console errors, horizontal
- * overflow at phone width (the site is read on a phone), TEXT CLIPPED INSIDE a
- * non-scrolling element, that the page rendered something at all, and that
- * nothing render-blocking in <head> points at another origin (see below).
+ * WHAT A FAILURE MEANS
+ *   A "real problem" is a page a learner sees broken: a thrown error (the
+ *   interactive engine is dead from that line on), overflow (the phone layout
+ *   scrolls sideways), almost no text (the page did not render), or a
+ *   render-blocking external <link>/<script> in <head> (a solid blank
+ *   rectangle on a slow host — angular-material-cdk sat at 13s FCP). A clean
+ *   run means nothing threw ON LOAD at this width. It does not mean every
+ *   button works, every scenario renders, or the content is right.
  *
- * The default width is 320, not 390. 390 is a comfortable modern phone; 320 is
- * the iPhone SE and a folded foldable, and it is where a rigid grid track
- * (minmax(280px,1fr) inside a 272px container) actually breaks. Four landing
- * pages passed at 390 and overflowed at 320, so the gate runs at the width
- * that finds the bug.
+ * WHAT IT CANNOT SEE
+ *   - Errors that only happen on INTERACTION. It loads, waits 450ms, measures.
+ *     A Play button that throws on click is invisible here; feature work has
+ *     used throwaway Playwright scripts for that.
+ *   - Text clipped inside a non-scrolling box is REPORTED SEPARATELY, never a
+ *     failure: ~450 pages carry hand-written per-page CSS and failing on all
+ *     of them would make the report noise people skip.
+ *   - CDN loads in a sandbox with no network fail on EVERY page. Those are
+ *     filed under "network only" and shown, not counted — so a genuinely
+ *     broken CDN URL also lands in that pile. Check it by hand when a run is
+ *     offline.
+ *   - Anything about legibility (tmp_contrast.mjs), anything at widths it was
+ *     not run at, and the wrong-track-palette clone (nothing sees that).
  *
- * Network failures are reported SEPARATELY: a sandbox with no outbound access
- * fails every CDN load, and folding those in with real bugs is how a report
- * becomes noise people ignore.
- *
- * USAGE
- *   node tmp_smoke.mjs                 # every page
- *   node tmp_smoke.mjs head-first-*    # a subset (shell-globbed)
- *   node tmp_smoke.mjs --width=390     # a roomier phone
- *   node tmp_smoke.mjs --width=1440    # desktop instead of phone
- * ========================================================================== */
-import { createServer } from 'node:http';
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
-import { extname, join, dirname, basename } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { loadChromium, browserExecutablePath } from './tmp_pw.mjs';
-
-const chromium = loadChromium();
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-const args = process.argv.slice(2);
-const flags = Object.fromEntries(args.filter((a) => a.startsWith('--'))
-  .map((a) => { const [k, v] = a.replace(/^--/, '').split('='); return [k, v ?? true]; }));
-const width = Number(flags.width || 320);   // see the header: 320 finds what 390 hides
-const only = args.filter((a) => !a.startsWith('--')).map((a) => basename(a));
-
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript',
-  '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml',
-  '.png': 'image/png', '.woff2': 'font/woff2', '.wasm': 'application/wasm' };
-
-const server = createServer((req, res) => {
-  /* Chrome probes /favicon.ico once per ORIGIN, not once per page. The site
-     ships no favicon, so that probe used to 404 and land in the console of
-     whichever page happened to load first — one phantom failure per run, on a
-     different page each time (it was blamed on shell-azure, then shell-aws,
-     then shell-powershell, none of which had anything wrong). 204 answers the
-     probe honestly without pretending a file exists, and leaves every real
-     404 still reportable. */
-  if (req.url === '/favicon.ico') { res.writeHead(204); return res.end(); }
-  const file = join(HERE, decodeURIComponent(req.url.split('?')[0]));
-  if (!file.startsWith(HERE) || !existsSync(file)) { res.writeHead(404); return res.end(); }
-  res.writeHead(200, { 'content-type': MIME[extname(file).toLowerCase()] || 'application/octet-stream' });
-  res.end(readFileSync(file));
-});
-await new Promise((r) => server.listen(0, '127.0.0.1', r));
-const port = server.address().port;
-
-const pages = (only.length ? only : readdirSync(HERE).filter((f) => f.endsWith('.html'))).sort();
-console.log(`smoke-testing ${pages.length} page(s) at ${width}px…`);
-
-const browser = await chromium.launch({ executablePath: browserExecutablePath() });
-const real = [], network = [];
-const clipping = [];   // text cut off inside a non-scrolling box (reported, not fatal)
-let done = 0;
-
-// A page-per-context is slower but keeps one page's storage/errors out of the next.
-const CONCURRENCY = 4;
+ * GIT NOTE: gitignored by `frontend/tmp*`; a new gate needs its own
+ * `!frontend/tmp_<name>.mjs` allowlist line in .gitignore or git never sees it.
+ */
 async function run(list) {
   for (const f of list) {
     const ctx = await browser.newContext({ viewport: { width, height: 844 }, isMobile: width < 500 });

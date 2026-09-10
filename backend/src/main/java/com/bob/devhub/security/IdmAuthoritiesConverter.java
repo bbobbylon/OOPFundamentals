@@ -30,6 +30,22 @@ import java.util.Set;
 public class IdmAuthoritiesConverter implements Converter<Jwt, Collection<GrantedAuthority>> {
 
     @Override
+    /**
+     * Read every recognised claim shape off an ALREADY-VALIDATED token and return the union
+     * of the authorities they imply.
+     *
+     * <p>The claims are additive, not a first-match: a token from a provider that sends both
+     * {@code roles} and {@code scope} contributes both, and a {@link LinkedHashSet} keeps
+     * the result de-duplicated while preserving the order above for readable logs.
+     *
+     * <p>Trusting these claims is only safe because signature and issuer validation happened
+     * upstream in the resource-server filter chain. Calling this on an unverified token
+     * would let anyone grant themselves ROLE_ADMIN by editing a payload.
+     *
+     * @param jwt a validated OIDC token
+     * @return the mapped authorities; EMPTY (never null) when the token carries no
+     *         recognised claim, which authorizes nothing rather than failing open
+     */
     public Collection<GrantedAuthority> convert(Jwt jwt) {
         Set<GrantedAuthority> authorities = new LinkedHashSet<>();
 

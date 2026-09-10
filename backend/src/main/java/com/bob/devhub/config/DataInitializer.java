@@ -44,6 +44,19 @@ public class DataInitializer implements CommandLineRunner {
     @Value("${app.demo.password:}")      private String demoPassword;
 
     @Override
+    /**
+     * Seed login accounts at startup, if and only if this deployment should have them.
+     *
+     * <p>Two distinct cases, and the difference matters: under the {@code dev} profile it
+     * seeds well-known demo/admin accounts with PUBLISHED passwords, which is fine on a
+     * laptop and would be a serious hole in production. Everywhere else nothing is seeded
+     * unless {@code app.demo.enabled} is on AND {@code app.demo.password} is explicitly
+     * set — so a public demo account can never come into existence by default, and never
+     * with a password from this file.
+     *
+     * <p>Idempotent through {@code seed()}, which skips a username that already exists: a
+     * restart never overwrites a password a real user has changed.
+     */
     public void run(String... args) {
         if (env.acceptsProfiles(Profiles.of("dev"))) {
             seed("demo", "demo@devhub.local", "demo12345", EnumSet.of(Role.ROLE_USER));

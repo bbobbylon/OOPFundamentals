@@ -21,8 +21,34 @@
  *    your account. Sign-in/sync simply won't be available until it's fixed.
  *  - After editing, commit and push — the GitHub Pages workflow redeploys the
  *    frontend automatically.
+ *
+ * WHO LOADS IT. Seven pages, all of them the ones that can reach a backend:
+ * app.html (sign-in + progress sync) and the six playground pages
+ * (auth-identity-live, jwt-playground, python-, shell-, spring-boot-,
+ * typescript-playground). The other 500+ lesson pages never load it — they
+ * have no reason to know where the backend is.
+ *
+ * WHO READS IT. Exactly one shared engine: devhub-run.js, which must be loaded
+ * AFTER this file (it reads window.DEVHUB_API_BASE at parse time and falls
+ * back to http://localhost:8081 when the value is null). app.html reads it the
+ * same way for /api/auth and /api/progress. Nothing else in frontend/ touches
+ * the network.
+ *
+ * PERSISTENCE. None of its own. The token that devhub-run.js and app.html
+ * send to this base URL lives in localStorage under 'dlh_token' / 'dlh_user',
+ * owned by those two files, not by this one.
+ *
+ * GATES. tmp_vcheck.mjs treats a `<script src="config.js">` reference like any
+ * other internal link (it must resolve), nothing more — there is no check
+ * that the URL below is live. A wrong URL degrades to anonymous mode, silently.
  * ========================================================================== */
 
+/**
+ * The backend origin, resolved once at load. A self-invoking function rather
+ * than a bare string so the same file serves both the deployed site
+ * (github.io → the public HTTPS backend) and local/Docker (null → localhost
+ * fallback in the readers) without anyone editing it per environment.
+ */
 window.DEVHUB_API_BASE = (function () {
   // Deployed on GitHub Pages (HTTPS) → talk to your public backend.
   // ⬇️ EDIT THIS ONE LINE to your deployed backend URL (HTTPS, no trailing slash).

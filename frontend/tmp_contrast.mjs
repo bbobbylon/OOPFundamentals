@@ -1,6 +1,49 @@
 /* ============================================================================
  * tmp_contrast.mjs — text-contrast gate for a theme.
  *
+ * THE QUESTION IT ANSWERS
+ *   "In a given theme, is any text on any page effectively INVISIBLE?" —
+ *   every element that owns a text node, measured in a real browser against
+ *   its composited background, reported when under the threshold and grouped
+ *   by selector so you fix causes, not instances.
+ *
+ * HOW TO RUN
+ *   node frontend/tmp_contrast.mjs                     # cream, the default target
+ *   node frontend/tmp_contrast.mjs --theme=dark        # guard against regressions
+ *   node frontend/tmp_contrast.mjs --min=3             # a stricter floor than 2.2
+ *   node frontend/tmp_contrast.mjs --pages=a.html,b.html
+ *   node frontend/tmp_contrast.mjs --width=390         # viewport width (default 390)
+ *   node frontend/tmp_contrast.mjs --json=out.json     # full list (relative to frontend/)
+ *   node frontend/tmp_contrast.mjs --inject=fix.css    # try a fix WITHOUT editing the site
+ *   node frontend/tmp_contrast.mjs --settle=1500       # let animated demos settle first
+ *   Needs a browser via tmp_pw.mjs (playwright, or playwright-core + system
+ *   Chrome/Edge). Sets the theme by writing `devhub-theme` into localStorage
+ *   before each load. Exit 1 when anything is under the floor.
+ *
+ * WHAT A FAILURE MEANS
+ *   A selector whose text sits under `--min`:1 against what is actually
+ *   painted behind it. The top rows (most pages affected) are the shared
+ *   components; fix those in devhub-hf.css / devhub-hf-theme.js and the
+ *   long tail usually collapses. A clean run means nothing is under 2.2:1
+ *   in THIS theme at THIS width. Run it for both themes.
+ *
+ * WHAT IT CANNOT SEE
+ *   - Anything between 2.2:1 and WCAG's 4.5:1. The 2.2 floor is deliberately
+ *     BELOW WCAG: this gate is for "the text is invisible", not "the text
+ *     could be crisper" — a gate that flags every muted caption is one people
+ *     learn to ignore. Pass --min=4.5 for a real AA sweep, and expect noise.
+ *   - Transient states. It measures after `--settle` ms; a demo that repaints
+ *     a box later, or the cream-theme legibility RACE (tmp_creamrace.mjs is
+ *     the targeted repro), can read fine on one load and fail on the next.
+ *   - Decorative text: aria-hidden ornament and gradient-clipped headings are
+ *     exempt on purpose, so a genuinely unreadable one of those is missed.
+ *   - Text on a background IMAGE or gradient — only solid backgroundColor
+ *     layers are composited; a gradient ground reads as whatever opaque
+ *     colour sits beneath it.
+ *
+ * GIT NOTE: gitignored by `frontend/tmp*`; a new gate needs its own
+ * `!frontend/tmp_<name>.mjs` allowlist line in .gitignore or git never sees it.
+ *
  * WHY THIS EXISTS. devhub.css hardcodes plenty of non-token colors (#cbd5e1,
  * #eef4fb, #86efac ...) and repairs them for the legacy light theme with rules
  * keyed on :root[data-theme="light"]. The Head First kit's cream theme uses

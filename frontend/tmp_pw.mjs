@@ -1,6 +1,37 @@
 /* ============================================================================
  * tmp_pw.mjs — the one place that knows how to find Playwright and a browser.
  *
+ * NOT A GATE. This is a helper module with no CLI: it answers no question
+ * about the site and never runs on its own. tmp_smoke, tmp_shot, tmp_contrast
+ * and tmp_creamrace import it to get a launchable `chromium` and a real
+ * browser binary path, so the "how do I find a browser" logic lives once.
+ *
+ * HOW TO USE (from another script — there is nothing to run here)
+ *   import { loadChromium, browserExecutablePath } from './tmp_pw.mjs';
+ *   const chromium = loadChromium();
+ *   const browser  = await chromium.launch({ executablePath: browserExecutablePath() });
+ *   Environment knobs: PW_MODULE (absolute path to a playwright package dir),
+ *   CHROME_PATH (a browser binary). On a machine with no `playwright` package
+ *   at all, `playwright-core` + an installed Chrome/Edge is enough — that is
+ *   how the browser gates run on Bobby's Windows box today.
+ *
+ * WHAT A FAILURE MEANS
+ *   loadChromium() exits the PROCESS with an install instruction when no
+ *   playwright module resolves — deliberately not a throw, so every caller
+ *   stays one line and nobody gets a stack trace for "not installed".
+ *   browserExecutablePath() returning undefined is not a failure: it means
+ *   "let playwright use its own downloaded chromium".
+ *
+ * WHAT IT CANNOT SEE
+ *   Whether the browser it found is RECENT enough for playwright-core's
+ *   protocol. A stale system Chrome fails at launch inside the caller, not
+ *   here. If every browser gate suddenly dies at launch, look here first and
+ *   set PW_MODULE / CHROME_PATH explicitly.
+ *
+ * GIT NOTE: gitignored by `frontend/tmp*`; a new gate needs its own
+ * `!frontend/tmp_<name>.mjs` allowlist line in .gitignore or git never sees it.
+ * This file's own `!` line MUST stay — without it the browser gates fail at import.
+ *
  * WHY THIS EXISTS: tmp_shot / tmp_smoke / tmp_contrast / tmp_creamrace each
  * carried their own copy of "load playwright, launch chromium". Three of those
  * copies hardcoded the cloud sandbox's paths — `/opt/node22/lib/node_modules`

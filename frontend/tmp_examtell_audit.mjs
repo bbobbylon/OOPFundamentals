@@ -1,6 +1,46 @@
 /* ============================================================================
  * tmp_examtell_audit.mjs — detect "giveaway" tells in the DevHub exam banks.
  *
+ * THE QUESTION IT ANSWERS
+ *   "Can a test-taker beat an exam-*.html bank WITHOUT knowing the material?"
+ *   — by always picking the longest (or shortest) option, or by always picking
+ *   the same letter — plus one coverage check: does every option on every
+ *   question carry a real per-option `why` explanation?
+ *
+ * HOW TO RUN
+ *   node frontend/tmp_examtell_audit.mjs             # every exam-*.html bank
+ *   node frontend/tmp_examtell_audit.mjs http-rest   # banks whose name contains this
+ *   node frontend/tmp_examtell_audit.mjs http-rest --lengths   # per-question dump
+ *   No prerequisites: pure node + vm (the bank is pulled out of the page's
+ *   inline <script> by stubbing DevHubQuiz.render). Exit 0 clean, 1 on any
+ *   tell, 2 when no bank matched. Run it after ANY bank edit, then
+ *   `node frontend/tmp_genpracticemap.mjs` because the practice map is derived
+ *   from the same banks.
+ *
+ * WHAT A FAILURE MEANS
+ *   LENGTH TELL — the correct option is the longest/shortest in >40% of
+ *   questions, or its mean length-rank sits outside 2.15–2.85 of 4, or a
+ *   single question's right answer towers ≥1.6× over its distractors. The
+ *   fix is length-bracketing: one shorter AND one longer distractor, correct
+ *   answer in the middle. POSITION TELL — one raw index holds >40% of the
+ *   single-answer questions (the engine shuffles, but a skewed source means
+ *   distractors were an afterthought). WHY COVERAGE — a question whose `why`
+ *   array is missing, misaligned, or boilerplate under 20 chars. A clean run
+ *   means the bank is not guessable by these three shapes.
+ *
+ * WHAT IT CANNOT SEE
+ *   - Whether a question is any GOOD. A well-bracketed, well-spread question
+ *     with a wrong answer key, a distractor that is also correct, or a
+ *     `why` that explains something false passes every check here.
+ *   - Tells in WORDING: "all of the above", the only option using the exact
+ *     term from the stem, the only grammatically matching option.
+ *   - Practice-*.html and flashcard decks — exam-*.html only.
+ *   - Small banks' position skew: under 8 single-answer questions the
+ *     position check is skipped on purpose.
+ *
+ * GIT NOTE: gitignored by `frontend/tmp*`; a new gate needs its own
+ * `!frontend/tmp_<name>.mjs` allowlist line in .gitignore or git never sees it.
+ *
  * Two anti-patterns make a multiple-choice question guessable without knowing
  * the material:
  *
@@ -43,6 +83,7 @@ const WHY_MIN_CHARS    = 20;   // a per-option "why" shorter than this is boiler
                                // ("Wrong.") rather than an actual reason
 
 /* ---- pull the inlined question bank out of an exam-*.html file ----------- */
+/** The bank object an exam page hands to DevHubQuiz.render, captured via a vm stub. */
 function loadBank(file) {
   const html = fs.readFileSync(file, 'utf8');
   // inline <script> blocks only (skip <script src="...">)
@@ -66,6 +107,7 @@ function loadBank(file) {
 const len = s => String(s).trim().length;
 
 /* ---- analyse one bank ---------------------------------------------------- */
+/** Length / position / why statistics for one bank, plus the three boolean tells. */
 function analyse(bank) {
   const posCount = {};              // raw answer index → frequency (single-answer only)
   const flags = [];                 // egregious per-question length outliers

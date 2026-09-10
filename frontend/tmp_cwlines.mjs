@@ -1,17 +1,51 @@
 /* tmp_cwlines.mjs — are CodeWalk line references in range?
  *
- * A step's `line:`/`lines:` values are used by devhub-codewalk.js as RAW indices
- * into the rendered line elements (see linesForStep + the lineEls.forEach in
- * devhub-codewalk.js) — so they are ZERO-BASED, and a value equal to the code
- * array's length points one past the end and highlights nothing.
+ * THE QUESTION IT ANSWERS
+ *   "Does every `line:` / `lines:` value in every DevHubCodeWalk.mount() on the
+ *   site point at a line that exists in THAT mount's `code:` array?" — and, as
+ *   a second signal, "does a mount look like it was authored 1-based?"
  *
- * This walks every DevHubCodeWalk.mount() on every page SEPARATELY, because a
- * page can carry several mounts and comparing one mount's indices against
- * another's code array is how you get a scary number that means nothing.
+ *   A step's `line:`/`lines:` values are used by devhub-codewalk.js as RAW
+ *   indices into the rendered line elements (see linesForStep + the
+ *   lineEls.forEach in devhub-codewalk.js) — so they are ZERO-BASED, and a
+ *   value equal to the code array's length points one past the end and
+ *   highlights nothing. The invariant is `0 <= v < n`, NOT `1 <= v <= n`.
  *
- *   node tmp_cwlines.mjs            # summary + the worst offenders
- *   node tmp_cwlines.mjs --all      # every finding
- *   node tmp_cwlines.mjs --file=x.html
+ *   Every mount on every page is scanned SEPARATELY, because a page can carry
+ *   several mounts and comparing one mount's indices against another's code
+ *   array is how you get a scary number that means nothing.
+ *
+ * HOW TO RUN
+ *   node frontend/tmp_cwlines.mjs                 # summary + worst 25 mounts
+ *   node frontend/tmp_cwlines.mjs --all           # every finding
+ *   node frontend/tmp_cwlines.mjs --file=x.html   # one page
+ *   No prerequisites: pure node, static text scan. `scanPage` is also exported
+ *   so another script can reuse the parser. NOTE: this script never sets a
+ *   non-zero exit code — read the two counts, do not rely on `$?`.
+ *
+ * WHAT A FAILURE MEANS
+ *   "out of range" = a step highlights NOTHING at that index (the widget dims
+ *   every non-current line, so the whole block sits grey while the note talks).
+ *   "blank lines" = a single ref or a range EDGE lands on an empty line — the
+ *   off-by-one tell. "looks 1-BASED" = nothing at index 0 and the max equals
+ *   the length: every highlight on that mount is one line low and the last
+ *   step falls off the end. Four pages shipped exactly that way. A clean run
+ *   means every index is in range — nothing more.
+ *
+ * WHAT IT CANNOT SEE
+ *   - A note pointing at the WRONG-but-in-range line. `lines:[2,5,9]` on a
+ *     32-line block is valid whether or not those are the lines the note is
+ *     about. 69 pages once shipped the identical pasted plan
+ *     `1-7 9-14 16-20 22-26 28-32` sized for a layout none of them had, and
+ *     finding the mis-pointed notes took a 242-mount MANUAL sweep. This gate
+ *     is the cheap half of that job; reading the notes is the other half.
+ *   - Whether the code array itself is right (tmp_codecheck.mjs compiles it)
+ *     or whether the step teaches something true (nothing does — read it).
+ *   - `line:` values computed at runtime or built from variables; it reads
+ *     literal integers only.
+ *
+ * GIT NOTE: gitignored by `frontend/tmp*`; a new gate needs its own
+ * `!frontend/tmp_<name>.mjs` allowlist line in .gitignore or git never sees it.
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -58,6 +92,12 @@ function codeLines(body) {
   return out;
 }
 
+/**
+ * Scan one page's source for every DevHubCodeWalk.mount() and return one
+ * finding per mount: code length, min/max index, out-of-range and blank-edge
+ * hits, and the 1-based signature. Exported for reuse; the CLI below is a
+ * thin loop over it.
+ */
 export function scanPage(src, file) {
   const findings = [];
   const marker = 'DevHubCodeWalk.mount(';

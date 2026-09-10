@@ -24,6 +24,20 @@
  *
  * Playwright and the browser binary are located by tmp_pw.mjs — a global
  * install, $PW_MODULE, or playwright-core paired with your system Chrome/Edge.
+ *
+ * WHAT IT CANNOT SEE
+ *   Anything you do not look at. This produces PNGs; it has no opinion and no
+ *   exit code, so it can never fail a build — every judgement is the reviewer's.
+ *   A shot is ONE MOMENT of an animated page: the scenario walks run at ~800ms
+ *   a step, so a shot taken after the settle delay catches whatever step the
+ *   walk happens to be on, and a mid-transition frame can look broken when the
+ *   page is fine (and vice versa). --settle exists for exactly that.
+ *   It shoots the VIEWPORT unless --full, so a layout that breaks below the
+ *   fold is out of frame. It renders in whatever theme the page boots into, so
+ *   a cream regression is invisible in a default-dark shot — pass --theme.
+ *   And it says nothing about text CONTRAST (tmp_contrast.mjs) or horizontal
+ *   overflow (tmp_smoke.mjs); a screenshot of unreadable text looks like a
+ *   screenshot.
  * ========================================================================== */
 import { createServer } from 'node:http';
 import { readFile, mkdir } from 'node:fs/promises';

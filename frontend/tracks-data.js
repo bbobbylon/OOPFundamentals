@@ -4,6 +4,53 @@
  * their own track + section (e.g. for the notebook feature) without embedding
  * this whole array a second time. app.html still defines `const TRACKS` from
  * this — nothing about the hub's own rendering changed.
+ *
+ * THIS FILE IS THE REGISTRY. A page that is not listed here does not exist as
+ * far as the hub is concerned: no sidebar entry, no chapter rail, no
+ * difficulty theming, no progress, no "Test yourself" strip. Registering a
+ * page means adding it under a section below AND, for a new track, wiring the
+ * track into the TRACKS/CATEGORIES arrays in app.html.
+ *
+ * SHAPE (documented once here, not per entry):
+ *   track    { id, icon, label, desc, sections: [...] }
+ *              id     stable key — app.html's TRACK_BY_ID, data-track-id
+ *                     attributes, per-track progress bars and the category
+ *                     placement (leftovers get a fallback group) all key on it
+ *              icon   one emoji, shown in the sidebar and track cards
+ *              label  display name; app.html's iconFor() matches on it
+ *              desc   the track card blurb
+ *   section  { label, pages: [...] }   an empty `pages` is tolerated —
+ *              devhub-chapters.js skips it when numbering
+ *   page     { title, file, level }
+ *              title  shown in the sidebar and the chapter rail (which
+ *                     shortens it: "Head First: X 🦆" → "X")
+ *              file   the HTML filename, unique across the WHOLE registry
+ *              level  'beginner' | 'intermediate' | 'advanced' | 'expert' —
+ *                     app.html builds FILE_LEVEL from it and stamps
+ *                     body[data-level] on the framed page, which is what
+ *                     devhub.css's difficulty glow keys off
+ *
+ * WHO LOADS IT. 523 pages: app.html (line ~548, `const TRACKS =
+ * window.DEVHUB_TRACKS`), notebook.html, stats.html, and every lesson page
+ * (for devhub-chapters.js). It is cached after the first hit, which is why an
+ * earlier slimmed-down `chapter-index.js` was dropped — see the banner in
+ * devhub-chapters.js.
+ *
+ * ORDERING. On a lesson page this MUST precede devhub-chapters.js; the rail
+ * reads DEVHUB_TRACKS at DOMContentLoaded and renders nothing, silently, when
+ * it is absent. That is the only real script-order constraint on the site.
+ *
+ * PERSISTENCE. None. The per-lesson learned state that app.html keys by
+ * `file` lives in localStorage 'dlh_progress_v1', owned by app.html.
+ *
+ * GATES. tmp_vcheck.mjs evaluates this file with `new Function` (so it must
+ * stay a plain script — no modules, no DOM) and checks registration BOTH
+ * ways: every `file:` must exist on disk, every page on disk must be
+ * registered (a few landing/index pages are whitelisted), and no file may
+ * appear in two sections. A red vcheck blocks the Pages deploy.
+ *
+ * THE SECOND GLOBAL, window.DEVHUB_PRACTICE, at the bottom of this file, is
+ * DERIVED — see the note above its markers. Never hand-edit it.
  * ========================================================================== */
 window.DEVHUB_TRACKS = [
   {
@@ -984,6 +1031,30 @@ window.DEVHUB_TRACKS = [
     ]
   },
 ];
+
+/* ---------------------------------------------------------------------------
+ * window.DEVHUB_PRACTICE — the lesson → practice map. DERIVED, NOT AUTHORED.
+ *
+ * Everything between the GENERATED / END GENERATED markers below is written by
+ * `node frontend/tmp_genpracticemap.mjs`, which reads every exam-*.html and
+ * practice-*.html bank, collects each question's `ref: { label, file }` (the
+ * lesson it came from), and INVERTS that edge: for each lesson file, which
+ * exam / graded-practice page / flashcard deck covers it. devhub-chapters.js
+ * renders the result as the "Test yourself" strip at the end of the lesson.
+ *
+ * Shape: { titles: { <page.html>: 'Display Title', … },
+ *          map:    { <lesson.html>: { exam?, practice?, deck? }, … } }
+ *
+ * Hand-editing the block is how a lesson silently loses its strip — the next
+ * generator run overwrites the edit, and `tmp_genpracticemap.mjs --check`
+ * (run by the gate sweep) fails while the two disagree. After ANY bank edit,
+ * re-run the generator, not this file. One known quirk: --check compares the
+ * block as a STRING, so mixed CRLF/LF line endings report STALE with a
+ * zero-byte content difference; re-running the generator normalises them.
+ *
+ * The generator splices on the exact marker strings, so this comment sits
+ * ABOVE the START marker on purpose — anything inside the markers is lost.
+ * ------------------------------------------------------------------------- */
 
 /* ==== GENERATED: lesson → practice map (tmp_genpracticemap.mjs) ==== */
 /* Derived from the banks by tmp_genpracticemap.mjs — do not hand-edit; run the

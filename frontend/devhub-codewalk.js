@@ -23,10 +23,59 @@
 
    No dependencies, no build. Each page provides only data; this file owns the
    rendering, line highlighting, play/step controls, and the variable-diff pulse.
+
+   THE CONTRACT THAT COST A 242-MOUNT REPAIR SWEEP — read before authoring:
+
+     `line:` and `lines:` are ZERO-BASED raw indices into `code`.
+     The invariant is  0 <= v < code.length,  NOT  1 <= v <= code.length.
+
+   The gutter prints idx+1, so what a reader SEES as "line 7" is `line: 6`.
+   Author them 1-based and every step highlights one line too low and the last
+   step falls off the end — and nothing throws: the page is valid, the widget
+   renders, the counter advances over the wrong line. Sixty-nine pages once
+   shipped carrying the identical pasted plan `1-7 9-14 16-20 22-26 28-32`,
+   five steps sized for a 32-line layout none of them had, because a cloned
+   mount's `lines:` arrays are NOT part of the skeleton: write the `code:`
+   array FIRST, then index it. `node frontend/tmp_cwlines.mjs` checks the range
+   invariant and the 1-based signature; it cannot see a note that points at the
+   wrong-but-in-range line. When a step teaches something the code never shows,
+   append to `code` — never repoint the note at unrelated lines.
+
+   TWO STEP SHAPES that are NOT interchangeable (see linesForStep):
+     line:  7          one line
+     line:  [4, 9]     a RANGE, 4..9 inclusive (always exactly 2 elements)
+     lines: [2,5,9,11] an explicit LIST — any length, never a range
+
+   WHO LOADS IT. 474 lesson pages, each with one or more inline
+   `DevHubCodeWalk.mount(...)` calls placed right after this <script>. It is
+   independent of every other engine and of script order; only the mount
+   target must exist in the DOM when mount() runs (pages call it inline below
+   the target, so it does).
+
+   STYLING. This widget does NOT inject its own CSS. The `.cw-*` rules live in
+   devhub.css, so a page must link devhub.css or the walk renders unstyled. (The
+   self-contained rule that the newer engines follow has not been applied here
+   yet — every page that mounts a CodeWalk already links devhub.css.)
+
+   PERSISTENCE. None. Position resets on every load, by design.
+
+   GATES THAT READ THE MOUNTS. tmp_cwlines.mjs (index range), tmp_codecheck.mjs
+   (compiles TS/Java `code:` arrays for real), tmp_assetcheck.mjs (counts mounts
+   so a bulk edit that drops one fails), tmp_hfaudit.mjs (a mount counts toward
+   the "explain" dimension of the teaching bar).
+
+   EXPORTS. `mount` (used everywhere) and `highlight` (exported for reuse, but as
+   of 2026-09-08 no page or engine calls it — devhub-syntax.js has its own
+   colouriser for static <pre> blocks; this one is the CodeWalk's).
    --------------------------------------------------------------------------- */
 (function () {
   'use strict';
 
+  /**
+   * HTML-escape a source line before it goes into innerHTML. Every code line
+   * passes through here before hl() adds spans, so the spans are the ONLY
+   * markup in the rendered code — an author's `<T>` or `&&` stays literal.
+   */
   function esc(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
@@ -35,8 +84,22 @@
   // ordered regex scan: a comment/string match consumes its whole region, so
   // keywords/numbers inside it are never separately colored. No placeholders,
   // no special sentinel bytes - the output is plain text.
+
+  /**
+   * Keyword vocabulary shared across every language a CodeWalk shows. It is
+   * deliberately the UNION (Java + TS + Python + Kotlin + SQL) rather than
+   * per-language: a mount never declares its language, and a false keyword hit
+   * in prose-like code is cheaper than a plain-white block.
+   */
   var KW = 'abstract|class|interface|enum|extends|implements|public|private|protected|static|final|void|return|new|if|else|elif|for|while|switch|case|break|continue|default|this|super|import|export|from|const|let|var|function|async|await|try|catch|finally|throw|throws|typeof|instanceof|of|in|yield|def|lambda|with|as|pass|record|sealed|permits|val|fun|package|namespace|type|readonly|select|where|group|order|by';
+  /** Literals coloured like numbers: JS/Java/Python/Ruby spellings of the same ideas. */
   var LIT = 'true|false|null|undefined|None|True|False|nil|self';
+  /**
+   * The single alternation hl() scans with. ORDER IS THE ALGORITHM: comment
+   * before string before keyword means a `//` region swallows the "keywords"
+   * inside it in one match, which is why no placeholder pass is needed. Group
+   * 8 (identifier followed by `(`) is what colours a call site as a function.
+   */
   var RE = new RegExp(
     '(\\/\\/[^\\n]*|#[^\\n]*|\\/\\*[\\s\\S]*?\\*\\/)' +          // 1 comment
     '|(\\x22[^\\x22]*\\x22|\\x27[^\\x27]*\\x27|`[^`]*`)' +       // 2 string ("..." / \x27...\x27 / `...`)
@@ -48,6 +111,12 @@
     '|\\b([a-z_$][A-Za-z0-9_$]*)(?=\\s*\\()',                    // 8 function call
     'g');
 
+  /**
+   * Colourise one source line: escape it, then wrap each RE match in the span
+   * class devhub.css's token palette expects (.cm/.str/.kw/.num/.type/.fn).
+   * Called once per line at mount time and never again — the walk toggles
+   * classes on the rendered lines, it never re-renders the code.
+   */
   function hl(raw) {
     return esc(raw).replace(RE, function (m, cm, str, dec, kw, lit, num, type, fn) {
       if (cm != null)   return '<span class="cm">' + cm + '</span>';
@@ -62,6 +131,13 @@
     });
   }
 
+  /**
+   * The ONE place that turns a step's `line`/`lines` authoring into the list of
+   * zero-based indices to highlight. render(), firstStepForLine() and the
+   * "seen" (done) tracking all go through it, so the two-shape rule below is
+   * enforced exactly once. tmp_cwlines.mjs re-implements this reading to check
+   * ranges offline — keep the two in step if the shapes ever change.
+   */
   function linesForStep(s) {
     if (!s) return [];
 
@@ -97,6 +173,14 @@
     return [s.line];
   }
 
+  /**
+   * Build one walkthrough into `target` (selector or element) from a page's
+   * inline data — the only public entry point. Renders the header/controls,
+   * the numbered code column and the state panel, then wires play/step/click.
+   * Returns {next, prev, play, reset} so a page could script it, though none
+   * do. `data.intervalMs` defaults to 1700 — slower than the site's ~800ms
+   * scenario pacing on purpose, because each step carries prose to read.
+   */
   function mount(target, data) {
     var root = typeof target === 'string' ? document.querySelector(target) : target;
     if (!root) { console.warn('DevHubCodeWalk: target not found', target); return; }
@@ -136,8 +220,18 @@
     }).join('');
     var lineEls = Array.prototype.slice.call(codeEl.querySelectorAll('.cw-line'));
 
+    /* Walk state: `cur` is the step index (-1 = nothing highlighted yet, the
+       "press Play" prompt); `timer` is the autoplay handle stop() clears. */
     var cur = -1, playing = false, timer = null;
 
+    /**
+     * The right-hand panel for step `s`: note, variable boxes, custom vis,
+     * output and callout. `prev` is the previous step so a variable whose
+     * value changed since last step gets the `.changed` pulse — the diff is
+     * computed by string compare here, not tracked anywhere. NOTE the "Line N"
+     * label only reads `s.line`; a step authored with `lines:` prints "Line -"
+     * (the highlight itself is still correct, see linesForStep).
+     */
     function renderPanel(s, prev) {
       var lbl = s.line == null ? '-' :
         (Array.isArray(s.line) ? (s.line[0] + 1) + '-' + (s.line[1] + 1) : (s.line + 1));
@@ -158,6 +252,12 @@
       return html;
     }
 
+    /**
+     * Repaint everything for the current `cur`: line classes (.cur = this
+     * step's lines, .done = lines any earlier step touched, .dim = not yet
+     * reached), scroll the first active line into view, refresh the panel and
+     * the button enabled-state. Cheap enough to call on every step.
+     */
     function render() {
       counter.textContent = (cur + 1) + ' / ' + steps.length;
       var s = steps[cur];
@@ -180,18 +280,31 @@
       btnNext.disabled = cur >= steps.length - 1;
     }
 
+    /** Jump to step n, clamped into range, and repaint. Every navigation ends here. */
     function go(n) { cur = Math.max(0, Math.min(steps.length - 1, n)); render(); }
+    /** Advance one step; past the last step it stops autoplay instead of wrapping. */
     function next() { if (cur < steps.length - 1) go(cur + 1); else stop(); }
+    /** Back one step (go() clamps at 0). */
     function prev() { go(cur - 1); }
+    /** Keep the Play/Pause button's label and accent class in sync with `playing`. */
     function setPlayLabel() { btnPlay.innerHTML = playing ? '&#10073;&#10073; Pause' : '&#9654; Play'; btnPlay.classList.toggle('play', !playing); }
+    /** Halt autoplay. Safe to call when not playing; every manual control calls it first. */
     function stop() { playing = false; clearTimeout(timer); setPlayLabel(); }
+    /** One autoplay beat: step, then schedule the next beat unless we just hit the end. */
     function tick() { next(); if (cur >= steps.length - 1) { stop(); return; } timer = setTimeout(tick, interval); }
+    /** Play/Pause toggle. Pressing Play on a finished walk restarts from the top. */
     function play() {
       if (playing) { stop(); return; }
       if (cur >= steps.length - 1) cur = -1;
       playing = true; setPlayLabel(); tick();
     }
+    /** Back to the untouched state (-1): all lines undimmed, the "press Play" prompt. */
     function reset() { stop(); cur = -1; render(); }
+    /**
+     * Click-a-line support: the first step whose lines include `li`, or the
+     * current step (or 0) when no step teaches that line — so clicking an
+     * un-taught line never throws the walk somewhere surprising.
+     */
     function firstStepForLine(li) {
       for (var k = 0; k < steps.length; k++) if (linesForStep(steps[k]).indexOf(li) >= 0) return k;
       return cur < 0 ? 0 : cur;

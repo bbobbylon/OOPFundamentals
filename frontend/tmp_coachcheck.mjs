@@ -1,20 +1,37 @@
 /* tmp_coachcheck.mjs — does every "Code With Me" coach entry fire on the
  * mistake it describes, and stay QUIET on a correct solution?
  *
- *   node frontend/tmp_coachcheck.mjs
+ * THE QUESTION IT ANSWERS
+ *   For every `coach:` entry in all nine practice-*.html banks: does its regex
+ *   trip on the wrong code it was written for, and stay silent on a correct
+ *   solution? And is every authored entry covered by a test case at all?
  *
- * A coach entry is a regex with an opinion. Nothing else in the site can tell
- * whether it is RIGHT: vcheck proves the page parses, codecheck compiles the
- * snippets, and a wrong `match` breaks neither — it just tells a learner their
- * correct code is wrong, which is the one thing CLAUDE.md says never to do.
- * So every entry carries two samples here: code that should trip it, and a
- * correct solution that must not.
+ *   A coach entry is a regex with an opinion. Nothing else in the site can
+ *   tell whether it is RIGHT: vcheck proves the page parses, codecheck
+ *   compiles the snippets, and a wrong `match` breaks neither — it just tells
+ *   a learner their correct code is wrong, which is the one thing CLAUDE.md
+ *   says never to do. So every entry carries two samples here: code that
+ *   should trip it, and a correct solution that must not.
  *
- * The bank lives inside each page's inline <script>, so this pulls that block
- * out and runs it in a vm with a stubbed DevHubCodeGrade/document, capturing
- * the bank object. Matching then replays devhub-codegrade.js's real
- * matchCoachEntry() — including the `absent` length gate — so a pass here
- * means the engine behaves the same way in the browser.
+ *   The bank lives inside each page's inline <script>, so this pulls that
+ *   block out and runs it in a vm with a stubbed DevHubCodeGrade/document,
+ *   capturing the bank object. Matching then replays devhub-codegrade.js's
+ *   real matchCoachEntry() — including the `absent` length gate — so a pass
+ *   here means the engine behaves the same way in the browser.
+ *
+ * HOW TO RUN
+ *   node frontend/tmp_coachcheck.mjs      # no flags; exit 1 on FAIL or untested
+ *   No prerequisites: pure node + vm. The corpus (CASES below) is the test
+ *   data — add BOTH samples for a new entry in the same commit as the entry.
+ *   COACH_ABSENT_MIN_EXTRA must track the constant in devhub-codegrade.js.
+ *
+ * WHAT A FAILURE MEANS
+ *   FAIL = the regex is quiet on its own bad sample, OR fires on the correct
+ *   one — the second is the unshippable case, and the rule learned the hard
+ *   way is that such an entry gets CUT, not softened. "untested entry" = an
+ *   authored coach id with no CASES row (exit 1 too). NUDGE = fires on both,
+ *   by declared design (`nudge: true`), reported rather than hidden. A clean
+ *   run means "not wrong on these two samples per entry".
  *
  * WHAT IT CANNOT SEE (the valuable half):
  *   - Whether the MESSAGE is true. It checks that the regex fires, not that
@@ -28,6 +45,13 @@
  *   - Anything about an exercise with no coach entry at all. Silence is not
  *     coverage: isomorphic-strings and graph-valid-tree are deliberately
  *     un-coached because no honest regex exists for their real bug.
+ *   - An `absent` entry that can never fire because a correct solution is
+ *     under 40 chars longer than its starter — the sample here is written
+ *     long enough to clear the gate, so the gate's real effect in the browser
+ *     is only reported ([absent gate: …]), not failed.
+ *
+ * GIT NOTE: gitignored by `frontend/tmp*`; a new gate needs its own
+ * `!frontend/tmp_<name>.mjs` allowlist line in .gitignore or git never sees it.
  */
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -35,6 +59,11 @@ import vm from 'node:vm';
 const DIR = 'B:/Documents/Coding/OOPFundamentals/frontend/';
 const COACH_ABSENT_MIN_EXTRA = 40; // must track devhub-codegrade.js
 
+/**
+ * Replay of devhub-codegrade.js's matchCoachEntry(): true when entry `c`
+ * would show its message for `code` in `lang`, honouring the `absent`
+ * inversion and its starter-length gate. Kept behaviour-identical on purpose.
+ */
 function matchCoachEntry(c, code, lang, starterCode) {
   if (c.absent && code.length < starterCode.length + COACH_ABSENT_MIN_EXTRA) return false;
   let re = c.match;
@@ -49,6 +78,11 @@ function matchCoachEntry(c, code, lang, starterCode) {
   return c.absent ? !hit : hit;
 }
 
+/**
+ * Pull the exercise bank out of a practice page: find the inline <script>
+ * that calls DevHubCodeGrade.render, run it in a vm with render() stubbed to
+ * capture its second argument, and return that bank object.
+ */
 function loadBank(page) {
   const html = readFileSync(DIR + page, 'utf8');
   const blocks = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]);

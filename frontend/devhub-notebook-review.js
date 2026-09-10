@@ -32,10 +32,30 @@
  *            {trackId, trackLabel, sectionLabel} by the caller (notebook.html
  *            looks these up from tracks-data.js before calling in).
  *   opts:    { scopeId: 'all'|trackId, scopeLabel: string, accent?: string }
+ *
+ * WHO LOADS IT: exactly one page, notebook.html.
+ *
+ * PERSISTS: through devhub-flashcards.js's store — localStorage
+ *   'dlh-flash:notebook-<scopeId>' → { 'k:<entry.id>': box }. Every scope
+ *   ('all', or one trackId) is its OWN store, so mastering an entry in the
+ *   Java scope does not mark it mastered in the all-tracks scope.
+ *
+ * THE LEITNER RULE is applied here in runSelfTest's rate() exactly as
+ *   devhub-flashcards.js's header states it (up one box capped at 5, or
+ *   straight back to 1). Keep the two in lockstep or "mastered" forks.
+ *
+ * DEPENDS ON: devhub-flashcards.js MUST load first (DevHubFlash.render /
+ *   loadBoxes / saveBoxes / injectStyles). Inside the hub iframe, "Open
+ *   lesson" asks app.html to navigate via postMessage {type:'dlh-navigate'}
+ *   so the hub rail and progress stay in sync; standalone it just sets
+ *   location. Entry labels (trackLabel/sectionLabel) are supplied by the
+ *   caller from tracks-data.js — this file never reads the registry itself.
  * ========================================================================== */
 (function (global) {
   'use strict';
 
+  /** Tiny DOM builder — same helper as devhub-flashcards.js / devhub-quiz.js, copied on
+   *  purpose so each engine stays self-contained. */
   function h(tag, props, ...kids) {
     const el = document.createElement(tag);
     if (props) for (const k in props) {
@@ -48,8 +68,12 @@
       el.appendChild(typeof kid === 'string' ? document.createTextNode(kid) : kid); }
     return el;
   }
+  /** Fisher–Yates on a copy; the caller's entry array is never reordered in place. */
   function shuffle(a) { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
 
+  /** Open a saved section. In the hub iframe this posts dlh-navigate to app.html (which
+   *  swaps the iframe and marks progress); standalone it navigates directly. Exported so
+   *  notebook.html's own entry list can use the identical behaviour. */
   function navigateTo(entry) {
     var file = entry.file, anchor = entry.anchor;
     try {
@@ -61,7 +85,9 @@
     global.location.href = file + (anchor ? '#' + anchor : '');
   }
 
-  /* ---- interleaving: round-robin across a bucket key, shuffled within ---- */
+  /** Interleaving order: bucket by sectionLabel (else trackId), shuffle bucket order and
+   *  each bucket's contents, then deal round-robin — so consecutive cards come from
+   *  different sections for as long as more than one section still has cards. */
   function interleaveOrder(entries) {
     var buckets = {}, order = [];
     entries.forEach(function (e) {
@@ -80,13 +106,16 @@
     return order;
   }
 
-  /* ---- Flashcards: thin passthrough to DevHubFlash ------------------------ */
+  /** Flashcards mode: a thin pass-through to DevHubFlash.render() over buildDeck(). */
   function renderFlashcards(root, entries, opts) {
     root.innerHTML = '';
     if (!entries.length) { renderEmpty(root); return; }
     global.DevHubFlash.render(root, buildDeck(entries, opts));
   }
 
+  /** Shape notebook entries into a DevHubFlash deck: id 'notebook-<scope>' (the shared
+   *  store key), front = the saved heading, back = the captured snippet, link = jump
+   *  back to the lesson section. card.id makes the box key stable (see keyOf there). */
   function buildDeck(entries, opts) {
     return {
       id: 'notebook-' + (opts.scopeId || 'all'),
@@ -105,6 +134,7 @@
     };
   }
 
+  /** Empty state — points at the "📖 Notebook" button devhub-notebook.js adds to every <h2>. */
   function renderEmpty(root) {
     root.appendChild(h('div', { class: 'df-card', style: 'text-align:center;padding:40px 24px' },
       h('p', { style: 'font-size:15px;color:var(--muted);margin:0' },
@@ -112,20 +142,27 @@
         ' next to any lesson section, then come back.')));
   }
 
-  /* ---- shared self-test engine for Quiz Me + Interleaved ------------------ */
+  /** The self-test engine behind Quiz Me and Interleaved. The two modes differ ONLY in
+   *  orderedEntries; landing, the recall-first card (textarea before reveal), rating and
+   *  the done screen all live here, on the same store the Flashcards mode uses. */
   function runSelfTest(root, entries, opts, orderedEntries, modeLabel, modeHint) {
     global.DevHubFlash.injectStyles();
     var deckId = 'notebook-' + (opts.scopeId || 'all');
     var boxes = global.DevHubFlash.loadBoxes(deckId);
     var N = entries.length;
+    /** Current box of an entry; unseen = box 1. Same key shape as flashcards keyOf(). */
     function boxOf(id) { return boxes['k:' + id] || 1; }
+    /** Number of entries in box 5 — the same mastery definition as devhub-flashcards.js. */
     function mastered() { return entries.filter(function (e) { return boxOf(e.id) >= 5; }).length; }
 
     var state = { queue: [], pos: 0, revealed: 0, reviewed: 0 };
 
+    /** Swap root's content for one screen and scroll to the top. */
     function screen(node) { root.innerHTML = ''; root.appendChild(node); global.scrollTo(0, 0); }
+    /** One value+label tile, in the flashcard engine's .df-stat look. */
     function stat(v, l) { return h('div', { class: 'df-stat' }, h('b', null, String(v)), h('span', null, l)); }
 
+    /** Scope overview: entry count, mastery, the 5-box histogram, and Start. */
     function landing() {
       if (!N) { renderEmpty(root); return; }
       var m = mastered();
@@ -144,17 +181,21 @@
           h('button', { class: 'df-btn primary', onclick: () => start() }, '▶ Start session'))));
     }
 
+    /** Begin a session over the caller-supplied order; counters reset, boxes do not. */
     function start() {
       state.queue = orderedEntries.slice();
       state.pos = 0; state.revealed = 0; state.reviewed = 0;
       card();
     }
 
+    /** One entry: a recall-first card. Rating buttons only appear AFTER reveal, so a
+     *  learner cannot rate a card they never attempted to recall. */
     function card() {
       if (state.pos >= state.queue.length) return done();
       var e = state.queue[state.pos];
       var revealed = false;
 
+      /** Paint the current card in its current revealed/unrevealed state. */
       function draw() {
         var top = h('div', { class: 'df-row', style: 'margin-bottom:10px' },
           h('span', { class: 'df-count' }, 'Card ' + (state.pos + 1) + ' / ' + state.queue.length),
@@ -192,17 +233,21 @@
         screen(h('div', null, h('div', { class: 'df-card' }, top, metaRow, flash, controls)));
       }
 
+      /** The Leitner rule (see header) for this entry, persisted to the scope store. Note
+       *  it does not call DevHubStreak.touch() — only the flashcard engine reports reps. */
       function rate(known) {
         boxes['k:' + e.id] = known ? Math.min(5, boxOf(e.id) + 1) : 1;
         global.DevHubFlash.saveBoxes(deckId, boxes);
         state.reviewed++; state.pos++;
         card();
       }
+      /** Advance without rating; the box is untouched. */
       function skip() { state.pos++; card(); }
 
       draw();
     }
 
+    /** End-of-session summary; mastery is re-read from the store. */
     function done() {
       var m = mastered();
       screen(h('div', { class: 'df-card df-done' },
@@ -218,6 +263,8 @@
     landing();
   }
 
+  /** Quiz Me: weak-first order — shuffle, then stable-sort ascending by box — the same
+   *  rule as the flashcard engine's default study order. */
   function renderQuizMe(root, entries, opts) {
     root.innerHTML = '';
     if (!entries.length) { renderEmpty(root); return; }
@@ -228,6 +275,8 @@
     runSelfTest(root, entries, opts, order, 'Quiz Me', 'Weak entries surface first. Try to recall each one before revealing — retrieval practice, not re-reading.');
   }
 
+  /** Interleaved: interleaveOrder() decides the sequence; boxes are ignored for ordering
+   *  but are still updated by rating, on the same scope store. */
   function renderInterleaved(root, entries, opts) {
     root.innerHTML = '';
     if (!entries.length) { renderEmpty(root); return; }

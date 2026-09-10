@@ -1,7 +1,37 @@
-// tmp_java_data.mjs — the Java layer for every coding-practice exercise:
-// display signature, starter code, functionName, javaTypes, and a REFERENCE
-// SOLUTION used only by tmp_java_verify.mjs (never shipped to a page).
-// Consumed by tmp_add_java.mjs (codemod) + tmp_java_verify.mjs (offline grader).
+/* ============================================================================
+ * tmp_java_data.mjs — the Java layer for every coding-practice exercise:
+ * display signature, starter code, functionName, javaTypes, and a REFERENCE
+ * SOLUTION used only by tmp_java_verify.mjs (never shipped to a page).
+ *
+ * WHAT IT IS
+ *   Pure data, no logic — one entry per exercise id, keyed the same as the
+ *   exercise banks the practice pages load. It is the ONLY place the Java
+ *   half of an exercise is written down; the pages get their starter/signature
+ *   from here via the tmp_add_java.mjs codemod, and the graders get the
+ *   reference solution from here too.
+ *
+ * HOW TO RUN
+ *   Not runnable. It is imported:
+ *     tmp_java_verify.mjs   compiles every `sol` with the local javac
+ *     tmp_add_java.mjs      splices `starter`/`fn`/`types` into the pages
+ *
+ * WHAT A FAILURE MEANS
+ *   Nothing fails HERE — failures surface in tmp_java_verify.mjs, which is the
+ *   point: this file is the gold standard, so a bad entry looks like a broken
+ *   grader. Suspect this file first when one exercise fails and its neighbours
+ *   pass.
+ *
+ * WHAT IT CANNOT SEE
+ *   That an entry matches the exercise the PAGE actually shows. The id is the
+ *   only link, so a starter here can drift from the prompt on the page and
+ *   nothing notices — the code still compiles, it just solves a different
+ *   problem than the one the learner is reading.
+ *   The reference solutions are not proof of a good exercise either: `sol` is
+ *   verified to PASS the tests, never to be idiomatic, optimal, or the
+ *   approach the lesson just taught.
+ *   And the `// ListNode is provided` preambles are plain strings — nothing
+ *   checks they still match the harness that really injects those classes.
+ * ========================================================================== */
 
 const U = 'import java.util.*;\n\n';
 const LN = '// ListNode is provided (do NOT redeclare it):\n// class ListNode { int val; ListNode next; ListNode(int val) { this.val = val; } }\n';
