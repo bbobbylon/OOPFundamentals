@@ -1,5 +1,52 @@
 /* tmp_codecheck.mjs — does the code on the page actually compile?
  *
+ * THE QUESTION IT ANSWERS
+ *   "Is any TypeScript or Java snippet shown on the site PROVABLY wrong?"
+ *   Every <pre> block and every DevHubCodeWalk `code:` array is extracted,
+ *   classified by language, wrapped in just enough scaffolding to be a
+ *   compilation unit, and handed to the real `tsc` API or the real `javac`.
+ *   Only the error classes an absent context cannot explain are reported
+ *   (an ALLOW list — see below).
+ *
+ * HOW TO RUN
+ *   node frontend/tmp_codecheck.mjs                 # whole site, exit 1 on any
+ *   node frontend/tmp_codecheck.mjs --file=x.html   # one page
+ *   node frontend/tmp_codecheck.mjs --lang=ts       # ts | java
+ *   node frontend/tmp_codecheck.mjs --all           # every finding, not first 40
+ *   node frontend/tmp_codecheck.mjs --syntax        # also report parse errors
+ *   node frontend/tmp_codecheck.mjs --raw           # every diagnostic, allow-list off
+ *   node frontend/tmp_codecheck.mjs --counter       # list the excused ❌ lines
+ *   node frontend/tmp_codecheck.mjs --list          # extract + classify only
+ *   Prerequisites: `npm i --no-save typescript@5.6.3` — the version the Try It
+ *   editor loads from the CDN, not the newest — and `javac` on PATH (JDK 24
+ *   with --enable-preview is what it invokes). `extract` is exported for
+ *   other scripts; importing the file does not scan the site.
+ *
+ * WHAT A FAILURE MEANS
+ *   A block where the compiler resolved BOTH sides and they still do not fit:
+ *   a type mismatch, a wrong argument count, a bad member on a known type, a
+ *   bad override. That is exactly the band four shipped pages were in. A
+ *   clean run means "nothing provably wrong". It has never meant "correct":
+ *   `identity(42) // T = number` compiles fine and is still false.
+ *
+ * WHAT IT CANNOT SEE
+ *   - A MISSING TOOLCHAIN. No `typescript` package means every TS block is
+ *     waved through behind one "not installed" line; no `javac` does the
+ *     same for Java. The run is a SKIP, not a failure, and the summary still
+ *     prints "clean". Read the two `!` lines before trusting a green run.
+ *   - Any language but TS and Java. Python, Go, C#, SQL, YAML, shell are
+ *     classified out and never checked.
+ *   - A fragment whose names all live three paragraphs up the page. Unknown
+ *     types produce no report by design — the allow list is the whole point.
+ *   - Whether a claim is TRUE. Compiling proves the code is well-typed, not
+ *     that the prose beside it, or the `// prints 42` comment, is right.
+ *   - A wrong ❌. A line marked as a deliberate error is excused whether or
+ *     not it really fails — `--counter` lists them so a human can check that
+ *     each one is MEANT to fail. One excused line never excuses its block.
+ *
+ * GIT NOTE: gitignored by `frontend/tmp*`; a new gate needs its own
+ * `!frontend/tmp_<name>.mjs` allowlist line in .gitignore or git never sees it.
+ *
  * vcheck proves the PAGE parses. This proves the LESSON does: it pulls every
  * <pre> block and every DevHubCodeWalk `code:` array out of the HTML, works out
  * what language each one is, and puts the TypeScript and Java ones through a
@@ -135,6 +182,11 @@ function arrayStrings(body) {
   return out.map((s) => s.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\(['"`\\])/g, '$1'));
 }
 
+/**
+ * Every code block on one page: each <pre> (de-tagged, entities decoded) and
+ * each CodeWalk `code:` array (strings joined by newline), tagged with kind
+ * and source offset. Exported so other scripts can reuse the extraction.
+ */
 export function extract(src, file) {
   const blocks = [];
 
@@ -212,6 +264,7 @@ const NOT_CODE = [
   /\[(HttpGet|HttpPost|ApiController|Authorize|Route)\b/, /\bIEnumerable</,
   /\{\s*get;\s*(set;)?\s*\}/, /\bstring\s+\w+\s*[=;)]/, /\bvar\s+\w+\s*=\s*new\s+\w+\s*\{/,
 ];
+/** 'java' | 'ts' | null for one block — null means "not confident, skip it". */
 function classify(text) {
   if (text.length < 24) return null;
   for (const re of NOT_CODE) if (re.test(text)) return null;
@@ -277,6 +330,11 @@ const JDK_IMPORTS = [
   'java.util.concurrent.StructuredTaskScope.Subtask',
 ].map((p) => 'import ' + p + ';').join(' ');
 
+/**
+ * Type-check each TS block with the real compiler API (in-memory host, strict,
+ * lib.dom only when the block touches the DOM) and return the allow-listed
+ * diagnostics, minus excused lines. Empty when `typescript` is not installed.
+ */
 function checkTS(blocks) {
   if (!ts) return [];
   const base0 = {
@@ -360,6 +418,11 @@ function prepTS(src) {
   return { text, off: 0 };
 }
 
+/**
+ * Compile each Java block with the local javac (wrapped in a class/method as
+ * needed, JDK imports added) in a temp dir and return the allow-listed errors,
+ * minus excused lines. Empty when javac is not on PATH.
+ */
 function checkJava(blocks) {
   if (!javac) return [];
   const dir = mkdtempSync(join(tmpdir(), 'devhub-cc-'));
@@ -428,6 +491,7 @@ function checkJava(blocks) {
 
 /* ── run ───────────────────────────────────────────────────────────────── */
 
+/** CLI entry: extract → classify → compile → print, setting exitCode 1 on findings. */
 function main() {
   const files = ONE ? [ONE] : readdirSync(HERE).filter((f) => f.endsWith('.html'));
   const cand = [];

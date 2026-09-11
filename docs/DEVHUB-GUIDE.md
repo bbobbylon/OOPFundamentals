@@ -17,7 +17,9 @@ the map. To *run* it (locally or deployed), see the main [README](../README.md);
 copy-paste **command-line runbook** (build/run, the auth round-trip via curl, and
 deployment troubleshooting), see [HELP.md](../HELP.md#command-line-runbook). For the
 **architecture, data flows, and diagrams** (C4 + a sequence diagram per use case), see
-[ARCHITECTURE.md](ARCHITECTURE.md). For **what's planned but not built yet** — new pages,
+[ARCHITECTURE.md](ARCHITECTURE.md). For **the files themselves** — what each engine, gate
+and backend class is, who loads it, where state lives, and the traps that look fine and are
+not — see [CODE-MAP.md](CODE-MAP.md). For **what's planned but not built yet** — new pages,
 content gaps found by audits, polish passes — see [ROADMAP.md](ROADMAP.md).
 
 **Quick-start options** (all from the project root):
@@ -532,6 +534,20 @@ visualizers).
   against its code. The checker also distinguishes blank lines: one INSIDE a
   range is deliberate (a step spanning a block crosses its separators), one at
   an EDGE is the tell, so only edges are reported.
+
+- **Is the pair-programming coach right?** (`frontend/tmp_coachcheck.mjs`) — a
+  `coach:` entry on a practice exercise is a regex with an opinion, and it is the
+  only thing on the site that can be WRONG while every other gate stays green:
+  the page parses, the snippet compiles, and the learner is simply told their
+  correct code is wrong. This pulls each bank out of its page with `vm` and
+  replays the engine's real `matchCoachEntry()` against two samples per entry —
+  one that should trip it and a correct solution that must not. It reports three
+  outcomes, and NUDGE is the interesting one: a regex cannot tell two sequential
+  loops from a nested pair, so an entry that fires on correct code is surfaced
+  rather than hidden behind a pass. What it cannot see is whether the MESSAGE is
+  true — only that the regex fires — and it says nothing at all about an
+  exercise with no entry, which for isomorphic-strings and graph-valid-tree is a
+  deliberate decision rather than a gap.
 - **Head First bar audit** (`frontend/tmp_hfaudit.mjs`) — scores every lesson
   page against CLAUDE.md's nine-point teaching standard and ranks the thinnest
   first, so the standing "scan for thin lessons" directive is a command rather

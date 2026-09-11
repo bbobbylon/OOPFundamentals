@@ -28,6 +28,20 @@ import java.util.Map;
  *   POST /oauth2/token      — public: exchange credentials for an RS256 token
  *   GET  /api/oidc/userinfo — protected: echoes the validated claims + authorities
  *   GET  /api/oidc/admin    — protected: ADMIN only → real 403 for USER tokens
+ *
+ * Why it exists: Bobby's day job is CIAM on Entra + Ping. A real Entra/Ping tenant
+ * cannot be embedded in a static learning site, so this controller plays BOTH
+ * halves — {@code /oauth2/*} is the fake IdP ({@link OidcTokenService} mints tokens
+ * shaped like Entra / Ping / Keycloak / Spring ones), {@code /api/oidc/*} is the
+ * resource server that validates them. The one front-end caller is
+ * {@code auth-identity-live-visualizer.html}, which lets the learner pick an IdM,
+ * mint a token, and watch the claims→authorities mapping happen live.
+ *
+ * Security: the OIDC chain in {@link com.bob.devhub.config.SecurityConfig}
+ * ({@code @Order(1)}, matcher {@code /api/oidc/**, /oauth2/**}). HS256 tokens from
+ * {@code /api/auth/login} are REJECTED here (wrong key, wrong algorithm), and RS256
+ * tokens are rejected by every other endpoint — the two token families do not mix.
+ * Authorities on this chain come from {@link com.bob.devhub.security.IdmAuthoritiesConverter}.
  */
 @RestController
 @RequiredArgsConstructor

@@ -60,6 +60,23 @@ public class ExecutionService {
     });
     private final Map<String, Boolean> availabilityCache = new ConcurrentHashMap<>();
 
+    /**
+     * Is server-side code execution switched on for this deployment? Checked by
+     * {@code ExecutionController} before every run, and reported through
+     * {@link #capabilities()} so the UI can grey out what it cannot offer.
+     *
+     * <p>NOTE: this defaults to TRUE ({@code app.exec.enabled}, env {@code EXEC_ENABLED}).
+     * That is convenient locally and worth a second look before exposing an instance
+     * publicly — this service runs learner-supplied code as a real OS process, so the
+     * default is "on" for the most dangerous capability in the backend. The blast radius
+     * is bounded by the timeout, output and code-size caps alongside it, and by requiring
+     * an authenticated caller, but a deployment that does not need it should turn it off
+     * explicitly rather than rely on nobody finding the endpoint.
+     *
+     * <p>Turning it off costs the site nothing structural: the in-browser runtimes
+     * (Pyodide, CheerpJ, sandboxed JS) handle every Try It and graded exercise, and only
+     * the three playground pages call the server at all.
+     */
     public boolean isEnabled() { return enabled; }
 
     /** Advertised to GET /api/run/languages so the UI can enable/disable toggles. */

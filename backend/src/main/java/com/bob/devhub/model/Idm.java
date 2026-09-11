@@ -15,6 +15,13 @@ package com.bob.devhub.model;
 public enum Idm {
     SPRING, ENTRA, PING, KEYCLOAK;
 
+    /**
+     * Lenient parser for the {@code idm} field of {@code POST /oauth2/token}
+     * ({@link com.bob.devhub.dto.OidcTokenRequest}). Case-insensitive; null, blank
+     * or unknown values fall back to {@link #SPRING} rather than failing, because
+     * the field is optional and the Spring shape is the "plain" default the
+     * learner sees first.
+     */
     public static Idm from(String value) {
         if (value == null) return SPRING;
         try {

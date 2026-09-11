@@ -25,10 +25,22 @@
  * plus the correct one if a wrong option was picked.
  *
  * USAGE: <script src="devhub-hf-check.js"></script> once per page.
+ *
+ * WHO LOADS IT: 111 pages (every page carrying an .hf-check). Assumes only the
+ * markup above; styling for .right / .wrong / .answered lives in devhub-hf.css.
+ *
+ * PERSISTS: nothing of its own. Its one side effect is DevHubStreak.touch()
+ * (devhub-transitions.js) on every answer, so re-drilling checks counts as a
+ * study day; the call is guarded, so the check still works when that script
+ * is absent — it just stops feeding the streak.
  * ========================================================================== */
 (function () {
   'use strict';
 
+  /**
+   * Wires one .hf-check: adds the screen-reader verdict line and the click handler
+   * that reveals the chosen and correct .why paragraphs. Idempotent via data-hfWired.
+   */
   function wire(box) {
     if (box.dataset.hfWired) return;
     box.dataset.hfWired = '1';
@@ -45,6 +57,10 @@
     live.hidden = true;
     box.appendChild(live);
 
+    /**
+     * Returns the box to its unanswered state — also runs before every answer, which
+     * is what lets a check be answered again immediately.
+     */
     function reset() {
       buttons.forEach(function (b) { b.className = ''; b.setAttribute('aria-pressed', 'false'); });
       whys.forEach(function (w) { w.hidden = true; });
@@ -77,6 +93,7 @@
     reset();
   }
 
+  /** Wires every .hf-check on the page. Public as DevHubCheck.init() for re-scans. */
   function init() {
     Array.prototype.forEach.call(document.querySelectorAll('.hf-check'), wire);
   }

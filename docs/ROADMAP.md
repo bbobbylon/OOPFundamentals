@@ -807,7 +807,7 @@ Bobby asked if a package/dependency exists to make live coding feel like StackBl
   minimap, real editor UX) without licensing or header constraints; consider WebContainers
   later only for the Node track where real `npm install` matters.
 
-### 4. "Code With Me" guided-coding sections (new feature) — ✅ ENGINE LANDED (2026-09-06), 2 of 9 banks authored
+### 4. "Code With Me" guided-coding sections — ✅ COMPLETE (engine 2026-09-06, all 9 banks 2026-09-07)
 Pair-programming simulation on top of the graded IDE: as the student types, checkpoint-based
 hints ("do you really want a nested loop here? An index Map would make this O(n)"), encouragement,
 and alternative-route suggestions — like coding alongside a senior. Design: extend
@@ -874,12 +874,80 @@ message): all 5 fired their correct message text. Also verified the negative con
 no coach message at all, confirming the inverted-match logic doesn't false-positive on correct
 code. `tmp_vcheck.mjs` and `tmp_smoke.mjs` both clean.
 
-**Still open: 7 of 9 banks** (backtracking, dynamic-programming, graphs, linked-lists,
-sorting-searching, stacks-queues, trees) have no authored `coach:` entries yet — the generic
-stuck/praise encouragement already fires on all of them (it's engine-level, not per-exercise), but
-none of their remaining exercises have a checkpoint-specific nudge. Authoring those means reading
-each exercise's actual best-and-worst approaches, the same way the eleven above were, not a
-mechanical sweep — logged here rather than rushed.
+**✅ CLOSED 2026-09-07 — all 9 banks authored (38 more entries, 49 total).** The remaining
+seven (backtracking, dynamic-programming, graphs, linked-lists, sorting-searching, stacks-queues,
+trees) were authored exercise by exercise, reading each problem's real best-and-worst approaches
+rather than pattern-matching a template across them. Six new shared regex consts carry the ideas
+that genuinely repeat — `NESTED_LOOP`, `SORT_CALL`, `SLOW_QUEUE` (front-of-array pops),
+`LINEAR_SCAN`, `COPY_ON_ADD` (the backtracking snapshot bug), `TWO_PASS` — but every message
+names the technique for ITS exercise, never a generic "that's slow".
+
+The entries worth calling out, because they catch a specific famous wrong answer rather than a
+performance smell:
+
+  - **validate-bst** — `/\.left\.val|\.right\.val/` catches comparing each node only with its
+    immediate children. The message hands over the counterexample: [5,1,6,null,null,4,7] passes
+    every parent-child check and still isn't a BST.
+  - **invert-binary-tree** — `.left = f(.right)` followed by `.right = f(.left)` reads back the
+    value it just overwrote. The regex only matches that exact ordering, so a temp-variable or
+    destructuring swap stays quiet.
+  - **coin-change** / **house-robber** — the two classic wrong greedies, each with the smallest
+    counterexample stated in the message (`[1,3,4]` for 6; `[2,1,1,2]` for alternating houses).
+  - **evaluate-rpn** — `langs: ['python']` on `//`, because floor division and truncation toward
+    zero differ exactly where the third test case lives (`6 // -132` is -1, the answer is 0, and
+    the difference turns that test's 22 into 12).
+  - **word-search** — an `absent` check for a SECOND grid assignment (or a set `.remove`), i.e.
+    the undo step. Marking without restoring is the difference between backtracking and DFS.
+  - **longest-increasing-subsequence** — deliberately `tone: 'praise'`: the O(n²) DP that trips
+    `NESTED_LOOP` here is the CORRECT expected answer, so the message says don't change it and
+    offers the O(n log n) patience-sorting follow-up instead. A nudge that calls right code wrong
+    is worse than no nudge.
+
+**Three authored entries were cut before shipping, and the harness is why.** `maximum-depth` and
+`same-tree` both wanted an `absent` base-case check, but the engine gates `absent` entries on the
+student's code having diverged 40+ chars from the starter, and a complete solution to either
+problem is barely longer than its own stub — they could never fire in JS and would fire only in
+the languages with longer starters. `remove-nth-from-end` wanted the `TWO_PASS` nudge, and the
+correct one-pass solution trips it too (a `for` to advance `fast`, then a `while`) — a false
+positive on correct code, which is the one outcome not worth shipping. `middle-of-linked-list`
+keeps `TWO_PASS` because its correct solution is a single loop.
+
+**Two exercises stay deliberately un-coached**, joining isomorphic-strings from bank 2:
+`graph-valid-tree` (no regex separates "forgot the edge-count/connectivity half" from the several
+correct shapes) and `n-queens-count`'s safety check. Silence is a decision here, not an omission.
+
+**Two test-coverage bugs surfaced while authoring, and both are fixed.** A coach that says "this
+is wrong" while the grader says "correct" teaches something false, so these were not optional:
+`is-graph-bipartite` had no DISCONNECTED graph in its tests, meaning a solution that colours only
+node 0's component passed everything — added `[[1],[0],[3,4],[2,4],[2,3]]` (an edge plus a
+triangle) which that solution answers `true` and the answer is `false`. `merge-intervals` handed
+out pre-sorted input in all four tests, so a solution that never sorts passed — added
+`[[2,6],[1,3],[15,18],[8,10]]`, which a no-sort sweep answers `[[2,6],[15,18]]`. Both new cases
+were verified in Node against a reference solution AND against the buggy solution, to prove the
+test actually catches what the coach warns about.
+
+**New gate: `node frontend/tmp_coachcheck.mjs`.** A coach entry is a regex with an opinion, and
+nothing else in the site can tell whether it is right — vcheck proves the page parses, codecheck
+compiles the snippets, and a wrong `match` breaks neither. It pulls each bank out of its page with
+`vm` (stubbing `DevHubCodeGrade.render`) and replays the engine's real `matchCoachEntry()`,
+including the `absent` length gate, against two samples per entry: code that should trip it, and a
+correct solution that must not. **49 passed, 1 nudge, 0 failed, 0 untested** across all nine banks
+— the two banks authored in 2026-09-06 are covered too, so the Playwright verification they got
+is now permanent and re-runnable. The single NUDGE is reported, not hidden: count-then-compare is
+a correct `valid-anagram` solution and still trips `NESTED_LOOP`, because a regex cannot tell
+sequential loops from nested ones. Writing the harness cost one real bug of its own — a regex
+built inside a `vm` context fails the host realm's `instanceof RegExp`, so 30 entries looked dead
+until it switched to `Object.prototype.toString`. Same cross-realm family as the `Uint8Array`
+gotcha from the original codegrade build.
+
+Gates after the sweep: vcheck 537/521 · codecheck 671 blocks 0 errors · assetcheck no teaching
+assets lost · cwlines 0/455 · coachcheck 49/0 · tmp_smoke.mjs clean on all nine practice pages
+(it runs here via the system-Chrome fallback even though `playwright` itself is not installed).
+
+Tooling gotcha found on the way: `tmp_genpracticemap.mjs --check` compares the generated block as
+a STRING, so a `tracks-data.js` carrying mixed line endings reports "STALE" while the map's actual
+content is identical. Re-running the generator fixed four CRLF lines and produced a zero-byte git
+diff. If --check ever fails with no bank edit behind it, that's why.
 
 ### 5. Thin tracks — audit results (counts from `tracks-data.js`, 2026-08-29)
 PHP & Laravel **2**, Ruby & Rails **2**, Rust **2**, MuleSoft **2**, Full-Stack Stacks **3**,
@@ -1876,6 +1944,116 @@ not installed on the Windows box** (`npm i -g playwright`, or set `PW_MODULE`). 
 iframe-based audit above was the substitute and is arguably stronger for this particular
 question, since it measures computed colour against real effective backgrounds; but it is
 ad-hoc and lives in the scratchpad, not in the gates.
+
+---
+
+### 15. Document the code itself — ✅ COMPLETE (Bobby, 2026-09-07; landed 2026-09-09)
+
+> "Make sure all the methods/variables, everything, is documented in comments in the code as
+> well as an overall concise doc for the app. Each file explained thoroughly, and how it
+> relates to other files in the project, and how it relates to the project overall."
+
+The teaching content is documented to a high bar; **the code that delivers it is not.** DevHub
+is itself a codebase a learner (or a future session) has to understand, and right now the only
+way in is to read 5,668 lines of engine JS and infer the wiring. Measured comment density
+across the 17 shared front-end files, 2026-09-07:
+
+| file | lines | comment lines | functions | note |
+|---|---|---|---|---|
+| `tracks-data.js` | 992 | 10 (1%) | — | the site REGISTRY; the derived practice-map block has no explanation of what derives it |
+| `devhub-codewalk.js` | 211 | 6 (2%) | 21 | the widget whose zero-based `lines:` contract cost this repo a 242-mount repair sweep — and the contract is written in CLAUDE.md, not in the file that enforces it |
+| `devhub-tryit.js` | 523 | 62 (11%) | 39 | four language runtimes (sandboxed JS, tsc, Pyodide, CheerpJ) with per-runtime quirks (Java 8 only, cooperative threads) recorded only in ROADMAP prose |
+| `devhub-codegrade.js` | 1201 | 161 (13%) | 83 | largest engine; the `coach:` contract IS well documented in its header — the model for the rest |
+| `devhub-chapters.js` / `-hf-theme.js` / `-quiz.js` | 269 / 388 / 605 | 12–14% | 25 / 37 / 44 | theme bootstrap is one of THREE that must agree; nothing in the file says so |
+| `devhub-flashcards.js` / `-notebook*.js` | 217 / 162 / 245 | 15–19% | 19 / 16 / 29 | |
+| `devhub-run.js` / `-syntax.js` / `-hf-check.js` / `-lesson.js` / `-transitions.js` / `config.js` | 40–168 | 24–82% | 4–8 | already at or near the bar — use these as the reference voice |
+
+Every engine already has a top-of-file banner; the gap is **per-function and per-field** doc
+comments, and the cross-file "who calls me, what breaks if I change" links.
+
+**Scope, in the order that pays off fastest:**
+
+1. **`docs/CODE-MAP.md` — the missing overall doc.** One page: what each file in `frontend/`,
+   `backend/`, `deploy/` and the gate harness IS, in one paragraph, plus a dependency picture
+   (which engines a lesson page loads, which of them touch `localStorage`, which read
+   `tracks-data.js`). `docs/ARCHITECTURE.md` covers the *system*; this covers the *files*.
+   Cross-link both ways so neither drifts alone.
+2. **Per-file JSDoc pass on the 17 shared engines**, worst-density first — `tracks-data.js`,
+   `devhub-codewalk.js`, `devhub-tryit.js`. Each file gets: what it is, who loads it, what it
+   assumes about the page, what it persists (exact `localStorage` key), and a one-line doc on
+   every exported function and every non-obvious field. **Invariants that currently live only
+   in CLAUDE.md belong in the code they govern** — zero-based `lines:` in
+   `devhub-codewalk.js`, the three-bootstrap theme agreement in `devhub-hf-theme.js`, the
+   self-contained-CSS rule in every engine that injects a `<style>`.
+3. **The gate harness (15 `tmp_*.mjs`)** — each says in its own header what question it
+   answers, what a failure means, and what it CANNOT see (`tmp_cwlines.mjs` cannot see a note
+   pointing at the wrong-but-in-range line; `tmp_hfaudit.mjs` reads markup, not meaning;
+   `tmp_vcheck.mjs` proves scripts parse, not run). The "what it cannot see" line is the
+   valuable half — every bug this repo has shipped twice lived in that gap.
+4. **The 537 lesson pages** get an anatomy doc, not 537 file comments: one "how a lesson page
+   is built" walkthrough of a canonical page (head → `body.track-*` → `.intro` → engine
+   mounts → "Where to go next"), so any page is readable once. Per-page inline comments only
+   where a page does something unusual.
+5. **`backend/`** — the global CLAUDE.md Javadoc standard ("full multi-line Javadoc that
+   explains how a class relates to the rest of the codebase") applied to the Spring side.
+
+**Do NOT** turn this into `// increment i` noise. The bar is the same as the teaching bar:
+explain the WHY and the relationships, never restate the syntax. A comment that repeats the
+code is worse than none, because it rots silently.
+
+**Suggested gate:** a `tmp_doccheck.mjs` that fails when a shared engine exports a function
+with no preceding doc comment — cheap, and it keeps the pass from decaying the way the
+CodeWalk indices did.
+
+#### ✅ What landed (2026-09-09)
+
+All five scope items are done and **`node frontend/tmp_doccheck.mjs` is green at 326/326
+symbols**, wired into `.github/workflows/deploy.yml` so it gates the Pages deploy.
+
+| scope item | state |
+|---|---|
+| 1. `docs/CODE-MAP.md` | written — 10 sections, cross-linked with ARCHITECTURE.md |
+| 2. 17 shared engines | every function documented; the CLAUDE.md invariants now live in the code they govern |
+| 3. 17 gates | every one opens with a banner carrying a **WHAT IT CANNOT SEE** section |
+| 4. 537 lesson pages | anatomy walkthrough in CODE-MAP §2, not 537 file comments |
+| 5. `backend/` | every type and public method carries relationship-explaining Javadoc |
+
+**Three gate bugs the pass surfaced** — all found by disbelieving a green result, and all
+fixed in `tmp_doccheck.mjs`:
+
+1. **It could not tell code from a string containing code.** `devhub-tryit.js` builds the
+   iframe sandbox bootstrap as a template literal; its `__send`/`__fmt` were reported as
+   undocumented functions of the file. Now skipped as the payload they are.
+2. **Backtick parity was the wrong tool for finding those strings.** `devhub-syntax.js` and
+   `devhub-codewalk.js` each build a highlighter regex as a single-quoted string containing
+   one backtick. A parity counter flipped there and never flipped back — silently skipping
+   **159 lines of `devhub-codewalk.js` and 64 of `devhub-syntax.js` and reporting every
+   symbol in them as documented.** Replaced with a scanner that tracks quote state, plus a
+   self-test that fails loudly if a file ever ends mid-template. *A gate that under-reports
+   is worse than no gate.*
+3. **It could not walk up past a multi-line annotation.** `@Table(name = …,` continues onto a
+   line starting `uniqueConstraints`, so `TopicProgress` was reported undocumented while
+   carrying a perfectly good Javadoc block. The upward walk now tracks bracket depth.
+
+It also gained a deliberate exemption: a **one-line DOM event wire-up**
+(`s.onerror = () => resolve(false);`) no longer needs a comment. Demanding one produced
+exactly the `// increment i` noise this item forbids. A handler with a real body still has
+to say why it exists.
+
+**Two real defects the documenting turned up** (documented in place, not silently changed —
+both are Bobby's call):
+
+- `ProgressService.TOTAL_TOPICS` is hard-coded to **200**, but `tracks-data.js` registers
+  **521** pages. Every completion percentage the stats endpoint returns is therefore
+  inflated, and a thorough learner can exceed 100%. Real fix: count from the registry
+  instead of a constant.
+- `app.exec.enabled` (env `EXEC_ENABLED`) **defaults to `true`** — server-side execution of
+  learner-supplied code as a real OS process is on unless a deployment turns it off. Bounded
+  by the timeout/output/code-size caps and an authenticated-caller requirement, but the
+  default is "on" for the backend's most dangerous capability.
+- Minor asymmetry, left as-is: `devhub-codegrade.js`'s `pyBooting` latch is never cleared on
+  failure (its `javaBooting` sibling and `devhub-tryit.js`'s version both are), so a Pyodide
+  boot that fails wedges Python grading until reload.
 
 ---
 

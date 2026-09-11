@@ -78,15 +78,25 @@
 
   /* ---- localStorage attempt history (per bank id) ---------------------- */
   const lsKey = id => 'dlh-quiz:' + id;
+  /** Every attempt ever recorded for one bank, newest first (see saveAttempt). A corrupt
+   *  or absent entry reads as "no attempts" rather than throwing — a learner with wiped
+   *  storage gets a fresh exam, never a broken page. */
   function loadHistory(id) {
     try { return JSON.parse(localStorage.getItem(lsKey(id))) || []; }
     catch (e) { return []; }
   }
+  /** Prepend one finished attempt and keep only the newest 25: history is a motivator,
+   *  not an archive, and an unbounded array in one localStorage key is how a heavy user
+   *  hits quota and loses the whole bank's history at once. A full quota fails silently —
+   *  the score is already on screen; only the record of it is lost. */
   function saveAttempt(id, attempt) {
     const hist = loadHistory(id);
     hist.unshift(attempt);
     try { localStorage.setItem(lsKey(id), JSON.stringify(hist.slice(0, 25))); } catch (e) {}
   }
+  /** Highest percentage ever scored on this bank, 0 if never attempted. Drives the
+   *  "best: N%" badge on the start screen and the readiness dashboard in
+   *  exam-readiness.html, which compares it against the bank's passPct. */
   function bestScore(id) {
     return loadHistory(id).reduce((m, a) => Math.max(m, a.pct), 0);
   }
@@ -212,6 +222,8 @@
     if (global.parent === global) global.location.href = file + (file.includes('#') ? '' : '');
   }
 
+  /** Seconds → "M:SS" for the exam countdown. Minutes are NOT zero-padded and are not
+   *  capped at 60, so a 90-minute exam reads "90:00" rather than wrapping to "30:00". */
   function fmtTime(sec) {
     const m = Math.floor(sec / 60), s = sec % 60;
     return m + ':' + String(s).padStart(2, '0');
@@ -304,10 +316,15 @@
       screen(h('div', null, ...children));
     }
 
+    /** One number-over-caption tile in the start screen's stat row (questions, pass mark,
+     *  best score). Presentational only — every caller computes the value itself. */
     function statBox(value, label) {
       return h('div', { class: 'dq-stat' }, h('b', null, String(value)), h('span', null, label));
     }
 
+    /** The "Recent attempts" panel: the six newest attempts as score / mode / date rows,
+     *  each coloured green or red against this bank's passPct. Rendered only when at least
+     *  one attempt exists, so a first-time learner sees no empty shell. */
     function historyCard(hist) {
       return h('div', { class: 'dq-card' },
         h('h5', { class: 'dq-domains', style: 'margin:0 0 10px' },
@@ -459,6 +476,11 @@
       screen(h('div', null, topbar, card));
     }
 
+    /** The "Why:" block shown under a question once it has been answered (practice mode)
+     *  or in review. When the question carries `ref: {label, file}` it also renders a
+     *  "Learn more" link back to the lesson that teaches it — those refs are the SAME data
+     *  tmp_genpracticemap.mjs derives the lesson→practice map from, so a bank edit that
+     *  breaks a ref here also breaks a lesson's "Test yourself" strip. */
     function explanation(q) {
       const wrap = h('div', { class: 'dq-expl' });
       wrap.appendChild(h('b', null, 'Why: '));
@@ -472,6 +494,10 @@
       return wrap;
     }
 
+    /** Record choice `i` for the current question and re-paint. Single-answer questions
+     *  store the index; `multi` questions TOGGLE membership in an array and store null
+     *  when the last pick is removed, so "unanswered" stays distinguishable from "answered
+     *  with nothing" for the progress count and the unanswered warning. */
     function choose(i) {
       const q = state.qs[state.idx];
       if (q.multi) {
@@ -485,7 +511,12 @@
       question();   // re-paint (practice mode reveals the answer)
     }
 
+    /** Move to the next question, clamped at the last one. Deliberately does NOT submit at
+     *  the end — a learner who arrows past the final question should land on it again, not
+     *  trigger a grade they did not ask for. */
     function next() { if (state.idx < state.qs.length - 1) { state.idx++; question(); } }
+    /** Move back one question, clamped at the first. Available in exam mode too: this is a
+     *  review-and-revise exam, so answers stay editable until submit. */
     function prev() { if (state.idx > 0) { state.idx--; question(); } }
 
     /* ---------------- SCORE A QUESTION ---------------- */
@@ -563,6 +594,10 @@
       screen(h('div', null, head, review));
     }
 
+    /** One question in the post-submit review: every choice marked ✓ correct or ✗ wrongly
+     *  chosen, with the bank's per-choice `why[ci]` rationale underneath when present.
+     *  Renders every choice, not just the learner's — seeing why the other four are wrong
+     *  is the half of retrieval practice that actually teaches. */
     function reviewItem(q, i) {
       const given = state.answers[i];
       const ok = isCorrect(q, given);

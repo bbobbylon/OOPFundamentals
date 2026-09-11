@@ -83,6 +83,16 @@ standing goal, not a one-time task. The full Head First rollout state lives in
   `npm i --no-save typescript@5.6.3` (match the version the Try It editor loads
   from the CDN, not the newest) and `javac`; either missing = skip, not fail.
   It reports from an ALLOW list, and a ❌ excuses ONE LINE, not the block.
+- A "Code With Me" `coach:` entry is a regex with an OPINION, and no other gate
+  can tell whether it is right — the page still parses and the snippet still
+  compiles when it is wrong; it just tells a learner their correct code is
+  wrong. Check with `node frontend/tmp_coachcheck.mjs`, which replays the
+  engine's real `matchCoachEntry()` (absent-length gate included) against two
+  samples per entry: code that should trip it, and a correct solution that must
+  NOT. Add both samples in the same commit as the entry. Two rules learned the
+  hard way: an `absent:` entry cannot fire on a problem whose whole solution is
+  under 40 characters longer than its own starter, and any entry that fires on a
+  correct solution gets CUT, not softened.
 - **CodeWalk `line:`/`lines:` indices are ZERO-based** — `devhub-codewalk.js`
   uses them as raw indices into the rendered lines and prints `idx+1` in the
   gutter. Authoring them 1-based highlights one line low on every step and

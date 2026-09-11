@@ -1,7 +1,44 @@
 /* tmp_genpracticemap.mjs — regenerate the lesson → practice map.
  *
- *   node tmp_genpracticemap.mjs           # rewrite the block in tracks-data.js
- *   node tmp_genpracticemap.mjs --check   # exit 1 if the committed block is stale
+ * THE QUESTION IT ANSWERS
+ *   "Which exam, practice bank and flashcard deck does each lesson page feed?"
+ *   It inverts every `ref: { label, file }` in exam-*.html and practice-*.html
+ *   into a lesson → {exam, practice, deck} map and writes it as the
+ *   `window.DEVHUB_PRACTICE` block inside tracks-data.js, between the
+ *   `==== GENERATED` / `==== END GENERATED` markers. That block powers the
+ *   "Test yourself" strip devhub-chapters.js renders on every lesson.
+ *   With --check it answers "is the committed block stale?"
+ *
+ * HOW TO RUN
+ *   node frontend/tmp_genpracticemap.mjs           # rewrite the block
+ *   node frontend/tmp_genpracticemap.mjs --check   # exit 1 if stale
+ *   No prerequisites: pure node. Run the generator after ANY bank edit, and
+ *   run --check in the gate suite. Exit 1 also when a `ref.file` or a
+ *   DECK_FOR_EXAM entry names a page that does not exist.
+ *
+ * WHAT A FAILURE MEANS
+ *   "STALE" = tracks-data.js does not match what the banks would generate
+ *   now: someone edited a bank (or hand-edited the block, which is the one
+ *   thing never to do) and a lesson has silently gained or lost its practice
+ *   links. "ref(s) point at a file that does not exist" = a bank cites a
+ *   lesson that was renamed or deleted. A clean --check means the block is
+ *   byte-identical to a fresh generation.
+ *
+ * WHAT IT CANNOT SEE
+ *   - It compares the block as a STRING. A tracks-data.js carrying mixed
+ *     line endings reports STALE while the map's CONTENT is identical —
+ *     re-running the generator once fixed four CRLF lines and produced a
+ *     zero-byte git diff. If --check fails with no bank edit behind it,
+ *     that is why.
+ *   - Whether a `ref` points at the RIGHT lesson. A question citing an
+ *     existing but unrelated page generates a confident wrong link.
+ *   - Lessons that no bank cites at all. They simply have no entry; nothing
+ *     here says "this lesson has zero recall practice".
+ *   - The DECK_FOR_EXAM pairing is editorial, not derived — a deck mapped to
+ *     the wrong exam is invisible to this script.
+ *
+ * GIT NOTE: gitignored by `frontend/tmp*`; a new gate needs its own
+ * `!frontend/tmp_<name>.mjs` allowlist line in .gitignore or git never sees it.
  *
  * WHY THIS IS GENERATED. The exam and practice banks already say which lesson
  * each question came from (`ref: { label, file }` — 560 refs across 19 exams,

@@ -1,9 +1,43 @@
-// tmp_java_verify.mjs — offline gold-standard check of the Java grading layer.
-// For every practice exercise: generate Harness.java with the ENGINE'S OWN
-// buildJavaHarness (imported from devhub-codegrade.js, not a copy), compile the
-// reference solution from tmp_java_data.mjs with the local javac, run it, and
-// grade the sentinel output exactly the way the page will (deepEq + the
-// unordered sort mirror). Any mismatch = the browser would fail the same way.
+/* ============================================================================
+ * tmp_java_verify.mjs — offline gold-standard check of the Java grading layer.
+ *
+ * WHAT QUESTION IT ANSWERS
+ *   "If a learner types the right answer, does the grader agree?" Java is the
+ *   one runtime we cannot test by eye: it compiles in the browser through
+ *   CheerpJ, so a harness bug looks exactly like a wrong answer, and the
+ *   learner is the one who pays. This runs the same grading path offline
+ *   against known-correct solutions, where a mismatch can only be our fault.
+ *
+ * HOW TO RUN
+ *   node tmp_java_verify.mjs        every exercise; exit 1 on any mismatch
+ *   Needs a local `javac` on PATH. Missing javac = SKIP, not fail.
+ *
+ * WHAT IT CHECKS
+ *   For every practice exercise: generate Harness.java with the ENGINE'S OWN
+ *   buildJavaHarness (imported from devhub-codegrade.js, not a copy — a copy
+ *   would drift and start proving the wrong thing), compile the reference
+ *   solution from tmp_java_data.mjs with the local javac, run it, and grade the
+ *   sentinel output exactly the way the page will (deepEq + the unordered sort
+ *   mirror). Any mismatch = the browser would fail the same way.
+ *
+ * WHAT A FAILURE MEANS
+ *   The harness, the expected values, or the reference solution disagree — and
+ *   since the solution is known good, suspect the first two. A learner hitting
+ *   this sees "your correct code is wrong", the worst failure this repo can
+ *   ship.
+ *
+ * WHAT IT CANNOT SEE
+ *   The actual browser. It grades with the local JDK; the page grades with
+ *   CheerpJ, which is JAVA 8 ONLY and runs threads cooperatively. Code that
+ *   passes here can still fail in the page by using a Java 9+ API (`List.of`,
+ *   `var` in a lambda) or by relying on real parallelism — and a modern local
+ *   javac will happily compile exactly that. Passing here is necessary, not
+ *   sufficient.
+ *   It only ever runs the REFERENCE solution, so it cannot see a test suite
+ *   that accepts wrong answers: an exercise with no negative cases passes
+ *   every run. Nor can it see an exercise missing from tmp_java_data.mjs —
+ *   absent entries are not checked, they are simply not there.
+ * ========================================================================== */
 import { readFileSync, readdirSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { join } from 'path';

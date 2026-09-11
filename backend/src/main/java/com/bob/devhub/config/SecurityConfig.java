@@ -147,6 +147,19 @@ public class SecurityConfig {
     }
 
     @Bean
+    /**
+     * CORS for the browser: the site is static files served from a DIFFERENT origin than
+     * this API (GitHub Pages / App Runner in production, file:// or a dev server locally),
+     * so without this every fetch from a lesson page is blocked before it is even sent.
+     *
+     * <p>Origins come from configuration, never a wildcard — {@code allowCredentials(true)}
+     * makes a wildcard both illegal and dangerous, since it would let any site on the
+     * internet make authenticated calls with a learner's cookies. Adding a deployment means
+     * adding its origin to {@code app.cors.allowed-origins}, not loosening this.
+     *
+     * <p>Registered for /api/** and /oauth2/** only; everything else needs no cross-origin
+     * access.
+     */
     public CorsConfigurationSource corsSource() {
         CorsConfiguration config = new CorsConfiguration();
         config.setAllowedOrigins(allowedOrigins);
@@ -160,11 +173,29 @@ public class SecurityConfig {
     }
 
     @Bean
+    /**
+     * Exposes Spring's auto-configured {@link AuthenticationManager} as a bean so
+     * {@code AuthService} (password login) and {@code OidcTokenService} (the token
+     * endpoint) can both call it directly to verify credentials.
+     *
+     * <p>Taken from {@link AuthenticationConfiguration} rather than assembled by hand: that
+     * is what wires in {@link UserDetailsServiceImpl} and the {@link #passwordEncoder()}
+     * below with the framework's own defaults — including hiding "user not found" behind
+     * "bad credentials". Building a ProviderManager here instead would silently opt out of
+     * that protection.
+     */
     public AuthenticationManager authManager(AuthenticationConfiguration config) throws Exception {
         return config.getAuthenticationManager();
     }
 
     @Bean
+    /**
+     * BCrypt, used both to hash new registrations and to verify logins — the two must be
+     * the same bean or every password stops matching.
+     *
+     * <p>Default strength (10). BCrypt stores its cost and salt inside the hash, so raising
+     * the strength later re-hashes new passwords without invalidating existing ones.
+     */
     public PasswordEncoder passwordEncoder() {
         return new BCryptPasswordEncoder();
     }

@@ -104,10 +104,34 @@
  *                          { val, left, right } node structure; a returned tree converts
  *                          back to the same level-order-with-nulls array (trailing nulls
  *                          trimmed) for comparison.
+ *
+ * RELATIONSHIPS (who loads this, what it touches, what checks it):
+ *   - Loaded by the 9 `practice-*.html` banks; each page is pure data + one
+ *     `DevHubCodeGrade.render()` call. `app.html` shows those pages in its iframe.
+ *   - Persists `dlh-codegrade:<bank id>` in localStorage: per exercise
+ *     { solved, code:{lang:src}, coachSeen:[ids], fails:n }. The global
+ *     "🧑‍💻 Pair" preference is the separate key `dlh-codegrade-coach`.
+ *   - `dlh-java-runtime` is a CACHE STORAGE name (the fetched-once tools.jar),
+ *     not a localStorage key — grep for `dlh-` will mislead you there.
+ *   - Reports each first solve into `DevHubStreak` (devhub-transitions.js) when
+ *     that engine is on the page; degrades silently when it is not.
+ *   - "Learn more" links post a `dlh-navigate` message to the parent app.html
+ *     frame so the hub swaps lessons in place (falls back to a plain navigation).
+ *   - `matchCoachEntry()` is a CONTRACT WITH A GATE: tmp_coachcheck.mjs replays
+ *     the real function against two samples per `coach:` entry. Change its
+ *     semantics (the absent-length gate especially) and rerun that gate.
+ *   - `buildJavaHarness()` / `JAVA_NODES_SRC` / `deepEq()` are exposed on
+ *     `DevHubCodeGrade.__test` so tmp_java_verify.mjs compiles and runs every
+ *     Java exercise against the REAL harness generator, never a copy.
+ *   - Shares its CDN pins with the playground pages (same tsc / Pyodide builds),
+ *     and with devhub-tryit.js, which uses the same four runtimes.
  * ========================================================================== */
 (function (global) {
   'use strict';
 
+  /** Pinned CDN builds. TS 5.6.3 is ALSO the version tmp_codecheck.mjs expects you to
+   *  `npm i --no-save typescript@5.6.3` for — bump both together or the gate and the
+   *  page will disagree about what compiles. Pyodide is the Python playground's build. */
   const TS_CDN = 'https://cdn.jsdelivr.net/npm/typescript@5.6.3/lib/typescript.js';
   const PY_BASE = 'https://cdn.jsdelivr.net/pyodide/v0.26.2/full/';
   const CHEERPJ_LOADER = 'https://cjrtnc.leaningtech.com/4.3/loader.js';
@@ -115,7 +139,9 @@
    * commit SHA so an upstream change can never silently break grading. */
   const JAVA_TOOLS_JAR = 'https://raw.githubusercontent.com/leaningtech/javafiddle/0d847f83f11607623187340e4d12efb494f64e80/static/tools.jar';
 
-  /* ---- tiny DOM helper: h('div', {class:'x'}, child, child) ------------- */
+  /** Tiny DOM builder used for every element this engine renders: h(tag, props, ...kids).
+   *  `class` → className, `html` → innerHTML (trusted engine markup only), `onX` → listener,
+   *  anything else → attribute. Kids may be strings, nodes, nested arrays, or null/false. */
   function h(tag, props, ...kids) {
     const el = document.createElement(tag);
     if (props) {
@@ -132,9 +158,13 @@
     }
     return el;
   }
+  /** HTML-escape untrusted text (student code, test values, runtime errors) before it
+   *  lands in innerHTML. Anything that came from the sandbox goes through here. */
   function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
-  /* ---- format a JS value for display (args / expected / got) ------------ */
+  /** Render a JS value the way the results panel shows args / expected / got. Strings
+   *  keep their quotes so "5" and 5 look different — the exact confusion a failing
+   *  test most often comes from. */
   function fmt(v) {
     if (typeof v === 'string') return JSON.stringify(v);
     if (v === null) return 'null';
@@ -143,13 +173,18 @@
     if (typeof v === 'object') return '{' + Object.keys(v).map(k => k + ': ' + fmt(v[k])).join(', ') + '}';
     return String(v);
   }
+  /** Comma-join a test's positional args with fmt() for the "input: (…)" line. */
   function fmtArgs(args) { return args.map(fmt).join(', '); }
 
   /* ---- "Code With Me" coach: global on/off preference ------------------- */
   const COACH_KEY = 'dlh-codegrade-coach';
+  /** Is the "Code With Me" coach on? Default ON (missing key, or storage unavailable):
+   *  the feature is opt-out, and a learner who cannot persist a preference should still
+   *  get the coaching rather than silently lose it. */
   function coachEnabled() {
     try { return localStorage.getItem(COACH_KEY) !== '0'; } catch (e) { return true; }
   }
+  /** Persist the global Pair on/off toggle (one preference across every bank). */
   function setCoachEnabled(v) {
     try { localStorage.setItem(COACH_KEY, v ? '1' : '0'); } catch (e) { /* ignore */ }
   }
@@ -158,6 +193,18 @@
    * written a real amount of their own code — checking it against the bare
    * starter would fire before a single keystroke. */
   const COACH_ABSENT_MIN_EXTRA = 40;
+  /** THE coach predicate — does entry `c` fire on this `code` in this `lang`?
+   *  Replayed verbatim by tmp_coachcheck.mjs, so its behaviour is a tested contract:
+   *   - `absent` entries return false until the student's code is at least
+   *     COACH_ABSENT_MIN_EXTRA chars longer than the starter (see the note above),
+   *     which is also why an `absent` entry can NEVER fire on a problem whose whole
+   *     solution is under 40 chars longer than its stub — those got cut, not softened.
+   *   - `match` is either one RegExp (all languages) or an object keyed by language;
+   *     a language missing from the object never triggers the entry.
+   *  The `instanceof RegExp` here is fine IN THE BROWSER (one realm). The gate cannot
+   *  use it — its bank is evaluated in a `vm` context whose RegExp is a different
+   *  constructor — so tmp_coachcheck.mjs tests with Object.prototype.toString instead.
+   *  Same cross-realm family as the Uint8Array gotcha in frameBytes() below. */
   function matchCoachEntry(c, code, lang, starterCode) {
     if (c.absent && code.length < starterCode.length + COACH_ABSENT_MIN_EXTRA) return false;
     let re = c.match;
@@ -180,22 +227,33 @@
   const STUCK_THRESHOLDS = [3, 6, 9];
 
   /* ---- localStorage progress (per bank id) ------------------------------ */
+  /** localStorage key per bank: `dlh-codegrade:<bank.id>`. One JSON object holding every
+   *  exercise's { solved, code, coachSeen, fails } — see the header's RELATIONSHIPS. */
   const lsKey = id => 'dlh-codegrade:' + id;
+  /** Read a bank's progress object; any parse/storage failure reads as "nothing yet". */
   function loadProgress(id) {
     try { return JSON.parse(localStorage.getItem(lsKey(id))) || {}; } catch (e) { return {}; }
   }
+  /** Write a bank's progress object back. Called on every keystroke (the editor buffer
+   *  is persisted live), so it must never throw — private mode just loses the save. */
   function saveProgress(id, data) {
     try { localStorage.setItem(lsKey(id), JSON.stringify(data)); } catch (e) { /* ignore */ }
   }
 
-  /* ---- navigate the parent hub to another visualizer page --------------- */
+  /** "Learn more" navigation. When this page is inside app.html's iframe, the parent
+   *  listens for the `dlh-navigate` message and swaps the lesson in place (keeping the
+   *  hub's sidebar/progress). The plain `location.href` after it is the standalone
+   *  fallback — postMessage to a non-listening parent is a no-op, so both run. */
   function gotoPage(file) {
     try { global.parent.postMessage({ type: 'dlh-navigate', file: file }, '*'); }
     catch (e) { /* not embedded — ignore */ }
     global.location.href = file;
   }
 
-  /* ---- inject the engine's stylesheet once ------------------------------ */
+  /** Inject this engine's critical CSS once, id-guarded on `dlh-codegrade-styles`.
+   *  Engines must be SELF-CONTAINED: they cannot assume devhub.css is linked (14
+   *  index/landing pages do not link it). The cg-* palette is hardcoded dark on purpose;
+   *  the cream theme re-skins these classes in devhub-hf.css (22 rules), not here. */
   function injectStyles() {
     if (document.getElementById('dlh-codegrade-styles')) return;
     const css = `
@@ -286,7 +344,11 @@
   }
 
   /* ---- lazy-load the real TypeScript compiler (shared with the TS playground's CDN build) ---- */
+  /** Memo for loadTs(): `tsReady` once window.ts exists, `tsLoading` while in flight so
+   *  two quick Run clicks share one script load instead of injecting two. */
   let tsReady = false, tsLoading = null;
+  /** Load the real TypeScript compiler from the CDN on first TS run. Resolves false
+   *  (never rejects) when offline so the caller can show a status line, not a stack. */
   function loadTs() {
     if (tsReady) return Promise.resolve(true);
     if (tsLoading) return tsLoading;
@@ -299,6 +361,8 @@
     });
     return tsLoading;
   }
+  /** TS → ES2020 JS, type errors IGNORED (transpileModule never type-checks). Grading
+   *  is behavioural: a solution with a type error that still passes the tests passes. */
   function transpileTs(code) {
     const ts = global.ts;
     return ts.transpileModule(code, {
@@ -306,11 +370,17 @@
     }).outputText;
   }
 
-  /* ---- run JS (or transpiled TS) inside a sandboxed iframe, get graded results ---- */
+  /** Run JS (or already-transpiled TS) against the hidden tests inside a throwaway
+   *  `<iframe sandbox="allow-scripts">` — an opaque origin, so student code can neither
+   *  read this page nor its localStorage. The harness below is inlined into that frame
+   *  and posts one result per test back on a random per-run `channel`, which is how
+   *  two overlapping runs cannot mix up each other's messages. Resolves, never rejects:
+   *  { results:[{pass,got|error}] } or { error } (including the kill-timer's message). */
   function runJsLike(fnCode, functionName, tests, timeoutMs, argShapes, resultShape) {
     return new Promise(resolve => {
       const channel = 'cg-' + Math.random().toString(36).slice(2);
       let settled = false;
+      /** The frame's single reply. `settled` makes the first message (or the timer) win. */
       function onMsg(e) {
         if (!e.data || e.data.channel !== channel) return;
         if (settled) return;
@@ -320,6 +390,8 @@
         else resolve({ results: e.data.results });
       }
       let frame, killTimer;
+      /** Detach the listener + timer, then remove the frame a beat later so a message
+       *  still in flight is not torn down mid-delivery. */
       function cleanup() {
         global.removeEventListener('message', onMsg);
         clearTimeout(killTimer);
@@ -328,6 +400,8 @@
       global.addEventListener('message', onMsg);
 
       const harness = `
+/** Sandbox harness helper (runs INSIDE the iframe, not on the page). Plain array →
+ *  { val, next } chain, so argShapes: ['list'] exercises receive real nodes. */
 function __buildList(arr) {
   let head = null, tail = null;
   for (const v of arr) {
@@ -336,17 +410,22 @@ function __buildList(arr) {
   }
   return head;
 }
+/** { values, pos } → chain whose tail points back at index pos (pos < 0 = no cycle).
+ *  Input-only shape: there is deliberately no reverse, it would never terminate. */
 function __buildListWithCycle(spec) {
   const nodes = spec.values.map(v => ({ val: v, next: null }));
   for (let i = 0; i < nodes.length - 1; i++) nodes[i].next = nodes[i + 1];
   if (spec.pos >= 0 && nodes.length) nodes[nodes.length - 1].next = nodes[spec.pos];
   return nodes.length ? nodes[0] : null;
 }
+/** Chain → plain array for comparison. The 100k guard stops a student's accidental
+ *  cycle from hanging the sandbox before the kill-timer would. */
 function __listToArray(node) {
   const out = []; let cur = node, guard = 0;
   while (cur && guard++ < 100000) { out.push(cur.val); cur = cur.next; }
   return out;
 }
+/** LeetCode level-order-with-null-gaps array → real { val, left, right } tree. */
 function __buildTree(arr) {
   if (!arr || !arr.length || arr[0] === null) return null;
   const root = { val: arr[0], left: null, right: null };
@@ -365,6 +444,8 @@ function __buildTree(arr) {
   }
   return root;
 }
+/** Tree → the same level-order encoding, trailing nulls trimmed, so a returned tree
+ *  compares equal to the plain expected array a bank author wrote by hand. */
 function __treeToArray(root) {
   if (!root) return [];
   const out = []; const queue = [root];
@@ -376,12 +457,14 @@ function __treeToArray(root) {
   while (out.length && out[out.length - 1] === null) out.pop();
   return out;
 }
+/** Dispatch one positional arg through its declared argShapes entry (or pass through). */
 function __applyArgShape(shape, value) {
   if (shape === 'list') return __buildList(value);
   if (shape === 'list-with-cycle') return __buildListWithCycle(value);
   if (shape === 'tree') return __buildTree(value);
   return value;
 }
+/** Dispatch the return value through resultShape so it compares as plain JSON. */
 function __applyResultShape(shape, value) {
   if (shape === 'list') return __listToArray(value);
   if (shape === 'tree') return __treeToArray(value);
@@ -391,6 +474,10 @@ ${fnCode}
 const __tests = ${JSON.stringify(tests)};
 const __argShapes = ${JSON.stringify(argShapes || [])};
 const __resultShape = ${JSON.stringify(resultShape || null)};
+/** Structural equality for the sandbox: NaN equals NaN, arrays by element, objects by
+ *  key set. deepEq() on the page side MUST mirror this exactly — the Java path grades
+ *  with deepEq, the JS/TS/Python paths grade with this, and a divergence would grade
+ *  the same answer differently per language. */
 function __eq(a,b){
   if(a===b) return true;
   if(typeof a==='number'&&typeof b==='number'&&Number.isNaN(a)&&Number.isNaN(b)) return true;
@@ -438,11 +525,20 @@ parent.postMessage({ channel: ${JSON.stringify(channel)}, kind: 'done', results:
   }
 
   /* ---- lazy-boot Pyodide (shared with the Python playground's CDN build) ---- */
+  /** Memo for bootPyodide(): the live interpreter, and the in-flight boot promise so a
+   *  second Run during the ~10 MB download joins it instead of starting another. */
   let pyodide = null, pyBooting = null;
+  /** Promise-wrapped `<script src>` injection (rejects on network failure). */
   function loadScript(src) { return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('failed to load ' + src)); document.head.appendChild(s); }); }
+  /** Boot CPython/WASM once per page and keep it: unlike the JS and Java paths, a
+   *  Python run is NOT isolated per run — top-level names persist between runs. */
   function bootPyodide() {
     if (pyodide) return Promise.resolve(pyodide);
     if (pyBooting) return pyBooting;
+    // The in-flight latch, assigned before the first await so two exercises graded in
+    // quick succession share one CPython download instead of racing two. Note this one
+    // is NOT cleared on failure (bootJava's is): a Pyodide boot that fails here leaves
+    // the rejected promise latched, so the page must be reloaded to retry.
     pyBooting = (async () => {
       if (!global.loadPyodide) await loadScript(PY_BASE + 'pyodide.js');
       pyodide = await global.loadPyodide({ indexURL: PY_BASE });
@@ -450,6 +546,10 @@ parent.postMessage({ channel: ${JSON.stringify(channel)}, kind: 'done', results:
     })();
     return pyBooting;
   }
+  /** Grade Python: the student's code + a Python twin of the JS harness (same list/tree
+   *  shape helpers, same unordered rule) run via runPythonAsync; the trailing
+   *  `__results` expression is the return value, converted to JS with dict_converter so
+   *  dicts arrive as plain objects, then destroyed to free the PyProxy. */
   async function runPython(code, functionName, tests, argShapes, resultShape) {
     const py = await bootPyodide();
     const harness = `
@@ -589,9 +689,12 @@ __results
    * weapon: destroying the iframe destroys a wedged JVM, and the next run
    * boots a fresh one.
    * ====================================================================== */
+  /** The one live JVM iframe (null until first Java run), its in-flight boot promise,
+   *  and the tools.jar bytes kept in memory so a JVM rebuild after a timeout does not
+   *  even hit Cache Storage. */
   let javaFrame = null, javaBooting = null, javaJarBuf = null;
 
-  /* CheerpJ runs in its own iframe realm, and its Uint8Array `instanceof`
+  /** CROSS-REALM GOTCHA #1. CheerpJ runs in its own iframe realm, and its Uint8Array `instanceof`
    * check fails for arrays built with the PARENT page's constructor (it then
    * silently stringifies them, corrupting binary data) — so every byte array
    * handed to cheerpjAddStringFile must be built with the FRAME's Uint8Array. */
@@ -602,12 +705,14 @@ __results
     return out;
   }
 
+  /** Kill the JVM iframe (the only way to stop a wedged JVM) and forget the boot promise
+   *  so the next Run boots fresh. Called by javaDeadline() on any timeout. */
   function destroyJavaRuntime() {
     if (javaFrame) { try { javaFrame.remove(); } catch (e) { /* ignore */ } }
     javaFrame = null; javaBooting = null;
   }
 
-  /* tools.jar is ~18 MB — fetch it once, keep it in Cache Storage so revisits
+  /** tools.jar is ~18 MB — fetch it once, keep it in Cache Storage so revisits
    * (even after a browser restart) never re-download it. */
   async function fetchToolsJar() {
     if (javaJarBuf) return javaJarBuf;
@@ -628,9 +733,16 @@ __results
     return javaJarBuf;
   }
 
+  /** Boot CheerpJ inside a hidden same-origin iframe: create the frame, load the loader
+   *  script INTO the frame (so CheerpJ's globals never touch this page), fetch tools.jar
+   *  in parallel, then mount the jar on the virtual FS. `status(msg)` feeds the toolbar
+   *  line during the ~40 MB first download. A failed boot clears `javaBooting` so the
+   *  next click retries instead of awaiting a dead promise forever. */
   function bootJava(status) {
     if (javaFrame) return Promise.resolve(javaFrame);
     if (javaBooting) return javaBooting;
+    // In-flight latch — see bootPyodide. Cleared by the .catch below so a failed boot
+    // (offline, or the 40 MB fetch cut short) can be retried by clicking Run again.
     javaBooting = (async () => {
       const frame = document.createElement('iframe');
       frame.style.display = 'none';
@@ -659,7 +771,7 @@ __results
     return javaBooting;
   }
 
-  /* a run that exceeds its budget gets its whole JVM torn down — a fresh one
+  /** a run that exceeds its budget gets its whole JVM torn down — a fresh one
    * boots on the next Run click (tools.jar stays cached, so that's cheap-ish) */
   function javaDeadline(promise, ms, what) {
     return new Promise((resolve, reject) => {
@@ -671,11 +783,16 @@ __results
     });
   }
 
-  /* ---- JSON test data -> typed Java literals ----------------------------- */
+  /** JSON test data → typed Java source literals. JSON cannot say int[] vs long[] or
+   *  char[][] vs String[][], which is why exercises may declare `javaTypes`.
+   *  jChar: one character as a Java char literal, escaping the two that need it. */
   function jChar(c) {
     const s = String(c);
     return "'" + (s === "'" ? "\\'" : s === '\\' ? '\\\\' : s) + "'";
   }
+  /** Value → Java literal of `type`. Arrays recurse with `nested` so only the outermost
+   *  level gets the `new T[]` prefix; a string for a char[] type is split per char. An
+   *  unknown type throws at harness-build time — better than a javac error later. */
   function jLit(type, v, nested) {
     if (v === null || v === undefined) return 'null';
     if (type && type.endsWith('[]')) {
@@ -696,6 +813,8 @@ __results
       default: throw new Error('devhub-codegrade: unsupported javaTypes entry "' + type + '"');
     }
   }
+  /** Fallback when an exercise has no `javaTypes`: number → int/double, array → first
+   *  non-null element's type + "[]". Anything else is an authoring error, so it throws. */
   function inferJavaType(v) {
     if (typeof v === 'number') return Number.isInteger(v) ? 'int' : 'double';
     if (typeof v === 'string') return 'String';
@@ -707,6 +826,8 @@ __results
     }
     throw new Error('devhub-codegrade: cannot infer a Java type — declare javaTypes on this exercise');
   }
+  /** One test arg as a Java expression: shaped args become harness builder calls
+   *  (buildList/buildTree), everything else a typed literal via jLit(). */
   function javaArgExpr(ex, argIndex, value) {
     const shape = ex.argShapes && ex.argShapes[argIndex];
     if (shape === 'list') return 'buildList(' + jLit('int[]', value) + ')';
@@ -716,7 +837,11 @@ __results
     return jLit(type, value);
   }
 
-  /* ---- generate Harness.java for one exercise ---------------------------- */
+  /** Generate Harness.java for one exercise: builders for the node shapes, a toJson that
+   *  knows every primitive-array type, and a main() that calls `new Solution().<fn>(…)`
+   *  per test and prints ONE `@@CG@@{json}` line each — the sentinel runJava() scans
+   *  the frame's #console for, so student System.out noise cannot be mistaken for a
+   *  result. Exposed on `__test` so tmp_java_verify.mjs runs this exact generator. */
   function buildJavaHarness(ex) {
     const fn = ex.functionName.java;
     const wrap = ex.resultShape === 'list' ? 'listToArray' : ex.resultShape === 'tree' ? 'treeToArray' : '';
@@ -828,7 +953,7 @@ __results
     ].join('\n');
   }
 
-  /* the node types user code may reference — provided as their own compilation
+  /** the node types user code may reference — provided as their own compilation
    * unit so exercise starters never (re)declare them */
   const JAVA_NODES_SRC = [
     'class ListNode {',
@@ -847,7 +972,7 @@ __results
     '}'
   ].join('\n');
 
-  /* page-side deep-equal, mirroring the sandbox harness's __eq exactly */
+  /** page-side deep-equal, mirroring the sandbox harness's __eq exactly (see __eq) */
   function deepEq(a, b) {
     if (a === b) return true;
     if (typeof a === 'number' && typeof b === 'number' && Number.isNaN(a) && Number.isNaN(b)) return true;
@@ -867,6 +992,12 @@ __results
     return false;
   }
 
+  /** Grade Java: write Solution/Nodes/Harness into the JVM frame's virtual FS, run javac
+   *  (compile errors come back as the diagnostic text with /str/ paths stripped), then run
+   *  Harness and parse the sentinel lines in test order. Three deadlines: 180s boot, 90s
+   *  compile, 30s run — each one tears the JVM down on expiry. Java 8 ONLY (the JDK-8
+   *  tools.jar) and CheerpJ threads are cooperative; both are runtime facts the exercise
+   *  starters were written around. */
   async function runJava(code, ex, status) {
     const frame = await javaDeadline(bootJava(status), 180000, 'downloading/booting the Java runtime');
     const win = frame.contentWindow, doc = frame.contentDocument;
@@ -911,7 +1042,11 @@ __results
     return { results };
   }
 
-  /* ---- render one exercise's editor+results panel ------------------------ */
+  /** Render one exercise: prompt, language tabs, gutter+textarea editor, Run/Reset,
+   *  results, hints, and the coach panel. `progress` is the live bank object (mutated and
+   *  saved here); `onSolved` lets render() refresh the list and progress bar. Called
+   *  afresh on every exercise switch — nothing here survives a switch except what was
+   *  persisted. */
   function renderExercise(root, bank, ex, progress, onSolved) {
     const langs = Object.keys(ex.starter);
     let lang = ex.__lastLang && langs.includes(ex.__lastLang) ? ex.__lastLang : langs[0];
@@ -951,17 +1086,24 @@ __results
       coachMsgs
     );
 
+    /** Reflect the global Pair preference in the toggle button's label/opacity. */
     function paintCoachToggle() {
       const on = coachEnabled();
       coachToggle.textContent = on ? '🧑‍💻 Pair: On' : '🧑‍💻 Pair: Off';
       coachToggle.classList.toggle('coach-off', !on);
     }
+    /** Turn the pair-programming coach on or off. The preference is per-learner and
+     *  sitewide (see coachEnabled/setCoachEnabled), not per-exercise, so a learner who
+     *  finds it noisy silences it once. Switching it ON re-evaluates immediately rather
+     *  than waiting for the next keystroke — otherwise the panel sits empty and looks
+     *  broken until you type. */
     coachToggle.onclick = () => {
       setCoachEnabled(!coachEnabled());
       paintCoachToggle();
       if (coachEnabled()) evaluateCoach();
     };
 
+    /** Append one dismissible coach bubble. `tone: 'praise'` swaps the avatar + border. */
     function addCoachMsg(text, tone) {
       coachMsgs.appendChild(h('div', { class: 'cg-coach-msg' + (tone === 'praise' ? ' praise' : '') },
         h('span', { class: 'av' }, tone === 'praise' ? '🎉' : '🧑‍💻'),
@@ -970,7 +1112,12 @@ __results
       ));
     }
 
+    /** Debounce handle: coach evaluation runs 900ms after the LAST keystroke, not on each. */
     let coachTimer = null;
+    /** Run every unseen `coach:` entry for the current language against the buffer and
+     *  show AT MOST ONE (break after the first hit) — a wall of nudges on one pass reads
+     *  as nagging. Skipped entirely on an untouched starter. Each id is recorded in
+     *  `coachSeen` before display so it can never repeat, even across reloads. */
     function evaluateCoach() {
       if (!coachEnabled() || !ex.coach || !ex.coach.length) return;
       const code = ta.value, starterCode = ex.starter[lang] || '';
@@ -988,11 +1135,15 @@ __results
       }
     }
 
+    /** Renumber the fake gutter to match the textarea's line count. */
     function refreshGutter() {
       const n = ta.value.split('\n').length;
       let g = ''; for (let i = 1; i <= n; i++) g += i + (i < n ? '\n' : '');
       gutter.textContent = g || '1';
     }
+    /** Switch the editor to language `l`: restore the saved buffer (or the starter), the
+     *  signature line, the active tab, and the "solved previously" status. `ex.__lastLang`
+     *  is a transient in-memory note so re-selecting the exercise keeps the tab. */
     function loadLang(l) {
       lang = l; ex.__lastLang = l;
       sigEl.textContent = ex.signature[l] || '';
@@ -1022,6 +1173,7 @@ __results
     // having typed indentation into the code, with Run and the language tabs
     // unreachable. Esc arms ONE focus-moving Tab (the standard editor pattern);
     // any other key re-arms indentation capture.
+    /** Armed by Esc: the NEXT Tab moves focus instead of indenting (see the note below). */
     let tabEscapes = false;
     ta.addEventListener('keydown', e => {
       if (e.key === 'Escape') { tabEscapes = true; return; }
@@ -1040,6 +1192,12 @@ __results
     });
     resetBtn.onclick = () => { ta.value = ex.starter[lang] || ''; delete stored[lang]; refreshGutter(); ta.focus(); };
 
+    /** Grade the current attempt: disable the button (a second click mid-run would race
+     *  two runtimes over one results pane), route to the per-language runner, then render
+     *  pass/fail per test case. Python and Java report boot progress through statusEl
+     *  because their first run downloads 10 MB / 40 MB; TypeScript needs the compiler
+     *  loaded before the code can even be transpiled, and an offline load must fail with a
+     *  message rather than silently doing nothing. */
     runBtn.onclick = async () => {
       runBtn.disabled = true;
       resultsEl.innerHTML = '';
@@ -1110,6 +1268,9 @@ __results
       let shown = 0;
       const hintBtn = h('button', { class: 'cg-btn ghost' }, '💡 Show a hint (' + ex.hints.length + ')');
       const hintList = h('div');
+      /** Reveal hints one at a time, never all at once — a learner who dumps every hint has
+       *  skipped the struggle that makes the exercise work. The button re-labels with the
+       *  remaining count and disables itself on the last one. */
       hintBtn.onclick = () => {
         if (shown < ex.hints.length) {
           hintList.appendChild(h('div', { class: 'cg-hint' }, ex.hints[shown]));
@@ -1140,7 +1301,9 @@ __results
     // stays where the user had it; the Reset button still focuses deliberately.
   }
 
-  /* ---- main render entry point ------------------------------------------ */
+  /** Main entry point — `DevHubCodeGrade.render(rootEl, bank)`. Injects styles, loads
+   *  the bank's progress, and builds the header/progress bar + the two-column layout
+   *  (exercise list | exercise panel), then selects the first exercise. */
   function render(root, bank) {
     injectStyles();
     const progress = loadProgress(bank.id);
@@ -1149,6 +1312,7 @@ __results
 
     const progBar = h('div', { class: 'cg-prog-bar' }, h('i'));
     const progTxt = h('span', { class: 'cg-prog-txt' });
+    /** Recompute the "n / total solved" bar from the progress object. */
     function refreshProgress() {
       const total = bank.exercises.length;
       const solved = bank.exercises.filter(e => progress[e.id] && progress[e.id].solved).length;
@@ -1170,11 +1334,13 @@ __results
     root.appendChild(layout);
 
     let current = bank.exercises[0];
+    /** Make `ex` current: highlight it in the list and (re)render its panel. */
     function selectExercise(ex) {
       current = ex;
       list.querySelectorAll('.cg-item').forEach(it => it.classList.toggle('on', it.dataset.id === ex.id));
       renderExercise(exPanel, bank, ex, progress, () => { refreshProgress(); renderList(); });
     }
+    /** Rebuild the sticky exercise list with solved dots and the active highlight. */
     function renderList() {
       list.innerHTML = '';
       bank.exercises.forEach(ex => {
@@ -1194,7 +1360,7 @@ __results
 
   global.DevHubCodeGrade = {
     render: render,
-    /* exposed for the offline verification scripts (tmp_java_verify.mjs) so they
+    /** exposed for the offline verification scripts (tmp_java_verify.mjs) so they
      * exercise the REAL harness generator, not a drift-prone copy */
     __test: { buildJavaHarness: buildJavaHarness, JAVA_NODES_SRC: JAVA_NODES_SRC, deepEq: deepEq }
   };

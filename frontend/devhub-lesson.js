@@ -45,6 +45,16 @@
  *
  * USAGE: <script src="devhub-lesson.js"></script>   (before </body>)
  * API:   DevHubLesson.apply(rootEl?)  → re-scan for late-added components
+ *
+ * WHO LOADS IT: 8 pages (the shell/CLI-flavoured lessons that use the
+ * terminal walkthrough or command anatomy). It is NOT one of the scripts
+ * tmp_vcheck.mjs requires on every page — add it only where the markup above
+ * appears. Assumes nothing beyond that markup; works with or without
+ * devhub.css / devhub-hf.css because every colour has a token fallback.
+ *
+ * PERSISTS: nothing. Revealed output is not remembered across reloads on
+ * purpose — the predict-first beat should replay every time.
+ * DEPENDS ON: nothing; nothing depends on it.
  * ========================================================================== */
 (function (global, doc) {
   'use strict';
@@ -97,6 +107,10 @@
   }
 
   /* ---------- 1. terminal walkthrough ------------------------------------ */
+  /**
+   * Upgrades one .hf-walk: numbers each step and hides each .hf-walk-out behind a
+   * "Reveal output" button. Idempotent via data-hfwalk-done, so apply() can re-scan.
+   */
   function wireWalk(w) {
     if (w.hasAttribute('data-hfwalk-done')) return;
     w.setAttribute('data-hfwalk-done', '');
@@ -125,11 +139,16 @@
   }
 
   /* ---------- 2. command anatomy ----------------------------------------- */
+  /**
+   * Upgrades one .hf-anatomy: clicking a .tok shows the .hf-anatomy-info whose
+   * data-part matches it. Idempotent via data-hfanat-done.
+   */
   function wireAnatomy(a) {
     if (a.hasAttribute('data-hfanat-done')) return;
     a.setAttribute('data-hfanat-done', '');
     var toks = a.querySelectorAll('.tok');
     var infos = a.querySelectorAll('.hf-anatomy-info');
+    /** Selects one token and its matching info panel; every other panel is hidden. */
     function show(part) {
       for (var i = 0; i < toks.length; i++) toks[i].classList.toggle('on', toks[i].dataset.part === part);
       for (var j = 0; j < infos.length; j++) infos[j].hidden = infos[j].dataset.part !== part;
@@ -142,6 +161,10 @@
   }
 
   /* ---------- boot -------------------------------------------------------- */
+  /**
+   * Scans `root` (default: the document) for both components and wires any not yet
+   * done. Public as DevHubLesson.apply() for pages that inject markup after load.
+   */
   function apply(root) {
     var r = root || doc, i, els;
     els = r.querySelectorAll('.hf-walk');    for (i = 0; i < els.length; i++) wireWalk(els[i]);

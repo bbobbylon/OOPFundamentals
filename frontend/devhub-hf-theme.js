@@ -30,16 +30,61 @@
  * means the whole cream theme is one <script> on a page rather than two.
  *
  * USAGE: <script src="devhub-hf-theme.js"></script> once per kit page.
+ *
+ * WHO LOADS IT: 522 of the 537 lesson pages (every <html data-hf> page), after
+ * the per-page widgets and tracks-data.js / devhub-chapters.js. It assumes
+ * nothing about the page beyond <html> — the button is only built on kit
+ * pages, and the repair works on whatever the DOM happens to contain.
+ *
+ * PERSISTS (localStorage, shared with app.html — never fork these keys):
+ *   devhub-theme     'dark' | 'light' | 'cream'   the user's choice
+ *   devhub-theme-v3  '1'                          one-time migration flag
+ *
+ * THE THREE-BOOTSTRAP INVARIANT. The default theme is decided in THREE places
+ * that must agree, or moving between hub, landing page and lesson flips the
+ * theme under the reader:
+ *   1. app.html's <head> script          (stores the word 'light')
+ *   2. normalise() in THIS file          (stores the word 'cream')
+ *   3. the inline pre-paint script in each of the 13 track landing pages
+ * They deliberately store different WORDS for the same palette and each
+ * reader normalises the other's. Do not "fix" that to one word without
+ * changing all three readers — when only the lesson half was restored once,
+ * a dark hub opened cream lessons.
+ *
+ * THE CREAM THEME HAS THREE HOMES. If cream text goes unreadable, find the
+ * owner before writing a rule:
+ *   1. devhub-hf.css — the cream block + repair layer (shared components)
+ *   2. THIS file's runtime repair pass, below — per-page <style> blocks,
+ *      which CSS cannot reach because it cannot query a computed background
+ *   3. the inline :root[data-theme="light"] block in each landing page,
+ *      which links neither of the other two
+ * When tuning a cream colour, measure it against --panel2 (#e6d7bd), the
+ * DARKEST cream surface, not --bg: 4.6:1 on the page ground is ~4.3:1 on
+ * every card. `node frontend/tmp_creamrace.mjs` is the targeted reproduction
+ * of the transition-timing race the repair's transitionend hook exists for.
  * ========================================================================== */
 (function () {
   'use strict';
 
+  /**
+   * localStorage key for the chosen theme. Bootstrap 1 (app.html) and bootstrap 3
+   * (the landing pages) read and write the SAME key — see the banner.
+   */
   var KEY = 'devhub-theme';             // shared with app.html — do not fork
   var root = document.documentElement;
+  /**
+   * True when this page is inside app.html's #viewer iframe. There the hub's own
+   * header control owns the theme, so build() must not add a second button.
+   */
   var embedded = (function () {
     try { return window.top !== window.self; } catch (e) { return true; }
   })();
 
+  /**
+   * Reads the saved theme, running the one-time devhub-theme-v3 migration first.
+   * Returns null when localStorage is unavailable (sandboxed iframe, privacy mode),
+   * which normalise() then treats as the cream default.
+   */
   function stored() {
     try {
       /* devhub-theme-v3 — ONE-TIME migration, identical to the one in
@@ -59,13 +104,21 @@
   }
 
   // 'light' is the hub's word for "not dark"; on a kit page that means cream.
-  /* CREAM IS THE DEFAULT (Bobby's 2026-09-01 reference mockup is cream): only an
+  /** Bootstrap 2 of 3 (see banner). Maps any stored word onto this page's two
+   * real palettes: only an explicit 'dark' is dark; everything else — 'light',
+   * 'cream', null, garbage — is cream.
+   *
+   * CREAM IS THE DEFAULT (Bobby's 2026-09-01 reference mockup is cream): only an
      explicitly stored 'dark' keeps the espresso colorway. Restored from 2260122 —
      the merge took the cloud side of this whole file, correctly (it is the 14KB
      superset carrying the runtime repair), and that discarded this one line with
      it. 'light' is the hub's word for "not dark", so it maps to cream too. */
   function normalise(v) { return v === 'dark' ? 'dark' : 'cream'; }
 
+  /**
+   * Writes the normalised theme onto <html data-theme>, which is what every CSS
+   * rule and the repair pass key off. Never writes storage — only the button does.
+   */
   function apply(v) { root.setAttribute('data-theme', normalise(v)); }
 
   apply(stored());
@@ -82,6 +135,10 @@
     }).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
   }
 
+  /**
+   * Adds the floating ☀/☾ toggle. Bails on non-kit pages, inside the hub iframe
+   * (embedded), or when a page already has one. Called once from boot().
+   */
   function build() {
     if (!root.hasAttribute('data-hf')) return;      // not a kit page
     if (embedded) return;                           // the hub's control governs
@@ -91,6 +148,7 @@
     btn.type = 'button';
     btn.className = 'hf-themebtn';
 
+    /** Relabels the button for the CURRENT theme so it always names the other one. */
     function paint() {
       var cream = root.getAttribute('data-theme') === 'cream';
       btn.textContent = cream ? '☾ Dark' : '☀ Cream';
@@ -134,19 +192,34 @@
      scenario engines build their nodes after load). Every change records the
      value it replaced, so switching back to dark restores the page exactly.
      ══════════════════════════════════════════════════════════════════════ */
+  /**
+   * Contrast thresholds. MIN is well below WCAG's 4.5 on purpose: this pass fixes
+   * "invisible", not "could be crisper" — the same floor tmp_contrast.mjs reports at.
+   */
   var MIN = 3.0;                 /* repair below this... */
   var AIM = 4.0;                 /* ...and climb to at least this when we can */
 
+  /** Linearises one 0-255 channel (the sRGB transfer curve) for lum(). */
   function srgb(v){ v/=255; return v<=0.03928 ? v/12.92 : Math.pow((v+0.055)/1.055,2.4); }
+  /** WCAG relative luminance of an [r,g,b] triple — the input to every ratio here. */
   function lum(c){ return 0.2126*srgb(c[0]) + 0.7152*srgb(c[1]) + 0.0722*srgb(c[2]); }
+  /** WCAG contrast ratio between two luminances; order-independent. */
   function ratio(a,b){ var hi=Math.max(a,b), lo=Math.min(a,b); return (hi+0.05)/(lo+0.05); }
+  /**
+   * Turns a getComputedStyle colour string ('rgb(…)' / 'rgba(…)') into [r,g,b,a].
+   * Returns null for anything else (transparent, currentcolor, unset).
+   */
   function parse(s){
     var m = s && s.match(/[\d.]+/g); if (!m) return null;
     return [ +m[0], +m[1], +m[2], m.length>3 ? +m[3] : 1 ];
   }
+  /** Alpha-composites colour t OVER opaque colour b (the "over" operator). */
   function over(t,b){ var a=t[3]; return [t[0]*a+b[0]*(1-a), t[1]*a+b[1]*(1-a), t[2]*a+b[2]*(1-a), 1]; }
 
-  /* Backgrounds composite: an 11%-alpha wash over a dark panel is not the wash,
+  /** The effective opaque ground behind an element — what its text is actually
+     read against. Used by repair(); `cache` lives for one pass.
+
+     Backgrounds composite: an 11%-alpha wash over a dark panel is not the wash,
      it is a slightly tinted dark. Walk up collecting translucent layers until
      something opaque, then paint them back down onto it.
 
@@ -178,6 +251,10 @@
     return base;
   }
 
+  /**
+   * RGB → HSL so relight() can move lightness while keeping the hue that carries
+   * meaning on a teaching page (green = fix, red = bug, amber = careful).
+   */
   function toHsl(r,g,b){
     r/=255; g/=255; b/=255;
     var mx=Math.max(r,g,b), mn=Math.min(r,g,b), h=0, s=0, l=(mx+mn)/2, d=mx-mn;
@@ -188,6 +265,7 @@
     }
     return [h,s,l];
   }
+  /** Helper for toRgb(): one channel of the HSL → RGB conversion. */
   function hue2rgb(p,q,t){
     if(t<0)t+=1; if(t>1)t-=1;
     if(t<1/6) return p+(q-p)*6*t;
@@ -195,13 +273,15 @@
     if(t<2/3) return p+(q-p)*(2/3-t)*6;
     return p;
   }
+  /** HSL → [r,g,b]; the inverse of toHsl(), used to realise relight()'s candidate. */
   function toRgb(h,s,l){
     if (!s) { var v=Math.round(l*255); return [v,v,v]; }
     var q = l<0.5 ? l*(1+s) : l+s-l*s, p = 2*l-q;
     return [Math.round(hue2rgb(p,q,h+1/3)*255), Math.round(hue2rgb(p,q,h)*255), Math.round(hue2rgb(p,q,h-1/3)*255)];
   }
 
-  /* Move lightness in the one direction that can help, in small steps, and stop
+  /** Hue-preserving repair of one foreground colour against a ground luminance.
+     Move lightness in the one direction that can help, in small steps, and stop
      at the first value that clears AIM. Returns null if the hue simply cannot
      get there (pure yellow on white), so the caller can fall back to the ramp. */
   function relight(fg, bgLum){
@@ -219,7 +299,11 @@
     return best;
   }
 
-  /* Two passes, not one interleaved loop. The original walked every node and,
+  /** One repair pass over `root`'s subtree: measure every text-bearing element
+     against its real ground, fix the unreadable ones, and un-fix any whose ground
+     has since moved back to readable. Called from run() only.
+
+     Two passes, not one interleaved loop. The original walked every node and,
      for each, READ getComputedStyle (visibility, color, groundOf's own reads)
      then immediately WROTE el.style.setProperty(color). That write invalidates
      style for the next node's read, so every fix forced a synchronous
@@ -284,6 +368,10 @@
     }
   }
 
+  /**
+   * Puts one element's inline colour back exactly as it was before repair() touched
+   * it, and clears the data-hfc-* bookkeeping. Used by repair() and undo().
+   */
   function restore(el){
     var was = el.dataset.hfcWas;
     el.style.removeProperty('color');
@@ -294,12 +382,24 @@
     delete el.dataset.hfcWas; delete el.dataset.hfcPri;
     delete el.dataset.hfcFg;  delete el.dataset.hfcBg;
   }
+  /**
+   * Restores every element the repair ever touched — what makes switching back to
+   * dark an exact round-trip rather than a page reload.
+   */
   function undo(){
     var done = document.querySelectorAll('[data-hfc-fg]');
     for (var i = 0; i < done.length; i++) restore(done[i]);
   }
 
+  /**
+   * `scheduled` coalesces bursts of mutations into one deferred run(); `mo` is the
+   * body observer, kept so run() can discard the records its own writes produce.
+   */
   var scheduled = false, mo = null;
+  /**
+   * The single entry point for a repair pass: under cream, repair the body; under
+   * dark, undo everything. Synchronous — schedule() is the deferred wrapper.
+   */
   function run(){
     if (normalise(root.getAttribute('data-theme')) !== 'cream'){ undo(); return; }
     var cache = new Map();
@@ -310,9 +410,16 @@
        without ever reacting to ourselves. */
     if (mo) mo.takeRecords();
   }
+  /**
+   * Deferred, de-duplicated run(): many mutations in one frame cost one pass, and it
+   * waits for idle so it never competes with an animation already on screen.
+   */
   function schedule(){
     if (scheduled) return;
     scheduled = true;
+    /* Hoisted rather than inlined because BOTH branches below must schedule the same
+       function, and it must clear `scheduled` FIRST: clearing after run() would drop any
+       mutation that run() itself triggers, which is how a repaired page reverts. */
     var go = function(){ scheduled = false; run(); };
     /* NOT (rIC || setTimeout)(go, 1): requestIdleCallback's second argument is
        an IdleRequestOptions object, so passing a number throws TypeError and
@@ -321,6 +428,11 @@
     else setTimeout(go, 1);
   }
 
+  /**
+   * Wires the repair to everything that can change what is on screen: the first
+   * synchronous pass, added subtrees / class / style changes, theme flips, and the
+   * end of CSS colour transitions. Called once from boot().
+   */
   function startRepair(){
     /* The FIRST pass runs synchronously, not on idle. Deferring it means the
        page paints unreadable text and then corrects itself, which reads as a
@@ -378,6 +490,7 @@
     }, true);
   }
 
+  /** Runs at DOMContentLoaded (or immediately if the DOM is already parsed). */
   function boot() { build(); startRepair(); }
 
   if (document.readyState === 'loading') {

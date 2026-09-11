@@ -17,10 +17,47 @@
  *       cards: [ { front: 'Amazon S3', back: 'Object storage…', hint: 'storage' }, … ]
  *     });
  *   </script>
+ *
+ * WHO LOADS IT: 17 pages — the static decks under 🎓 Exam Prep (AWS services,
+ *   Big-O, HTTP, Spring), lesson pages that embed a deck inline, and
+ *   notebook.html (through devhub-notebook-review.js, which builds a deck
+ *   out of saved notebook entries and hands it to render()).
+ *
+ * CARD FORMAT:
+ *   { front: 'the prompt (plain text)',
+ *     back:  'the answer (plain text)',
+ *     hint:  'small chip on the prompt face only (optional)',
+ *     id:    'stable key (optional) — see keyOf() for what it changes',
+ *     link:  { href, label, onNavigate }   // optional "back to the lesson"
+ *   }                                       // chip; notebook decks set it
+ *
+ * THE LEITNER RULE (keep it exact — a second file re-implements it):
+ *   every card starts in box 1. "Got it" moves it UP one box, capped at 5.
+ *   "Review again" drops it straight back to box 1 — not down one box.
+ *   Mastered = box 5. "Study (weak cards first)" orders ascending by box,
+ *   so box-1 cards lead. devhub-notebook-review.js applies the same rule
+ *   to the same store in its own rate(); change one, change both.
+ *
+ * PERSISTS: localStorage 'dlh-flash:<deck.id>' → { <cardKey>: box } and
+ *   nothing else — no timestamps, no history. cardKey is the array index
+ *   for static decks, or 'k:<card.id>' when cards carry a stable id.
+ *
+ * DEPENDS ON: nothing at load. Each rating is reported to DevHubStreak
+ *   (devhub-transitions.js) when it is present, so a flashcard session
+ *   counts toward the retrieval streak exactly like a quiz attempt does.
+ *   Injects its own .df-* CSS (id 'dlh-flash-styles') — it never assumes
+ *   devhub.css is linked (14 index/landing pages don't link it).
+ *
+ * USED BY: devhub-notebook-review.js imports loadBoxes / saveBoxes /
+ *   injectStyles (exported at the bottom) so the notebook's Quiz Me and
+ *   Interleaved modes share this store and this look instead of forking it.
  * ========================================================================== */
 (function (global) {
   'use strict';
 
+  /** Tiny DOM builder: h(tag, {class, html, on<event>, ...attrs}, ...kids).
+   *  Deliberately duplicated in devhub-quiz.js and devhub-notebook-review.js:
+   *  every engine stays self-contained, with no shared runtime to load first. */
   function h(tag, props, ...kids) {
     const el = document.createElement(tag);
     if (props) for (const k in props) {
@@ -33,12 +70,20 @@
       el.appendChild(typeof kid === 'string' ? document.createTextNode(kid) : kid); }
     return el;
   }
+  /** Fisher–Yates on a COPY — deck.cards is never reordered, so positional keys stay valid. */
   function shuffle(a) { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
 
+  /** Storage key per deck. The 'dlh-flash:' prefix is what notebook-review shares (CODE-MAP §4). */
   const lsKey = id => 'dlh-flash:' + id;
+  /** Read a deck's box map; corrupt or missing storage reads as "every card in box 1".
+   *  Exported — the notebook review modes read this exact store. */
   function loadBoxes(id) { try { return JSON.parse(localStorage.getItem(lsKey(id))) || {}; } catch (e) { return {}; } }
+  /** Write a deck's box map. Quota / private-mode failures are swallowed: the session
+   *  still works, the progress just won't survive a reload. Exported (see loadBoxes). */
   function saveBoxes(id, b) { try { localStorage.setItem(lsKey(id), JSON.stringify(b)); } catch (e) {} }
 
+  /** Self-contained CSS, id-guarded so any caller may invoke it repeatedly. Exported so
+   *  devhub-notebook-review.js can wear the same .df-* classes without copying them. */
   function injectStyles() {
     if (document.getElementById('dlh-flash-styles')) return;
     const css = `
@@ -84,6 +129,9 @@
     document.head.appendChild(h('style', { id: 'dlh-flash-styles', html: css }));
   }
 
+  /** Entry point: mounts the whole deck experience (landing → study → done) into root.
+   *  Called once by a deck page, or by notebook-review's renderFlashcards() with a deck
+   *  synthesised from notebook entries. All session state lives in this closure. */
   function render(root, deck) {
     injectStyles();
     root.classList.add('df');
@@ -92,16 +140,21 @@
     let boxes = loadBoxes(deck.id);
     const state = { queue: [], pos: 0, flipped: false, reviewed: 0 };
 
-    // Cards with a stable c.id (notebook-sourced decks) key their box progress
-    // by that id instead of array position, so progress survives the notebook
-    // list changing shape (entries added/removed) between sessions. Static
-    // decks with no c.id keep the original positional-index behavior.
+    /** Storage key for card i. Cards with a stable c.id (notebook-sourced decks) key their
+     *  box progress by that id instead of array position, so progress survives the notebook
+     *  list changing shape (entries added/removed) between sessions. Static
+     *  decks with no c.id keep the original positional-index behavior. */
     function keyOf(i) { const c = deck.cards[i]; return c && c.id != null ? 'k:' + c.id : i; }
+    /** Current box of card i. Unseen cards are box 1 by definition (see the header rule). */
     function boxOf(i) { return boxes[keyOf(i)] || 1; }
+    /** Number of box-5 cards — THE mastery figure on the landing, done screen and stats. */
     function mastered() { let c = 0; for (let i = 0; i < N; i++) if (boxOf(i) >= 5) c++; return c; }
+    /** Swap root's content for one screen and scroll to the top of the page. */
     function screen(node) { root.innerHTML = ''; root.appendChild(node); window.scrollTo(0, 0); }
 
     /* ---- landing ---- */
+    /** Deck overview: totals, the 5-box histogram, Study / Shuffle / Reset. Recomputed from
+     *  storage every time it is shown, so it is always the persisted truth. */
     function landing() {
       const m = mastered();
       const counts = [0, 0, 0, 0, 0];
@@ -128,11 +181,15 @@
           h('button', { class: 'df-btn bad', onclick: reset }, 'Reset progress')));
       screen(card);
     }
+    /** One value+label tile for the .df-meta row. */
     function stat(v, l) { return h('div', { class: 'df-stat' }, h('b', null, String(v)), h('span', null, l)); }
 
+    /** Wipe the deck's box map — every card back to box 1. Irreversible; hence the red button. */
     function reset() { boxes = {}; saveBoxes(deck.id, boxes); landing(); }
 
     /* ---- start a session ---- */
+    /** Build the session queue. Default: shuffle, then stable-sort ascending by box, so weak
+     *  cards lead while ties stay random. shuffleAll ignores boxes entirely. */
     function start(shuffleAll) {
       let order = deck.cards.map((_, i) => i);
       if (shuffleAll) order = shuffle(order);
@@ -142,6 +199,8 @@
     }
 
     /* ---- study a card ---- */
+    /** Draw the current card on its prompt or answer face (state.flipped). Re-renders itself
+     *  on every flip; falls through to done() once the queue is exhausted. */
     function study() {
       if (state.pos >= state.queue.length) return done();
       const idx = state.queue[state.pos];
@@ -183,6 +242,8 @@
       screen(h('div', null, h('div', { class: 'df-card' }, top, flash, controls)));
     }
 
+    /** Apply the Leitner rule from the header to the card just answered, persist it, report
+     *  the rep to the streak, and advance. The only place a box ever changes. */
     function rate(idx, known) {
       boxes[keyOf(idx)] = known ? Math.min(5, boxOf(idx) + 1) : 1;
       saveBoxes(deck.id, boxes);
@@ -191,9 +252,12 @@
       state.flipped = false; state.pos++;
       study();
     }
+    /** Advance without rating — the box is untouched, so a skipped card is not a "miss". */
     function skip() { state.flipped = false; state.pos++; study(); }
 
     /* ---- done ---- */
+    /** End-of-session summary. Mastery is re-read from the store, not from this session's
+     *  ratings alone, so it matches what the landing screen will show next. */
     function done() {
       const m = mastered();
       screen(h('div', { class: 'df-card df-done' },

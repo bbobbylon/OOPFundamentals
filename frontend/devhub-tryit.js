@@ -39,15 +39,71 @@
  *
  * Edits persist per-widget in localStorage (dlh-tryit:<page>:<n>); ↺ Reset
  * restores the lesson's original example.
+ *
+ * PLACE IN THE SITE: loaded by 119 lesson pages (Java 44 / TS 30 / Python 23 /
+ * DSA 20 / JS 3 at the time of writing). It is the "touch the code" beat of
+ * the teaching bar; devhub-codegrade.js is the graded sibling and REUSES these
+ * exact runtimes (same CDN versions, same Cache Storage bucket) — if you bump a
+ * CDN pin here, bump it there, and bump tmp_codecheck.mjs's expected TypeScript
+ * version (5.6.3) too, because that gate compiles every snippet on the site with
+ * the same compiler the learner runs.
+ *
+ * Assumes about the page: zero required markup beyond the .tryit[data-lang] hosts
+ * — every style it needs is injected below (SELF-CONTAINED, like all engines:
+ * 14 index/landing pages never link devhub.css). devhub-syntax.js is an OPTIONAL
+ * peer: if window.DevHubSyntax exists at DOMContentLoaded the editor gets an
+ * IDE-coloured overlay, otherwise a plain textarea. Script order between the two
+ * does not matter because attachAll() waits for DOMContentLoaded.
+ *
+ * The four runtimes are REAL, not simulations:
+ *   js     — a hidden <iframe sandbox="allow-scripts"> with an OPAQUE origin, so
+ *            learner code cannot touch this page, its storage, or its cookies.
+ *   ts     — the actual TypeScript compiler (TS_CDN) transpiling in-page, then
+ *            the js path.
+ *   python — CPython compiled to WASM (Pyodide), one interpreter per page.
+ *   java   — CheerpJ: a JVM in WASM running the real javac from a JDK 8
+ *            tools.jar. LIMITATIONS that lesson authors must respect: Java 8
+ *            source only (no var, records, switch expressions, text blocks),
+ *            and threads are cooperative — a busy-wait loop starves every other
+ *            thread and trips the deadline. Examples on the 44 Java pages were
+ *            verified against this runtime, not a desktop JDK.
+ *
+ * Persists:
+ *   localStorage  dlh-tryit:<page>:<n>   the learner's edited buffer, per widget
+ *   Cache Storage dlh-java-runtime       the 18 MB tools.jar (NOT localStorage;
+ *                                        grep for the key will mislead you)
+ *
+ * Output pacing: lines that arrive in one burst are revealed with a stepped
+ * delay (see appendLine) so a result "walks in" — the same step-pacing idea as
+ * the animated visualizers, capped so long output never stalls the learner.
  */
 (function (global) {
   'use strict';
 
+  /**
+   * Pinned TypeScript build. MUST match devhub-codegrade.js and the version
+   * tmp_codecheck.mjs asks for (`npm i --no-save typescript@5.6.3`).
+   */
   const TS_CDN = 'https://cdn.jsdelivr.net/npm/typescript@5.6.3/lib/typescript.js';
+  /**
+   * Pyodide base URL; the same pin as devhub-codegrade.js so the browser cache is shared.
+   */
   const PY_BASE = 'https://cdn.jsdelivr.net/pyodide/v0.26.2/full/';
+  /**
+   * CheerpJ WASM JVM loader, loaded INSIDE the hidden runner iframe (see bootJava),
+   * never into this page.
+   */
   const CHEERPJ_LOADER = 'https://cjrtnc.leaningtech.com/4.3/loader.js';
+  /**
+   * JDK 8 javac as a jar, pinned to one javafiddle commit. This is what makes Java 8 the
+   * ceiling for every Try It example. Fetched once, then served from Cache Storage.
+   */
   const JAVA_TOOLS_JAR = 'https://raw.githubusercontent.com/leaningtech/javafiddle/0d847f83f11607623187340e4d12efb494f64e80/static/tools.jar';
 
+  /**
+   * Per-language display + editor settings. `indent` drives the Tab key; `dark` picks the
+   * badge text colour for contrast on the language's brand colour.
+   */
   const LANG_META = {
     js:     { label: 'JavaScript', badge: '#f7df1e', dark: true,  indent: 2 },
     ts:     { label: 'TypeScript', badge: '#3178c6', dark: false, indent: 2 },
@@ -55,9 +111,17 @@
     java:   { label: 'Java',       badge: '#f89820', dark: true,  indent: 4 },
   };
 
+  /**
+   * HTML-escape for anything user- or author-supplied that lands in innerHTML.
+   */
   function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
   /* ---------- styles (injected once) ------------------------------------- */
+  /**
+   * Self-contained CSS, id-guarded so multiple widgets on one page inject it once. The
+   * overlay selectors carry a deliberately high specificity — see the comment inside;
+   * devhub-hf.css restyles every <pre> on kit pages and would break editor alignment.
+   */
   function injectStyles() {
     if (document.getElementById('dlh-tryit-css')) return;
     const st = document.createElement('style');
@@ -107,7 +171,15 @@
   /* ---------- shared runtimes -------------------------------------------- */
 
   /* TypeScript compiler (page-level script, loaded once) */
+  /**
+   * In-flight TypeScript load, shared by every widget on the page so N TS examples
+   * trigger ONE compiler download.
+   */
   let tsLoading = null;
+  /**
+   * Resolve true when window.ts is usable, false when the CDN failed (offline). Never
+   * rejects — the runner turns false into a readable "offline" message.
+   */
   function loadTs() {
     if (global.ts) return Promise.resolve(true);
     if (tsLoading) return tsLoading;
@@ -122,7 +194,16 @@
   }
 
   /* Pyodide (one interpreter per page, reused across widgets and runs) */
+  /**
+   * The page's single Pyodide interpreter and its boot promise. Shared across widgets AND
+   * across runs: globals a learner defines in one Try It survive into the next run on
+   * the same page — a deliberate trade for not rebooting a 10 MB runtime per click.
+   */
   let pyodide = null, pyBooting = null;
+  /**
+   * Promise wrapper around a <script src> insert. Used for Pyodide; the TS path has its
+   * own because it must dedupe on window.ts.
+   */
   function loadScript(src) {
     return new Promise((res, rej) => {
       const s = document.createElement('script');
@@ -131,9 +212,18 @@
       document.head.appendChild(s);
     });
   }
+  /**
+   * Lazy, once-per-page Pyodide boot. `status` is the widget's status-line setter so the
+   * first run can say why it is slow. A failed boot clears pyBooting so the NEXT click
+   * retries instead of being stuck on a rejected promise forever.
+   */
   function bootPyodide(status) {
     if (pyodide) return Promise.resolve(pyodide);
     if (pyBooting) return pyBooting;
+    // The in-flight latch, assigned BEFORE the first await: a second Try It block that
+    // runs while Pyodide is still downloading joins this promise instead of starting a
+    // second ~10 MB download. Cleared on both success and failure (below) so a learner
+    // who goes offline mid-boot can retry rather than being stuck on a dead promise.
     pyBooting = (async () => {
       if (status) status('downloading the Python runtime (first run — cached after)…');
       await loadScript(PY_BASE + 'pyodide.js');
@@ -146,18 +236,37 @@
   }
 
   /* CheerpJ JVM (one hidden iframe per page; torn down + rebooted on timeout) */
+  /**
+   * The page's single CheerpJ runner iframe, its boot promise, and the tools.jar bytes.
+   * javaDeadline() tears the frame down on timeout, so javaFrame can go back to null
+   * mid-session and bootJava() will build a fresh one.
+   */
   let javaFrame = null, javaBooting = null, javaJarBuf = null;
 
+  /**
+   * THE cross-realm fix (see banner): builds the byte array with the runner iframe's
+   * own Uint8Array constructor. Every call into cheerpjAddStringFile goes through here;
+   * passing a parent-realm array silently corrupts the file.
+   */
   function frameBytes(win, data) {
     if (typeof data === 'string') data = new TextEncoder().encode(data);
     const out = new win.Uint8Array(data.length);
     out.set(data);
     return out;
   }
+  /**
+   * Hard reset of the JVM: removing the iframe kills a runaway program, which is the
+   * only way to stop one — cooperative threads cannot be interrupted from outside.
+   */
   function destroyJavaRuntime() {
     if (javaFrame) { try { javaFrame.remove(); } catch (e) { /* ignore */ } }
     javaFrame = null; javaBooting = null;
   }
+  /**
+   * tools.jar from Cache Storage bucket 'dlh-java-runtime' (shared with devhub-codegrade.js),
+   * falling back to a plain fetch when the Cache API is unavailable (private mode, some
+   * file:// contexts). Memoised in javaJarBuf for the life of the page.
+   */
   async function fetchToolsJar() {
     if (javaJarBuf) return javaJarBuf;
     let resp = null;
@@ -176,9 +285,17 @@
     javaJarBuf = new Uint8Array(await resp.arrayBuffer());
     return javaJarBuf;
   }
+  /**
+   * Lazy, once-per-page JVM boot inside a hidden SAME-origin iframe (srcdoc), which is
+   * what lets this page read the iframe's #console text back. The loader script and the
+   * jar download run in parallel; cheerpjInit then mounts the jar at /str/tools.jar.
+   * Same retry-on-failure shape as bootPyodide.
+   */
   function bootJava(status) {
     if (javaFrame) return Promise.resolve(javaFrame);
     if (javaBooting) return javaBooting;
+    // Same in-flight latch as bootPyodide: set before the first await so concurrent
+    // callers share one CheerpJ boot, cleared on failure so a retry is possible.
     javaBooting = (async () => {
       const frame = document.createElement('iframe');
       frame.style.display = 'none';
@@ -206,6 +323,11 @@
     javaBooting.catch(() => { javaBooting = null; });
     return javaBooting;
   }
+  /**
+   * Race a JVM step against a timeout. On timeout the WHOLE runtime is destroyed (not
+   * just the promise abandoned) because a spinning Java thread would otherwise keep
+   * burning the tab's CPU behind the "infinite loop?" message.
+   */
   function javaDeadline(promise, ms, what) {
     return new Promise((resolve, reject) => {
       const t = setTimeout(() => {
@@ -220,15 +342,29 @@
   /* Every runner streams output lines through onLine({text, kind}) and
    * resolves {exit} or {error}. kind: 'out' | 'err'. */
 
+  /**
+   * JS runner. Spins up a throwaway sandboxed iframe whose boot script rewires console.*
+   * to postMessage lines back on a per-run channel id (so two widgets' output cannot
+   * cross), wraps the learner's code in an async IIFE so top-level await works, and
+   * kills the frame after 5 s. The channel check in onMsg is the security boundary on
+   * this side: the frame is opaque-origin and can only talk through postMessage.
+   */
   function runJsFree(code, onLine) {
     return new Promise(resolve => {
       const channel = 'ti-' + Math.random().toString(36).slice(2);
       let settled = false, frame = null, killTimer = null;
+      /**
+       * Detach the listener and drop the frame (after a beat so a final message lands).
+       */
       function cleanup() {
         global.removeEventListener('message', onMsg);
         clearTimeout(killTimer);
         if (frame) setTimeout(() => frame.remove(), 200);
       }
+      /**
+       * Receives {channel, kind:'line'|'done'|'error'} from the sandbox; lines stream
+       * through onLine immediately, the first done/error settles the run.
+       */
       function onMsg(e) {
         if (!e.data || e.data.channel !== channel) return;
         if (e.data.kind === 'line') { onLine({ text: e.data.text, kind: e.data.stream }); return; }
@@ -277,6 +413,10 @@ window.addEventListener('unhandledrejection', e=>{ __send('line',{text:'Unhandle
     });
   }
 
+  /**
+   * TS runner: transpileModule (no type-check — a type error still runs, which is the
+   * same behaviour as tsc --noEmitOnError false) then hands the JS to runJsFree.
+   */
   async function runTsFree(code, onLine, status) {
     if (status) status('loading the TypeScript compiler…');
     const ok = await loadTs();
@@ -292,6 +432,11 @@ window.addEventListener('unhandledrejection', e=>{ __send('line',{text:'Unhandle
     return runJsFree(js, onLine);
   }
 
+  /**
+   * Python runner. Stdout/stderr are captured in batched mode (Pyodide flushes per line),
+   * and reset in `finally` so a failed run does not leave the interpreter piping output
+   * into a widget that no longer exists.
+   */
   async function runPyFree(code, onLine, status) {
     let py;
     try { py = await bootPyodide(status); }
@@ -310,10 +455,21 @@ window.addEventListener('unhandledrejection', e=>{ __send('line',{text:'Unhandle
     }
   }
 
+  /**
+   * Pick the class to compile/run from the buffer's `public class X` — Try It examples are
+   * single-file, so the public class is the entry point. Defaults to Main.
+   */
   function javaMainClass(code) {
     const m = code.match(/public\s+(?:final\s+|abstract\s+)?class\s+([A-Za-z_$][\w$]*)/);
     return m ? m[1] : 'Main';
   }
+  /**
+   * Java runner: boot (≤180 s, first run downloads ~40 MB) → javac via
+   * com.sun.tools.javac.Main against /str/tools.jar (≤90 s) → run the main class
+   * (≤30 s). Output is not streamed: CheerpJ writes stdout into the iframe's #console,
+   * which is read once at the end and split into lines, so a Java result always arrives
+   * as one burst and appendLine's walk-in animation carries the pacing.
+   */
   async function runJavaFree(code, onLine, status) {
     const frame = await javaDeadline(bootJava(status), 180000, 'downloading/booting the Java runtime');
     const win = frame.contentWindow, doc = frame.contentDocument;
@@ -341,15 +497,39 @@ window.addEventListener('unhandledrejection', e=>{ __send('line',{text:'Unhandle
     return { exit: runExit };
   }
 
+  /**
+   * Dispatch table keyed by data-lang. All four share the signature (code, onLine, status).
+   */
   const RUNNERS = { js: (c, l, s) => runJsFree(c, l), ts: runTsFree, python: runPyFree, java: runJavaFree };
 
   /* only one heavyweight runtime run at a time page-wide (JVM + Pyodide are shared) */
+  /**
+   * Page-wide run lock. The JVM and Pyodide are singletons with one console each, so two
+   * concurrent runs would interleave output; the second click is refused with a status
+   * message instead.
+   */
   let busy = false;
 
   /* ---------- widget ------------------------------------------------------ */
+  /**
+   * Mount order on the page → the :<n> suffix of each widget's localStorage key. Reordering
+   * the Try It blocks on a lesson page therefore shuffles saved buffers between them.
+   */
   let widgetCount = 0;
+  /**
+   * The page's file name, the :<page> part of the storage key — stable whether the page
+   * is opened standalone or inside app.html's iframe.
+   */
   function pageKey() { return (location.pathname.split('/').pop() || 'page'); }
 
+  /**
+   * Build one widget into `host`: header + badge, optional predict-first prompt, the
+   * editor (transparent textarea over a coloured <pre>), Run/Reset bar, output pane.
+   * Wires localStorage restore/save, Tab-indent with the Esc-then-Tab escape hatch, the
+   * burst-aware output reveal, and the Run click that dispatches through RUNNERS. Called
+   * by attachAll for each .tryit host; also public (DevHubTryIt.render) for pages that
+   * build widgets programmatically.
+   */
   function render(host, opts) {
     injectStyles();
     const lang = (opts.lang || 'js').toLowerCase();
@@ -390,6 +570,10 @@ window.addEventListener('unhandledrejection', e=>{ __send('line',{text:'Unhandle
     const edwrap = box.querySelector('.dlh-tryit-edwrap');
     const canHl = !!(global.DevHubSyntax && global.DevHubSyntax.highlight);
     if (!canHl) edwrap.classList.add('plain');
+    /**
+     * Repaint the overlay from the textarea's current value. Called on every input, Tab,
+     * reset and restore — cheap because DevHubSyntax.highlight is a single regex pass.
+     */
     function syncHl() {
       if (!canHl) return;
       // trailing \n so the last line keeps its height while the caret is on it
@@ -406,6 +590,10 @@ window.addEventListener('unhandledrejection', e=>{ __send('line',{text:'Unhandle
     autosize();
     syncHl();
 
+    /**
+     * Grow the editor with its content between 6 and 30 lines so a short example does not
+     * sit in a tall empty box and a long one does not need an inner scrollbar.
+     */
     function autosize() {
       const lines = ed.value.split('\n').length;
       ed.style.minHeight = Math.min(30, Math.max(6, lines + 1)) * 1.7 * 12.5 + 24 + 'px';
@@ -449,6 +637,10 @@ window.addEventListener('unhandledrejection', e=>{ __send('line',{text:'Unhandle
        arrive slower than that and animate immediately. Capped so a huge
        output never makes the learner wait more than ~1s. */
     let burstAt = 0, burstN = 0;
+    /**
+     * Add one output line with the stepped reveal delay described above the burst counters.
+     * Error lines (kind 'err') get the red .err class.
+     */
     function appendLine(l) {
       out.classList.add('show');
       const now = performance.now();
@@ -500,6 +692,13 @@ window.addEventListener('unhandledrejection', e=>{ __send('line',{text:'Unhandle
   }
 
   /* ---------- declarative attach ------------------------------------------ */
+  /**
+   * Declarative mount: turn every <div class="tryit" data-lang> into a widget, reading the
+   * example from its <script type="text/plain"> child (so the browser never parses the
+   * example as HTML — angle brackets in Java generics survive). Idempotent via
+   * data-tryit-done. Runs at DOMContentLoaded; public as DevHubTryIt.attachAll for pages
+   * that add hosts later.
+   */
   function attachAll() {
     document.querySelectorAll('.tryit[data-lang]').forEach(el => {
       if (el.dataset.tryitDone) return;

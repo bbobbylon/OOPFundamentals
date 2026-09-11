@@ -20,6 +20,38 @@
  * Sections with fewer than 2 pages get NO rail — a "you are here" with one
  * stop is noise. Long sections are WINDOWED around the current page (the
  * Design Patterns section has 14 chapters and a phone shows about 5).
+ *
+ * WHO LOADS IT. 521 lesson pages — every registered lesson. It renders TWO
+ * things from the registry: the chapter rail at the top (build/mount) and the
+ * "Test yourself" strip at the bottom (buildPractice/mountPractice). Both are
+ * skipped when the page already carries a `.hf-rail` / `.hf-practice` of its
+ * own, so a hand-rolled one is never doubled.
+ *
+ * ORDERING — the one real script-order constraint on the site: tracks-data.js
+ * MUST come before this file. init() reads window.DEVHUB_TRACKS and
+ * window.DEVHUB_PRACTICE at DOMContentLoaded and silently renders nothing if
+ * the array is missing — no error, just no rail, which is why tmp_vcheck.mjs
+ * checks the required-script list rather than trusting the page to notice.
+ *
+ * STYLING. This file does NOT inject its own CSS: `.hf-rail`, `.hf-chapnum`,
+ * `.hf-kicker`, `.hf-railnext`, `.hf-practice*` all live in devhub-hf.css.
+ * The self-contained-CSS rule the other engines follow (inject an id-guarded
+ * <style> so a page that skips devhub.css still lays out — the giant-ripple
+ * incident) has not been applied here; it works today because all 521 pages
+ * that load this also link devhub-hf.css.
+ *
+ * TALKING TO THE HUB. Inside app.html's iframe every rail link goes out as
+ * `window.parent.postMessage({type:'dlh-navigate', file})` instead of a plain
+ * navigation (see railClick for the bug that forced this). `dlh-navigate` is
+ * a message TYPE, not a storage key, despite the dlh- prefix it shares with
+ * the localStorage keys; devhub-codegrade.js, devhub-quiz.js and
+ * devhub-notebook-review.js send the same message for their cross-links.
+ *
+ * PERSISTENCE. None. It reads nothing from and writes nothing to storage.
+ *
+ * DEPENDS ON: tracks-data.js (DEVHUB_TRACKS, DEVHUB_PRACTICE), devhub-hf.css.
+ * DEPENDED ON BY: nothing — it can be dropped from a page without breaking
+ * any other engine.
  * ========================================================================== */
 (function () {
   'use strict';
@@ -33,14 +65,22 @@
   var WINDOW_RADIUS = narrow ? 1 : 2;
   var WINDOW_MIN = narrow ? 3 : 5;
 
+  /**
+   * The page's own filename, which is also its key in the registry (`file:`).
+   * Both the rail and the practice strip locate themselves by this alone —
+   * a renamed page falls out of both until tracks-data.js is updated.
+   */
   function currentFile() {
     var p = location.pathname.split('/').pop();
     return p || 'index.html';
   }
 
-  /* Strip the series prefix and any trailing emoji, then cut at the first
-     em-dash or colon: "Head First: Adapter+Facade 🦃" -> "Adapter+Facade".
-     Five labels have to share a 390px phone, so this is not cosmetic. */
+  /**
+   * Strip the series prefix and any trailing emoji, then cut at the first
+   * em-dash or colon: "Head First: Adapter+Facade 🦃" -> "Adapter+Facade".
+   * Five labels have to share a 390px phone, so this is not cosmetic. Used for
+   * rail stops, the kicker's track name and the "Next up" section label alike.
+   */
   function shortLabel(title) {
     return String(title)
       .replace(/^Head First:\s*/i, '')
@@ -50,6 +90,13 @@
       .trim() || String(title).trim();
   }
 
+  /**
+   * Find `file` in the registry and return everything the rail needs to draw:
+   * {track, section, pages, index, sections, sectionIndex}. First match wins,
+   * which is fine because tmp_vcheck.mjs fails the build on a page registered
+   * in two sections. Returns null for unregistered pages (landing pages, the
+   * hub itself), and those simply get no rail.
+   */
   function locate(tracks, file) {
     for (var t = 0; t < tracks.length; t++) {
       /* Skip sections with no real pages when numbering, or "the next section"
@@ -70,11 +117,13 @@
     return null;
   }
 
-  /* Where a learner goes after the last page of a section. Without this the rail
-     simply stops: 90 of the site's 124 sections end on a page with no forward
-     link of any kind, which is most of why 512 pages read as a library rather
-     than the "zero to hero" path they are meant to be. Returns null on the last
-     section of a track — that is a real end, not a dead end, and says so. */
+  /**
+   * Where a learner goes after the last page of a section. Without this the rail
+   * simply stops: 90 of the site's 124 sections end on a page with no forward
+   * link of any kind, which is most of why 512 pages read as a library rather
+   * than the "zero to hero" path they are meant to be. Returns null on the last
+   * section of a track — that is a real end, not a dead end, and says so.
+   */
   function nextSectionStart(loc) {
     if (!loc || !loc.sections) return null;
     if (loc.index !== loc.pages.length - 1) return null;       // not at a boundary
@@ -85,6 +134,12 @@
     return { section: next, page: pages[0] };
   }
 
+  /**
+   * The [from, to) slice of `pages` the rail shows: the whole section when it
+   * fits in WINDOW_MIN stops, otherwise WINDOW_RADIUS stops either side of the
+   * current page, shifted (not shrunk) at the edges so the rail is always the
+   * same width. The "3 of 14" count in build() exists because this hides pages.
+   */
   function windowed(pages, index) {
     if (pages.length <= WINDOW_MIN) return { from: 0, to: pages.length };
     var from = index - WINDOW_RADIUS;
@@ -106,6 +161,13 @@
      cross-links work), so the rail just has to use it. We keep the real href — so
      middle-click, ctrl-click, copy-link and the keyboard all still behave like
      links — and only take over the plain left-click, and only when embedded. */
+  /**
+   * Click handler shared by every link this file creates (rail stops, "Next
+   * up", the practice strip). Standalone (not framed): does nothing and the
+   * href navigates. Framed: swallows the plain left-click and asks app.html
+   * to navigate via postMessage, so the hub's breadcrumb, sidebar and
+   * progress follow the learner — see the note above for the bug otherwise.
+   */
   function railClick(e) {
     if (window.top === window.self) return;                 // standalone: let the href work
     if (e.defaultPrevented) return;
@@ -117,6 +179,13 @@
     catch (err) { window.location.href = file; }            // cross-origin: fall back
   }
 
+  /**
+   * Assemble the <nav class="hf-rail"> for a located page: ghost chapter
+   * numeral, "Track · Section" kicker, the windowed list of stops (current one
+   * as a <span aria-current>, the rest as links), the "N of M" count when
+   * windowing hid pages, and the "Next up" link at a section boundary. Pure
+   * DOM construction; mount() decides where it goes.
+   */
   function build(loc) {
     var pages = loc.pages, index = loc.index;
     var w = windowed(pages, index);
@@ -178,6 +247,11 @@
     return rail;
   }
 
+  /**
+   * Place the rail: an explicit <div data-chapter-rail> wins; otherwise it goes
+   * directly after the `a.back` link inside .container/.page/body, i.e. the
+   * same spot on every page without any per-page markup.
+   */
   function mount(rail) {
     var slot = document.querySelector('[data-chapter-rail]');
     if (slot) { slot.appendChild(rail); return; }
@@ -201,6 +275,13 @@
      at the end of the lesson, where someone who has just finished reading is
      the most likely to want it. No per-page markup: all 202 lessons with an
      entry already load this script and tracks-data.js. */
+  /**
+   * The <aside class="hf-practice"> for this lesson, or null when
+   * DEVHUB_PRACTICE has no entry for it. Up to three links — Practice (graded
+   * IDE), Exam, Flashcards — in that fixed order, each labelled with the
+   * target's title from the derived map. Links use railClick, so inside the
+   * hub they navigate the hub, not just the frame.
+   */
   function buildPractice(file) {
     var data = window.DEVHUB_PRACTICE;
     if (!data || !data.map) return null;
@@ -238,6 +319,11 @@
     return box;
   }
 
+  /**
+   * Place the practice strip: an explicit <div data-practice-strip> wins,
+   * otherwise it is appended as the LAST thing in .container/.page/body —
+   * after "Where to go next", because recall belongs after reading.
+   */
   function mountPractice(box) {
     var slot = document.querySelector('[data-practice-strip]');
     if (slot) { slot.appendChild(box); return; }
@@ -245,6 +331,13 @@
     host.appendChild(box);
   }
 
+  /**
+   * Entry point, run once at DOMContentLoaded (or immediately if the DOM is
+   * already parsed). Bails silently when tracks-data.js did not load first —
+   * that silence is the failure mode the ORDERING note in the banner is about.
+   * Each of the two widgets is skipped independently if the page already has
+   * one, so a page can hand-roll the rail and still get the practice strip.
+   */
   function init() {
     var tracks = window.DEVHUB_TRACKS;
     if (!Array.isArray(tracks)) return;               // tracks-data.js not loaded

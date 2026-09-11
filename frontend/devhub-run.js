@@ -14,13 +14,45 @@
  * that a real API call carries a real JWT.
  *
  * Requires config.js to have loaded first (window.DEVHUB_API_BASE).
+ *
+ * PLACE IN THE SITE: this is the ONLY front-end file that talks to the backend
+ * (backend/ — devhub-backend, ExecutionController → /api/run/*). Every other
+ * engine persists to localStorage and never leaves the device. Loaded by 3
+ * pages (the Python / TypeScript / Shell playgrounds); every other page works
+ * with no backend at all, which is why a missing server must degrade to
+ * { enabled:false } rather than throw.
+ *
+ * Assumes: config.js ran first (window.DEVHUB_API_BASE — the one file you edit
+ * after deploying a backend). Without it, falls back to localhost:8081, the
+ * dev port in backend/src/main/resources/application-dev.yml.
+ *
+ * Persists: localStorage 'dlh_token' — SHARED with app.html's login flow (same
+ * key, same origin), so a learner who logged in at the hub is already
+ * authenticated here, and a demo login here is visible to the hub.
  * ========================================================================== */
 (function () {
+  /**
+   * Backend origin, trailing slashes stripped so path joins below never produce "//api".
+   * Read once at load — config.js must already have run.
+   */
   const API_BASE = (window.DEVHUB_API_BASE || 'http://localhost:8081').replace(/\/+$/, '');
+  /**
+   * Same localStorage key app.html writes on login (see CODE-MAP §4). Do not rename
+   * one without the other or the hub and the playgrounds stop sharing a session.
+   */
   const TOKEN_KEY = 'dlh_token';
 
+  /**
+   * The saved JWT, or null. try/catch because localStorage throws in some sandboxed /
+   * private contexts — a missing token just means "log in as demo" (see exec).
+   */
   function token() { try { return localStorage.getItem(TOKEN_KEY); } catch (e) { return null; } }
 
+  /**
+   * Silent fallback login as the seeded `demo` account (DataInitializer.java creates it).
+   * Called by exec() when there is no token or the server answered 401. Saves the new
+   * token so the next call — and app.html — reuse it.
+   */
   async function login() {
     const r = await fetch(API_BASE + '/api/auth/login', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -32,6 +64,11 @@
     return j.token;
   }
 
+  /**
+   * GET /api/run/languages, unauthenticated. The playground calls this on load to decide
+   * whether to offer "Run on server (real)" at all: any failure (no backend, CORS, offline)
+   * resolves to { enabled:false } instead of rejecting, so the page still renders.
+   */
   async function capabilities() {
     try {
       const r = await fetch(API_BASE + '/api/run/languages');
@@ -42,9 +79,18 @@
     }
   }
 
+  /**
+   * POST /api/run/{lang} with a Bearer token. Auth is mandatory server-side because an
+   * open code runner is remote code execution. One retry on 401 (stale token → fresh demo
+   * login); network failures come back as { error:'network' } so the caller can show a
+   * message rather than crash. Shape of the resolved object is documented in the banner.
+   */
   async function exec(lang, code, stdin) {
     let t = token();
     if (!t) { try { t = await login(); } catch (e) { return { error: 'auth', message: e.message }; } }
+    // The request itself, parameterised by token rather than closing over one, so the
+    // 401 branch below can REPLAY it verbatim with a freshly minted token. Inlining
+    // this would mean writing the fetch twice and letting the two drift.
     const call = tok => fetch(API_BASE + '/api/run/' + lang, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + tok },

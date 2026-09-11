@@ -11,6 +11,42 @@
  *
  * available:false → not built yet; the dashboard shows it as "coming soon"
  * so the menu doubles as a roadmap.
+ *
+ * WHO LOADS IT. Exactly ONE page: exam-readiness.html (`window.DEVHUB_EXAMS`
+ * at its line ~84). The exam pages themselves do not load it — each carries
+ * its own bank and renders through devhub-quiz.js without ever consulting this
+ * list. learning-paths.html does NOT read it either, despite the banner's
+ * hope above: it keeps its own PATHS array with a hand-written `passOf(id)`
+ * that mirrors `passPct` here. Change a pass mark in one place and the other
+ * drifts; no gate compares them.
+ *
+ * RELATION TO THE REGISTRY. This is a second, independent list of the same
+ * exam pages that tracks-data.js registers under the 🎓 Exam Prep track. The
+ * registry decides whether the hub can NAVIGATE to an exam; this manifest
+ * decides whether the readiness dashboard can SUMMARISE it. Adding an exam
+ * means touching both (plus `node tmp_genpracticemap.mjs`, which derives the
+ * lesson → practice map from the bank's `ref:` entries, not from this file).
+ *
+ * PERSISTENCE. None of its own. The dashboard calls DevHubQuiz.loadHistory(id)
+ * for each row, which reads the attempt history devhub-quiz.js writes to
+ * localStorage as `dlh-quiz:<id>` — so `id` here must equal the `id` the exam
+ * page passes to DevHubQuiz. A mismatch shows the exam as "never attempted"
+ * while the attempts sit under the other key. (devhub-quiz.js must therefore
+ * be loaded on the dashboard too; this file alone cannot read anything.)
+ *
+ * ENTRY SHAPE (documented once, not per row):
+ *   id        stable key; doubles as the localStorage suffix (see above)
+ *   title     what the dashboard prints
+ *   cert      the real-world certification code, or a short tag for
+ *             non-cert banks ('interview prep', 'GenAI')
+ *   file      the exam page — tmp_vcheck.mjs verifies it resolves
+ *   track     display label of the track it belongs to (a STRING, not the
+ *             registry's `id`; matched by eye, not by code)
+ *   passPct   the bank's pass mark; must match the exam page AND
+ *             learning-paths.html's passOf()
+ *   count     number of questions; must match the page's bank by hand —
+ *             tmp_examtell_audit.mjs audits the banks, never this manifest
+ *   available false = a placeholder row rendered as "coming soon"
  * ========================================================================== */
 window.DEVHUB_EXAMS = [
   {
