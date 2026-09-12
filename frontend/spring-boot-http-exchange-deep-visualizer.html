@@ -104,6 +104,205 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> Three <code>@HttpExchange</code> interfaces — <code>PingAdminClient</code> (CRUD users in Ping Directory), <code>EntraGraphClient</code> (Azure AD groups via Graph), <code>UserInfoClient</code> (OIDC userinfo). Each <code>RestClient</code> has a token interceptor that pulls a Client-Credentials token from its IdP, cached and refreshed 60s before expiry. Zero boilerplate — just interfaces and return types.</div>
   </div>
 
+<p class="hf-deck">or, defaultHeader() only ever asks "what's the token right now" — once, forever</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">It compiled, it passed a manual test, and it quietly sent the wrong identity to Ping's admin API for six hours before anyone noticed.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">One user's token, frozen in, for every request after it</div>
+  <p>A <code>PingAdminClient</code> bean is meant to relay each caller's own token on-behalf-of, so
+  Ping's admin API sees the real user, not the backend service account:
+  <code>@Bean RestClient pingClient(RestClient.Builder b, CurrentUserService cu) { return
+  b.baseUrl(PING_URL).defaultHeader("Authorization", "Bearer " + cu.getToken()).build(); }</code>
+  Spring calls this factory method exactly once, at startup, to build the singleton. At that moment
+  there's no HTTP request in flight — <code>cu.getToken()</code> returns whatever it returns with no
+  caller present, and that string is what gets baked into the header. Every request from every user,
+  for as long as the app keeps running, goes out with that one frozen value.</p>
+  <div class="hf-scatter">
+    <span>@Bean method compiles and runs fine ✓</span>
+    <span>.defaultHeader("Authorization", …) looks identical to the interceptor version ✓</span>
+    <span>the value is evaluated exactly once, at bean-creation time ⚠</span>
+    <span>every user's downstream call after that reuses the SAME frozen string ⚠</span>
+  </div>
+  <p class="hf-foot">defaultHeader() takes a value. An interceptor takes a function. One is computed
+  when the bean is BUILT; the other runs on every call the bean ever makes.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Put the per-caller logic where it actually runs per call</div>
+  <div class="hf-ladder">
+    <b>Never pass defaultHeader() anything that varies per caller</b>
+    <i>↓ it's evaluated once, at builder time — fine for a static API key, wrong for a relayed identity</i>
+    <b>Use a ClientHttpRequestInterceptor instead</b>
+    <i>↓ its intercept(request, body, execution) method runs fresh on every outgoing call</i>
+    <b>Read the caller's token from SecurityContextHolder inside the interceptor, not the @Bean factory method</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A value passed to defaultHeader() is computed once, when the client bean is built.</b> A
+  <code>ClientHttpRequestInterceptor</code> is code that runs once PER outgoing call. Anything that
+  must vary per request — a relayed caller identity, a per-tenant credential, a freshly refreshed
+  token — belongs in the interceptor. Anything genuinely constant for the client's whole lifetime — a
+  static API key, a fixed Content-Type — is exactly what <code>defaultHeader()</code> is for.
+</div>
+
+<div class="hf-note">Think of <code>defaultHeader()</code> as <b>writing a name on a sticker in
+permanent marker before the front doors even open for the day</b>. Every visitor who walks in for
+the rest of the day is wearing that same sticker now — it was written once, and it doesn't rewrite
+itself per visitor. An interceptor is a receptionist standing at the door who writes a fresh sticker
+for each person as they arrive — slower per visitor, but actually correct.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I used .defaultHeader() for the Authorization header, same shape as the intro card showed.
+    Why is every downstream call using the same user's identity?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">RestClient.Builder</span>
+    <p>Because you gave me a String, not instructions. The moment you called
+    <code>defaultHeader("Authorization", "Bearer " + token)</code>, I evaluated that concatenation
+    immediately, took the resulting text, and baked it into every client built from here on. I don't
+    re-run your expression later — I never even kept a reference to your token source, just its
+    answer from that one moment.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The @Bean method</span>
+    <p>And I only run once — when Spring wires me up at startup. There's no incoming request for me
+    to read a caller from at that point. Whatever getToken() handed back then is what's frozen in,
+    for good.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">defaultHeader() never lied. It was always going to run exactly once — the mistake was asking it to do a per-request job.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>App starts. Spring invokes the @Bean factory method for PingAdminClient exactly
+    once</span><span class="tag">no HTTP request exists yet</span></li>
+    <li><span><code>.defaultHeader("Authorization", "Bearer " + cu.getToken())</code> runs as part of
+    that single invocation</span><span class="tag">a one-time String concatenation</span></li>
+    <li class="open"><span><code>cu.getToken()</code> has no request to read a caller from — it
+    returns null, a fallback, or a leftover value</span><span class="tag">whatever it returns right now is final</span></li>
+    <li class="open"><span>That resulting string is stored inside the built RestClient as a fixed
+    default header — not a reference to cu, just its answer</span><span class="tag">the method call is gone; only its return value survives</span></li>
+    <li class="open"><span>Request #1, from User A, goes out with that frozen header. So does request
+    #4,721, from User Z, six hours later</span><span class="tag">the exact same header, every single call</span></li>
+    <li><span>The on-behalf-of relay this page's hero demonstrates never actually happens in
+    production — every call carries whichever identity happened to resolve at startup</span><span class="tag">a silent authorization bug, not a crash</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is where it goes visibly wrong, but step 2 is where the mistake was
+  actually made: <code>defaultHeader()</code> was always going to evaluate its argument immediately
+  and exactly once, no matter what that argument was. The bug isn't in <code>cu.getToken()</code> —
+  it's in calling a "once, at startup" method with a value that only makes sense "fresh, per
+  request."</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>User A's request, minute 1</span><span>User M's request, hour 3</span><span>User Z's request, hour 6</span>
+    </div>
+    <div class="funnel">defaultHeader()'s value — frozen at startup, before any of them existed ↓</div>
+    <div class="instance">Authorization: Bearer &lt;startup-time value&gt;<small>the same header, no matter who's actually calling</small></div>
+  </div>
+  <p class="hf-annot">Three different callers, three different intended identities, one frozen header.
+  The client has no way to tell them apart — it was never given a way to ask "who is it this time?"</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A <code>PingAdminClient</code> bean is built as: <code>@Bean RestClient
+  pingClient(RestClient.Builder b, CurrentUserService cu) { return
+  b.baseUrl(PING_URL).defaultHeader("Authorization", "Bearer " + cu.getToken()).build(); }</code> —
+  intended to relay each caller's own token to Ping's admin API (on-behalf-of). Six hours and
+  thousands of requests after the app started, what Authorization header does request #4,721
+  actually go out with?</p>
+  <button type="button">Whatever cu.getToken() returns for the user making request #4,721 — defaultHeader() re-evaluates its arguments on every call, exactly like an interceptor would</button>
+  <button type="button">The exact same header value that was computed once, when this @Bean method ran at application startup — cu.getToken() was never called again after that</button>
+  <button type="button">A 401, because defaultHeader() requires a fresh interceptor-supplied token on every call and throws if one isn't provided dynamically</button>
+  <p class="why" data-for="0">The natural assumption, since the header seems to represent "whoever's
+  calling right now." But <code>defaultHeader()</code> takes a String argument, evaluated exactly
+  once, when you call it — here, that's inside the @Bean factory method, which Spring invokes exactly
+  once, at startup. Nothing re-runs cu.getToken() later.</p>
+  <p class="why" data-for="1">Exactly — cu.getToken() ran exactly once, during startup wiring, and
+  its return value was frozen into the client as a fixed header. Every request after that, from every
+  user, carries that identical value; the on-behalf-of relay never actually happens.</p>
+  <p class="why" data-for="2">defaultHeader() doesn't validate or require anything about how its
+  value was produced — it just stores whatever String you handed it and reuses that String forever.
+  It won't throw; it will just be silently, confidently wrong.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three HTTP clients, one boundary: a value baked in at construction time versus code that runs per call.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Node's axios.create() defaults</h4>
+    <p><code>axios.create({ headers: { Authorization: `Bearer ${token}` } })</code> bakes
+    <code>token</code>'s current value into the created instance the moment <code>create()</code>
+    runs. Every request from that instance reuses it, unless you attach a request interceptor —
+    <code>axios.interceptors.request.use(cfg =&gt; …)</code> — that reads a fresh value per call. Same
+    static-value-vs-per-call-function split, different library.</p>
+    <div class="hf-scatter"><span>axios.create() defaults ≈ defaultHeader()</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>.NET's HttpClient.DefaultRequestHeaders</h4>
+    <p><code>httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {token}")</code> on a
+    long-lived, <code>IHttpClientFactory</code>-pooled <code>HttpClient</code> freezes that header for
+    every request the instance makes afterward. The fix is a <code>DelegatingHandler</code> that sets
+    the header per request — the exact role a <code>ClientHttpRequestInterceptor</code> plays here.</p>
+    <div class="hf-scatter"><span>DelegatingHandler ≈ ClientHttpRequestInterceptor</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your own Client-Credentials cache, one section back</h4>
+    <p>This page's "Adding the auth token" card caches a Client-Credentials token and refreshes it 60
+    seconds before expiry — genuinely correct there, because a machine-to-machine token represents
+    the application itself: one identity, for the client's whole lifetime. Reusing that exact caching
+    shape for a per-user relay is this lesson's mistake wearing a different outfit — the call's
+    shape (one constant identity vs. one identity per caller) decides which pattern is right, not how
+    the code happens to look.</p>
+    <div class="hf-scatter"><span>same shape, opposite correctness</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Doesn't .mutate().defaultHeader(...) at least get re-evaluated if I rebuild the client per request?</p>
+  <p class="a">Only if you actually call .mutate()....build() inside something that runs per request —
+  which throws away the entire point of a singleton, connection-pooled client. If you find yourself
+  rebuilding a client on every call just to get a fresh header, you don't need defaultHeader() at
+  all — you need an interceptor, and a single long-lived client.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">How do I know whether my defaultHeader() call is fine or one of these ticking bombs?</p>
+  <p class="a">Ask what happens if the value never changes again after this bean is built. A static
+  API key or a fixed Content-Type: genuinely fine — that's the whole point of defaultHeader(). Anything
+  meant to reflect "who's calling right now" — a caller's JWT, a per-tenant credential — needs to be
+  read fresh, per call, which only an interceptor can do.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Would this actually pass code review?</p>
+  <p class="a">Easily. <code>.defaultHeader("Authorization", "Bearer " + cu.getToken())</code> reads
+  exactly like the fix, not the bug — it compiles, it resembles the interceptor version at a glance,
+  and it works perfectly in a quick manual test, where you happen to be the first (and so far only)
+  caller, so your own token is what gets frozen in. The bug only shows up later, for the second
+  different user who calls it.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  This page's own "Adding the auth token" card caches a Client-Credentials token — refreshed 60
+  seconds before expiry — for PingAdminClient, EntraGraphClient, and UserInfoClient alike.
+  Client-Credentials tokens represent the application itself, not any particular end user: one
+  identity, for the client's whole lifetime. Given everything above, is that caching-and-refreshing
+  pattern the same bug as the on-behalf-of case, or is it actually fine — and what specifically is
+  different between the two calls?
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -486,6 +685,7 @@ document.querySelectorAll('#routebtns button').forEach(b=>b.onclick=()=>build(b.
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -112,6 +112,190 @@
     <div class="intro-ciam"><span class="tag">In CIAM / Your Job:</span> Decoding JWTs is your primary auth-debugging skill: on a 401, copy the token (Authorization header or MSAL cache) into jwt.ms and read the claims. Most 401s are one of — wrong <code>aud</code> (token for Graph, not your API: wrong scope in MSAL), past <code>exp</code> (expired: check MSAL silent refresh), or <code>iss</code> mismatch (v1.0 vs v2.0 in Spring config). The <code>kid</code> says which JWKS key signed it — if Spring can't find that kid, it was a rotated key and Spring needs a JWKS refresh.</div>
   </div>
 
+
+<p class="hf-deck">or, the token gets too big and Entra deletes the claim you were relying on</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Authorization works for everyone on the team. It fails for the director.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The one person with the most access is the one person who cannot get in</div>
+  <p>You authorize on the <code>groups</code> claim, exactly as this page describes: Entra stamps
+  the user's group object IDs into the token, Spring maps them to authorities,
+  <code>@PreAuthorize</code> checks them. It works in dev. It works in the pilot. It works for
+  every engineer who tries it.</p>
+  <p>Then a director signs in — someone who, over eleven years, has accumulated membership in
+  <b>240 groups</b>. Their token comes back with <b>no <code>groups</code> claim at all</b>. Not a
+  truncated list. Not the first two hundred. The claim is simply gone, replaced by two claims
+  nobody wrote code for: <code>_claim_names</code> and <code>_claim_sources</code>, which together
+  amount to a note saying <i>"too many to send — ask Microsoft Graph."</i> Every authority check
+  evaluates against an empty set, and the person with the broadest access in the company gets a
+  403 on everything.</p>
+  <div class="hf-scatter">
+    <span>signature valid ✓</span>
+    <span>aud, iss, exp all fine ✓</span>
+    <span>groups claim: absent ⚠</span>
+    <span>_claim_names present ⚠</span>
+    <span>authorities: empty ⚠</span>
+  </div>
+  <p class="hf-foot">A JWT travels in an HTTP header, and headers have limits. Something had to
+  give, and Entra chose the claim most likely to be enormous.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Stop shipping group membership and start shipping decisions</div>
+  <div class="hf-ladder">
+    <b>Best: use app roles. Define them on the API registration, assign users or groups to them, and read the roles claim</b>
+    <i>↓ a handful of values that describe what this app cares about, instead of the user's entire directory history</i>
+    <b>Next best: in Token configuration, emit only "Groups assigned to the application" rather than all groups</b>
+    <i>↓ 240 memberships collapse to the two or three your app was ever going to check</i>
+    <b>Last resort: detect _claim_names and call Graph's getMemberObjects — a network call per login, plus a cache you now own</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A token is a message with a size budget, and the claims in it are a summary, not a database
+  dump.</b> The moment you use a JWT to carry "everything true about this user", you have made
+  your authorization model depend on a payload that grows with the user's tenure — and it will
+  overflow first for exactly the people with the most access. Put <i>decisions</i> in a token,
+  not <i>facts</i>: not "here are 240 groups, you work it out", but "here is the one role this
+  API cares about."
+</div>
+
+<div class="hf-note">Overage is an <b>itemised receipt that gives up</b>: instead of 240 lines it
+prints <i>"and 47 other items — see the store for details."</i> Perfectly honest, entirely
+useless to anything that was written to read line items, and it only ever happens to the customer
+with the fullest trolley.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>Why would it delete the claim instead of just sending a bigger token?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Entra</span>
+    <p>Because a token that no server will accept is worse than one with a claim missing. Group
+    GUIDs are 36 characters each; at 240 of them the payload alone is around 9 KB before Base64.
+    Plenty of proxies and servers cap request headers at 8 KB, so I would be handing you a
+    credential guaranteed to fail with a 431. Above roughly 200 groups in a JWT — 150 for SAML —
+    I swap the list for a pointer.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Your Spring API</span>
+    <p>And I do not know that happened. I get a valid, correctly signed token with no
+    <code>groups</code> claim. My converter produces an empty authority set, which is
+    indistinguishable from a user who genuinely belongs to nothing. The failure looks like a
+    permissions problem, not a token problem — which is why this costs an afternoon to
+    diagnose.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">App roles</span>
+    <p>Which is the case for me. I am not a fact about the user's directory, I am a statement about
+    <i>this application</i> — assign groups to me if you like, but what lands in the token is one
+    short string per role. A user can be in ten thousand groups and my claim stays the same
+    size.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps. Nothing errors, and the evidence is a claim you never looked for.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The app registration's Token configuration says "emit the <code>groups</code> claim", so Entra resolves the user's transitive group membership at sign-in</span><span class="tag">transitive: nested groups count</span></li>
+    <li class="open"><span>Entra counts them. Under the limit → the GUIDs go into <code>groups</code> and everything behaves the way your dev tenant taught you</span><span class="tag">why it always works in testing</span></li>
+    <li><span>Over the limit → <code>groups</code> is <b>omitted entirely</b>, and <code>_claim_names</code> + <code>_claim_sources</code> are added, naming a Graph endpoint</span><span class="tag">replaced, never truncated</span></li>
+    <li class="open"><span>Signature, <code>iss</code>, <code>aud</code>, <code>exp</code> all still validate perfectly — the token is completely legitimate</span><span class="tag">no gate can catch this</span></li>
+    <li><span>Your claim-to-authority converter reads a claim that is not there and yields an empty collection</span><span class="tag">absent reads as "member of nothing"</span></li>
+    <li class="open"><span><code>@PreAuthorize</code> denies. The 403 is correct, given the authorities — which is why the logs look like a permissions misconfiguration</span><span class="tag">the wrong place to debug</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is why this reaches production: your dev tenant has four groups and
+  your test users have three, so no amount of local testing produces the failing shape. It is a
+  bug whose trigger is <i>organisational history</i>, and the affected users are the senior ones
+  who joined a lot of projects — which also means the incident arrives with an audience. If you
+  keep the <code>groups</code> claim at all, the minimum defensible move is to log loudly when
+  <code>_claim_names</code> is present, so the next person sees the cause in one line instead of
+  hunting an authorization ghost.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">the groups claim<small>what your converter reads</small></div>
+    <div class="arrow">what actually arrives →</div>
+    <div class="opts">
+      <span>["a1b2…", "c3d4…"] — the normal case, and every test you wrote</span>
+      <span class="on">nothing, plus _claim_names + _claim_sources — over the limit</span>
+      <span>nothing at all — a user genuinely in no groups</span>
+    </div>
+  </div>
+  <p class="hf-annot">The second and third rows are the trap: to code that does
+  <code>jwt.getClaimAsStringList("groups")</code>, an overage and a genuinely group-less user are
+  the same value — <code>null</code>. They demand opposite responses (go ask Graph versus deny
+  correctly), and the only thing that distinguishes them is a claim your converter was never
+  written to look at.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A director belongs to <b>240</b> Entra groups. Your app registration emits the
+  <code>groups</code> claim, and your Spring API maps it to authorities for
+  <code>@PreAuthorize</code>. What does their access token actually contain?</p>
+  <button type="button">All 240 group IDs — the token is simply larger, which may cause a 431 at the proxy but keeps every group check working</button>
+  <button type="button">No groups claim at all — Entra replaces it with _claim_names and _claim_sources pointing at a Graph endpoint, so every group check evaluates against an empty set</button>
+  <button type="button">The first 200 group IDs, truncated to fit, so checks pass for older memberships and fail for the newest ones</button>
+  <p class="why" data-for="0">This is what you would design if the only goal were fidelity, and it
+  is exactly what Entra refuses to do — a 9 KB claim produces a token that many proxies and
+  servers reject outright with a 431, so the credential would be useless rather than merely
+  incomplete. Entra chooses a token that works over a token that is complete.</p>
+  <p class="why" data-for="1">Right, and "replaced rather than truncated" is the detail that makes
+  it hard to spot: there is no partial list to notice, just an absence that reads identically to a
+  user who belongs to nothing. The overage claims are the only evidence, and nothing in a standard
+  claim-to-authority converter looks at them. The durable fix is to stop carrying raw membership —
+  use app roles, or restrict the claim to groups assigned to this application.</p>
+  <p class="why" data-for="2">Truncation is the intuitive guess, and it would arguably be worse:
+  silent partial authorization, where a user passes some checks and fails others with no
+  indication why, and the behaviour shifts as their memberships change. Entra does not do it — the
+  claim is all or nothing, which at least fails in one consistent direction.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Every protocol that must fit a limit eventually invents "here is where the rest lives."</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Cookies, and the 4 KB cliff that created server-side sessions</h4>
+    <p>Cookies cap at about 4 KB, so the moment anyone tried to keep real state in one, the
+    industry switched to storing a short session ID and keeping the state on the server. That is
+    the same move Entra is making with <code>_claim_sources</code> — the token stops carrying the
+    data and starts carrying its address. JWT-based authorization is the pendulum swinging the
+    other way, and overage is where it hits the wall.</p>
+    <div class="hf-scatter"><span>carry the value, or carry the pointer</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>GraphQL and REST pagination — the same admission, politely worded</h4>
+    <p>No sane API returns 240,000 rows because you asked for a collection; it returns a page and a
+    cursor. Overage is an unpaginated claim discovering its limit at runtime, in a protocol with
+    nowhere to put a cursor, so it improvises one.</p>
+    <div class="hf-scatter"><span>unbounded collections always bite eventually</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>The rule this suggests for any claim you design</h4>
+    <p>Ask what the biggest realistic value is, for the most-tenured user, in five years. Group
+    lists, permission lists and team lists all grow without bound; a role name does not. Claims
+    should be O(what the app checks), never O(the user's history) — which is the same instinct as
+    putting a foreign key in a row instead of an array.</p>
+    <div class="hf-scatter"><span>bounded claims only</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a JWT is <code>header.payload.signature</code>, Base64URL and
+  <b>signed, not encrypted</b>; the <code>kid</code> picks the JWKS key, then verify RS256 and
+  check <code>iss</code> (ending <code>/v2.0</code>), <code>aud</code> and <code>exp</code> — all
+  offline. One more sentence for production: <b>claims have a size budget, and past ~200 groups
+  Entra drops the <code>groups</code> claim entirely rather than truncate it</b> — so authorize on
+  app roles, and your longest-serving colleagues keep working.
+</div>
+
   <!-- ── HERO: animated JWT validation pipeline · token chip + live check-by-check inspector ── -->
   <div class="panel" style="border:1px solid #22d3ee">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:#22d3ee">▶ Validate a JWT — every check the API runs, in order</h2>
@@ -680,6 +864,7 @@ claims after verifying the signature.`},
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

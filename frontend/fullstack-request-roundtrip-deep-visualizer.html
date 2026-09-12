@@ -129,6 +129,225 @@
     </div>
   </div>
 
+<p class="hf-deck">or, readOnly=true is a promise to Hibernate — and Hibernate holds you to it</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The endpoint returns 200. The user list is correct. The one field it's also supposed to update never moves.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">getUsersByTenant() looks read-only, so nobody thought twice about what it also does</div>
+  <p>Section 1's own JPA snippet shows <code>@Transactional(readOnly = true)</code> on
+  <code>getUsersByTenant()</code> — a real, correct optimization: Hibernate skips dirty-checking
+  every loaded entity at commit, because a read-only method has nothing to check. Then someone adds
+  one line inside that same <code>.map(this::toDTO)</code> step: touch
+  <code>user.setLastAccessedAt(now())</code> on each entity, to power a "last seen" column on an
+  admin dashboard. The endpoint still returns 200. The user list in the response is still exactly
+  right — reads work fine inside a read-only transaction. The one thing that silently never
+  happens is the write: Hibernate set this transaction's flush mode to MANUAL the moment it saw
+  <code>readOnly = true</code>, so the changed <code>lastAccessedAt</code> sits on the in-memory
+  entity, gets discarded when the transaction ends, and never reaches a single row in the
+  database. No exception. No log line. Just a dashboard column that reads "Last seen: never" for
+  every user, forever.</p>
+  <div class="hf-scatter">
+    <span>GET /api/users → 200 OK ✓</span>
+    <span>user list in the response is completely correct ✓</span>
+    <span>@Transactional(readOnly = true) on a method that also writes ⚠</span>
+    <span>lastAccessedAt update never flushed, never persisted, no error ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption underneath: that <code>readOnly</code> describes what a
+  method mostly does — Hibernate reads it as an instruction to stop tracking changes at all, not a
+  comment about your intent.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Decide what a method IS before you annotate it, then keep it that way</div>
+  <div class="hf-ladder">
+    <b>First move: split the read from the write — getUsersByTenant() stays readOnly = true; recordAccess(userId) gets its own writable @Transactional and is called separately</b>
+    <i>↓ each method's annotation now matches what it actually does, so Hibernate's optimization only ever applies where it's true</i>
+    <b>Better: if the write genuinely belongs in the same transaction, drop readOnly entirely rather than "mostly" keeping it</b>
+    <i>↓ readOnly isn't a performance dial you can leave half-on — a transaction either needs dirty-checking or it doesn't</i>
+    <b>The result: the audit write either happens every time, or the annotation stops lying about what the method does</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>readOnly = true doesn't just hint at the database — it turns off Hibernate's memory of what
+  changed.</b> Once a persistence context's flush mode is set to MANUAL, any entity field you
+  mutate inside that transaction is changed in Java and nowhere else; nothing downstream ever asks
+  "did anything change here?" because you told it, up front, the answer would always be no. That's
+  the same read/write boundary the intro-mini's <code>@Transactional(readOnly = true)</code>
+  comment calls "a hint to the DB" — it's a much bigger hint than it looks.
+</div>
+
+<div class="hf-note">Think of <code>readOnly = true</code> as <b>telling a stenographer to stop
+transcribing the meeting</b>. They're still in the room. They can still watch you write on the
+whiteboard. They just stopped writing any of it down, because you told them at the door this was
+"just a briefing, nobody's deciding anything here." If someone quietly makes a real decision in
+minute forty, it happened, everyone in the room saw it — but the official record shows nothing,
+because the one person whose job was to record it was told in advance not to bother.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p><code>user.setLastAccessedAt(now())</code> runs right there in the method. I can see it in
+    the debugger. Why is the database row unchanged?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Hibernate</span>
+    <p>I saw you set it too — the entity in memory has the new value, I'm not disputing that. But
+    this transaction started with <code>readOnly = true</code>, and the first thing I do with that
+    flag is set my flush mode to MANUAL. Dirty-checking costs time, and you told me not to bother,
+    so at commit I don't compare anything to anything. Nothing to flush means nothing to send.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The transaction manager</span>
+    <p>And I closed the transaction clean — no rollback, no error. From where I sit, everything
+    about this commit succeeded, because nothing was ever queued to fail.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Your admin dashboard</span>
+    <p>Which is why I've been showing "Last seen: never" for every user since the day this shipped
+    — and returning a 200 the entire time. No health check was ever going to catch this. I was
+    never broken. I was just reporting the truth about a write that never happened.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One flag changes what Hibernate is even willing to remember.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The controller calls <code>userService.getUsersByTenant(tenantId)</code>, annotated <code>@Transactional(readOnly = true)</code></span><span class="tag">the promise gets made here</span></li>
+    <li class="open"><span>Spring opens a transaction and, seeing <code>readOnly = true</code>, sets Hibernate's session flush mode to <b>MANUAL</b> before a single query runs</span><span class="tag">this is the actual effect of the flag</span></li>
+    <li><span>The repository loads <code>User</code> entities into the persistence context — each one a managed, dirty-checkable object, in principle</span><span class="tag">"in principle" is about to matter</span></li>
+    <li class="open"><span>The mapping step sets <code>user.setLastAccessedAt(now())</code> on each entity while building DTOs</span><span class="tag">a real mutation, on a real managed entity</span></li>
+    <li><span>The method returns; Spring commits the transaction</span><span class="tag">looks completely normal</span></li>
+    <li class="open"><span>Commit does not trigger a flush, because flush mode is MANUAL — Hibernate never compares the entities' current state to what it loaded, so it never notices <code>lastAccessedAt</code> changed at all</span><span class="tag">the write simply never gets asked about</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is the lesson. Nothing that happens afterward is Hibernate
+  malfunctioning — steps 3 through 6 are a persistence context and a transaction manager doing
+  exactly what MANUAL flush mode tells them to do. The mutation at step 4 is completely real in
+  Java; it's just never compared against anything, because step 2 already switched off the only
+  mechanism that would have noticed.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <p class="note">setLastAccessedAt(now()) runs right here — one line inside a box that already stopped listening ↴</p>
+    <div class="ring"><span class="lbl">@Transactional(readOnly = true) — the whole method runs inside this</span>
+      <div class="ring"><span class="lbl">flush mode: MANUAL — Hibernate's dirty-checking, switched off for this transaction</span>
+        <div class="core">User entity<small>fully managed, fully mutated, and completely unwatched</small></div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">The mutation happens inside both rings — the entity is genuinely managed,
+  genuinely changed, for the entire life of a genuinely open transaction. What's missing is inside
+  the inner ring: the one mechanism that would normally ask "did anything change?" at commit time
+  was switched off the moment <code>readOnly = true</code> was read. That makes this stranger than
+  the classic detached-entity bug (a setter fired after the transaction already closed) — every
+  box in this picture is technically still open when the write happens.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A service method is annotated <code>@Transactional(readOnly = true)</code>. Inside
+  it, <code>userRepo.findById(id)</code> loads a managed <code>User</code>, and the method calls
+  <code>user.setLastAccessedAt(now())</code> on it — still inside that same open transaction,
+  before the method returns. Does the update reach the database?</p>
+  <button type="button">Yes — the entity is still managed and the transaction is still open, so Hibernate's dirty checking will flush the change at commit like it does for any other managed entity</button>
+  <button type="button">No — because the entity became detached the instant findById() returned, the same as calling a setter outside any transaction at all</button>
+  <button type="button">No — readOnly=true set this transaction's flush mode to MANUAL, so Hibernate never compares the entity's state at commit, and the change is discarded when the transaction ends</button>
+  <p class="why" data-for="0">This is exactly what would happen if the method weren't marked
+  readOnly — a genuinely writable transaction absolutely would flush this change at commit. The
+  one thing different here, worth checking before trusting "it's managed, so it'll flush": what
+  flush mode did this specific transaction start in?</p>
+  <p class="why" data-for="1">This is a real JPA bug — just not this one. An entity does detach
+  the moment its owning transaction closes, which is exactly what happens if
+  <code>findById()</code> opens its own short-lived transaction because the calling method has no
+  <code>@Transactional</code> of its own. Here, the surrounding method IS
+  <code>@Transactional</code> for its entire body, so the entity stays managed all the way through
+  — the write is discarded for a completely different reason.</p>
+  <p class="why" data-for="2">Right. The entity is managed, the transaction is genuinely still
+  open, and the setter genuinely ran — none of that is in question. What's missing is the one step
+  that would normally notice: flush mode MANUAL means Hibernate never runs its "did anything
+  change?" comparison at commit, so a real, live, managed mutation gets thrown away for lack of
+  anyone ever checking.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">A write that's real in exactly one place, and nowhere anyone actually looks.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Your own "last login" column, in production</h4>
+    <p>CIAM systems live and die by exactly this kind of audit timestamp — last login, last MFA
+    challenge, last password change, last consent acceptance. All of them get written from inside
+    a request that's also doing a read (fetch the user, then stamp the access), which is exactly
+    the shape that tempts someone into leaving a convenient <code>readOnly = true</code> on the
+    outer method. A silently-stuck "last login" column isn't just an annoying dashboard bug in
+    this world — auditors and compliance reports read that value.</p>
+    <div class="hf-scatter"><span>audit timestamps live in exactly this shape of method</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Mutating Redux/NgRx state instead of dispatching an action</h4>
+    <p>Redux and NgRx have the mirror-image version of this bug: <code>state.user.name =
+    'new'</code> genuinely changes the object in memory, but nothing downstream ever finds out,
+    because the whole framework is built around noticing a <i>new state reference</i> arriving
+    through a dispatched action — not an in-place mutation. Same lesson: the write is real, but
+    bypass the one mechanism that watches for change, and nothing downstream consumes it.</p>
+    <div class="hf-scatter"><span>real mutation, unwatched by the framework</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Write-behind caching — the write is "done" until you ask where</h4>
+    <p>A write-behind cache marks a value updated immediately and defers the actual database write
+    to a background flush, for speed — a deliberate, useful trade-off, right up until that
+    background flush doesn't happen (a crash, a misconfigured worker) and the "saved" value only
+    ever existed in memory. Same shape again: a write that's completely real in one place and
+    never reaches the place everyone actually queries later.</p>
+    <div class="hf-scatter"><span>real in memory, absent from disk</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Why does Hibernate even offer a MANUAL flush mode? Seems dangerous.</p>
+  <p class="a">Because dirty-checking every loaded entity at every commit is real, measurable
+  overhead — comparing the current state of every managed object against a snapshot taken at load
+  time, for potentially hundreds of rows, on every single read-only request. For a method that
+  truly never writes, skipping that comparison is a legitimate, meaningful performance win. The
+  danger isn't the flag; it's using it on a method that turns out not to be as read-only as its
+  name suggests.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">How would you actually catch this in code review, since nothing throws?</p>
+  <p class="a">Read <code>@Transactional(readOnly = true)</code> as a hard constraint on
+  everything the method calls, not just a label on the method itself — then trace every setter
+  reachable from inside it, including ones buried in a mapper or a stream <code>.map()</code>
+  call. In practice, the more reliable catch is automated: a test that asserts the database row
+  actually changed after calling the method, not just that the method returned successfully. A 200
+  response proves the read worked; it says nothing about a write nobody asserted on.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does readOnly = true do anything at the database level too, or is it purely a
+  Hibernate-side flag?</p>
+  <p class="a">It can go further than Hibernate, depending on your transaction manager and driver
+  — some setups propagate it down to the JDBC connection itself as a read-only hint. Whether that
+  actually gets enforced (some drivers or databases reject writes outright on a read-only
+  connection; others treat it as an ignorable hint) varies enough by stack that you shouldn't rely
+  on it as a safety net either way. The Hibernate-side flush skip is the one part of this you can
+  always count on — that's the layer this whole bug lives in.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  You split the method: <code>getUsersByTenant()</code> stays <code>readOnly = true</code>; the
+  <code>lastAccessedAt</code> write moves into its own separately-annotated, writable
+  <code>@Transactional</code> method. A week later, someone wraps both calls inside one outer
+  <code>@Service</code> method that's also marked <code>@Transactional(readOnly = true)</code>,
+  reasoning "the controller only needs one transaction boundary." Does the inner method's own
+  (non-readOnly) annotation protect the write this time?
+</div>
+
   <!-- 1 -->
   <section>
     <h2>1. The journey, at a glance</h2>
@@ -520,5 +739,6 @@ renderNodes(); resetStage();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

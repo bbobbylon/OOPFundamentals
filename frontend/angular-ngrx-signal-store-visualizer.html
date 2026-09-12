@@ -222,6 +222,208 @@
     </div>
   </div>
 
+<p class="hf-deck">or, the object you hand patchState was built before the await finished — and so was every value inside it</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Two admins granted two different roles. The store only remembers one.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">patchState({ ... }) with a value read before an await can lose a concurrent write</div>
+  <p><code>grantRole</code> reads <code>s.roles()</code>, builds a new array with the role appended,
+  <code>await</code>s the API call that persists it, then calls
+  <code>patchState(store, { roles: next })</code> with that array. Two admins click "grant EDITOR"
+  and "grant VIEWER" for the same user within the same few hundred milliseconds. Both methods read
+  <code>s.roles()</code> as <code>['USER']</code> before either write lands. Both awaits resolve.
+  Both eventually call <code>patchState</code> — each with its own array, both built from the same
+  stale <code>['USER']</code> snapshot. Whichever call runs second completely overwrites the
+  first's array, and the role that "lost" the race silently disappears from the store even though
+  its API call returned 200.</p>
+  <div class="hf-scatter">
+    <span>both API calls returned 200 ✓</span>
+    <span>the server persisted both roles ✓</span>
+    <span>each local snapshot was taken before its own await ⚠</span>
+    <span>the second patchState call overwrites, not merges ⚠</span>
+  </div>
+  <p class="hf-foot">Nothing threw. Nothing logged an error. The UI just quietly shows one role
+  instead of two, and the only trace of the dropped grant is server-side truth the store no longer
+  agrees with.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Use the updater-function form — it reads state fresh at write time</div>
+  <div class="hf-ladder">
+    <b>patchState(store, state =&gt; ({ roles: [...state.roles, newRole] }))</b>
+    <i>↓ that callback runs when patchState is called — against whatever state is current at THAT moment</i>
+    <b>Not patchState(store, { roles: [...s.roles(), newRole] }) computed earlier and carried across an await</b>
+    <i>↓ the object form bakes in values at construction time, however long ago that was</i>
+    <b>Same fix as any other read-modify-write race: move the read inside the write, not before it</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>patchState's updater-function form reads state at the moment it runs, not the moment you wrote the call.</b>
+  The object-literal form (<code>{ roles: next }</code>) is just data — whatever values it holds were
+  computed whenever you built it, possibly well before an <code>await</code> let something else patch
+  the store first. The function form (<code>state =&gt; ({...})</code>) defers that read until
+  <code>patchState</code> actually executes, which is the only way to guarantee you're building on
+  top of the latest state instead of a snapshot.
+</div>
+
+<div class="hf-note">It's the shared-Google-Doc problem. Edit offline, then paste your saved copy back
+in, and you overwrite whatever anyone else typed while you were offline — even though your copy was
+completely correct <b>when you made it</b>. The updater function is editing live instead of pasting a
+stale draft back over everyone else's work.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I read s.roles() right before the await — why doesn't the result have EDITOR anymore after I write it back?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">patchState</span>
+    <p>Because you didn't hand me a fresh read. You handed me an array you built a while ago —
+    milliseconds, but a while, in state-management terms. I don't know what changed since then. I
+    just write exactly what you gave me.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The roles signal</span>
+    <p>And I don't remember what I "should" have been. I only know my current value the instant
+    someone reads me. Read me early and hold onto that number, and it starts going stale the moment
+    anything else writes.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">patchState</span>
+    <p>Hand me a function instead of a value, though, and I'll call s.roles() myself — right when I
+    run, not whenever you happened to type the line.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Two forms, two very different timings — same function name.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>patchState(store, partial) accepts either a plain object or a function (state) =&gt; partial — TypeScript allows both, so nothing warns you which one you reached for</span><span class="tag">one call, two behaviors</span></li>
+    <li class="open"><span>The object-literal form is evaluated as an ordinary JS expression, right where you call patchState — any s.roles() reads inside it already happened before patchState even starts running</span><span class="tag">captured at call-construction time</span></li>
+    <li><span>The function form isn't evaluated yet at that point — it's just a function reference, handed to patchState unexecuted</span><span class="tag">deferred, not yet run</span></li>
+    <li class="open"><span>Inside patchState, when the argument is a function, patchState calls it itself, passing in the CURRENT state at that exact instant, then applies whatever partial comes back</span><span class="tag">the state argument is fresh, not yours</span></li>
+    <li><span>The resulting partial merges into the state source and the underlying signals update — synchronously, same as any patchState call, either form</span><span class="tag">both forms end the same way</span></li>
+    <li class="open"><span>An await anywhere between building the object literal and calling patchState is exactly the gap where another write can sneak in and get silently overwritten</span><span class="tag">the actual danger window</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the whole fix. patchState calling the function itself, against
+  whatever state exists right then, is the entire mechanism the safe version relies on — nothing
+  else about patchState changes between the version that loses a write and the version that
+  doesn't.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">roles: ['USER','EDITOR']<small>one merged state signal, several readers</small></div>
+    <div class="fan">flows to ↓</div>
+    <div class="obs">
+      <span>isAdminComputed — recomputes (reads roles)</span>
+      <span>roleBadges computed — recomputes (reads roles)</span>
+      <span class="new">auditLogCount computed — skipped, never reads roles</span>
+    </div>
+  </div>
+  <p class="hf-annot">Only computeds that actually read <code>roles()</code> inside their own
+  function recompute — the same fine-grained dependency tracking as every signal in Angular. One
+  patchState call correctly updates two places on screen and correctly leaves a third alone,
+  because withComputed never told that third one to care about roles in the first place.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A method calls these two lines back-to-back, with no <code>await</code> between
+  them, both using the object-literal form: <code>patchState(store, { count: store.count() + 1
+  })</code> then the identical line again. If <code>count</code> started at 5, what is
+  <code>store.count()</code> afterward?</p>
+  <button type="button">5 — the object-literal form always uses a stale snapshot regardless of timing, so both calls silently apply the same increment</button>
+  <button type="button">6 — the second patchState call overwrites the first, so only one of the two increments ever takes effect</button>
+  <button type="button">7 — patchState applies synchronously, so the second read already sees the first call's write, with no async gap for anything to go stale</button>
+  <p class="why" data-for="0">There's nothing inherently "stale" about the object-literal form by
+  itself — it only goes stale across a real gap, like an await, where something else gets a chance
+  to write in between. Two calls back-to-back with nothing between them have no such gap.</p>
+  <p class="why" data-for="1">This is the shape of the bug from earlier on this page — but only
+  once an await sits between the read and the write. Here there's no await at all between the two
+  lines, so the second line's store.count() read happens strictly after the first line's write.</p>
+  <p class="why" data-for="2">Right — patchState applies synchronously. By the time line two
+  evaluates store.count(), the signal already reflects line one's write, giving 6 then 7. The
+  lost-update bug needs an actual time gap — an await, a separate concurrent call — between a read
+  and its matching write; two synchronous calls in a row never have one.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Read-then-write races show up anywhere state can change between your read and your write.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>React's functional setState</h4>
+    <p><code>setCount(c =&gt; c + 1)</code> versus <code>setCount(count + 1)</code> is the exact
+    same distinction under a different name — the callback form reads React's latest pending state
+    when it runs; the value form bakes in whatever <code>count</code> was when the closure was
+    created, which is exactly how React batches multiple updates without losing any of them.</p>
+    <div class="hf-scatter"><span>same fix, same reason, different framework</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>SQL's UPDATE accounts SET balance = balance + 100</h4>
+    <p>The database computes <code>balance + 100</code> against whatever row value exists at the
+    instant the statement executes — atomically, server-side. An application that instead does
+    <code>SELECT balance</code>, adds 100 in code, then <code>UPDATE</code>s that number back has
+    reintroduced the exact same read-then-write gap, and needs a transaction or row lock to close
+    it.</p>
+    <div class="hf-scatter"><span>the atomic form is always the one closer to the data</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A CIAM role-grant endpoint, for real</h4>
+    <p>A Spring Boot <code>POST /users/{id}/roles</code> that does <code>findById</code>, appends a
+    role to the in-memory list, then saves the whole list back, has this exact race — two admins
+    granting different roles to the same user within milliseconds of each other can silently drop
+    one grant, with no error anywhere in the logs. The fix is the server-side version of the same
+    idea: an atomic append at the database (or a version check / row lock), never read-modify-write
+    across a network round trip.</p>
+    <div class="hf-scatter"><span>the same bug is worse when it's a security entitlement</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Does the updater-function form fix every possible race, or just this specific one?</p>
+  <p class="a">Just this one, and it's worth being precise about which one. It guarantees that any
+  single patchState call you make builds on the latest state your OWN store already knows about —
+  it can't make your client-side write lose track of a write your client itself already applied.
+  It does nothing for two different users' browsers racing to update the SAME backend row; that's a
+  server-side concern (a DB transaction, an optimistic-lock version check), not something a
+  frontend state library can solve on its own.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Can withEntities' own helpers — setEntity, updateEntity — be mixed with the updater-function form on the same store?</p>
+  <p class="a">Yes, and it's worth knowing why: helpers like <code>updateEntity({ id, changes })</code>
+  are themselves just updater functions you pass into patchState — <code>patchState(store,
+  updateEntity({ id, changes }))</code> — so they already follow the exact fresh-state-at-call-time
+  rule this page just walked through. Reaching for the entity helpers instead of hand-writing an
+  object-literal patch against the entity map is actually the safer default, not a separate
+  concern.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">If withComputed values are cached, doesn't recomputing isAdminComputed on every roles change get expensive on a big store?</p>
+  <p class="a">Not in practice — computed() only reruns when something actually reads it again after
+  a dependency changed, and the derivation itself is normally a cheap in-memory filter/some/map, not
+  I/O. The case that WOULD be expensive — an HTTP call inside a computed — isn't something
+  withComputed lets you do cleanly anyway, since its functions are expected to run synchronously.
+  That kind of work belongs in withMethods or rxMethod, which is exactly where this page's
+  grantRole example lives.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  <code>withHooks({ onInit(store) { ... } })</code> runs once, when the store is first constructed
+  — typically to kick off an initial <code>rxMethod</code> load. The store was registered
+  <code>providedIn: 'root'</code>. Three different components each <code>inject()</code> it and each
+  component's constructor calls a method on it. How many times does <code>onInit</code> actually
+  run — once, or three times?
+</div>
+
   <!-- ── HERO: animated patchState → signal → computed walk · update chip + live store inspector ── -->
   <div class="panel" style="border:1px solid #22d3ee">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:#22d3ee">▶ Call one method — watch patchState ripple to the screen</h2>
@@ -1219,6 +1421,7 @@ new value derived from old → <span class="hl-ok">updater fn</span>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

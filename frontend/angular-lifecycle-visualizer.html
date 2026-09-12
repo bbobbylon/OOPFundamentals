@@ -243,6 +243,215 @@
     </div>
   </div>
 
+<p class="hf-deck">or, ngDoCheck doesn't ask if you changed — it just asks, over and over, no matter who moved</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">One tiny diff check in one widget, and the whole dashboard starts to feel sluggish.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The comparison itself is one line. The bill for running it isn't.</div>
+  <p>A 50-widget admin dashboard has a "recent orders" widget that mutates its own array in place
+  (pushes a new order without swapping the reference), so Angular's normal input comparison can't
+  see it change. The fix looks reasonable: implement <code>ngDoCheck()</code> and compare
+  <code>items.length</code> against the last value you saw. It works in your local test. In the
+  real dashboard, a small clock widget in the corner ticks once a second, and suddenly the whole
+  page feels slower — most noticeably while typing in a completely unrelated search box. You
+  profile it and the CPU shows your "recent orders" widget's <code>ngDoCheck</code> firing dozens
+  of times a second, far more often than that array ever actually changes.</p>
+  <div class="hf-scatter">
+    <span>items.length compare is a one-liner ✓</span>
+    <span>this widget's own inputs rarely change ✓</span>
+    <span>ngDoCheck fires on every CD pass, app-wide ⚠</span>
+    <span>an unrelated clock ticking = 50 needless checks/sec ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption underneath it: that a hook named "do check" only runs
+  when there's something of its own worth checking.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make the hook cheap enough to survive being called constantly — or replace it</div>
+  <div class="hf-ladder">
+    <b>Guard it: bail out in one comparison before doing any real work</b>
+    <i>↓ ngDoCheck will still run thousands of times regardless — the only lever you have is making each run near-free</i>
+    <b>Better: OnPush + a signal, or trackBy on the array</b>
+    <i>↓ now the framework tells you what changed instead of you polling for it on every tick — nothing runs at all unless the data actually moved</i>
+    <b>Reserve ngDoCheck for what neither can catch, and keep it embarrassingly cheap</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>ngDoCheck doesn't watch your component — it watches the clock.</b> On the Default strategy it
+  fires on every single change-detection pass, anywhere in the app, whether or not this
+  component's own data moved at all — the one hook that inherits Zone.js's broad net instead of
+  Angular's usual per-component discipline. Which is exactly why OnPush is also the fix here, not
+  just for template checks: a clean OnPush view skips its whole check phase, and
+  <code>ngDoCheck</code> goes with it.
+</div>
+
+<div class="hf-note">Think of <code>ngDoCheck</code> as <b>a smoke detector wired to every room
+in the building, not just yours</b>. It doesn't go off because your room caught fire — it goes off
+because the building's electrical system did its routine sweep, and yours happened to be one of
+the detectors on the circuit. It rings at the same rate whether your room is fine or not; the only
+thing you control is how fast you can glance around and go back to sleep.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I only added ngDoCheck to catch one mutated array. Why is my whole app slower now?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">ngDoCheck</span>
+    <p>Because I don't know what "your app" means. Angular calls me every time it checks this
+    view — and on the Default strategy, that's every change-detection pass in the entire
+    application. Nobody tells me "something near you changed"; I just get called, constantly, and
+    it's on you to figure out fast whether anything's actually different.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Zone.js</span>
+    <p>And I'm the reason there are so many passes to begin with. I patch every timer and event in
+    the app — your clock widget's <code>setInterval</code> included. Every tick that fires,
+    anywhere, triggers exactly the kind of check that calls your DoCheck.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">OnPush</span>
+    <p>Put me on that component and the story changes. If nothing marked it dirty, Angular skips
+    the whole check for it — DoCheck never even gets called. I don't make your comparison faster;
+    I stop Angular from asking in the first place.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Fifty widgets. One clock ticking. Fifty DoChecks nobody asked for.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A one-second interval fires somewhere on the page — say, a clock widget's own timer</span><span class="tag">any async event will do</span></li>
+    <li class="open"><span>Zone.js notices the timer completed and tells Angular: something might have changed, check everything</span><span class="tag">the trigger is global, not local</span></li>
+    <li><span>ApplicationRef.tick() walks the entire component tree, top to bottom</span><span class="tag">the usual dirty-check pass</span></li>
+    <li class="open"><span>For every Default-strategy component it visits — including your 49 other, completely unrelated widgets — Angular calls <code>ngDoCheck()</code> if the component implements it</span><span class="tag">"visits" means "calls," unconditionally</span></li>
+    <li><span>Your array-length comparison runs, finds nothing changed, and returns</span><span class="tag">cheap, but not free, and not zero</span></li>
+    <li class="open"><span>Multiply one comparison by 50 widgets and however many ticks per second the page produces, and the "trivial" check becomes real, measurable CPU time</span><span class="tag">this is what the profiler is showing you</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the lesson: "visits" is unconditional for Default components.
+  Angular doesn't ask whether this component's own inputs changed before calling
+  <code>ngDoCheck</code> — it asks on every pass, for every component that implements the hook,
+  and trusts you to make the answer fast. The bug was never the comparison; it was believing the
+  hook only runs when there's something of its own to report.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">clock ticks once<small>Zone.js: "something finished"</small></div>
+    <div class="fan">ApplicationRef.tick() ↓ visits every Default component</div>
+    <div class="obs">
+      <span>RevenueChart.ngDoCheck()</span>
+      <span>UserList.ngDoCheck()</span>
+      <span>NavHeader.ngDoCheck()</span>
+      <span class="new">RecentOrders.ngDoCheck() — the one you added</span>
+      <span>…46 more widgets</span>
+    </div>
+  </div>
+  <p class="hf-annot">Every widget gets visited, every tick, whether or not it has anything to say
+  — including 46 that were never touched by this change at all. RecentOrders isn't special to
+  Angular; it's just the one paying for a comparison the other 46 don't even have to run.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A component is <code>OnPush</code> and implements <code>ngDoCheck()</code> with a
+  log statement inside it. A totally different part of the page fires ten unrelated events, but
+  this component's own @Inputs never change and no event fires inside it. How many times does the
+  log run?</p>
+  <button type="button">Zero times — OnPush skips this component's entire check phase when nothing has marked it dirty, and DoCheck runs only as part of that check</button>
+  <button type="button">Ten times — ngDoCheck fires on every change-detection pass no matter the strategy</button>
+  <button type="button">Once — ngDoCheck only ever fires on the very first pass, right after the component is created</button>
+  <p class="why" data-for="0">Right — and this is the exception to "ngDoCheck watches the clock,
+  not your component" above: that rule was specifically about the Default strategy. OnPush
+  changes what "visiting" means. With nothing marking this component dirty — no changed
+  <code>@Input</code> reference, no internal event, no <code>markForCheck()</code> — Angular never
+  enters its check phase this pass, so <code>ngDoCheck</code>, <code>ngAfterContentChecked</code>
+  and <code>ngAfterViewChecked</code> are all skipped along with the template check.</p>
+  <p class="why" data-for="1">This is the overgeneralization of the exact lesson two sections up —
+  true for Default, not for OnPush. The whole point of OnPush is that Angular stops treating "a
+  tick happened somewhere" as a reason to check this component at all, and that skip applies to
+  every hook in the check phase, not just template bindings.</p>
+  <p class="why" data-for="2">That's closer to how <code>ngOnInit</code> behaves, not
+  <code>ngDoCheck</code>. DoCheck is designed to run repeatedly — the open question is always "how
+  often," never "was that the last time." Even on OnPush it fires again the moment something
+  legitimately marks the component dirty.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Polling costs the same whether anything changed or not. Pushing costs nothing until something does.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>React's dependency-less useEffect</h4>
+    <p><code>useEffect(() =&gt; { ... })</code> with no dependency array runs after every single
+    render of that component — and without memoization, a state update anywhere above it in the
+    tree can trigger that render. Same failure mode reached from the other side: a hook that looks
+    like it's watching something specific, actually firing on almost anything nearby moving at
+    all.</p>
+    <div class="hf-scatter"><span>no deps array ≈ unconditional DoCheck</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Database polling vs. LISTEN/NOTIFY</h4>
+    <p>A cron job polling a table every 5 seconds for new rows costs the same whether zero rows
+    changed or a thousand did — the exact shape of an unconditional <code>ngDoCheck</code>.
+    Postgres's <code>LISTEN</code>/<code>NOTIFY</code>, or any message queue, flips it around: you
+    get pushed an event only when a row actually changed. That inversion is precisely what OnPush
+    and signals bring to change detection.</p>
+    <div class="hf-scatter"><span>poll = pay always; push = pay on change</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your CIAM cross-tab logout check</h4>
+    <p>Before signals, some Angular CIAM shells caught "the user logged out in another tab" by
+    polling <code>localStorage</code> inside <code>ngDoCheck()</code> on every route's shell
+    component — the only hook available that didn't need an explicit trigger. Copy that onto 30
+    route shells and you've built the dashboard problem above at 30x: every tick, everywhere,
+    re-checking a key that changes maybe once a session. The <code>storage</code> event — a real
+    DOM event that only fires when another tab actually writes — replaces all 30 polls with zero
+    ongoing cost.</p>
+    <div class="hf-scatter"><span>30 pollers → one event listener</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">If ngDoCheck is this expensive, why does Angular even offer it?</p>
+  <p class="a">Because some changes really are invisible to Angular's own reference check —
+  mutating an array in place, a value changing inside a third-party object Angular doesn't
+  control, or state that lives outside any <code>@Input</code> entirely. <code>ngDoCheck</code> is
+  the manual override for exactly those cases. The mistake isn't using it; it's reaching for it
+  before checking whether an immutable update, a signal, or <code>trackBy</code> would have made
+  the manual check unnecessary in the first place.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does the same "called on every tick, everywhere" apply to ngAfterViewChecked and ngAfterContentChecked too?</p>
+  <p class="a">Yes — all three are "check-phase" hooks, called every time Angular checks that
+  view, and on the Default strategy that means every tick regardless of where it originated. They
+  live and die together: OnPush skips all three at once, not selectively. You don't get to keep
+  DoCheck while skipping the other two.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">So should I basically never use ngDoCheck?</p>
+  <p class="a">Treat it as a last resort, not a default tool. Reach for an immutable update plus
+  the normal <code>@Input</code> comparison first, or a signal, or <code>trackBy</code> for list
+  diffing. If none of those can see the change you care about, <code>ngDoCheck</code> is
+  legitimate — but keep whatever runs inside it embarrassingly cheap, because you don't get to
+  choose how often it runs. Angular already decided that for you: every tick, forever.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  A component implements only <code>ngDoCheck()</code> — no OnPush. It renders inside a modal
+  that's currently closed via <code>@if (modalOpen())</code>, and <code>modalOpen()</code> is
+  false. A totally unrelated button elsewhere on the page is clicked ten times. How many times
+  does this component's <code>ngDoCheck()</code> run — ten, or zero? What changes about the answer
+  if the modal were open but merely hidden with <code>[hidden]</code> instead of
+  <code>@if</code>?
+</div>
+
   <!-- ── HERO: animated lifecycle walk · hook chip + live component-state inspector ── -->
   <div class="panel" style="border-color:#22d3ee">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:#22d3ee">▶ Watch a component live and die — hook by hook</h2>
@@ -1360,6 +1569,7 @@ instance → <span class="hl-bad">never collected — memory leak</span>`},
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

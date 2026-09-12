@@ -58,6 +58,185 @@
     <div class="intro-ciam"><span class="tag">In CIAM / Your Job:</span> Knowing "which box does what" prevents the classic mistakes: putting authorization logic in Spring instead of AM's policy engine (a redeploy for every policy change); calling PingDS directly from Angular instead of AM's <code>/userinfo</code> (bypassing access control); storing profile data in your app DB instead of PingDS (a shadow store that drifts). The design intent: your app knows nothing about identity — it only sees validated tokens and enforced policies from the Ping stack.</div>
   </div>
 
+
+<p class="hf-deck">or, PingGateway protects the front door of an app that also has a side entrance</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The legacy app was made SSO-capable without changing a line of its code. Read that sentence again and ask what is doing the authenticating.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The app trusts a header because "only the gateway can set it" — and nothing anywhere enforces that</div>
+  <p>This is PingGateway's headline trick and it is a good one. A twelve-year-old Java app that
+  knows nothing about OIDC gets put behind the gateway; the gateway authenticates the user against
+  AM, then forwards the request with <code>X-Authenticated-User: j.smith</code> attached. The app
+  reads the header, believes it, and builds a session. No code change, no redeploy, no rewrite.
+  Modern SSO in front of something that predates it.</p>
+  <p>The trust in that arrangement is <b>entirely topological</b>. It holds only while every route
+  to the app passes through the gateway — and inside a cluster, that is almost never true. Pods
+  talk to each other directly by service name unless a network policy forbids it. A developer's
+  port-forward reaches it. A second ingress added months later for a health dashboard reaches it.
+  Any of those, and a request carrying a hand-written <code>X-Authenticated-User: admin</code> is
+  accepted with exactly the same confidence, because <b>the header is indistinguishable from the
+  one the gateway adds</b>. The app has no way to tell them apart: the header is not signed, and
+  there is nothing in it to verify.</p>
+  <div class="hf-scatter">
+    <span>gateway authenticates correctly ✓</span>
+    <span>AM policy evaluated ✓</span>
+    <span>ingress routes only through the gateway ✓</span>
+    <span>app reachable pod-to-pod ⚠</span>
+    <span>header unsigned, unverifiable ⚠</span>
+  </div>
+  <p class="hf-foot">The gateway is a very good front door on a building with no interior walls.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make the assertion carry its own proof, so the network stops being the control</div>
+  <div class="hf-ladder">
+    <b>Have the gateway inject a <b>signed JWT</b> rather than a plain header, and have the app verify the signature</b>
+    <i>↓ now the assertion authenticates itself, and a forged copy fails regardless of which route it arrived by</i>
+    <b>Strip inbound copies of those headers at the gateway, unconditionally, before you add your own</b>
+    <i>↓ otherwise a client can simply send the header and have it forwarded — the gateway becomes the thing laundering it</i>
+    <b>Then close the path anyway: network policy or mTLS so the app accepts connections from the gateway alone</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>An unsigned header is a claim about the network, not a claim about the user.</b> It says "I
+  arrived on a path someone believes is trustworthy", and every property you want from it depends
+  on a belief held somewhere else — in an ingress rule, a security group, a network policy that
+  may or may not still exist. A signed assertion moves the guarantee into the message, where the
+  application can check it itself, and stops requiring your architecture diagram to remain accurate
+  forever.
+</div>
+
+<div class="hf-note">Header-injection SSO is <b>a hotel wristband</b>. It works beautifully at the
+pool gate, because the only way in is past the desk. It stops working the moment somebody notices
+the fence has a gap — and wristbands are very easy to draw.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>Nothing can reach that app except the gateway. Isn't the header fine?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">PingGateway</span>
+    <p>I do my half properly: I authenticate against AM, enforce the policy, and attach the result.
+    But I am a proxy, not a firewall. I control what goes <i>through</i> me — never what goes
+    <i>around</i> me. Whether there is another route to that app is a question about your network,
+    and I was never asked it.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The legacy app</span>
+    <p>And I cannot help you here. I read a header and trust it, because I was written in an era
+    when a reverse proxy in front of an app server was the whole security model. There is nothing
+    in that header for me to verify even if I wanted to — no signature, no expiry, no issuer.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The cluster network</span>
+    <p>Meanwhile my default is that every pod can reach every service. Nobody configured that; it is
+    what you get when nobody configures anything. Your ingress rules describe how traffic enters
+    from outside. They have never described what already-inside traffic may do.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps that turn a correct design into a bypass.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>PingGateway sits in front of the legacy app. A browser request with no session is redirected to AM</span><span class="tag">the designed path</span></li>
+    <li class="open"><span>AM authenticates, the gateway evaluates policy, and the request is forwarded with <code>X-Authenticated-User</code> attached</span><span class="tag">the injection</span></li>
+    <li><span>The app trusts the header and builds a session. Everything works — this is the feature, not the bug</span><span class="tag">SSO, with no code change</span></li>
+    <li class="open"><span>Six months later something else needs to reach the app: a batch job, a health check, a second ingress, a migration script</span><span class="tag">a second route appears</span></li>
+    <li><span>That route does not pass through the gateway, and nobody notices — nothing breaks, because the app is perfectly happy to be called directly</span><span class="tag">silent, by construction</span></li>
+    <li class="open"><span>Anything that can use that route can name itself anyone, by typing one header</span><span class="tag">authentication, bypassed</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is where this becomes inevitable rather than unlucky. The original
+  architecture was correct; it just encoded a security property in a place that has no
+  memory — a routing decision, rather than the app's own logic. Every later change is made by
+  someone who does not know that the topology <i>was</i> the authentication, because nothing in the
+  app says so. A signed JWT at step 2 survives all of it, because the guarantee travels inside the
+  request instead of alongside it.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">The internet — the ingress routes <code>/app</code> to the gateway and nowhere else</span>
+      <div class="ring"><span class="lbl">The cluster network — every pod can reach every service by name, by default</span>
+        <div class="ring"><span class="lbl">PingGateway — authenticates with AM, evaluates policy, injects the header</span>
+          <div class="core">Your legacy app, on port 8080<small>trusting a header — and sitting inside the cluster ring, not inside the gateway's</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Read the rings from the inside out and the bug is drawn rather than argued.
+  The app believes it is protected by the ring immediately around it, but that ring only encloses
+  traffic arriving from <i>outside</i> the cluster. Anything already in the second ring reaches the
+  core without crossing the third. <b>A control only protects what it actually sits between</b> —
+  and this one sits between the internet and the app, not between the cluster and the app. Which is
+  also the general rule for the four engines on this page: AM, IDM, DS and the gateway each guard a
+  specific boundary, and knowing which boundary is the difference between a design and a
+  diagram.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A legacy app runs behind PingGateway, which authenticates against AM and forwards
+  <code>X-Authenticated-User: j.smith</code>. The ingress sends outside traffic only to the gateway.
+  A teammate says the app is fully protected. What is the strongest objection?</p>
+  <button type="button">Anything that can reach the app without traversing the gateway can set that header itself — the assertion is unsigned, so the app cannot distinguish the gateway's copy from a hand-written one</button>
+  <button type="button">The header can be read by anything between the gateway and the app, so the username leaks to any observer on the internal network</button>
+  <button type="button">Nothing important — an attacker would have to compromise the gateway itself, since the ingress rule guarantees no other path to the app exists</button>
+  <p class="why" data-for="0">Correct, and the fix follows from the diagnosis: make the assertion
+  self-authenticating. A gateway that injects a signed JWT gives the app something it can verify on
+  its own, so the guarantee no longer depends on a routing rule staying true. Close the network path
+  as well — but as defence in depth, not as the mechanism.</p>
+  <p class="why" data-for="1">Disclosure on an internal hop is a real concern and worth fixing with
+  mTLS, but a username is not a secret in the way a credential is. The severe problem is not that
+  someone can <i>read</i> the header — it is that anyone in a position to read it is usually also in
+  a position to <i>write</i> it, and writing it grants access.</p>
+  <p class="why" data-for="2">An ingress rule constrains traffic entering from outside. It says
+  nothing about what other pods, jobs, port-forwards or a second ingress added later may do, and
+  cluster networking permits all of them by default. No gateway compromise is needed: the attacker
+  never touches the gateway, they route around it.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Only we can set this" is a claim about the world, and the world changes.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4><code>X-Forwarded-For</code>, and the rate limiter that trusts it</h4>
+    <p>A proxy appends the client IP; the app reads the first value and rate-limits on it. Anyone
+    who can send the header directly picks their own identity and their own quota. Same mistake, and
+    the same fix: trust a hop-count you control, or nothing at all.</p>
+    <div class="hf-scatter"><span>a header is an assertion, not a fact</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>The internal API with no auth because "it is not exposed"</h4>
+    <p>True on the day it was written, and the sentence outlives the network it described. This is
+    most of the argument for zero trust: authenticate every hop, because network position is a
+    property that changes without anyone editing the code that depends on it.</p>
+    <div class="hf-scatter"><span>not exposed yet</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Why Spring validates a JWT rather than asking who called</h4>
+    <p>Your resource server does not care which network the request came from — it verifies a
+    signature. That is why the same API is safe behind a gateway, in a mesh, or on a laptop. Get the
+    legacy app to the same place with a signed injected token and the topology stops being load-
+    bearing.</p>
+    <div class="hf-scatter"><span>verify the message, not the route</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> four engines with four jobs — AM authenticates and enforces
+  policy, IDM runs the identity lifecycle and provisioning, DS stores the identities, and the
+  gateway retrofits all of that onto apps that cannot do it themselves — either self-managed or as
+  the PingOne cloud, with DaVinci orchestrating flows. The sentence worth adding: <b>the gateway
+  protects a boundary, so anything that can reach the app from the other side of that boundary is
+  unprotected</b> — inject a signed token, not a bare header.
+</div>
+
   <section>
     <h2>1. The four engines</h2>
     <div class="grid grid-2">
@@ -367,6 +546,7 @@ pRender(); pReset();
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

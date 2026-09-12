@@ -203,6 +203,203 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> Angular sends <code>X-Correlation-Id</code> on every call; a filter does <code>MDC.put("correlationId", header)</code> so each line reads <code>[correlationId=abc-123] [userId=user-42] INFO UserService - Role ADMIN assigned…</code>. A "user X can't access Y" ticket → grab the correlationId from the console → search all service logs → full trace. Security events (login, failed login + IP, role change, password reset) always log at INFO — that's the audit trail; never demote them.</div>
   </div>
 
+<p class="hf-deck">or, @Async doesn't inherit MDC — it starts a brand-new thread with nothing in it</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Same request, two consecutive log lines. One has the correlation ID. One doesn't.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">sendConfirmationAsync() logs perfectly — with an empty [requestId=]</div>
+  <p><code>OrderService.placeOrder()</code> — the example this page already builds around — runs
+  on the request thread. <code>MdcFilter</code> already set <code>requestId</code> before
+  <code>placeOrder()</code> was ever called, so "Order placed: 42" and "Payment initiated" both
+  carry it straight into Loki, exactly as Section 5 shows. Then <code>placeOrder()</code> calls
+  <code>notificationService.sendConfirmationAsync(order)</code> — an <code>@Async</code> method, so
+  Spring hands the call to a task executor and returns immediately. Inside
+  <code>sendConfirmationAsync()</code>, on its own thread, <code>log.info("Email sent to: {}",
+  order.getEmail())</code> fires — and ships as <code>[requestId=] INFO NotificationService - Email
+  sent to: ...</code>. Same request, same order, same trace you're trying to follow — and the one
+  line proving the email actually went out can't be found by searching for its requestId, because
+  it doesn't have one.</p>
+  <div class="hf-scatter">
+    <span>MDC.put(requestId) on http-nio-8080-exec-3 ✓</span>
+    <span>placeOrder() logs — carry requestId ✓</span>
+    <span>sendConfirmationAsync() — runs on a task-executor thread</span>
+    <span>its log lines — [requestId=] empty</span>
+  </div>
+  <p class="hf-foot">Not a bug in @Async. MDC was never told this request grew a second thread.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Copy the context across, on purpose, once</div>
+  <div class="hf-ladder">
+    <b>Implement a TaskDecorator — Runnable decorate(Runnable r)</b>
+    <i>↓ this hook wraps every Runnable an executor is about to run, before it runs</i>
+    <b>Inside decorate(): capture MDC.getCopyOfContextMap() right there, on the SUBMITTING thread</b>
+    <i>↓ decorate() runs on the request thread, before the task ever reaches the pool</i>
+    <b>Inside the wrapped Runnable, on the WORKER thread: MDC.setContextMap(copy) → run the real task → MDC.clear()</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>MDC lives on one thread. The moment your code crosses to another one — @Async, a manual
+  ExecutorService, CompletableFuture.supplyAsync — that thread starts with a blank map, not a copy
+  of yours.</b> Nothing copies it across for you unless you wire that copy in yourself.
+</div>
+
+<div class="hf-note">Think of MDC as a <b>sticky note on your monitor, not a memo that follows
+you</b>. Whoever sits at this desk sees it. Hand the task to a coworker at a different desk — a
+thread-pool worker — and they see their own monitor, sticky-note-free, unless you photocopy yours
+and hand it over on the way out. That photocopy step is exactly what a TaskDecorator
+automates.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>requestId=req-abc123 is all over the placeOrder() logs. Why does the confirmation-email log
+    line have nothing?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">placeOrder()</span>
+    <p>I set nothing up myself — MdcFilter did that, once, before I even got called, on this
+    thread. I just log normally and it shows up, same as this page already told you.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">the task-executor thread</span>
+    <p>I'm not that thread. I'm a worker Spring's async executor already had running, and I was
+    handed sendConfirmationAsync() to execute. Nobody copied anything onto me — I only know what's
+    in my own, brand-new, empty MDC map.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">TaskDecorator</span>
+    <p>Which is exactly the gap I close. Wrap me around your executor once, and every Runnable it
+    ever hands off gets the submitting thread's MDC copied on the way in, and cleared on the way
+    out. Nobody has to remember it per call site.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One @Async call. Two threads. Follow MDC across the seam between them.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Request arrives. MdcFilter.doFilter() runs <code>MDC.put("requestId", reqId)</code> on thread http-nio-8080-exec-3</span><span class="tag">this page's own Section 5</span></li>
+    <li><span>placeOrder() runs on that same thread; every log.info() call reads the CURRENT thread's MDC map, finds requestId, includes it</span><span class="tag">same thread, same map</span></li>
+    <li class="open"><span>placeOrder() calls notificationService.sendConfirmationAsync(order) — the @Async proxy intercepts it and hands the actual invocation to a configured Executor instead of running it inline</span><span class="tag">the same kind of proxy you've now met more than once</span></li>
+    <li class="open"><span>The executor picks a worker thread — task-1, say — and calls run() on it. That thread has its OWN MDC map, and nothing has ever written to it</span><span class="tag">a different thread, a different map</span></li>
+    <li><span>Without a TaskDecorator, nothing runs between "executor picks a thread" and "your @Async method body starts" to copy the map across — no such step exists unless you add one</span><span class="tag">the missing step</span></li>
+    <li><span>sendConfirmationAsync()'s log.info() reads task-1's MDC — empty — and the line ships with no requestId at all</span><span class="tag">silently, not an error</span></li>
+  </ol>
+  <p class="hf-annot">Compare this to the leak this page already warned you about: there, a pooled
+  thread kept a PREVIOUS request's leftover values because nobody called MDC.clear(). Here, a
+  pooled thread has NOTHING, because nobody called MDC.setContextMap() in the first place. Same
+  root cause — MDC is thread-local and nobody's watching the seam — opposite symptom.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">MDC on http-nio-8080-exec-3<small>{requestId: "req-abc123"}</small></div>
+    <div class="fan">@Async hands sendConfirmationAsync() to the executor ↓</div>
+    <div class="obs">
+      <span>placeOrder() — same thread, same map, requestId present</span>
+      <span class="new">sendConfirmationAsync() on task-1 — new thread, empty map</span>
+    </div>
+  </div>
+  <p class="hf-annot">The fan only has one exit that matters: does anything run between "executor
+  picks a thread" and "your code starts" to copy the map across? Out of the box, no. A
+  TaskDecorator is the only thing that inserts itself there.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">OrderService.placeOrder() runs on the request thread, where MdcFilter already set
+  requestId. It calls <code>notificationService.sendConfirmationAsync(order)</code> — an
+  <code>@Async</code> method, no TaskDecorator configured on its executor. What does
+  sendConfirmationAsync()'s own log.info() line show for requestId?</p>
+  <button type="button">The same requestId as placeOrder() — MDC is shared across the whole request, no matter which thread does the work</button>
+  <button type="button">Empty — the executor's worker thread has its own MDC map, and nothing copied placeOrder()'s values into it</button>
+  <button type="button">The previous request's requestId — thread-pool reuse leaks whatever value was there before</button>
+  <p class="why" data-for="0">MDC's map lives on one thread, not on "the request" as a concept.
+  placeOrder() and sendConfirmationAsync() are the same logical request, but not the same thread
+  once @Async hands off — and MDC only ever knows about threads.</p>
+  <p class="why" data-for="1">Right. Spring's @Async proxy hands the call to an Executor, which
+  runs it on a worker thread that has never had anything written to its MDC map. Empty in, empty
+  out — unless a TaskDecorator copies the calling thread's map across the handoff.</p>
+  <p class="why" data-for="2">That's the OTHER MDC bug this page already covers — a pooled thread
+  reused without MDC.clear(), inheriting a previous request's leftover values. This is the opposite
+  case: the worker thread's map isn't wrong, it's simply never been written to at all.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three more things that live on a thread — and stop existing the moment you leave it.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>SecurityContextHolder — the exact same seam, in code you already trust</h4>
+    <p>Spring Security's default strategy is <code>MODE_THREADLOCAL</code>, so
+    <code>SecurityContextHolder.getContext()</code> populated by the request thread is just as
+    invisible to an <code>@Async</code> method as MDC is — <code>getAuthentication()</code> comes
+    back <code>null</code> on the worker thread. The fix is the same shape:
+    <code>MODE_INHERITABLETHREADLOCAL</code>, or Spring Security's
+    <code>DelegatingSecurityContextExecutor</code> wrapping the async executor, mirroring
+    TaskDecorator for MDC.</p>
+    <div class="hf-scatter"><span>ThreadLocal auth ≈ ThreadLocal MDC — same fix shape</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Node's AsyncLocalStorage — built to not need this fix</h4>
+    <p>Node designed <code>AsyncLocalStorage</code> specifically so context follows a logical
+    request through every callback, promise, and <code>await</code> automatically — the runtime
+    instruments the async machinery itself. Java's MDC predates anything like that: it only ever
+    followed a literal OS thread, which is exactly why crossing to a new one silently drops
+    it.</p>
+    <div class="hf-scatter"><span>runtime-propagated vs manually-propagated context</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your own traceparent, fanning out to Ping and Entra in parallel</h4>
+    <p>A filter reads the incoming <code>traceparent</code> header and puts it in MDC — the
+    cross-service correlation story this page opens with. If that same request then fans out to
+    <code>@Async</code> entitlement checks against Ping and Entra so they run concurrently, each
+    of those lookups' logs loses the trace ID right at the one point internal parallelism was
+    supposed to make things faster, not harder to trace.</p>
+    <div class="hf-scatter"><span>cross-service propagation ≠ cross-thread propagation</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Does Spring Cloud Sleuth or Micrometer Tracing fix this automatically?</p>
+  <p class="a">Yes — that's a large part of what those libraries buy you: instrumented executors,
+  TaskDecorators, and context propagation wired in for you, plus trace headers propagated across
+  HTTP calls automatically. Without one of those on the classpath, a hand-written TaskDecorator is
+  the lightweight version of the same idea.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">What about CompletableFuture.supplyAsync() with no @Async in sight?</p>
+  <p class="a">Same rule, no annotation involved. <code>CompletableFuture.supplyAsync(fn)</code>
+  (default: the common ForkJoinPool) or <code>supplyAsync(fn, myExecutor)</code> both run
+  <code>fn</code> on a different thread with its own empty MDC map. Capture the map before
+  submitting and set it inside the lambda yourself if that executor has no TaskDecorator.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does switching to WebFlux make this go away?</p>
+  <p class="a">It changes shape rather than disappearing. Reactor doesn't run your pipeline on one
+  thread at all, so plain ThreadLocal-based MDC breaks down constantly there, not just at explicit
+  async boundaries. Reactor's own Context (or Micrometer's automatic context propagation) is the
+  reactive answer — a different mechanism from MDC entirely, and worth its own page rather than a
+  footnote on this one.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  <code>PaymentService.charge(order)</code> runs on the request thread and correctly logs
+  <code>[requestId=req-99]</code> on every line. It then calls
+  <code>fraudCheckExecutor.submit(() -&gt; fraudService.checkAsync(order))</code> — a plain
+  <code>ExecutorService</code>, no <code>@Async</code> annotation, no TaskDecorator anywhere in
+  sight. Before you scroll back up — what shows up for requestId in
+  <code>fraudService.checkAsync()</code>'s own log lines? And would wrapping the submitted lambda
+  as a <code>Callable</code> instead of a <code>Runnable</code> change your answer at all?
+</div>
+
   <!-- ── HERO: animated logging pipeline · live per-step inspector ── -->
   <div class="panel" style="border:1px solid var(--accent)">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch a log statement travel — SLF4J → Logback → appender → output</h2>
@@ -1095,6 +1292,7 @@ renderNodes(cur);
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>

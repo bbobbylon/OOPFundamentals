@@ -132,6 +132,201 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> <code>/v3/api-docs</code> feeds the typed Angular client — <code>npx openapi-generator-cli generate -i … -g typescript-angular -o src/app/api</code> yields a typed <code>createUser(body): Observable&lt;UserResponse&gt;</code> with no hand-written interfaces. Rename a DTO field in Spring, regenerate, and TypeScript flags every Angular component still using the old name. The same spec drives contract tests (Pact, Schemathesis).</div>
   </div>
 
+<p class="hf-deck">or, the padlock icon is a claim, not a lock</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Swagger UI shows a lock on the endpoint. The endpoint doesn't have one anymore.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The docs and the config drifted apart, and nothing noticed</div>
+  <p><code>POST /api/admin/reset-password</code> carries <code>@SecurityRequirement(name = "bearerAuth")</code>,
+  and <code>SecurityConfig</code> has a matching <code>.requestMatchers("/api/admin/reset-password").hasRole("ADMIN")</code>.
+  Swagger UI renders a padlock. Correct, on day one. Weeks later, someone adds a public
+  health-check endpoint under <code>/api/admin/health</code> and reaches for the fastest fix:
+  <code>.requestMatchers("/api/admin/**").permitAll()</code>, placed ABOVE the specific
+  reset-password rule. Spring Security matches top-down — first match wins — so the new broad rule
+  now answers for reset-password before its own specific rule is ever reached. Nobody touched the
+  controller. The annotation is untouched. Swagger UI still shows the padlock.</p>
+  <div class="hf-scatter">
+    <span>@SecurityRequirement(name="bearerAuth") on the method ✓</span>
+    <span>Swagger UI padlock shown ✓</span>
+    <span>SecurityConfig's matcher order changed independently, weeks later ⚠</span>
+    <span>the annotation and the matcher chain have never once been the same system ⚠</span>
+  </div>
+  <p class="hf-foot">Springdoc documents what you TOLD it. Spring Security enforces what you
+  CONFIGURED. Nothing keeps those two in sync but a human remembering to check both.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Trust the matcher chain, not the icon</div>
+  <div class="hf-ladder">
+    <b>Never treat generated docs as a security audit</b>
+    <i>↓ the padlock reflects an annotation, not the SecurityFilterChain's actual decision</i>
+    <b>Add an integration test that hits the real endpoint unauthenticated</b>
+    <i>↓ a test exercises the ACTUAL filter chain; a doc annotation exercises nothing at runtime</i>
+    <b>Either way: @SecurityRequirement is metadata for API consumers, not a guarantee for API owners</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>@SecurityRequirement — and every other Springdoc enrichment annotation — documents an intent.</b>
+  It has no runtime connection to Spring Security's filter chain, and no way to verify the two still
+  agree. Only the matcher chain itself decides what actually happens to a request; reading the docs
+  is not the same as reading the config.
+</div>
+
+<div class="hf-note">Think of Swagger UI's padlock like <b>a "Beware of Dog" sign on a gate</b>. The
+sign tells you what the owner believed, the day they hung it. It doesn't check whether the dog is
+still there, whether a delivery driver propped the gate open, or whether the dog was given away last
+spring. The sign and the gate are two completely separate things — one describes, the other decides
+— and only one of them can actually bite.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>Swagger UI shows a padlock on reset-password. Doesn't that mean it's protected?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Springdoc</span>
+    <p>It means somebody wrote <code>@SecurityRequirement(name = "bearerAuth")</code> above that
+    method. I read annotations and generate a spec from them — I have never once looked at your
+    SecurityConfig, and I wouldn't know a request matcher if I tripped over one.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">SecurityConfig</span>
+    <p>And I've never read a single Springdoc annotation either. I only look at my own matcher list,
+    top to bottom, first match wins. Whatever the docs claim, I make the actual decision — and right
+    now, a broader rule above yours is answering for this endpoint before your specific rule ever
+    gets asked.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">The padlock was true once. Nothing about Springdoc ever promised it would stay that way.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Day one: <code>@SecurityRequirement(name = "bearerAuth")</code> on the method and
+    <code>.hasRole("ADMIN")</code> in SecurityConfig both say the same thing</span><span class="tag">doc and reality agree</span></li>
+    <li><span>Springdoc reads the annotation once, at boot, and bakes a padlock into the OpenAPI
+    spec</span><span class="tag">documentation generated once per boot</span></li>
+    <li class="open"><span>Weeks later, a new public endpoint is added, and the fastest fix is a
+    broad <code>.requestMatchers("/api/admin/**").permitAll()</code></span><span class="tag">a change nobody connects to reset-password</span></li>
+    <li class="open"><span>That broad rule is placed ABOVE the specific reset-password rule — first
+    match wins, so permitAll() now matches first</span><span class="tag">matcher order, not annotations, decides</span></li>
+    <li class="open"><span>reset-password is now unauthenticated at runtime. Nobody touched its
+    controller method or its annotation</span><span class="tag">the annotation never changed, so the docs never changed either</span></li>
+    <li><span>Swagger UI still shows the same padlock on the next boot — Springdoc re-reads the same
+    annotation, which still says bearerAuth</span><span class="tag">confidently wrong, until someone reads the config</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the whole lesson: the padlock's truth value was decided the moment the
+  annotation was written, and never rechecked against the actual authority — the matcher chain —
+  which can change for a completely unrelated reason, on a different day, touched by a different
+  person.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">POST /api/admin/reset-password<small>an unauthenticated request arrives — which authority actually decides what happens to it?</small></div>
+    <div class="arrow">who gets asked? →</div>
+    <div class="opts">
+      <span>@SecurityRequirement(name="bearerAuth") — Springdoc's docs; generates a padlock, enforces nothing at runtime</span>
+      <span class="on">SecurityConfig's matcher chain — the ONLY thing Spring Security actually consults, top-down, first match wins</span>
+    </div>
+  </div>
+  <p class="hf-annot">Both exist. Both mention this endpoint. Only one of them is ever asked what to
+  do with a real request — and it isn't the one with the padlock.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A controller method has <code>@SecurityRequirement(name = "bearerAuth")</code>, and
+  Swagger UI shows a padlock on it. Someone later adds
+  <code>.requestMatchers("/api/admin/**").permitAll()</code> ABOVE that endpoint's own specific
+  <code>.requestMatchers(...).hasRole("ADMIN")</code> rule in <code>SecurityConfig</code>. Nobody
+  touches the controller. On the next deploy, what does an unauthenticated request to that endpoint
+  actually get — and what does Swagger UI say about it?</p>
+  <button type="button">A 401 Unauthorized, and Swagger UI updates its icon to an unlocked padlock, since Springdoc re-scans the security config on every request</button>
+  <button type="button">A 401 Unauthorized, because @SecurityRequirement is itself enforced by Spring Security at runtime, not just documented</button>
+  <button type="button">A 200, because the broader permitAll() rule matches first and wins — while Swagger UI still shows the padlock, unchanged, because the annotation itself was never touched</button>
+  <p class="why" data-for="0">Springdoc doesn't re-scan your security config at all — it only reads
+  annotations once, when the app boots. There's no mechanism connecting the two, so the icon can't
+  "notice" anything changed.</p>
+  <p class="why" data-for="1">This is the trap most people fall into: @SecurityRequirement LOOKS like
+  a security annotation because it lives right next to @PreAuthorize in the same codebase, but it's
+  pure documentation metadata for Springdoc. The actual gate is the SecurityFilterChain's matcher
+  list — and that list now waves this request through before your specific rule is ever reached.</p>
+  <p class="why" data-for="2">Exactly — first-match-wins means the new permitAll() rule answers for
+  this request before hasRole("ADMIN") ever gets a turn, so the response is a plain 200. The
+  @SecurityRequirement annotation is unrelated code that nobody edited, so Springdoc keeps generating
+  the exact same padlock it always did — accurately describing a security posture that no longer
+  exists.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three systems, one gap: describing a rule is not the same as enforcing it.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>GraphQL schema descriptions</h4>
+    <p>A GraphQL SDL field can carry a <code>"""Requires ADMIN role"""</code> doc-comment for
+    tooling like GraphiQL. Nothing forces the resolver behind that field to actually check a role —
+    the description and the resolver's real authorization logic are exactly as disconnected as
+    <code>@SecurityRequirement</code> and <code>SecurityConfig</code>.</p>
+    <div class="hf-scatter"><span>SDL doc-comment ≈ @SecurityRequirement</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>API Gateway route tags</h4>
+    <p>A Kong or AWS API Gateway route can be tagged "requires API key" in the gateway's own console,
+    while the key-required plugin actually attached to that route was removed or misconfigured
+    independently. The tag and the enforcing plugin live in two different places, edited by two
+    different people, on two different days.</p>
+    <div class="hf-scatter"><span>gateway tag ≈ Swagger padlock</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your CIAM's Entra/Ping scope descriptions</h4>
+    <p>An exposed API's OAuth2 scope carries an admin-facing description — "Allows reading all user
+    profiles" — in the identity provider's app registration. The resource server's actual
+    <code>@PreAuthorize("hasAuthority('SCOPE_users.read.all')")</code> check is configured
+    separately, in your Spring code. Narrowing the real enforcement later doesn't touch the IdP's
+    description text — the two drift independently, exactly like the padlock.</p>
+    <div class="hf-scatter"><span>IdP scope description ≈ @SecurityRequirement</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Is there any way to make Springdoc actually verify the annotation against the real config?</p>
+  <p class="a">Not automatically — Springdoc has no visibility into your SecurityFilterChain bean at
+  spec-generation time, and Spring Security has no idea Springdoc's annotations exist. The closest
+  you can get is a contract test that hits the real endpoint unauthenticated and asserts the status
+  code — that tests reality, not documentation.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">So why bother adding @SecurityRequirement at all?</p>
+  <p class="a">It's genuinely useful — for API consumers. It tells whoever's integrating against your
+  API "bring a Bearer token here" without them reading your Spring config. It answers a documentation
+  question ("what should I send?"), not a security question ("is this actually enforced?"). Both are
+  worth having; neither substitutes for the other.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Would disabling Swagger UI in prod, like this page already recommends, have prevented this?</p>
+  <p class="a">No — the misconfigured matcher would still let the request through with the UI turned
+  off entirely; only the padlock's misleading VISIBILITY disappears, not the actual hole. Disabling
+  docs in prod protects against surface-mapping by an attacker; it does nothing about a security rule
+  that's actually wrong.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  This page's own intro promises Springdoc-generated docs "never drift from the code" — and for the
+  auto-detected basics (paths, verbs, parameter names) that's true. A hand-added
+  <code>@ApiResponse(responseCode = "404", description = "Order not found")</code> sits above a
+  method whose <code>@ExceptionHandler</code> mapping later changes to return 400 instead. Is that
+  <code>@ApiResponse</code> annotation in the same category as the auto-detected basics, or the same
+  category as the security padlock above — and what would make it silently wrong?
+</div>
+
   <!-- ── HERO: animated Springdoc spec pipeline · live per-step inspector ── -->
   <div class="panel" style="border:1px solid var(--accent)">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch Springdoc turn your code into a live API contract</h2>
@@ -1124,6 +1319,7 @@ Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJib2JieSJ9…
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

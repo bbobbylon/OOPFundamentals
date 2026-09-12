@@ -112,7 +112,112 @@ print("three rolls:", roll())
     <code>def f(): ...<br>f = deco(f)</code>
   </div>
 
-  <!-- ── HERO ── -->
+  <p class="hf-deck">or, the decorator that crashes on an integer that appears nowhere in your code</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You wrote <code>@retry(3)</code> exactly the way this page just taught. <code>retry</code> itself was still the old two-layer shape — and Python never once tells you that's the actual problem.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">TypeError: 'int' object is not callable — on a decorator, at the @ line</div>
+  <p>Someone half-refactored a plain decorator into a configurable one and stopped partway: <code>def retry(func): @functools.wraps(func) def wrapper(*a, **k): ...; return wrapper</code> — still only two layers, still expecting <code>func</code> directly. They apply it as <code>@retry(3)</code> above <code>def transfer_funds(): ...</code>, meaning to allow three attempts.</p>
+  <p>The crash lands immediately, at the <code>@retry(3)</code> line, before <code>transfer_funds</code> even finishes being defined: <code>TypeError: 'int' object is not callable</code>. Nowhere in this file does anyone write <code>3(...)</code>. The traceback points inside <code>wrapper</code>, at a variable called <code>func</code> — and <code>func</code>, somehow, is <code>3</code>.</p>
+  <div class="hf-scatter">
+    <span>@retry(3) parses fine ✓ — valid Python syntax</span>
+    <span>retry(3) runs fine and returns a real function ✓</span>
+    <span>that function is then CALLED with transfer_funds as its argument ⚠</span>
+  </div>
+  <p class="hf-foot"><code>transfer_funds</code> never gets a chance to exist as a decorated function. The name is never bound, the module fails to import, and the only clue is an integer that was supposed to mean "three attempts."</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Add the missing layer — or drop the parentheses that promise one</div>
+  <div class="hf-ladder">
+    <b>Give retry a real outer layer: def retry(times): def decorator(func): def wrapper(*a,**k): ...; return wrapper; return decorator</b>
+    <i>↓ now retry(3) returns decorator, and decorator(func) is what finally receives transfer_funds — three calls deep, on purpose</i>
+    <b>Or, if no configuration is actually needed, drop the parentheses: @retry, not @retry()</b>
+    <i>↓ this matches what a plain two-layer decorator's contract actually promises: "hand me the function directly"</i>
+    <b>Read every `@expr` as "call expr, then call the result on the function below it" — no exceptions</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b><code>@expr</code> above a def desugars to exactly one thing: <code>f = expr(f)</code>.</b> There is no special decoration machinery beyond that single rule. If <code>expr</code> is <code>retry(3)</code>, Python evaluates <code>retry(3)</code> first — one ordinary function call, which can succeed even when the whole setup is wrong — and then calls whatever THAT returned on <code>f</code>. Two calls happen, always, whether or not the code you wrote was designed for two.
+</div>
+
+<div class="hf-note">A decorator factory is a vending machine: you put in <code>3</code>, it hands you a decorator. A plain decorator is a turnstile: you put the function itself through it. Wire the turnstile up behind the vending machine's coin slot, and the coin — <code>3</code> — is what walks through the turnstile instead of your function.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>The error says an int isn't callable. I never wrote 3(...) anywhere.</p></div>
+  <div class="hf-bub right"><span class="who">wrapper</span><p>You didn't — I did. <code>retry(3)</code> convinced me that <code>3</code> was the function I'm supposed to call. Then Python handed me <code>transfer_funds</code> and asked me to run, and my body says <code>func(*a, **k)</code>. That's <code>3(transfer_funds)</code>.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But retry(3) alone didn't crash when I tried it by itself in the REPL.</p></div>
+  <div class="hf-bub right"><span class="who">The @ syntax</span><p>Because typing <code>retry(3)</code> alone only builds <code>wrapper</code> — it never hands wrapper anything to call. <code>@retry(3)</code> does both in one breath: build <code>wrapper</code>, then immediately call it on <code>transfer_funds</code>. That second call is decoration itself, and it's the one that breaks.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch the two calls hiding inside one line of syntax.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Python sees <code>@retry(3)</code> directly above <code>def transfer_funds(): ...</code></span><span class="tag">syntax</span></li>
+    <li class="open"><span>It evaluates <code>retry(3)</code> first — an ordinary call, with <code>func</code> bound to <code>3</code> inside retry</span><span class="tag">call #1</span></li>
+    <li><span><code>@functools.wraps(3)</code> decorates a fresh <code>wrapper</code> closure — no error; wraps silently skips attributes an int doesn't have</span><span class="tag">silently fine</span></li>
+    <li class="open"><span><code>retry(3)</code> returns that <code>wrapper</code>, a real function closing over <code>func = 3</code></span><span class="tag">returns a REAL function</span></li>
+    <li><span>Python now calls that returned function on the actual target: <code>wrapper(transfer_funds)</code></span><span class="tag">call #2 — this IS decoration</span></li>
+    <li class="open"><span>Inside wrapper, <code>func(*a, **k)</code> runs as <code>3(transfer_funds)</code> → TypeError</span><span class="tag">crash</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the one nobody visualizes. <code>@expr</code> is not "apply some decoration magic" — it is two chained function calls, and the second one is where the actual function you wrote gets passed in. Everything before that point can succeed perfectly, including a factory that was never a factory, because call #1 doesn't know or care what call #2 is about to hand it.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">what @retry(3) actually evaluates<small>assuming retry is still the plain two-layer decorator above</small></div>
+    <div class="arrow">what really happens →</div>
+    <div class="opts">
+      <span>retry(3) treated as "skip configuration, just decorate"</span>
+      <span class="on">retry(3) returns wrapper, then wrapper(transfer_funds) runs</span>
+      <span>a clear TypeError naming retry() and the missing layer</span>
+    </div>
+  </div>
+  <p class="hf-annot">The middle option is the only one Python ever runs — there is no special-casing for "oh, this decorator wasn't built as a factory, let me adjust." The error you get names <code>int</code>, not <code>retry</code>, because by the time anything crashes, <code>retry</code> has already finished running successfully and handed off to <code>wrapper</code>.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A teammate pastes in an old plain decorator, <code>def audited(func): ...; return wrapper</code> — no configuration argument anywhere — and applies it as <code>@audited()</code>, with empty parentheses, above <code>def transfer_funds(): ...</code>. What happens?</p>
+  <button type="button"><code>audited()</code> is called with zero arguments, but it requires <code>func</code> — TypeError right at the <code>@</code> line, before transfer_funds is decorated</button>
+  <button type="button">transfer_funds gets decorated normally — the empty parentheses are simply ignored</button>
+  <button type="button">Nothing happens yet — it only fails once transfer_funds() is actually called</button>
+  <p class="why" data-for="0">Right. <code>@audited()</code> means "call audited() first" — zero arguments — and a plain decorator declared as <code>def audited(func):</code> requires exactly one. It fails immediately, for the missing-argument mirror image of the @retry(3) story: wrong SHAPE either way, just missing instead of extra this time.</p>
+  <p class="why" data-for="1">Parentheses always mean "call this," never "ignore this." Empty parentheses are still a call — with zero arguments — and <code>audited</code> was never written to accept zero.</p>
+  <p class="why" data-for="2">This fails at decoration time, the same moment <code>@retry(3)</code> failed — not later, and not when transfer_funds is called. transfer_funds never successfully becomes a name at all.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Call the wrapper, then call what it gives you" is not special to Python's @ syntax — plenty of ecosystems build a two-call handshake and plenty of engineers skip one of the calls.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A Java annotation with the wrong element shape</h4>
+    <p><code>@Retryable(times = 3)</code> requires an annotation type that actually declares a <code>times</code> element — get the shape wrong and <code>javac</code> refuses to compile. Java catches this mismatch before the program ever runs; Python's version of the same mistake only surfaces the moment the decorator line executes.</p>
+    <div class="hf-scatter"><span>javac ✓ catches it at compile time</span><span>Python ⚠ catches it at import/decoration time</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>TypeScript's <code>@Input()</code> vs <code>@Input</code></h4>
+    <p>Angular's own decorators follow the identical two-call shape: <code>@Input()</code> calls a factory that returns the real decorator, then applies it to the property. Forgetting the parentheses on a factory-style decorator, or adding them to a plain one, is the same class of mistake in a different syntax.</p>
+    <div class="hf-scatter"><span>@Input() — factory, needs the call</span><span>@Input — would be the plain form, if Angular offered one</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Express middleware: <code>app.use(cors)</code> vs <code>app.use(cors())</code></h4>
+    <p><code>cors</code> is a factory — <code>cors()</code> returns the actual middleware function. Pass the factory itself to <code>app.use</code> without calling it, and Express happily wires up the wrong thing, running the factory as if it were middleware instead of the configured handler it was supposed to produce.</p>
+    <div class="hf-scatter"><span>cors() ✓ the configured middleware</span><span>cors ⚠ the unconfigured factory itself</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a decorator is a callable that takes a function and returns a replacement, <code>@name</code> is sugar for <code>name = decorator(name)</code>, and an argument-taking decorator needs a third nested layer to make that math work.
+  <b>The one new sentence this block adds:</b> because <code>@expr</code> is always two calls chained together, a decorator built for the wrong number of layers doesn't fail with a helpful message about layers — it fails wherever the second call happens to land, blaming whatever object was standing in for your function at that moment.
+</div>
+
+<!-- ── HERO ── -->
   <div class="card" style="border-color:var(--accent)">
     <h2 id="hero" style="margin-top:0;border:0;padding:0;color:var(--accent2)">▶ Watch <code>@</code> rewrap a function</h2>
     <p class="note top">The decorator runs <em>once</em>, at definition time, and replaces the name with its return value. Then every call
@@ -423,6 +528,7 @@ document.addEventListener('click', function (e) {
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

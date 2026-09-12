@@ -344,6 +344,203 @@
     </div>
   </div>
 
+<p class="hf-deck">or, .value only ever describes what the user is currently allowed to touch</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The role field was right there on screen. It never made it to the server.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">form.value silently drops every disabled control — not just skips it, omits the key entirely</div>
+  <p>You built a user-edit form. Non-admins can't change their own role, so you disable the control
+  for them: <code>this.form.get('role').disable()</code>. The field still renders — greyed out,
+  showing "USER" — exactly the UX you wanted. On submit you send <code>this.form.value</code> to
+  the API. The PATCH lands with no <code>role</code> key at all — not <code>role: null</code>, not
+  <code>role: ""</code>, the property simply isn't in the object. Depending on how your backend
+  treats an absent field, that ranges from harmless to a genuine data-integrity bug on a request
+  that happened to reuse this same form component.</p>
+  <div class="hf-scatter">
+    <span>the field renders correctly, greyed out ✓</span>
+    <span>the value onscreen matches the server ✓</span>
+    <span>form.value silently excludes disabled controls ⚠</span>
+    <span>the key isn't sent as null — it's just absent ⚠</span>
+  </div>
+  <p class="hf-foot">Angular isn't hiding a bug here. .value doing exactly this is documented — just
+  documented in a place most people read after they've already shipped the form.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Use getRawValue() when disabled fields must be in the payload</div>
+  <div class="hf-ladder">
+    <b>this.form.getRawValue() instead of this.form.value on submit</b>
+    <i>↓ getRawValue() includes every control regardless of disabled state</i>
+    <b>Or, if the value genuinely shouldn't be sent either, leave form.value as-is</b>
+    <i>↓ disabled isn't always "still relevant, just locked" — sometimes it's really "not this form's business"</i>
+    <b>Decide which one you meant, per field, instead of discovering it in a bug report</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>disable() doesn't remove a control from the form — it removes it from .value.</b> Every other
+  API still sees a disabled control: it's still in <code>form.controls</code>, it still has a value
+  you can read with <code>getRawValue()</code> or the control's own <code>.value</code>, it's just
+  excluded from the aggregate <code>.value</code> and skipped by validation. That one exclusion rule
+  is the entire reason <code>getRawValue()</code> exists, and forgetting it is the single most
+  common way a Reactive Form quietly loses data on submit.
+</div>
+
+<div class="hf-note">Think of a disabled control like an employee on leave, still on the org chart.
+Ask <code>.value</code> for the department roster and it only counts people currently clocked in —
+technically accurate, and exactly why payroll (<code>getRawValue()</code>) has to check the
+<b>full</b> roster, on-leave employees included, or somebody's paycheck goes missing.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>The role field shows USER right there on the screen. Why isn't it in the payload?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">form.value</span>
+    <p>Because I represent what the user can currently edit and submit — and a disabled control
+    isn't editable, by definition. Leaving it out is me doing my job, not failing at it.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The &lt;select&gt; element</span>
+    <p>I don't know any of that. I'm just rendering whatever value the FormControl handed me. As
+    far as the DOM is concerned, I'm showing "USER" just as honestly as any enabled field would.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">getRawValue()</span>
+    <p>Which is exactly the gap I exist to close. I don't ask whether a control is editable — I just
+    read every value in the tree, disabled or not. Need what's on screen, not what's editable? I'm
+    the one to call.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One flag, checked at exactly one point: when .value gets assembled.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>FormControl.disable() sets the control's status to DISABLED and marks it excluded from its parent's aggregation</span><span class="tag">the only thing disable() actually flips</span></li>
+    <li class="open"><span>The control keeps its current value internally — disable() doesn't clear it, blank it, or detach it from the DOM binding</span><span class="tag">which is why it still renders correctly</span></li>
+    <li><span>A disabled control is skipped by validation entirely — not "always valid," genuinely not checked — so a disabled required field never blocks form.valid</span><span class="tag">a second, separate consequence of the same flag</span></li>
+    <li class="open"><span>Reading form.value walks the control tree and builds an object from ENABLED controls only, recursively — a disabled child of an enabled FormGroup is dropped right there</span><span class="tag">the exact moment the key disappears</span></li>
+    <li><span>getRawValue() walks the identical tree but builds the object from every control regardless of status</span><span class="tag">same tree, different filter</span></li>
+    <li class="open"><span>valueChanges also only fires from an enabled control's own edits — calling disable()/enable() itself doesn't emit on valueChanges, only on statusChanges</span><span class="tag">a second place this same flag quietly changes behavior</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the one line of implementation that explains the whole page's worth
+  of confusion. There's no separate "submission mode" Angular switches into — <code>.value</code> is
+  <i>always</i> the enabled-only view, every time you read it, which is why the disabled field's
+  data was never briefly there and then removed. It was never in <code>.value</code> to begin
+  with.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">userEdit<small>FormGroup — .value walks every child below</small></div>
+    <div class="fan">assembling .value ↓</div>
+    <div class="obs">
+      <span>email</span>
+      <span>displayName</span>
+      <span class="new">role — disabled, excluded from .value</span>
+    </div>
+  </div>
+  <p class="hf-annot">Two controls make it into <code>.value</code>; the disabled one doesn't, even
+  though it's sitting in the exact same FormGroup with a real value of its own. Swap the read for
+  <code>getRawValue()</code> and all three appear — same tree, the only thing that changed is which
+  method walked it.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A FormGroup has <code>email</code> (enabled) and <code>role</code> (disabled,
+  current value <code>'ADMIN'</code>). You call <code>form.get('role').enable()</code> immediately
+  before reading <code>form.value</code> on the very next line. What does <code>form.value</code>
+  contain?</p>
+  <button type="button">{ email } only — enable() doesn't take effect until the next change detection cycle, so the read still sees the disabled state</button>
+  <button type="button">{ email, role: 'ADMIN' } — enable() is synchronous, so by the time .value is read, role is already an enabled control</button>
+  <button type="button">{ email, role: null } — enabling a control resets its value to null until the user interacts with it again</button>
+  <p class="why" data-for="0">There's no change-detection delay here — FormControl status changes
+  are plain synchronous method calls, not something queued for a future render. If enable() already
+  ran on the line above, .value already reflects it by the time you read it.</p>
+  <p class="why" data-for="1">Right — enable() and disable() take effect immediately and
+  synchronously. .value is computed fresh every time you read it by walking the current control
+  tree, so there's no lag between flipping a control's status and that change showing up in the very
+  next .value read, even one line later.</p>
+  <p class="why" data-for="2">enable() and disable() only ever change a control's status, never its
+  value. The control held 'ADMIN' before the call and holds 'ADMIN' after it — that's actually the
+  whole reason getRawValue() is useful in the first place: the value was preserved the entire time
+  it was disabled, not cleared.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Silent, documented exclusion shows up everywhere data gets filtered on the way out.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>SQL's WHERE clause, silently dropping rows</h4>
+    <p>A query filtered on <code>status = 'active'</code> doesn't complain that inactive rows
+    exist — it just never shows them, and a report built from that query looks complete until
+    someone asks where the archived accounts went. <code>.value</code> filtering out disabled
+    controls is the identical shape: correct, silent exclusion that only becomes a bug once someone
+    downstream assumed "the result" meant "everything."</p>
+    <div class="hf-scatter"><span>a silent WHERE clause, not a bug</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>JSON.stringify skipping undefined values</h4>
+    <p><code>JSON.stringify({ a: 1, b: undefined })</code> produces <code>'{"a":1}'</code> — no
+    <code>b</code> key at all, the same silent-omission shape as a disabled control missing from
+    <code>.value</code>. Both are documented, correct behavior that still catches people expecting
+    "the object" to mean "every property I set."</p>
+    <div class="hf-scatter"><span>undefined keys vanish; disabled controls vanish</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A locked MFA-enforcement toggle, for real</h4>
+    <p>An org-policy screen where "require MFA" is locked ON for admin roles by policy — shown
+    checked and greyed out. A save handler built on <code>form.value</code> silently drops that
+    field from the PATCH, and if the backend treats a missing field as "leave whatever's there,"
+    this specific case is harmless by luck. Change the backend's semantics to "missing means false"
+    even once, and a locked-on security setting silently turns itself off on save.</p>
+    <div class="hf-scatter"><span>luck, not correctness, is doing the work here</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">If disabled controls are skipped by validation, can a form with an invalid disabled field still be form.valid?</p>
+  <p class="a">Yes — consistent with everything else disable() does, not a separate bug. A disabled
+  control's status becomes DISABLED, not VALID or INVALID, and the parent FormGroup's aggregate
+  validity only looks at ENABLED children. A required field showing empty and disabled won't block
+  submission — which is exactly why the "good card" pattern matters: decide deliberately whether a
+  locked field should also be exempt from validation, because Angular will exempt it whether you
+  decided that or not.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does setValue() work on a disabled control?</p>
+  <p class="a">Yes, and this surprises people in the other direction — setValue() and patchValue()
+  both still write to a disabled control's internal value; disabled only affects the
+  .value/.valid aggregation, not whether the control can be programmatically updated. It's
+  specifically user input that the disabled state blocks, via the native element's own
+  [disabled] binding; your TypeScript can read and write a disabled control freely.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Is there a way to include SOME disabled controls in .value but not others?</p>
+  <p class="a">Not through .value/getRawValue() directly — that split is all-or-nothing per form.
+  The common pattern is building the submit payload by hand instead of trusting either helper
+  blindly: spread <code>form.value</code>, then explicitly add back the specific disabled fields you
+  need with <code>form.get('role').value</code>. A few extra lines, but it makes the intent —
+  "this one is deliberately included" — visible in the code instead of riding on which helper method
+  you happened to call.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  A FormGroup has two controls: <code>email</code> (enabled) and <code>role</code> (disabled). You
+  call <code>form.disable()</code> on the whole group — not just the one control — then read
+  <code>form.value</code>. How does the result differ from when only <code>role</code> was disabled?
+  And what does <code>form.valid</code> report now that every control in the group is disabled?
+</div>
+
     <!-- ============ TOC ============ -->
     <div class="toc">
       <div class="group">Foundations</div>
@@ -1716,6 +1913,7 @@ submit  <span class="hl-bad">BLOCKED</span>`},
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

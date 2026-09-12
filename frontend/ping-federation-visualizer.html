@@ -118,7 +118,195 @@
     <div class="intro-ciam"><span class="tag">In CIAM / Your Job:</span> Federation is central to enterprise CIAM — your customers are partner employees whose identities live in the partner's AD/IdP, and PingFederate brokers them into OAuth2 tokens your Angular + Spring stack consumes. Common tasks: a new SAML IdP connection (import metadata, map attributes, test SP-initiated SSO), debugging "invalid signature" (clock skew, expired certs), NameID format mismatches (transient vs email), and mapping upstream groups to your role model. The federation metadata XML is your config contract — version-control it.</div>
   </div>
 
-  <!-- ── HERO: animated SAML SP-initiated SSO walk · message chip + live assertion inspector ── -->
+  
+<p class="hf-deck">or, the one field in that walk above that decides whether anyone can log you in as someone else</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Every check passed. The signature was real, the assertion was in date, and you are now signed in as somebody else.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">IdP-initiated SSO was switched on for the portal tile, and it removed the only thing tying an assertion to the person holding it</div>
+  <p>Users wanted to click your app's icon on the PingFederate launchpad and land inside, already
+  logged in. That is <b>IdP-initiated</b> SSO: no <code>AuthnRequest</code> from your app, no
+  redirect out — PingFederate just POSTs a signed assertion straight at your ACS URL. One checkbox
+  on the SP connection. Everyone does it.</p>
+  <p>Now look at what your SP can still verify. Signature: valid, it really came from your IdP.
+  Audience: correct, it names you. <code>NotOnOrAfter</code>: fine. Assertion ID: not seen before.
+  All good — and every one of those checks is about the <i>assertion</i>. Not one of them is about
+  the <b>browser presenting it</b>. In the SP-initiated walk above, the thing that closed that gap
+  was <code>InResponseTo</code>: proof that this response answers a request <i>you</i> sent moments
+  ago to <i>this</i> browser. An unsolicited response has no <code>InResponseTo</code> — the spec
+  requires its absence — so there is nothing to correlate, and an attacker who can make your
+  browser POST an assertion for <b>their</b> account has just signed you into it.</p>
+  <div class="hf-scatter">
+    <span>signature valid ✓</span>
+    <span>audience is you ✓</span>
+    <span>not expired, not replayed ✓</span>
+    <span>InResponseTo: absent by design ⚠</span>
+    <span>whose browser this is: never checked ⚠</span>
+  </div>
+  <p class="hf-foot">Then you upload the quarterly numbers into an account the attacker can log into
+  whenever they like.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Keep the request, so the response has something to answer</div>
+  <div class="hf-ladder">
+    <b>Prefer SP-initiated SSO and require <code>InResponseTo</code> to match a request this browser actually made</b>
+    <i>↓ Spring Security stores the AuthnRequest (HTTP session by default) and checks the response against it — that is the correlation doing its job</i>
+    <b>Turn IdP-initiated off at the SP unless a business requirement genuinely needs it</b>
+    <i>↓ and if the portal tile is that requirement, have the tile deep-link into <i>your</i> app so it starts an SP-initiated login instead</i>
+    <b>Accepting one means never establishing a privileged session from it — land the user on a neutral page and make them act to continue</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A response you never requested is a response you cannot correlate — and correlation is the
+  only thing that binds an assertion to the person in front of you.</b> Signature proves
+  <i>origin</i>. Audience proves <i>destination</i>. Timestamps and the replay cache prove
+  <i>freshness</i>. None of the four says anything about <i>who is holding it</i>. That is the job
+  <code>InResponseTo</code> does, and IdP-initiated SSO is the mode where you agree to do without
+  it.
+</div>
+
+<div class="hf-note"><b>Bearer means what it says.</b> A SAML assertion's default
+<code>SubjectConfirmation</code> method is literally <code>…cm:bearer</code> — the same word as
+<code>Authorization: Bearer</code>, and the same deal: possession is the entire credential. It
+proves who the assertion is <i>about</i>. It never proves who is <i>carrying</i> it.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>The assertion is signed by our own IdP. How is a signed assertion a problem?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The assertion</span>
+    <p>My signature proves I was issued by that IdP and not tampered with afterwards. It says
+    nothing about the route I took to reach you. I am a signed note about a person — anyone who
+    picks me up can hand me in, which is exactly what <i>bearer</i> means, and that is written into
+    my own <code>SubjectConfirmation</code>.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">InResponseTo</span>
+    <p>Which is why I exist. In an SP-initiated login your app generates an <code>AuthnRequest</code>
+    with a fresh ID, keeps it in <i>that browser's</i> session, and I carry that ID back. A response
+    quoting an ID you never issued, or one you already consumed, is not a login — it is somebody
+    else's assertion arriving at your door. In an unsolicited response I am absent, and there is
+    nothing left to check.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Your ACS endpoint</span>
+    <p>And I am wide open on purpose. CSRF protection is switched off for me in every SAML SP,
+    because the IdP has to POST here without one of your tokens. So a cross-site form POST is not
+    an anomaly on this endpoint — it is <i>the normal case</i>. Whatever distinguishes a real login
+    from a planted one has to live in the message itself.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps. The attacker never touches your server and never forges anything.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The attacker signs in at the IdP <b>as themselves</b> — a real account, a real password, no forgery anywhere</span><span class="tag">everything so far is legitimate</span></li>
+    <li class="open"><span>They capture the signed <code>SAMLResponse</code> from the POST form before it is consumed — a browser dev-tools panel or a SAML tracer extension is enough</span><span class="tag">the credential is now portable</span></li>
+    <li><span>They host a page containing a form that auto-submits that <code>SAMLResponse</code> to <b>your</b> ACS URL, and get a victim to open it</span><span class="tag">a link in an email will do</span></li>
+    <li class="open"><span>Your SP validates signature, issuer, audience, timestamps and assertion ID. Every check passes, because the assertion is genuine — just not the victim's</span><span class="tag">nothing is wrong with the assertion</span></li>
+    <li><span>No <code>InResponseTo</code> is present, so nothing compares this response to a request. The SP creates a session for the <b>attacker's</b> identity in the <b>victim's</b> browser</span><span class="tag">the gap, being used</span></li>
+    <li class="open"><span>The victim sees your app, logged in, and carries on working — and everything they save lands in an account the attacker can open at will</span><span class="tag">exfiltration by consent</span></li>
+  </ol>
+  <p class="hf-annot">Step 6 is what makes this worth taking seriously, because the usual instinct
+  is "so what, they logged someone in." Ordinary CSRF makes the victim act <i>as themselves</i>
+  under attacker instruction. <b>Login CSRF inverts it: the victim acts as the attacker,
+  voluntarily, inside an account the attacker owns</b> — uploading a document, saving a note,
+  linking a payment method, connecting a data source. Nothing is stolen in transit. It is handed
+  over.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>a real SP-initiated login — your app sent an AuthnRequest ten seconds ago</span>
+      <span>the portal tile — the user clicked your icon on the PingFederate launchpad</span>
+      <span>an attacker's page — a hidden form auto-POSTing an assertion for their own account</span>
+    </div>
+    <div class="funnel">all three arrive as an identical POST ↓</div>
+    <div class="instance">POST /login/saml2/sso/ping<small>one endpoint, one signature check — and only the first of the three carries an InResponseTo to correlate</small></div>
+  </div>
+  <p class="hf-annot">Three arrivals, one door, and the door cannot tell them apart on anything
+  except that field. Which reframes the whole decision: enabling IdP-initiated SSO is not "adding a
+  convenient second way in" — it is <b>telling your ACS endpoint to stop distinguishing between
+  rows one and three</b>. That is why the fix is a connection setting rather than code, and why the
+  best version of the portal tile is one that deep-links into your app and lets it start an
+  ordinary SP-initiated login.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your Spring Boot SP accepts IdP-initiated SSO so the PingFederate portal tile works.
+  An attacker signs in at the IdP as themselves, captures the signed <code>SAMLResponse</code>
+  issued for their own account, and gets a victim to open a page that auto-POSTs it to your ACS
+  URL. Signature, issuer, audience and timestamps all validate. What happens?</p>
+  <button type="button">It is rejected — the Subject names the attacker rather than the victim, and the SP compares that against the browser's current session before creating a new one</button>
+  <button type="button">The victim's browser gets a session authenticated as the attacker — every check that passed concerned the assertion's contents, and none of them bind it to the browser presenting it</button>
+  <button type="button">Nothing — with no <code>InResponseTo</code>, Spring Security rejects it as unsolicited</button>
+  <p class="why" data-for="0">There is nothing to compare it against: the victim may have no session
+  with you at all, and that is the ordinary case for this attack. SAML has no notion of "this
+  assertion belongs to that browser" — the default <code>SubjectConfirmation</code> method is
+  <code>bearer</code>, the spec's own word for "whoever holds it". The Subject names who the
+  assertion is <i>about</i>; it has never named who is <i>presenting</i> it.</p>
+  <p class="why" data-for="1">Correct — and notice the attacker forged nothing and never touched
+  your server. Every property you rely on held: the IdP really issued it, it really names your
+  audience, it really is in date. The missing property is the one no cryptography supplies, which
+  is that this response answers a request <i>this</i> browser made. Restore that by preferring
+  SP-initiated SSO and requiring <code>InResponseTo</code>.</p>
+  <p class="why" data-for="2">This is what you <i>want</i>, and it is what you get once
+  IdP-initiated is off — but it is not the behaviour of an SP configured to accept it. A response
+  carrying no <code>InResponseTo</code> is, by the specification, a perfectly legitimate unsolicited
+  login; an SP that supports the flow has to accept it, because rejecting it would break the very
+  portal tile the flow was enabled for. You cannot have the tile and the check at the same time,
+  which is the actual decision on the table.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Every federation protocol eventually invents the same field, under a different name.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>OIDC's <code>state</code> and <code>nonce</code> are this exact idea, redesigned</h4>
+    <p>The relying party generates both, stores them against the browser's session, and refuses any
+    response that does not echo them back. That is <code>InResponseTo</code> with the lesson already
+    learned — which is also why OIDC has no equivalent of IdP-initiated login as a normal mode. The
+    successor protocol made the correlation mandatory instead of optional.</p>
+    <div class="hf-scatter"><span>same field, better defaults</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Login CSRF — the direction nobody threat-models</h4>
+    <p>Everyone defends the case where an attacker makes you act as yourself. Almost nobody models
+    the inverse, because "logging a user in" does not sound like an attack until you notice whose
+    account they were logged into. Worth a slot in your threat model in its own right: <b>any
+    endpoint that can establish a session from a cross-site POST is a login-CSRF surface.</b></p>
+    <div class="hf-scatter"><span>the attack that gives you something</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Bearer tokens, cookies, API keys — one property, three names</h4>
+    <p>A signed JWT you paste into a header behaves identically: valid signature, correct audience,
+    in date, and utterly indifferent to who is sending it. It is why session fixation, token theft
+    and this attack all rhyme, and why the mitigations always come down to the same two moves —
+    shorten the window, or bind the credential to something the attacker cannot move.</p>
+    <div class="hf-scatter"><span>possession is the whole credential</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> the IdP asserts who you are, the SP trusts it instead of
+  keeping passwords, PingFederate holds the SP Connection that names the entity ID, ACS URL, signing
+  certificate and attribute contract, and SP-initiated SAML runs AuthnRequest → authenticate →
+  signed assertion POSTed to the ACS → session. The sentence worth carrying: <b>the assertion is a
+  bearer credential, so <code>InResponseTo</code> is what ties it to this browser</b> — which is
+  precisely what IdP-initiated SSO gives up.
+</div>
+
+<!-- ── HERO: animated SAML SP-initiated SSO walk · message chip + live assertion inspector ── -->
   <div class="panel" style="border:1px solid #ff6070">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:#ff6070">▶ Federate a login — SP-initiated SSO, message by message</h2>
     <p style="font-size:13px;color:var(--muted);margin:6px 0 12px">Federation lets a user at one org sign in to an app at another, with no shared password. Pick a scenario and press ▶ — the chip is the SAML message in flight, and the inspector shows the <b>real artifacts</b>: the <code>AuthnRequest</code>, the signed <code>Assertion</code> (subject + attributes + conditions), the trust that makes it verifiable, and how Ping brokers many IdPs behind one SP integration.</p>
@@ -649,6 +837,7 @@ in one place. exactly PingFederate’s job.`},
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

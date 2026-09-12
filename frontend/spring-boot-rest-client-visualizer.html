@@ -108,6 +108,196 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> Three beans — <code>pingClient</code> (Ping admin, Client-Credentials Bearer), <code>graphClient</code> (Microsoft Graph, Entra Client-Credentials), <code>partnerClient</code> (API key header) — each with a 5s connect + 10s read timeout and a Resilience4j circuit breaker. For bulk Graph reads (500 users' groups), WebClient with <code>Flux.parallel(8)</code> fans the calls out.</div>
   </div>
 
+<p class="hf-deck">or, an HTTP client with no timeout isn't being patient — it's volunteering your thread pool as a hostage</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The order was created fine. The response just never made it back. Your retry created it again.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The retry worked exactly as configured. That's the problem.</div>
+  <p>You wire <code>Retry.backoff(3, ...).filter(ex -&gt; ...is5xxServerError())</code> around a
+  <code>POST /orders</code> call, because a flaky downstream occasionally 503s under load. One
+  night it 503s — but not because it rejected the order. It accepted the order, wrote it to its
+  own database, and then timed out sending the response back over a slow link. Your client sees no
+  <code>2xx</code>, assumes nothing happened, and retries. The downstream service, which has no
+  idea this is a retry, creates a second order.</p>
+  <div class="hf-scatter">
+    <span>filter only matches 5xx ✓</span>
+    <span>looks like a transient failure ✓</span>
+    <span>the write already succeeded server-side ⚠</span>
+    <span>the retry has no way to know that ⚠</span>
+  </div>
+  <p class="hf-foot">A timeout or a 503 tells you the response didn't arrive. It tells you nothing
+  about whether the request was already acted on — and for a POST, those are two very different
+  failures wearing the same symptom.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make the retry safe before you make it automatic</div>
+  <div class="hf-ladder">
+    <b>Send an Idempotency-Key header the server can deduplicate on</b>
+    <i>↓ a retried request with the same key returns the original result instead of creating a second one</i>
+    <b>Or only retry what's actually safe to repeat — GET, a PUT keyed by a natural id — not a blind POST</b>
+    <i>↓ an idempotent operation can be retried with no second consequence ever appearing</i>
+    <b>Keep the 5xx-only filter regardless — retrying a 4xx just repeats a request that was never going to succeed</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A retry is a second attempt at "did this happen," not a second attempt at "make this happen."</b>
+  Those are the same thing for a GET and completely different things for a POST that isn't
+  idempotent. Every retry policy you write is implicitly answering "is it safe to do this twice" —
+  and the HTTP verb is the first input to that question, not the status code.
+</div>
+
+<div class="hf-note">Think of a retried POST like re-sending a text you're not sure went through.
+If the message was "call me back," resending it is harmless — worst case, your friend gets it
+twice. If the message was "transfer me $500," resending it is a very different kind of
+harmless-looking mistake. The network failure looks identical from where you're standing in both
+cases. Only the <i>content</i> of the request tells you whether resending is free or expensive.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>The request threw a timeout. I assumed nothing happened, so I retried.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The network</span>
+    <p>All I can tell you is that a response didn't reach you in time. I have no opinion on what
+    the server did with the request before I lost track of it — I'm not a witness to that. I just
+    carry bytes, and this time I didn't carry enough of them back.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The downstream service</span>
+    <p>And from where I sit, I received a perfectly normal POST, did exactly what it said, and
+    tried to tell you. By the time I finished writing that response, you'd already given up and
+    asked me to do it again — so I did. Twice. You asked me to.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">You</span>
+    <p>So the bug isn't in the retry logic at all.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One call. Three possible fates, decided entirely by the status code that comes back.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>RestClient.builder()</code> sets a base URL, default headers, and a request factory with explicit connect + read timeouts</span><span class="tag">timeouts you must set yourself — the default is not "fast," it's unbounded</span></li>
+    <li class="open"><span><code>.get()</code>/<code>.post().uri(...)</code> builds the request — nothing has gone over the wire yet, it's still just a description</span><span class="tag">fluent, but lazy until .retrieve()</span></li>
+    <li><span><code>.retrieve()</code> actually sends it and gets back a response — status line, headers, an unread body</span><span class="tag">the network hop happens here</span></li>
+    <li><span>2xx → <code>.body(Type.class)</code> deserializes with Jackson and hands back your object</span><span class="tag">the happy path</span></li>
+    <li class="open"><span>4xx → RestClient throws <code>HttpClientErrorException</code> by default; your <code>onStatus</code> handler, if any, decides what to throw instead</span><span class="tag">a client error is your bug or the caller's — don't retry it</span></li>
+    <li class="open"><span>5xx → <code>HttpServerErrorException</code>, which a retry policy can catch and re-attempt with backoff — <b>only</b> if the call was safe to repeat</span><span class="tag">might be transient, but "might" needs a safety check first</span></li>
+  </ol>
+  <p class="hf-annot">Steps 5 and 6 are the lesson. RestClient's default exception split — one type
+  for 4xx, another for 5xx — isn't just a categorization convenience. It's the exact line most
+  retry policies build their filter around, because a 4xx means "this specific request was wrong"
+  (retrying changes nothing) while a 5xx means "something failed on their end, maybe transiently"
+  (retrying might help) — assuming the operation was even safe to repeat to begin with.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>UserService</span><span>RoleService</span><span>AuditService</span><span>ProfileController</span>
+    </div>
+    <div class="funnel">pingClient bean ↓ one shared config</div>
+    <div class="instance">5s connect · 10s read · circuit breaker<small>the one place timeout policy lives</small></div>
+  </div>
+  <p class="hf-annot">This is the real payoff of building the client as a <code>@Bean</code>
+  instead of a fresh <code>RestClient.builder()...build()</code> at each call site: all four
+  callers inherit the exact same timeout and retry behavior automatically. Change the read timeout
+  once, in one place, and every caller gets the new value on the next deploy — nobody has to
+  remember to update four separate call sites.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A GET to a downstream service hangs — connects fine, then no response, no error,
+  nothing. Your <code>RestClient</code> was built with <code>RestClient.builder().build()</code>
+  and no custom request factory. How long does the calling thread wait?</p>
+  <button type="button">About 30 seconds — Spring Boot ships a sensible default HTTP timeout for exactly this case</button>
+  <button type="button">It depends on the downstream server's own configured timeout, not on your client</button>
+  <button type="button">Indefinitely — with no request factory configured, connect and read timeouts default to unbounded</button>
+  <p class="why" data-for="0">A reasonable guess given how much Spring Boot defaults elsewhere — but HTTP client timeouts are deliberately one of the places Boot does <i>not</i> pick a number for you, because "sensible" varies enormously by what you're actually calling.</p>
+  <p class="why" data-for="1">The downstream server's timeout governs how long <i>it</i> waits on <i>its</i> own dependencies. It has no bearing on how long your client waits for a response over a connection that's open but silent.</p>
+  <p class="why" data-for="2">Correct — and this is the scenario that quietly drains a thread pool. One slow or wedged downstream, called by every request through a shared client with no read timeout, and every calling thread blocks forever. Under Spring MVC's servlet thread pool, this is how a single misbehaving dependency takes down your whole API, not just the one endpoint that calls it.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Two timeout numbers and a "stop trying" switch — every HTTP client on earth has this shape.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>curl's --connect-timeout and --max-time</h4>
+    <p>Every mainstream HTTP client — curl, Angular's own <code>HttpClient</code>, Python's
+    <code>requests</code>, RestClient — splits "timeout" into the same two concerns: how long to
+    wait for the TCP handshake (connect) versus how long to wait for the first byte of a response
+    after that (read). Angular wraps the same idea as an RxJS <code>timeout()</code> operator on
+    the observable — different vocabulary, identical two-number shape underneath.</p>
+    <div class="hf-scatter"><span>connect timeout ≠ read timeout, everywhere</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A circuit breaker — retry's more cautious sibling</h4>
+    <p>Retry answers "should I try again right now?" A circuit breaker (Resilience4j) answers a
+    different question: "has this downstream failed so often lately that trying again just wastes
+    time and piles on load?" After enough failures it "opens" and fails fast for a cooldown window
+    — no network call at all. That's exactly why the CIAM client beans pair a breaker with retry
+    and timeouts: retry handles a single blip, the breaker handles a downstream that's genuinely down.</p>
+    <div class="hf-scatter"><span>retry = try again; breaker = stop trying</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Fanning out 500 Graph reads without fanning out your own thread pool</h4>
+    <p>Reading 500 users' group memberships one at a time with a blocking RestClient in a loop is
+    500 sequential round-trips — at ~80ms each, roughly 40 seconds for one admin page load.
+    <code>Flux.fromIterable(userIds).flatMap(id -&gt; graphClient.get()...,8)</code> runs 8 at a
+    time, non-blocking, so wall-clock time drops to roughly (500÷8)×80ms ≈ 5 seconds. A bound like
+    8 also keeps you comfortably under Microsoft Graph's own throttling — go wider and you start
+    trading your latency problem for <code>429 Too Many Requests</code> instead.</p>
+    <div class="hf-scatter"><span>serial ~40s → parallel(8) ~5s</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Should I wrap onStatus around every single call I make?</p>
+  <p class="a">No — centralize it instead of repeating it. Build error handling into the
+  <code>RestClient</code> bean itself (or a shared filter function) once, rather than pasting the
+  same <code>onStatus</code> chain onto every call site. Each of the three IdP client beans gets
+  its own error-to-exception mapping at construction, so every call through that bean inherits
+  consistent behavior automatically — the same reasoning as centralizing timeouts.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">When would I actually reach for WebClient instead of RestClient in a normal Spring MVC app?</p>
+  <p class="a">Almost never for a single call — RestClient's blocking style already matches Spring
+  MVC's thread-per-request model, so mixing in WebClient there just adds reactive-programming
+  overhead for no benefit. The one case worth it: fanning out several independent calls you want
+  in flight at once (<code>Mono.zip</code>, or <code>Flux.parallel</code> for a bigger fan-out) —
+  even inside an otherwise-blocking app, calling <code>.block()</code> once at the boundary to get
+  the combined result is a legitimate, common pattern. Going fully reactive end-to-end is a
+  separate, much bigger decision.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why does RestTemplate still exist if it's "in maintenance mode" — should I migrate old code today?</p>
+  <p class="a">It exists because a huge amount of production code uses it and Spring doesn't break
+  what already works. Whether to migrate depends on churn: a service you touch often benefits from
+  RestClient's cleaner builder and error handling every time you're in there anyway. A stable,
+  rarely-modified integration that already works is a low-value place to spend migration effort.
+  The one hard rule is narrower than "migrate everything" — never start <i>new</i> code on
+  RestTemplate.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  A WebClient call is built as <code>.retrieve().bodyToMono(Product.class).retryWhen(Retry.backoff(3,
+  ...).filter(ex -&gt; is5xx(ex)))</code> — with no <code>.timeout(...)</code> chained anywhere.
+  The downstream connects fine, then simply never sends a response. Does the retry filter ever get
+  a chance to run? And given what you now know about RestClient's "no request factory means
+  unbounded," how long do you think this <code>Mono</code> waits before anything happens at all?
+</div>
+
   <!-- ── HERO: animated RestClient call flight · live per-step inspector ── -->
   <div class="panel" style="border:1px solid var(--accent)">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch a RestClient call fly — build → send → response → deserialize</h2>
@@ -815,6 +1005,7 @@ Tip: use defaultHeaders() to attach Bearer on every call.`},
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

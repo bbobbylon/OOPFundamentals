@@ -97,6 +97,213 @@
     </div>
   </div>
 
+<p class="hf-deck">or, this error doesn't go away in production — the warning does</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You wrapped the assignment in <code>detectChanges()</code>, the red error vanished, and you shipped it.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The error stopped throwing. The bug didn't stop happening.</div>
+  <p><code>ngAfterViewInit() { this.title = 'Ready' }</code> throws
+  <code>ExpressionChangedAfterItHasBeenChecked</code> in dev. You find
+  <code>ChangeDetectorRef.detectChanges()</code>, drop it right after the assignment, and the red
+  text disappears. Tests are green. You ship it. And it genuinely did silence the error — calling
+  <code>detectChanges()</code> forces a synchronous check that renders the new value before dev
+  mode's own verify pass gets a chance to compare against the stale one. But dev is the
+  <i>only</i> place that runs a verify pass at all. The mutation you just discovered was unstable
+  is still exactly as unstable in production — you've just removed the one thing that was ever
+  going to tell you about it.</p>
+  <div class="hf-scatter">
+    <span>error message: gone ✓</span>
+    <span>tests: green ✓</span>
+    <span>detectChanges() ran an extra full CD pass ⚠</span>
+    <span>the mid-tick mutation still happens, every time ⚠</span>
+  </div>
+  <p class="hf-foot">The assumption underneath: an error going away means the thing causing it
+  stopped happening. Here the error is a smoke detector for a pass that production doesn't even
+  run — silencing the alarm doesn't put out anything.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Move the write out of the tick that's already being checked</div>
+  <div class="hf-ladder">
+    <b>Read what the error actually names — the expression and the component</b>
+    <i>↓ that tells you exactly which binding disagreed, not just that something, somewhere, did</i>
+    <b>Defer the write past this tick — Promise.resolve().then(...), afterNextRender(), or ngOnInit</b>
+    <i>↓ the value only has to be stable within the tick Angular is checking; next tick is free</i>
+    <b>Nothing left to reconcile, so nothing throws — in dev or in prod</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>ExpressionChangedAfterItHasBeenChecked never means Angular is broken — it means a value
+  changed after being read, in the same tick that read it.</b> A getter that builds a new array on
+  every call, an <code>ngAfterViewInit</code> that mutates a bound field, and a parent reading a
+  child's value the child set during its own check are three completely different-looking code
+  shapes, and every one of them is this same race.
+</div>
+
+<div class="hf-note">Think of dev mode's verify pass as a teacher counting the class twice before
+marking attendance. First count: 24 kids. While she's writing it down, a kid switches seats and
+waves — recount: still 24, but the seating chart doesn't match what she just wrote. Nobody left,
+nobody's missing, but the two counts disagree, so she stops and asks what happened. Production
+doesn't recount. It writes down the first number and moves on, seating chart or not.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I mutated a field inside ngAfterViewInit(). Why does Angular yell at ME instead of just re-rendering with the new value?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Angular</span>
+    <p>Because I already finished checking this view for this tick. I don't re-check within the
+    same tick — if I did, a component that kept changing its own state could loop forever. In dev
+    I run one extra verify pass specifically to catch this; when the two passes disagree, I throw
+    instead of quietly rendering whichever value pass one happened to see.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">ngAfterViewInit</span>
+    <p>And I fire exactly once, right after this view and its children finish their first check —
+    which is precisely the worst possible moment to write to anything Angular already read this
+    tick.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Production Angular</span>
+    <p>I never run that second pass. I'd have rendered the stale value from pass one and said
+    nothing at all. The dev error isn't a new bug you introduced by upgrading or refactoring — it's
+    the one bug that was always going to ship silently.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One tick. Two passes. One value that disagreed with itself.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A CD tick starts; Angular walks the tree top-down, reading every bound expression and rendering what it sees</span><span class="tag">pass one — the real check</span></li>
+    <li class="open"><span>A lifecycle hook fires as part of that same walk — <code>ngAfterViewInit</code>, say — and your code mutates a field the template already read this tick</span><span class="tag">the write nobody scheduled</span></li>
+    <li><span>In <b>dev mode only</b>, Angular immediately re-walks the same tree a second time</span><span class="tag">the verify pass</span></li>
+    <li class="open"><span>It compares each expression's new value against what it rendered a moment ago in pass one</span><span class="tag">this comparison is the actual check</span></li>
+    <li><span>Same value both times → silence, the tick ends normally</span><span class="tag">the common, boring case</span></li>
+    <li class="open"><span>Different value → <code>ExpressionChangedAfterItHasBeenCheckedError</code>, naming the exact expression and component that disagreed</span><span class="tag">your only clue, and it's a good one</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the one line separating dev from prod, and it explains this error's
+  whole reputation. Production Angular runs step 1 and stops — no re-walk, no comparison, no
+  throw. The bug this error reports isn't <i>created</i> by the verify pass; it's only
+  <i>detected</i> by it. Turn the verify pass off by shipping to prod and the identical mutation
+  still happens — you just lose your one warning that it did.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>getter returns a new array each call</span>
+      <span>ngAfterViewInit mutates a bound field</span>
+      <span>parent reads a child's value set during the child's own CD</span>
+    </div>
+    <div class="funnel">same underlying race ↓</div>
+    <div class="instance">ExpressionChangedAfterItHasBeenCheckedError<small>one message, three unrelated-looking causes</small></div>
+  </div>
+  <p class="hf-annot">Three completely different-looking bugs, one error — because Angular doesn't
+  care <i>why</i> a value changed mid-tick, only <i>that</i> it did. The component and expression
+  name in the thrown error is how you work backward from the funnel to which caller actually
+  fired.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">You "fix" <code>ExpressionChangedAfterItHasBeenChecked</code> by calling
+  <code>ChangeDetectorRef.detectChanges()</code> right after the mutating assignment. In
+  production, where no verify pass ever runs, does the underlying mid-tick mutation still happen?</p>
+  <button type="button">No — detectChanges() forces Angular to reconcile the new value immediately, so there's nothing left "mid-tick" by the time rendering finishes</button>
+  <button type="button">Yes — the mutation hasn't moved, you've only added a second CD pass that renders the new value before dev mode's own verify pass would have compared it against the stale one</button>
+  <button type="button">It depends on whether the component uses OnPush</button>
+  <p class="why" data-for="0">Tempting, because <code>detectChanges()</code> really does make
+  Angular look again — but "look again" is exactly what dev mode's own verify pass already does
+  automatically. You haven't removed a mutation from mid-tick; you've made your manual look-again
+  win the race the verify pass would otherwise have caught. The mutation itself is untouched.</p>
+  <p class="why" data-for="1">Right. <code>detectChanges()</code> doesn't undo or relocate the
+  assignment — it forces a synchronous CD pass so your own code sees the fresh value before any
+  later comparison gets a chance to catch the mismatch. Nothing about the actual timing bug moved;
+  you added a forced pass that happens to render over it.</p>
+  <p class="why" data-for="2">OnPush changes whether a component gets checked automatically on the
+  <i>next</i> tick — it has no say over <code>detectChanges()</code>, which forces a check on that
+  view and its children unconditionally, by design, regardless of strategy. OnPush isn't what
+  decides the outcome here.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">A React warning with the same accusation, a database norm with the same fix, and a guard component in your own CIAM shell.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>React's "Cannot update a component while rendering a different component"</h4>
+    <p>A near-identical dev-only guard for the identical root cause: something wrote to state
+    while React was still reading state to build the tree. Different rendering model, same
+    underlying sin — don't mutate what's currently being read.</p>
+    <div class="hf-scatter"><span>ECAICHB ≈ React's mid-render setState warning</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A getter that allocates is an endpoint that isn't idempotent</h4>
+    <p><code>get items() { return this.raw.map(x =&gt; ({...x})) }</code> is the same mistake as a
+    <code>GET</code> handler that quietly increments a counter on every call: the caller has no
+    way to know that "just reading" it isn't free, and two reads that should return the same
+    answer don't. A getter with no side effects and a stable return is the actual contract a
+    template is trusting you to honor.</p>
+    <div class="hf-scatter"><span>read twice, expect one answer</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An OIDC guard component setting state in its own lifecycle hook</h4>
+    <p>A callback guard decodes the ID token and sets <code>isAuthorized</code> inside its own
+    <code>ngAfterViewInit</code>, and the parent shell's template reads
+    <code>authGuard.isAuthorized</code> directly to decide whether to show the nav. That's cause 3,
+    verbatim — a parent reading a child's value the child set during its own change-detection
+    pass. The fix is what CIAM code should be doing anyway: the guard emits
+    <code>@Output() authorized = new EventEmitter&lt;boolean&gt;()</code> and the parent stores it,
+    instead of reaching into the child's field.</p>
+    <div class="hf-scatter"><span>reaching into child.isAuthorized ⚠</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Why does Angular even bother with a verify pass — why not just re-render with the new value and move on?</p>
+  <p class="a">Because "just re-render with the new value" has no natural stopping point. A
+  component that alters state every time it's checked would never settle — Angular would have no
+  way to tell "found the last fresh change" apart from "still finding new ones" without either
+  looping indefinitely or picking a hard rule: one tick checks once. The rule is the actual fix;
+  the dev-only verify pass just tells you the moment you've broken it.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does this error fire in production under a different name?</p>
+  <p class="a">No — the verify pass is compiled out of production builds entirely, the same way
+  several of Angular's other dev-only sanity checks are stripped. What survives into production is
+  the underlying bug, just unreported: the mismatch renders silently instead of throwing. A
+  real-world incident report that reads "the header briefly shows the wrong thing, then it's fine
+  on reload" is very often this exact class of bug with the safety net removed. Treat the dev error
+  as the closest thing you'll get to a stack trace for a category of bug that's otherwise nearly
+  invisible.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Is <code>setTimeout(() =&gt; this.title = 'Ready')</code> as good a fix as <code>Promise.resolve().then()</code>?</p>
+  <p class="a">Both defer past the current tick and both silence the error, but they're not
+  equally fast. A microtask — <code>Promise.resolve().then()</code> — runs before the browser
+  paints and before the next macrotask, so the delay is imperceptible. <code>setTimeout</code>,
+  even at 0ms, is a macrotask and can be pushed behind other pending work, occasionally producing a
+  visible one-frame flash of the old value. <code>afterNextRender()</code> is the Angular-idiomatic
+  version of the same deferral and is the one to reach for in modern Angular — it's explicit about
+  intent instead of borrowing a generic JS timing primitive to say "later."</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  A getter — <code>get displayName() { return this.user?.name ?? 'Guest' }</code> — is bound in
+  the template. Something mutates <code>this.user.name</code> inside <code>ngAfterViewInit</code>.
+  Does this throw <code>ExpressionChangedAfterItHasBeenChecked</code> — and would your answer to
+  "does it throw" change if the getter instead returned
+  <code>{ name: this.user?.name ?? 'Guest' }</code>, with no mutation happening at all?
+</div>
+
   <!-- ── EXTREME-VIZ HERO: Change Detection Debug ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -408,6 +615,7 @@ diagnose();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

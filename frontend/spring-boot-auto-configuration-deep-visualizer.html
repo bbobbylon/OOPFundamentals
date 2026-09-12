@@ -110,6 +110,199 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> Adding <code>spring-boot-starter-oauth2-resource-server</code> auto-configures a <code>SecurityFilterChain</code> that validates JWTs plus a <code>JwtDecoder</code> that fetches your issuer's JWKS. Define your own <code>SecurityFilterChain</code> bean and Spring's backs off — which also explains the "why is Security blocking everything?" mystery: the default chain requires auth on every endpoint until you customize it.</div>
   </div>
 
+<p class="hf-deck">or, a property string that doesn't match anything doesn't fail — it just doesn't do anything</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You told Boot to exclude a class. Boot never got the message — and never once told you it didn't.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle"><code>spring.autoconfigure.exclude=...DataSourceAutoConfiguraiton</code> looks completely correct. It's spelled one letter wrong.</div>
+  <p>A developer wants a custom multi-tenant routing <code>DataSource</code> to fully replace Boot's
+  default, so they add an exclude property — and mistype "Configuration" as "Configuraiton".
+  <code>AutoConfigurationImportSelector</code> reads that exclude list as plain strings and checks
+  each candidate auto-configuration's fully-qualified class name against them by exact string
+  equality. There's no <code>Class.forName</code> step that would throw on a bad name, and no
+  warning logged for a string that matches nothing. <code>DataSourceAutoConfiguration</code>'s own
+  conditions — classpath has JDBC, no custom <code>DataSource</code> bean registered yet, because
+  the plan was "exclude the default, then add mine" — both still pass normally, so Boot quietly wires
+  its default HikariCP pool exactly as if the exclude line was never written at all.</p>
+  <div class="hf-scatter">
+    <span>the property name and value both parse without error ✓</span>
+    <span>the app starts up cleanly, no stack trace anywhere ✓</span>
+    <span>the typo'd class name matches nothing in the candidate list ⚠</span>
+    <span>the "excluded" auto-configuration activates anyway, silently ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that telling Spring to exclude something is a request
+  Spring validates. A property-string exclude is compared by exact string equality against real
+  class names — get one character wrong and it isn't an exclusion of the wrong thing, it's an
+  exclusion of nothing at all.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make a typo impossible to miss, not just possible to catch</div>
+  <div class="hf-ladder">
+    <b>Quick fix: after adding any exclude=, run with --debug and check the Conditions Evaluation Report — a class you meant to exclude showing up in POSITIVE matches means the string didn't match</b>
+    <i>↓ this catches it, but only if you remember to look</i>
+    <b>Better: use the class-literal form — @SpringBootApplication(exclude = {DataSourceAutoConfiguration.class}) — instead of a property string</b>
+    <i>↓ now a typo is a build failure, not a silent runtime no-op</i>
+    <b>Best: prefer defining your own @Bean over excluding Boot's default in the first place — @ConditionalOnMissingBean already backs off correctly, with nothing to spell</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>An exclude that Spring cannot type-check is only as reliable as the string that spells it — and
+  Spring never tells you a string matched nothing.</b> A class-literal reference gets checked by the
+  compiler before your code even runs; a property string gets checked by nothing at all, which is
+  exactly why the failure mode is silence instead of an error.
+</div>
+
+<div class="hf-note">A "stop delivery" request at the post office is filed by writing a resident's
+name on an index card. Write "Configuraiton" instead of "Configuration" and the card still goes in
+the drawer just fine — filed, accepted, no error. Mail for the real, correctly-spelled name keeps
+arriving exactly as before, because nobody at the counter ever compares your card against the actual
+list of names receiving deliveries. The form works. It's just a form for nobody.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I added <code>spring.autoconfigure.exclude</code> with the exact class name. Why is the default
+    <code>DataSource</code> still showing up among my beans?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">AutoConfigurationImportSelector</span>
+    <p>I read your exclude list as plain text and compare it, character for character, against every
+    candidate's fully-qualified name. One of your characters didn't match. I didn't reject your
+    request — I just found nothing to apply it to.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">"DataSourceAutoConfiguraiton"</span>
+    <p>I look right at a glance. Nobody proofreads a property value the way a compiler proofreads a
+    class reference.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">DataSourceAutoConfiguration</span>
+    <p>Nobody excluded me. As far as I can tell, I was never even mentioned. My conditions passed
+    like any ordinary startup, so I registered my bean.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps. The typo does its damage at exactly one of them — everything before and after is completely ordinary.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>You add <code>spring.autoconfigure.exclude=...DataSourceAutoConfiguraiton</code>, intending to fully replace the default <code>DataSource</code> with your own multi-tenant routing bean</span><span class="tag">the intent is completely reasonable</span></li>
+    <li class="open"><span>At startup, <code>AutoConfigurationImportSelector</code> reads that property as a plain list of strings — no compiler, no reflection check runs against it yet</span><span class="tag">still just text at this point</span></li>
+    <li><span>It compares each string against the fully-qualified class name of every candidate auto-configuration, looking for an EXACT match</span><span class="tag">character for character</span></li>
+    <li class="open"><span>"DataSourceAutoConfiguraiton" never exactly matches "DataSourceAutoConfiguration" — one character off is still a non-match, same as a completely unrelated string would be</span><span class="tag">the one step where it breaks</span></li>
+    <li><span>Nothing gets added to the real exclusion set — not a wrong exclusion, no exclusion at all — and Boot logs no warning, because from its point of view nothing unusual happened</span><span class="tag">silence, not an error</span></li>
+    <li class="open"><span><code>DataSourceAutoConfiguration</code> proceeds through <code>@ConditionalOnClass</code> / <code>@ConditionalOnMissingBean</code> completely normally, both pass, and it registers its default HikariCP bean right alongside whatever you expected to be the only <code>DataSource</code></span><span class="tag">the payoff of the bug</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the entire bug, and it's invisible precisely because nothing after it
+  behaves abnormally. Every step around it is Spring doing exactly what an untyped string comparison
+  is supposed to do: compare, fail to match, move on without complaint.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">spring.autoconfigure.exclude=...DataSourceAutoConfiguraiton<small>one letter off from the real class name</small></div>
+    <div class="arrow">→ which approach actually excludes DataSourceAutoConfiguration?</div>
+    <div class="opts">
+      <span>exclude={DataSourceAutoConfiguration.class} — fails to compile on this typo, caught immediately</span>
+      <span class="on">the property string above — matches nothing, excludes nothing, no warning logged</span>
+      <span>a correctly-spelled property string — excludes it exactly as intended</span>
+    </div>
+  </div>
+  <p class="hf-annot">The highlighted option is what actually ships in this scenario — not because
+  it's the best choice, but because it's the one that fails silently instead of failing loud. The
+  other two both tell you something went wrong, one way or another; this one never does.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A teammate writes <code>@SpringBootApplication(exclude = {DataSrcAutoConfiguration.class})</code>
+  — a different typo, one word shortened by accident, using the CLASS-LITERAL form instead of the
+  property-string form. What happens when the app starts?</p>
+  <button type="button">The build fails — DataSrcAutoConfiguration isn't a real type, so this line of code doesn't compile</button>
+  <button type="button">The app starts normally and silently excludes nothing, identical to the property-string typo earlier</button>
+  <button type="button">Spring logs a warning that DataSrcAutoConfiguration could not be found, but startup continues</button>
+  <p class="why" data-for="0">Right — exclude={X.class} needs X to be a real, resolvable Java type. DataSrcAutoConfiguration was never a class anyone defined, so this reference doesn't compile. You find out about the typo before the app ever runs, not after — which is the entire argument for preferring this form over a property string.</p>
+  <p class="why" data-for="1">That's exactly what happens with the STRING-property form of exclude — which is the whole point of contrasting the two. This question uses the class-literal exclude={X.class} form instead, and it fails in a completely different way: at compile time, not silently at runtime.</p>
+  <p class="why" data-for="2">There's no runtime "class not found, continuing anyway" behavior for exclude={X.class} — a reference to a type that was never defined can't produce bytecode to run in the first place. This never reaches a point where anything COULD log a warning; the build itself doesn't finish.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three unrelated tools, the identical "string didn't match, nobody told you" shape.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A typo'd path in .gitignore</h4>
+    <p><code>buld/</code> instead of <code>build/</code> in a <code>.gitignore</code> file produces
+    no error from git at all — it's a perfectly valid pattern, it just doesn't match the directory
+    anyone meant to ignore. The build output gets tracked anyway, and the first sign anything's wrong
+    is usually a confusingly large diff, not a warning at commit time.</p>
+    <div class="hf-scatter"><span>.gitignore pattern ≈ exclude string</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A misspelled CSS selector</h4>
+    <p><code>.button-primry { color: blue; }</code> never applies to any <code>.button-primary</code>
+    element on the page. The browser doesn't error, doesn't warn, doesn't underline anything red —
+    the rule simply matches zero elements and sits in the stylesheet forever, doing nothing, looking
+    completely normal.</p>
+    <div class="hf-scatter"><span>CSS selector matching ≈ class-name matching</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>CIAM: excluding Boot's security defaults for a custom Ping integration</h4>
+    <p>A team rolling a fully custom <code>SecurityFilterChain</code> for Ping adds
+    <code>spring.autoconfigure.exclude=...SecurityAutoConfiguratoin</code> — another one-letter typo.
+    Nothing is actually excluded, and the only proof is buried in the Conditions Evaluation Report's
+    POSITIVE matches list, which nobody checks once the app starts and appears to handle requests
+    normally. The habit from Section 5 is the fix: after any exclude=, run with --debug once and
+    confirm the specific class you meant to exclude shows up in the NEGATIVE matches, not the
+    positive ones.</p>
+    <div class="hf-scatter"><span>the debug report was right there the whole time</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Would @ConditionalOnMissingBean have saved this DataSource scenario even without excluding anything?</p>
+  <p class="a">Only if the timing had lined up differently. In this exact scenario the plan was
+  "exclude the default, THEN add my custom bean" — so at the moment Boot evaluated conditions, there
+  wasn't yet a custom <code>DataSource</code> for <code>@ConditionalOnMissingBean</code> to detect.
+  The exclude was supposed to do the removing; when it silently failed, there was no second safety
+  net in place yet. If you already have your own <code>@Bean</code> registered first (Section 3's
+  pattern), the exclude becomes redundant insurance rather than your only line of defense — one good
+  reason to prefer "define your own bean" over "exclude the default" whenever you can.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does --debug catch this automatically, or do I still have to go looking?</p>
+  <p class="a">It gets you most of the way, not all of it. The Conditions Evaluation Report will show
+  <code>DataSourceAutoConfiguration</code> in the POSITIVE matches — proof it activated — but --debug
+  doesn't proactively flag "hey, one of your exclude= entries didn't match anything." You still have
+  to know to look for the specific class you meant to exclude and notice it landed in the wrong list.
+  There's no highlighted line calling out the mismatch itself.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Is the class-literal form always better — is there ever a reason to use the property-string form?</p>
+  <p class="a">Property strings earn their place for environment-specific config — an
+  <code>application-test.yml</code> excluding something only in the test profile, say, where you want
+  the exclusion to vary by profile without touching the annotated class itself. The class-literal form
+  is fixed at compile time for every environment. So the tradeoff is real: property strings buy
+  per-environment flexibility at the cost of compile-time safety on the class name — which is exactly
+  why double-checking with --debug matters MORE, not less, whenever you reach for one.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll back up.</p>
+<div class="hf-napkin">
+  <code>spring.autoconfigure.exclude</code> takes a comma-separated list of fully-qualified class
+  names. A teammate writes
+  <code>...DataSourceAutoConfiguration,&nbsp;...SecurityAutoConfiguration</code> — both spelled
+  correctly, both real classes — but leaves a single space after the comma before the second class
+  name. Does that stray space break the second exclusion the same way the earlier typo broke the
+  first one?
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -544,6 +737,7 @@ rebuild();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

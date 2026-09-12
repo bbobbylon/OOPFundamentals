@@ -78,6 +78,209 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> An admin bulk-imports 500 users from CSV. Polling <code>GET /api/jobs/{id}</code> every 2s wastes ~250 requests; instead <code>GET /api/jobs/{id}/progress</code> streams <code>data:{"processed":50,"total":500}</code> via SSE so Angular updates a live progress bar, then <code>data:{"status":"COMPLETE","created":498,"failed":2}</code> and closes. SSE fits because it's one-way over plain HTTP — WebSocket would be overkill.</div>
   </div>
 
+<p class="hf-deck">or, the handshake gets past your security filters — every frame after that has to prove itself all over again</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The login worked. The handshake succeeded. An anonymous SUBSCRIBE still got through.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">/ws sat behind Spring Security the whole time — and it didn't matter</div>
+  <p>Someone wires up <code>registry.addEndpoint("/ws").withSockJS()</code> and reasonably assumes
+  that because <code>/ws</code> sits behind the same <code>SecurityFilterChain</code> as every REST
+  controller — session cookie checked, the works — a connection that makes it past the handshake is
+  "logged in" for the rest of its life. They add <code>@MessageMapping("/admin/broadcast")</code>
+  for an admin-only feature and don't think twice about it — it's just another controller method, in
+  the same app, under the same security config. Except the moment the upgrade to WebSocket
+  completes, every STOMP frame that flows over that socket — CONNECT, SUBSCRIBE, SEND — travels
+  through Spring's message-handling pipeline, not the HTTP filter chain. Nothing about
+  <code>@EnableWebSocketMessageBroker</code> or a <code>@MessageMapping</code> method re-runs
+  <code>@PreAuthorize</code>-style checks by default. Anyone who can open a socket to
+  <code>/ws</code> at all can SEND to <code>/app/admin/broadcast</code>.</p>
+  <div class="hf-scatter">
+    <span>/ws sits behind the security filter chain ✓</span>
+    <span>the handshake correctly required a valid session ✓</span>
+    <span>every STOMP frame after that rides the same open socket ⚠</span>
+    <span>the HTTP filter chain never sees another one of them ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that "an authenticated connection" means "every message
+  on it is authorized." The handshake proves who opened the door. It says nothing about what walks
+  through it afterward.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Authenticate the CONNECT frame, then authorize each destination on its own</div>
+  <div class="hf-ladder">
+    <b>Add a ChannelInterceptor.preSend() that reads the JWT off the STOMP CONNECT frame's headers and validates it — the same JwtDecoder the REST controllers already use</b>
+    <i>↓ this is the one place a WebSocket connection gets checked, so it has to happen explicitly</i>
+    <b>Set the resulting Principal on the STOMP session, then restrict destinations — an ordinary user can't SUBSCRIBE to /topic/admin-audit-log or SEND to /app/admin/*</b>
+    <i>↓ authentication (who is this) and authorization (what can they reach) are still two separate steps, same as REST</i>
+    <b>Now a valid handshake only ever gets you as far as your own role allows, frame by frame</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A WebSocket handshake authenticates a connection. It does not authorize every frame that ever
+  travels over it.</b> That's why the HTTP filter chain protecting <code>/ws</code> is necessary
+  but not sufficient, why <code>@PreAuthorize</code> inside a <code>@MessageMapping</code> method
+  needs its own wiring to mean anything, and why "the user was logged in when they connected" is a
+  different claim from "this specific SEND is something they're allowed to do."
+</div>
+
+<div class="hf-note">Think of the handshake like showing ID to get a wristband at a festival gate.
+The wristband proves you got checked once, at the door. It does <b>not</b>, by itself, mean every
+tent you walk into afterward has its own bouncer confirming you belong there — if the VIP tent
+doesn't post someone at its own entrance checking for a different wristband color, showing up with
+any wristband at all gets you in. The gate's check and the VIP tent's check are two separate jobs,
+done by two separate people.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>The user already logged in to open this socket. Why would I need to check anything again?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The HTTP filter chain</span>
+    <p>Because I only ever see ONE request from this connection — the handshake. The moment it
+    upgrades to a WebSocket, I'm out of the picture. Everything that happens on that socket after
+    that, I never see.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">A STOMP frame</span>
+    <p>And I'm not an HTTP request. I don't carry a session cookie the way the handshake did — I'm
+    just bytes on an already-open pipe. If nobody's inspecting me specifically, nobody's checking
+    who sent me.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">ChannelInterceptor</span>
+    <p>Which is the job nobody assigns by default. I sit in the one spot that DOES see every
+    frame — CONNECT, SUBSCRIBE, SEND, all of it. That's exactly why the fix lives here, and nowhere
+    else.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One HTTP request gets filtered. Every frame after it rides the pipe that request built.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The client opens <code>new SockJS('/ws')</code> — a normal HTTP request, and it DOES go through Spring Security's filter chain</span><span class="tag">the one moment HTTP security applies</span></li>
+    <li class="open"><span>The <code>101 Switching Protocols</code> response completes the upgrade — from here it's a raw bidirectional channel, not HTTP requests anymore</span><span class="tag">the filter chain's last look at this connection</span></li>
+    <li><span>The STOMP client sends a CONNECT frame over that channel — Spring's message-handling pipeline picks it up, not <code>DispatcherServlet</code></span><span class="tag">a different pipeline entirely</span></li>
+    <li class="open"><span>Without a ChannelInterceptor, that CONNECT frame — and every SUBSCRIBE/SEND after it — has no Principal attached</span><span class="tag">silently, not with an error</span></li>
+    <li><span>A registered <code>ChannelInterceptor.preSend()</code> reads the <code>Authorization</code> header off the CONNECT frame specifically, validates the JWT, and sets the STOMP session's Principal</span><span class="tag">the fix runs exactly once, at CONNECT</span></li>
+    <li class="open"><span>Every later frame on that session carries the Principal the interceptor set — but only destinations you've explicitly restricted actually check it against anything</span><span class="tag">authentication ≠ authorization, still</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the lesson. Nothing throws, nothing 403s, nothing logs a warning
+  when a <code>@MessageMapping</code> method runs with no Principal attached — Spring just calls it
+  with whatever an unauthenticated session's <code>getPrincipal()</code> returns, and if that
+  method never checks, it never notices. Every other step here — the handshake, the upgrade, the
+  interceptor — is infrastructure built to make sure step 4's silence isn't the last word.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">HTTP handshake</span>
+      <span class="go">GET /ws with an Upgrade header — the filter chain runs HERE, exactly once
+      <span class="arrow">→</span> 101 Switching Protocols</span></div>
+    <div class="stt"><span class="nm">STOMP CONNECT</span>
+      <span class="go">JWT read from the CONNECT frame's headers by ChannelInterceptor, not by the filter chain
+      <span class="arrow">→</span> a Principal attached to the STOMP session</span></div>
+    <div class="stt"><span class="nm">SUBSCRIBE / SEND frames flow</span>
+      <span class="go">each destination checked against what THIS Principal is allowed to reach
+      <span class="arrow">→</span> MESSAGE frames delivered</span></div>
+    <div class="stt"><span class="nm">DISCONNECT — or the socket just drops</span>
+      <span class="go"><em>SessionDisconnectEvent</em> fires
+      <span class="arrow">→</span> back to nothing connected, nothing authenticated</span></div>
+  </div>
+  <p class="hf-annot">Notice what does <i>not</i> carry over the loop: the filter chain's work in
+  step 1 never reaches step 3 on its own — every reconnect restarts the cycle with a fresh
+  handshake and a fresh ChannelInterceptor check. That's the safe half of the design. The other
+  half is a real design question this diagram doesn't answer for you: a connection that
+  authenticated hours ago and never disconnected is still trusted on whatever it authenticated
+  with <i>then</i>, because nothing about a long-lived socket re-runs step 2 on a timer.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q"><code>/ws</code> sits behind Spring Security's normal filter chain, requiring a
+  valid session to complete the handshake. No <code>ChannelInterceptor</code> is configured. A
+  logged-in ordinary user's browser opens a STOMP connection and sends a SUBSCRIBE frame for
+  <code>/topic/admin-audit-log</code>. What happens?</p>
+  <button type="button">The subscription succeeds — nothing at the STOMP layer checked whether this Principal is allowed to reach that destination, only whether the original handshake had a valid session</button>
+  <button type="button">Spring Security rejects it with a 403, because destination-level checks are enabled by default whenever @EnableWebSocketMessageBroker is present</button>
+  <button type="button">The broker silently drops the subscription, because /topic/admin-audit-log requires an admin role and destination names starting with "admin" are protected automatically</button>
+  <p class="why" data-for="0">Right. The handshake required a valid session, but that's the only check that ran. Without a ChannelInterceptor — or message-level authorization rules configured separately — nothing at the STOMP layer ever asks "should THIS Principal see THIS destination," so an ordinary logged-in user reaches an admin-named topic just by asking for it.</p>
+  <p class="why" data-for="1">@EnableWebSocketMessageBroker turns on STOMP support — routing, the broker, @MessageMapping dispatch. It does not turn on authorization checks for destinations; that's separate config you add yourself, the same way @EnableWebSocketMessageBroker doesn't make @PreAuthorize start working inside a @MessageMapping method on its own.</p>
+  <p class="why" data-for="2">There's no such convention. The simple in-memory broker (<code>enableSimpleBroker("/topic","/queue")</code>) just routes messages to whoever subscribed to a destination string — it has no idea "admin" in a topic name is supposed to mean anything. Naming a destination defensively doesn't defend it.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three connections, one rule: check once at the door, and the door doesn't check again for you.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A gRPC bidirectional stream</h4>
+    <p>Opening a gRPC stream sends auth metadata (a token) once, at the start. Everything sent over
+    that stream afterward is trusted based on that first check unless you deliberately add
+    interceptors that re-validate per message — the exact same "checked at open, not per-frame"
+    shape as a STOMP session's Principal.</p>
+    <div class="hf-scatter"><span>stream metadata ≈ the CONNECT frame</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An SSH session after key authentication</h4>
+    <p>You authenticate once with your key when the connection opens. The shell session that
+    follows doesn't re-prompt for your key on every command you type — the connection itself
+    becomes the trust boundary, not each thing sent over it.</p>
+    <div class="hf-scatter"><span>the connection is the trust boundary</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>CIAM: the admin session-monitoring dashboard, in production</h4>
+    <p>The JWT is validated once in a ChannelInterceptor at CONNECT — but
+    <code>@PreAuthorize("hasAuthority('App-Admin')")</code> still has to be wired explicitly on the
+    service the <code>@MessageMapping</code> method calls into, because the WebSocket layer itself
+    doesn't enforce it the way a <code>@RestController</code> would. Two separate checks, same as
+    the ladder above, not one check standing in for both.</p>
+    <div class="hf-scatter"><span>CONNECT auth + destination authz, wired separately</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">If the JWT expires while the socket is still open, does the connection get kicked?</p>
+  <p class="a">Not automatically. The Principal was set once, at CONNECT time, and nothing about a
+  long-lived WebSocket connection re-runs that check on a timer. If expired tokens need to actually
+  disconnect live sessions, you have to build that — a scheduled check against stored
+  connection-start times, or having the client proactively reconnect with a fresh token before
+  expiry and letting the ordinary CONNECT cycle handle re-validation. It's a real operational gap
+  worth deciding on purpose, not by default.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">The intro says SSE is simpler for one-way updates — could the admin audit-log dashboard have used SSE instead?</p>
+  <p class="a">For read-only monitoring, quite possibly — and it would sidestep this entire
+  CONNECT-frame question. An <code>SseEmitter</code> endpoint is a normal <code>@GetMapping</code>,
+  so it's protected by the exact same <code>SecurityFilterChain</code> and <code>@PreAuthorize</code>
+  as any other REST endpoint, re-checked the ordinary way, on every request. WebSocket earns its
+  extra complexity when the dashboard also needs to <i>send</i> something back — revoke a session,
+  push a config change. One-way monitoring alone doesn't need full duplex.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why not just put the JWT in a query parameter on the /ws URL — wouldn't the HTTP filter chain see that?</p>
+  <p class="a">It would see it, which is exactly the problem — tokens in URLs get written to proxy
+  logs, load balancer logs, and access logs by default, and browsers can leak them through the
+  <code>Referer</code> header. The reason to validate the token in the STOMP CONNECT frame instead
+  is that STOMP frames aren't HTTP requests, so they don't land in any of those logs the same way.
+  It's a real, if second-order, reason to keep the token out of the handshake URL entirely.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  Your ChannelInterceptor validates the JWT on CONNECT and sets the Principal. Ten minutes into an
+  admin's live session-monitoring connection, their account gets deprovisioned in Entra — the JWT
+  that connection authenticated with is still technically unexpired for another 20 minutes. Does
+  that admin lose dashboard access immediately, at the moment of deprovisioning, or only once
+  something forces a reconnect?
+</div>
+
   <!-- ── HERO: animated WebSocket lifecycle · live per-step inspector ── -->
   <div class="panel" style="border:1px solid var(--accent)">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch the WebSocket handshake — HTTP upgrade → persistent channel → STOMP</h2>
@@ -892,5 +1095,6 @@ renderNodes(cur);
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

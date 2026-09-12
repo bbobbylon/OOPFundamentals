@@ -117,6 +117,185 @@
     <div class="intro-ciam"><span class="tag">In CIAM / Your Job:</span> Entra is the other major CIAM platform alongside Ping — and they often coexist (Ping federates into Entra or vice versa); your Angular app may auth through Entra (MSAL) while other APIs take Ping tokens. Entra Connect sync means a user you see in your admin tool is the Entra projection of an on-prem AD account. Use the immutable <code>objectId</code>/<code>onPremisesImmutableId</code> as the stable cross-system key — never UPN or email, which can change.</div>
   </div>
 
+
+<p class="hf-deck">or, Conditional Access guards the door — it is not standing behind every button</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">"Finance requires MFA" is a real policy. It is not protecting your approve-payment endpoint.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The audit asks what enforced MFA on that transfer. The honest answer is: something, ninety minutes earlier.</div>
+  <p>Conditional Access is genuinely the best thing about this platform — policy without app code,
+  evaluated centrally, changeable by people who are not you. "Require MFA for the Finance group",
+  "block sign-ins from outside the corporate network", "require a compliant device." No deploy, no
+  ticket in your backlog.</p>
+  <p>Then read it precisely: CA is evaluated <b>at sign-in, when a token is issued</b>. A finance
+  user authenticates at 09:00, satisfies MFA, and receives an access token valid for an hour. At
+  09:47 they call <code>POST /api/payments/approve</code>. Your Spring API validates the token —
+  signature, issuer, audience, expiry — and allows the call. At no point in that request did
+  Conditional Access run, because there was no sign-in. <b>The policy secured the door; the
+  operation happened well inside the building.</b></p>
+  <div class="hf-scatter">
+    <span>CA policy: active and correct ✓</span>
+    <span>MFA: genuinely performed at 09:00 ✓</span>
+    <span>token: valid, unexpired ✓</span>
+    <span>CA evaluated at 09:47: never ⚠</span>
+    <span>your API's view of any of this: none ⚠</span>
+  </div>
+  <p class="hf-foot">Nothing is misconfigured. A sign-in policy is being asked to answer a
+  per-operation question, and it was never the shape of thing that could.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">If an operation needs assurance, the operation has to check</div>
+  <div class="hf-ladder">
+    <b>Read the assurance claims your API already receives: acr / amr say how and when this token's holder authenticated</b>
+    <i>↓ now "was MFA used for this session?" is a question your code can actually answer</i>
+    <b>For a sensitive operation, demand more — and when it is missing, return a claims challenge rather than a flat 403</b>
+    <i>↓ that is what tells MSAL to re-authenticate for real, instead of silently renewing the same assurance level</i>
+    <b>Pair it with a short token lifetime, so a CA policy change reaches live sessions in minutes rather than at the end of the day</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Conditional Access answers "may this sign-in happen?" — never "may this action happen?"</b>
+  It runs once, produces a token, and then has no further contact with the request. Everything
+  after issuance is your application's authorization, working from claims. Treating a door policy
+  as an operation policy is the identity version of validating input at the edge and trusting it
+  forever: right idea, wrong layer, and the gap is invisible until someone audits it.
+</div>
+
+<div class="hf-note">CA is <b>airport security, not the cockpit door</b>. It is thorough, it is
+centralised, and everyone goes through it — once, on the way in. Nobody argues it is unnecessary;
+they also do not conclude that the cockpit therefore needs no lock.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>Security says MFA is required for Finance. Can I tell the auditor the approve endpoint is MFA-protected?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Conditional Access</span>
+    <p>You can say the <i>session</i> was. I evaluated user, device, location and risk at
+    sign-in, decided to allow it with MFA, and Entra issued a token reflecting that. Then I was
+    done. I am not in the request path — that is exactly why I do not require any app code, and it
+    is the same reason I cannot speak to what happened at 09:47.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The access token</span>
+    <p>But I carry the record. My <code>amr</code> lists the methods actually used, and
+    <code>acr</code> the assurance level reached. Your API receives me on every request. The
+    information you want is right there — it simply will not check itself.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Your Spring API</span>
+    <p>So for the endpoints that matter I read those claims and, if the assurance is too low, I
+    return a <b>claims challenge</b>. MSAL sees it and forces a real interactive re-auth rather
+    than a silent renewal — which is the difference between step-up authentication and merely
+    hoping the morning's MFA still counts.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Two timelines that never touch, and everyone assumes they do.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><b>09:00</b> — sign-in begins. Entra evaluates every CA policy against this user, device, location and risk signal</span><span class="tag">the one moment CA runs</span></li>
+    <li class="open"><span>MFA is required and satisfied. Entra issues an access token whose <code>amr</code> records the methods used</span><span class="tag">the verdict becomes a claim</span></li>
+    <li><span><b>09:47</b> — a request arrives at your API carrying that token. Your resource server validates signature, <code>iss</code>, <code>aud</code>, <code>exp</code>, all offline</span><span class="tag">no contact with Entra, by design</span></li>
+    <li class="open"><span>CA is not consulted. It has no hook here — no callback, no webhook, nothing in the request path. Nor could it be, without the per-request IdP call JWTs exist to avoid</span><span class="tag">the gap, and why it exists</span></li>
+    <li><span>Your <code>@PreAuthorize</code> checks roles or scopes and allows the payment. Correct, given what it was asked to check</span><span class="tag">right answer, incomplete question</span></li>
+    <li class="open"><span>Unless step 5 also reads <code>acr</code>/<code>amr</code> and challenges when the assurance is too low for <i>this</i> operation</span><span class="tag">where step-up actually lives</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is not a flaw to be fixed — it is the same trade the whole platform
+  runs on. Offline validation is what makes a stateless API scale, and the price is that any
+  policy evaluated at issuance is frozen into the token until it expires. This is the identical
+  trade behind role revocation lag, one page over: <b>token lifetime is the only dial that moves
+  every one of these problems at once</b>, which is why CIAM apps keep access tokens short and put
+  explicit checks on the handful of operations that cannot wait.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">The tenant — every identity, group and policy lives inside this boundary</span>
+      <div class="ring"><span class="lbl">Conditional Access — evaluated once, at sign-in, and never again</span>
+        <div class="ring"><span class="lbl">The issued token — carries that verdict forward as <code>acr</code> / <code>amr</code> claims</span>
+          <div class="core">Your API's authorization, at 09:47<small>the only one of these four still running when the payment is approved</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Each ring exists only because the one outside it allowed it — but read the
+  rings as a <i>clock</i> as well as a hierarchy. The outer three all finished before the request
+  arrived, leaving nothing behind but claims; only the core is still executing at 09:47. Which is
+  the whole picture in one image: your API is not protected by Conditional Access, it is protected
+  by <b>the evidence Conditional Access left in the token</b> — and only if it bothers to read
+  it.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A Conditional Access policy requires MFA for the Finance group. A finance user signs
+  in at <b>09:00</b>, completes MFA, and receives a one-hour access token. At <b>09:47</b> they
+  call <code>POST /api/payments/approve</code> on your Spring API. What enforced MFA on that
+  specific call?</p>
+  <button type="button">Conditional Access — it re-evaluates its policies each time the token is presented, which is what "conditional" refers to</button>
+  <button type="button">Spring Security — it calls Microsoft Graph to confirm the session still satisfies every applicable CA policy before the method runs</button>
+  <button type="button">Nothing at request time — CA ran once at sign-in; your API sees only a token, so per-operation assurance means reading acr/amr yourself and issuing a claims challenge</button>
+  <p class="why" data-for="0">"Conditional" describes the <i>inputs</i> to the decision — user,
+  device, location, risk — not how often it is made. The decision happens when a token is issued.
+  After that, CA has no presence in the request path at all, which is precisely why it needs no
+  application code and why it cannot see your endpoint.</p>
+  <p class="why" data-for="1">A resource server deliberately makes no call to the identity provider
+  per request; validating the signature against cached JWKS keys, entirely offline, is the property
+  that lets this design scale. Adding a Graph round trip to every request would give back exactly
+  what stateless JWT authorization was adopted to buy — and Spring does not do it.</p>
+  <p class="why" data-for="2">Right. The claims are there — <code>amr</code> records the methods
+  used, <code>acr</code> the assurance reached — but nothing reads them unless you do. For a
+  genuinely sensitive operation, check the claim and respond with a claims challenge when it falls
+  short, so MSAL forces a real re-authentication instead of a silent renewal that would simply
+  reissue the same assurance level.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Check-at-the-edge, trust-forever is the same bug at every layer of a system.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A firewall in front of an internal API</h4>
+    <p>"It is not reachable from the internet" is a perimeter fact, and it stops being true the
+    moment anything inside the perimeter is compromised — which is the entire argument for zero
+    trust. CA is a very good perimeter. Your API still needs its own lock, for the same reason.</p>
+    <div class="hf-scatter"><span>perimeter ≠ per-request</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Validating input in the controller and trusting it three layers down</h4>
+    <p>The DTO was validated at the edge, so the service assumes it is safe, so the repository
+    assumes the service checked. Then someone adds a second caller. Same shape: a check performed
+    once, at a boundary, treated afterwards as a permanent property of the data.</p>
+    <div class="hf-scatter"><span>a check is an event, not an attribute</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Ping's authentication journeys — the same boundary, a different vendor</h4>
+    <p>A journey composes MFA, risk and device checks at authentication time and hands back a
+    token. Identical division of labour, so the same rule transfers: <b>the IdP decides who gets
+    in and records how; your application decides what they may then do.</b> Recognising that the
+    two vendors differ in syntax and not in structure is most of what makes CIAM knowledge
+    portable.</p>
+    <div class="hf-scatter"><span>journeys and CA occupy the same slot</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Entra is the identity layer behind M365 and Azure, so if the
+  org already runs Microsoft the identities are here; the directory holds users, groups, service
+  principals and managed identities by immutable object ID; Entra Connect syncs on-prem AD for
+  hybrid identity; and Conditional Access is the policy engine that needs no app code. The sentence
+  to carry: <b>CA decides whether a sign-in happens, not whether an action is allowed</b> — for
+  anything sensitive, read <code>acr</code>/<code>amr</code> in your own API and challenge when the
+  assurance is not good enough.
+</div>
+
   <!-- ── HERO: animated "where Entra fits" walk · sign-in chip + live per-hop inspector of the real identity objects ── -->
   <div class="panel" style="border:1px solid #22d3ee">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:#22d3ee">▶ Watch identity move through Entra — four everyday scenarios</h2>
@@ -584,6 +763,7 @@ risk-based, adaptive auth on every sign-in.</span>`},
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

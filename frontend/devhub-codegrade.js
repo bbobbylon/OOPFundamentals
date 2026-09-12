@@ -536,14 +536,16 @@ parent.postMessage({ channel: ${JSON.stringify(channel)}, kind: 'done', results:
     if (pyodide) return Promise.resolve(pyodide);
     if (pyBooting) return pyBooting;
     // The in-flight latch, assigned before the first await so two exercises graded in
-    // quick succession share one CPython download instead of racing two. Note this one
-    // is NOT cleared on failure (bootJava's is): a Pyodide boot that fails here leaves
-    // the rejected promise latched, so the page must be reloaded to retry.
+    // quick succession share one CPython download instead of racing two. Cleared by the
+    // .catch below — as bootJava does — so a boot that failed offline or on a cut-short
+    // download can be retried by clicking Run again, rather than wedging Python grading
+    // behind a permanently rejected promise until the page is reloaded.
     pyBooting = (async () => {
       if (!global.loadPyodide) await loadScript(PY_BASE + 'pyodide.js');
       pyodide = await global.loadPyodide({ indexURL: PY_BASE });
       return pyodide;
     })();
+    pyBooting.catch(() => { pyBooting = null; });
     return pyBooting;
   }
   /** Grade Python: the student's code + a Python twin of the JS harness (same list/tree

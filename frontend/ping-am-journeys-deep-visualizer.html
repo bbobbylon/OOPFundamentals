@@ -78,7 +78,186 @@
     <div class="intro-ciam"><span class="tag">In CIAM / Your Job:</span> Journeys are the central design artifact of every Ping AM deployment. You'll design them (which nodes, how wired), write <strong>Scripted Decision</strong> nodes in Groovy/JS for custom logic (call a fraud API, check account status, transform claims), debug failures (which node returned which outcome — AM audit logs capture every traversal), and drive the journey from Angular via its REST API. The NodeState inspector on this page shows exactly what data flows between nodes — essential for writing scripts and debugging wrong-outcome paths.</div>
   </div>
 
-  <section>
+  
+<p class="hf-deck">or, a journey is a program — drag-and-drop removed the syntax, not the logic</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The MFA node never ran, the tree reached Success, and nothing anywhere logged an error.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A decision node asked about a value nobody had put in the bag yet — and "no" was wired to the easy branch</div>
+  <p>You add risk-based MFA exactly as advertised: a Risk Score node, then a Decision node reading
+  the score from <code>NodeState</code>, with the high-risk outcome going to an OTP node and the
+  low-risk outcome going straight to Success. Drag, drop, connect, save. No code, no deploy.</p>
+  <p>Then someone reorders the tree, or an upstream node fails softly, or a device-fingerprint
+  collector returns nothing for a particular browser — and the risk key is simply
+  <b>absent</b> from <code>NodeState</code> when the Decision node reads it. Absent is not high.
+  So the node takes its low-risk outcome, skips the OTP entirely, and hands the user a session.
+  The tree completed successfully. Every node did what it was told. <b>The most dangerous outcome
+  was the default one, and nothing in the canvas made that visible.</b></p>
+  <div class="hf-scatter">
+    <span>tree valid ✓</span>
+    <span>every node configured ✓</span>
+    <span>journey reached Success ✓</span>
+    <span>risk key: absent ⚠</span>
+    <span>MFA: silently skipped ⚠</span>
+  </div>
+  <p class="hf-foot">Declarative did not remove the bug. It removed the stack trace.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make the missing case explicit, and make the safe branch the default one</div>
+  <div class="hf-ladder">
+    <b>Wire the branch you want when data is MISSING, not just when it is present</b>
+    <i>↓ "no risk score" should mean "treat as risky", never "treat as fine" — absence is not evidence of safety</i>
+    <b>Point every unhandled or fall-through outcome at Failure rather than letting it drift toward Success</b>
+    <i>↓ a journey should fail closed, the same way a firewall rule does</i>
+    <b>Then test it like code: walk every path, including the ones where a collector returns nothing</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A journey is a program whose variables are a shared untyped bag and whose control flow is
+  drawn with arrows.</b> That buys something real — anyone can add MFA without a deploy — and it
+  costs something equally real: no compiler checks that the key a node reads is one an earlier node
+  wrote, and no reviewer sees a diff. The lesson is not "avoid declarative." It is that
+  <i>declarative moves your errors from build time to run time</i>, so the testing you skipped
+  writing has to come back somewhere.
+</div>
+
+<div class="hf-note">NodeState is a <b>bag of global variables</b>, and a journey is a program
+written entirely with them. Everything you were ever taught about globals applies unchanged: any
+node can write any key, nothing declares what it needs, and the bug is always the distance between
+where a value was set and where it was read.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>There is no code here. How is there a null-check bug?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">NodeState</span>
+    <p>Because I am a map, and maps have absent keys. I am not typed, not declared, and not
+    validated — any node may write any key at any point, and a node reading a key I do not have
+    gets nothing back. I never throw. I have no opinion about whether the key <i>should</i> have
+    been there.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The Decision node</span>
+    <p>And I only have the outcomes you drew. "High" and "low" were your two arrows, so an absent
+    value has to come out of one of them — and it will be whichever you configured as the
+    fall-through. I am doing precisely what the canvas says. The canvas just does not draw the
+    third case.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The compiler you no longer have</span>
+    <p>Which is what I used to be for. In a coded login flow, reading an undeclared variable is a
+    build error, and a reviewer sees the diff in a pull request. Here there is no build and the
+    change was a mouse drag on a Tuesday. So the safety has to come from somewhere else: explicit
+    absent-data branches, fail-closed defaults, and someone actually walking the paths.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps, every one of them behaving correctly.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The engine begins at the start node and walks the tree, carrying one <code>NodeState</code> for the whole journey</span><span class="tag">one shared bag, start to finish</span></li>
+    <li class="open"><span>A collector or action node writes keys into it — username, auth level, device fingerprint, risk score</span><span class="tag">writes are implicit, never declared</span></li>
+    <li><span>A Decision node reads a key. Present and high → the MFA branch. Present and low → straight through</span><span class="tag">the two cases you drew</span></li>
+    <li class="open"><span><b>Absent</b> → there is no third arrow, so it leaves by the fall-through you configured, which is almost always the permissive one</span><span class="tag">the case you did not draw</span></li>
+    <li><span>Traversal continues to a terminal. Reaching Success issues a session, exactly as designed</span><span class="tag">no error to log</span></li>
+    <li class="open"><span>Your app receives a perfectly valid session with an auth level that never earned it — and cannot tell the difference</span><span class="tag">where it becomes your problem</span></li>
+  </ol>
+  <p class="hf-annot">Step 6 is worth dwelling on, because it is where this stops being Ping's
+  concern and becomes your API's. Downstream, the session or token carries an auth level, and your
+  resource server trusts it — it has no view of which path through the tree produced it. This is
+  the same shape as Conditional Access on the Entra side: <b>a policy engine decides at
+  authentication time and leaves only a claim behind</b>, so if the claim can be produced by an
+  unintended path, nothing later in the stack can detect that.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">Decision node: "is the risk score high?"<small>reading a key from NodeState</small></div>
+    <div class="arrow">what the bag actually holds →</div>
+    <div class="opts">
+      <span>"high" → the outcome you drew: send OTP, raise auth level</span>
+      <span>"low" → the other outcome you drew: continue to Success</span>
+      <span class="on">absent — the upstream node did not run, or returned nothing → whichever arrow is the fall-through</span>
+    </div>
+  </div>
+  <p class="hf-annot">Two of these rows were designed and one was inherited. The fix is not
+  cleverness, it is drawing the third row on purpose: give the node an explicit absent-data
+  outcome, or put a node in front that fails the journey when a required key is missing. Once the
+  third case is on the canvas it gets reviewed like the other two — and the whole problem here was
+  that it was invisible, not that it was hard.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A Decision node branches on a risk score in <code>NodeState</code>: "high" routes to
+  an OTP node, "low" routes straight to Success. On some browsers the upstream device-fingerprint
+  node returns nothing, so the risk key is never written. What does the journey do for those
+  users?</p>
+  <button type="button">It throws at the Decision node and the journey terminates in Failure, because reading a missing key from NodeState is an error</button>
+  <button type="button">It pauses and re-runs the upstream collector node, since the engine knows the Decision node depends on a key that has not been written</button>
+  <button type="button">It takes whichever outcome is configured as the fall-through — usually the permissive one — so those users reach Success with MFA silently skipped</button>
+  <p class="why" data-for="0">NodeState is an untyped map, and reading an absent key from a map
+  yields nothing rather than raising. If it did throw, this would be a far better bug: loud,
+  immediate, and impossible to ship. The whole difficulty is that it fails quietly and in the
+  permissive direction.</p>
+  <p class="why" data-for="1">There is no dependency graph to consult. Nodes do not declare which
+  keys they read or write, which is exactly what makes the canvas so easy to rearrange — and
+  exactly why the engine cannot know that one node's output was another node's input. Re-running
+  a collector would also be unsafe in general, since collectors have side effects like prompting
+  the user.</p>
+  <p class="why" data-for="2">Correct, and the direction matters more than the mechanism: the
+  unhandled case lands on the easy path, so a journey degrades toward <i>less</i> security rather
+  than more. Draw the absent case explicitly and point it at the OTP node or at Failure — and while
+  you are there, check every other outcome that currently falls through to Success.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Low-code moves the bugs. It does not remove them.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A <code>switch</code> with no <code>default</code>, forty years of the same bug</h4>
+    <p>Every language eventually grows exhaustiveness checking — sealed types, <code>assertNever</code>,
+    a compiler warning on a missing case — because the unhandled branch is where bugs live. A
+    node canvas has none of that: unhandled cases are drawn as nothing at all, which is the least
+    visible possible representation.</p>
+    <div class="hf-scatter"><span>the missing case is always the bug</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Fail-open versus fail-closed, in every security control ever built</h4>
+    <p>A firewall that cannot reach its policy server should drop traffic, not allow it. An auth
+    tree that cannot evaluate risk should challenge, not wave through. The rule is identical and
+    the reason is identical: <b>the failure mode must be the safe one, because the failure mode is
+    the one nobody tested.</b></p>
+    <div class="hf-scatter"><span>absence of evidence is not evidence of safety</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Why "no code" needs more testing, not less</h4>
+    <p>No build, no compiler, no pull request, no diff, and a change ships the instant someone
+    clicks save. Every safety net that normally catches a mistake between "I had an idea" and
+    "production" has been removed in exchange for speed. That is a real trade with real upside —
+    it just means the review has to be deliberate, because nothing will force it.</p>
+    <div class="hf-scatter"><span>speed borrowed from the safety net</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Ping AM models login as a declarative tree of single-purpose
+  nodes wired by outcomes — collectors gather, decisions branch, actions do, terminals end — all
+  sharing one <code>NodeState</code> bag, so adding MFA is drag-and-drop instead of a deploy. Carry
+  this with you: <b>that bag is untyped and every node can write to it, so a Decision node reading
+  a key nobody set takes its fall-through outcome</b> — draw the absent case on purpose, and make
+  sure it fails closed.
+</div>
+
+<section>
     <h2>1. A journey is a tree of nodes</h2>
     <div class="card card-accent">
       <p style="font-size:13px;color:var(--muted);line-height:1.7">
@@ -397,6 +576,7 @@ jRender(); jReset();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

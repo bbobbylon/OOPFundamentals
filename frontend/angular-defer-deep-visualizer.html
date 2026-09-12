@@ -126,6 +126,202 @@
     </div>
   </div>
 
+<p class="hf-deck">or, @defer only splits what the build could already split on its own</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You wrapped the heavy component in @defer. The bundle didn't get one byte smaller.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">@defer compiled clean and changed nothing about what downloads on page load</div>
+  <p>You've got a legacy audit-log table — still declared in an NgModule, never converted to
+  standalone — and you wrap it: <code>@defer (on viewport) { &lt;audit-table/&gt; }</code>. It
+  compiles. The placeholder shows first, just like it should. You open the network tab expecting a
+  new chunk to appear once it scrolls into view — and the table was already there, in the initial
+  bundle, the whole time. What's actually wrong: <code>@defer</code> can only code-split
+  <b>standalone</b> components, directives, and pipes. Your table, and everything it imports, was
+  never a candidate for its own chunk; Angular had no choice but to bundle it eagerly, @defer
+  wrapper or not.</p>
+  <div class="hf-scatter">
+    <span>@defer compiles with no error ✓</span>
+    <span>placeholder renders correctly ✓</span>
+    <span>&lt;audit-table&gt; isn't standalone ⚠</span>
+    <span>no new chunk, ever, at any trigger ⚠</span>
+  </div>
+  <p class="hf-foot">@defer didn't fail silently — it did exactly what it can do, which for a
+  non-standalone dependency is nothing.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Convert the deferred component to standalone first</div>
+  <div class="hf-ladder">
+    <b>Give audit-table's @Component standalone: true (or drop the NgModule declaration on v19+, standalone by default)</b>
+    <i>↓ now it's actually eligible to live in its own chunk</i>
+    <b>Re-check the network tab: a new .js file appears exactly when the trigger fires</b>
+    <i>↓ the @defer wrapper was correct all along — the dependency inside it wasn't</i>
+    <b>And the rule generalizes: everything imported INSIDE the block must be standalone, not just the top component</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>@defer can only split what the build could already split on its own.</b> A deferred block
+  doesn't grant Angular some new lazy-loading superpower — it marks where a boundary is
+  <i>allowed</i> to go, and a boundary can only exist around something with an independent,
+  standalone dependency graph. That's why the trigger, the placeholder, and the four states are the
+  easy part; the actual requirement — everything inside must be standalone — is the part that
+  silently decides whether any of it does anything at all.
+</div>
+
+<div class="hf-note">Think of @defer as marking a perforated line on a sheet of paper. The
+perforation doesn't tear the paper for you — it just says where a tear is <b>allowed</b> to happen
+cleanly. A non-standalone component is paper with no perforation running through it: you can draw
+the line, but it still comes away in one piece.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I wrapped it in @defer. Why is it still in the main bundle?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The bundler</span>
+    <p>I build chunks around modules that can stand alone — literally. A component still wired into
+    an NgModule pulls that module's declarations in as a unit. I can't cut a boundary through the
+    middle of that and call the result independent.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">@defer</span>
+    <p>And I don't override that. I'm a template-level instruction — "don't render this yet."
+    Whether "this" can live in its own file was decided at build time, before I ever ran.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The bundler</span>
+    <p>So the placeholder still worked. It just didn't defer anything — correctly, even. You asked
+    it to wait to render. It waited. It just never had a separate file to wait for.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Two systems have to agree before one byte gets deferred: the compiler, then the trigger.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>At build time, Angular's compiler scans every @defer block's template for its dependencies</span><span class="tag">before the app ever runs</span></li>
+    <li class="open"><span>Every standalone dependency found only in that block (not eagerly imported elsewhere) becomes eligible for its own chunk</span><span class="tag">the actual split point</span></li>
+    <li><span>A non-standalone dependency can't be isolated this way — it stays in whichever eager bundle already pulls in its NgModule</span><span class="tag">where the audit-table case breaks</span></li>
+    <li class="open"><span>At runtime, the placeholder renders first, and Angular registers whatever the trigger needs — IntersectionObserver for on viewport, a listener for on interaction, requestIdleCallback for on idle</span><span class="tag">each trigger is a different browser API underneath</span></li>
+    <li><span>When the trigger fires, Angular fetches the chunk (if one exists), shows @loading during the fetch, then swaps in the real content</span><span class="tag">@error only fires if this fetch itself fails</span></li>
+    <li class="open"><span>prefetch runs this same fetch on its own independent trigger, ahead of the render trigger — so by the time on interaction fires, the chunk may already be cached</span><span class="tag">render and fetch are two separate clocks</span></li>
+  </ol>
+  <p class="hf-annot">Step 1 decides everything before step 4 even gets a chance to matter. If
+  nothing eligible came out of the compiler's scan, there's no chunk for any trigger to fetch — on
+  viewport, on idle, and prefetch all become no-ops for that block, silently, because there was
+  never anything for them to do.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">@placeholder</span>
+      <span class="go"><em>trigger fires</em> <span class="arrow">→</span> @loading (if written)</span></div>
+    <div class="stt"><span class="nm">@loading</span>
+      <span class="go"><em>chunk resolves</em> <span class="arrow">→</span> deferred content &nbsp;·&nbsp; <em>fetch fails</em> <span class="arrow">→</span> @error</span></div>
+    <div class="stt"><span class="nm">Deferred content</span>
+      <span class="go">stays rendered — no path back to @placeholder for this instance</span></div>
+    <div class="stt"><span class="nm">@error</span>
+      <span class="go">stays — no built-in retry; recreate the block by re-rendering its parent (e.g. toggling an *ngIf)</span></div>
+  </div>
+  <p class="hf-annot">Every @defer block is this same four-state machine regardless of which
+  trigger you chose. The trigger only decides <i>when</i> the first transition fires — it never
+  changes the shape of the states themselves.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A block reads <code>@defer (on interaction; prefetch on idle)</code>. The browser
+  sits idle for 3 seconds with no clicks, then the user finally clicks the trigger element. What
+  happens at the click?</p>
+  <button type="button">Nothing needs to download — the chunk was already prefetched during the idle window, so the content swaps in immediately</button>
+  <button type="button">The idle prefetch only warms the browser's HTTP cache; Angular still re-fetches and parses the module on click, so there's a brief @loading flash either way</button>
+  <button type="button">prefetch on idle and on interaction conflict — Angular uses whichever condition is declared second, so idle is ignored and the click triggers the very first fetch</button>
+  <p class="why" data-for="0">Right — <code>prefetch on idle</code> downloads and prepares the
+  module during a browser idle period, well before the click. By the time <code>on interaction</code>
+  fires, there's nothing left to fetch; Angular renders the already-resolved content immediately,
+  which is the entire point of separating the render trigger from the prefetch trigger.</p>
+  <p class="why" data-for="1">A reasonable-sounding hedge, but prefetch does the full job — fetching
+  and preparing the module, not just warming an HTTP cache entry. If it finished before the render
+  trigger fires, there's no fetch left to do and no @loading flash to show, since @loading only
+  appears while a fetch is actually in flight.</p>
+  <p class="why" data-for="2">They don't conflict, and this was never a which-wins situation —
+  render trigger and prefetch trigger are two independent instructions read from the same block.
+  <code>on interaction</code> controls when content <i>renders</i>; <code>prefetch on idle</code>
+  controls when it's <i>downloaded</i>. Both run, on their own schedules.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">The same trick, drawn at two different zoom levels.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Route-level lazy loading, one level up</h4>
+    <p><code>loadComponent()</code>/<code>loadChildren()</code> in the router does the identical
+    trick at the route boundary instead of the template boundary — and the identical requirement:
+    the routed component has to be standalone, or there's no independent chunk for the router to
+    fetch either. @defer is that same idea, zoomed in to fit inside a single page.</p>
+    <div class="hf-scatter"><span>loadComponent() ≈ @defer, one level up</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>React's lazy() + Suspense</h4>
+    <p><code>React.lazy(() =&gt; import('./Chart'))</code> wrapped in
+    <code>&lt;Suspense fallback={&lt;Skeleton/&gt;}&gt;</code> is the same three-part shape — a
+    placeholder, a dynamic import as the split point, a swap when it resolves. React has no trigger
+    vocabulary built in (you gate it yourself, usually with a hand-rolled IntersectionObserver);
+    @defer's contribution is making viewport/interaction/idle/prefetch declarative instead.</p>
+    <div class="hf-scatter"><span>Suspense fallback ≈ @placeholder</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your CIAM admin shell's audit-log tab</h4>
+    <p>A tab that pulls in a heavy grid library and a date-range picker — real weight nobody needs
+    at login. <code>@defer (on viewport; prefetch on idle)</code> keeps it out of the initial CIAM
+    shell bundle, but the fix that actually mattered <i>first</i> was converting the legacy grid
+    wrapper to standalone — the @defer block had been sitting there doing nothing until that
+    landed.</p>
+    <div class="hf-scatter"><span>the standalone conversion shipped the win</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Can I nest one @defer block inside another?</p>
+  <p class="a">Yes, and it's a legitimate pattern — a page-level <code>@defer (on viewport)</code>
+  around a whole dashboard section, with a smaller <code>@defer (on interaction)</code> around one
+  particularly heavy widget inside it, like a chart. Each block resolves independently once its own
+  trigger fires; the outer one loading doesn't force the inner one to load too. Watch your total
+  chunk count, though — every @defer boundary is a real network request, and past a certain point
+  you're trading initial-bundle size for a page full of skeletons that feels slower, not faster.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">If I don't write an @error block, what happens when the fetch fails?</p>
+  <p class="a">The block has nothing to swap to, so it's left showing whatever it was last showing —
+  typically the placeholder, indefinitely, with no visible error and no retry. Treat that as a real
+  gap, not a rare edge case: a flaky connection or a CDN hiccup makes this the actual failure mode,
+  and an @error block — even a plain "Couldn't load this, refresh the page" — is cheap insurance
+  against a silently stuck placeholder.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does after 200ms mean the content shows 200ms after the page loads?</p>
+  <p class="a">No — it means 200ms after the block itself starts being evaluated, which for a
+  top-level block is close to page load, but for one nested inside another @defer or behind an
+  <code>*ngIf</code>, the clock only starts once that block actually renders. It's also commonly
+  paired as <code>on viewport, after 200ms</code> — read a comma-separated trigger list as OR:
+  whichever condition fires first wins.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  A <code>@defer (on interaction)</code> block has no <code>@placeholder</code> written at all.
+  Before the user interacts with it, what renders in that spot — and does leaving out
+  <code>@placeholder</code> change whether the component's dependencies still get split into their
+  own chunk?
+</div>
+
   <!-- ── EXTREME-VIZ HERO: @defer Deferrable Views ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -608,6 +804,7 @@ renderNodes(cur);
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

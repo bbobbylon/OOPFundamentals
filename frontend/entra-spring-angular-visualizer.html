@@ -103,6 +103,191 @@
     <div class="intro-ciam"><span class="tag">In CIAM / Your Job:</span> The Microsoft equivalent of the Ping integration — same architecture, different libraries (MSAL not angular-oauth2-oidc; <code>issuer-uri</code> on the Entra <code>/v2.0</code> endpoint). The four Entra-specific things to build and test beyond the happy path: silent refresh, app-role 403, and OBO. Silent-refresh failures are the most common prod issue — test with third-party cookies disabled and sessionStorage cleared. OBO is essential when Spring must call Microsoft Graph (group memberships, Exchange email) on behalf of the user.</div>
   </div>
 
+
+<p class="hf-deck">or, "silent refresh" was never a protocol feature — it was a cookie trick, and browsers are taking it away</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">It works on your machine for an hour. On Safari it works for an hour <i>once</i>.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">At the 60-minute mark, mid-form, the user is thrown back to the Microsoft sign-in page</div>
+  <p>The stack above is doing exactly what it advertises: <code>MsalInterceptor</code> notices the
+  access token is close to expiry and renews it <i>silently</i>, without a redirect, so the user
+  keeps typing and never knows. On your machine, it does.</p>
+  <p>The trick underneath is a <b>hidden iframe</b> pointed at
+  <code>login.microsoftonline.com/…/authorize?prompt=none</code>. It works only because that
+  iframe carries Entra's session cookie, proving the user is still signed in. But from the
+  browser's point of view, your app is on your domain and that iframe is on Microsoft's — so that
+  cookie is a <b>third-party cookie</b>. Safari has blocked those for years and Chrome has spent
+  years phasing them out. When the cookie does not travel, Entra cannot see a session, returns
+  <code>login_required</code>, and MSAL throws <code>InteractionRequiredAuthError</code>. Your
+  interceptor's only remaining move is a full redirect — mid-task, unsaved work and all.</p>
+  <div class="hf-scatter">
+    <span>token expired, as scheduled ✓</span>
+    <span>user still signed in at Entra ✓</span>
+    <span>iframe = cross-site request ⚠</span>
+    <span>session cookie not sent ⚠</span>
+    <span>InteractionRequiredAuthError ⚠</span>
+  </div>
+  <p class="hf-foot">Nothing expired that should not have. The mechanism for renewing it quietly
+  was borrowed from a browser behaviour that is being deliberately removed.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Stop depending on a cookie you do not control</div>
+  <div class="hf-ladder">
+    <b>Register the redirect URI under the Single-page application platform, not Web</b>
+    <i>↓ that is what makes Entra issue a refresh token to a public client, with rotation and a sliding window</i>
+    <b>MSAL then renews from that refresh token — a direct POST to /token, same-site to nobody, no iframe and no third-party cookie</b>
+    <i>↓ the hidden iframe becomes a fallback rather than the whole strategy</i>
+    <b>Or remove the question entirely with a BFF: the token lives server-side behind an httpOnly session cookie that is first-party by construction</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A silent renewal is only as durable as the thing carrying the proof of session.</b> Hidden-iframe
+  renewal outsources that proof to a third-party cookie — a browser behaviour your app neither
+  owns nor can test reliably, and one the industry is actively retiring. Refresh tokens and BFF
+  sessions move the proof somewhere you control. This is the difference between a feature and a
+  side effect, and it is worth knowing which one you are shipping.
+</div>
+
+<div class="hf-note">The iframe trick is <b>propping a fire door open with a chair</b>. It works, the
+whole team relies on it, and nobody wrote it down — so the day facilities removes the chairs,
+nothing in your documentation explains why people are suddenly locked out.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>The token refreshed fine all sprint. Why would a browser update change that?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The hidden iframe</span>
+    <p>Because I was never talking to your server. I load a page on Microsoft's domain from inside
+    your page, and I need Entra's session cookie to ride along to prove the user is still signed
+    in. That is textbook third-party cookie behaviour — the exact pattern tracking-prevention was
+    built to stop. Nobody targeted me; I just look identical to the thing they were aiming at.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The refresh token</span>
+    <p>Whereas I am a credential your app holds. MSAL POSTs me straight to the token endpoint — no
+    iframe, no cookie, nothing for a browser policy to strip. The catch is that Entra only issues
+    me to a client registered under the <b>SPA</b> platform, and I come with a sliding window
+    measured in hours rather than days precisely because I live in a browser.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">A BFF</span>
+    <p>And I sidestep the argument. If the browser never holds a token, there is nothing to renew
+    in the browser: it holds an httpOnly session cookie for <i>your own</i> origin, which is
+    first-party and unaffected by any of this. You pay for it with a server to run and session
+    state to keep — the trade this stack chose not to make, which is worth re-examining when the
+    renewal path is the thing giving you trouble.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">The same lifecycle, and the one arrow that does or does not exist.</p>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Signed in, token fresh</span>
+      <span class="go"><em>MsalInterceptor attaches the Bearer</em> <span class="arrow">→</span> API calls succeed</span></div>
+    <div class="stt"><span class="nm">Token near expiry</span>
+      <span class="go"><em>SPA platform, refresh token held</em> <span class="arrow">→</span> POST /token, renewed, user never notices</span></div>
+    <div class="stt"><span class="nm">No refresh token — iframe attempt</span>
+      <span class="go"><em>third-party cookie sent</em> <span class="arrow">→</span> back to fresh &nbsp;·&nbsp; <em>cookie blocked</em> <span class="arrow">→</span> InteractionRequiredAuthError</span></div>
+    <div class="stt"><span class="nm">Interaction required</span>
+      <span class="go"><em>loginRedirect()</em> <span class="arrow">→</span> full page navigation, unsaved state lost, and round to the top</span></div>
+  </div>
+  <p class="hf-annot">Read the third row twice: it is the only step whose outcome depends on
+  something outside your stack entirely. Everything else here is decided by your code and your app
+  registration; that one branch is decided by the user's browser and its settings, which is why the
+  bug reports arrive sorted by browser and why it is untestable in the one you develop in. The
+  durable fix is to make the second row the path that always runs, so the third is never
+  reached.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">how the token gets renewed<small>the slot MsalInterceptor fills</small></div>
+    <div class="arrow">what actually plugs in →</div>
+    <div class="opts">
+      <span class="on">refresh token → direct POST to /token, immune to cookie policy (SPA platform registration)</span>
+      <span>hidden iframe + prompt=none → depends on a third-party cookie surviving</span>
+      <span>BFF session → the browser holds no token at all, so there is nothing to renew here</span>
+      <span>nothing → full redirect every hour, and users learn to hate the app</span>
+    </div>
+  </div>
+  <p class="hf-annot">Notice that choosing between these is not a coding decision — rows one and
+  two are selected by <b>a dropdown in the app registration</b>, and row three by an architecture
+  choice made long before. Which is the real lesson of this page's three layers: the most
+  consequential setting in the Angular half of the stack is not in the Angular half at all.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your SPA's Entra registration lists its redirect URI under the <b>Web</b> platform
+  rather than <b>Single-page application</b>, so MSAL holds no refresh token and relies on
+  hidden-iframe renewal. A user on a browser that blocks third-party cookies reaches the one-hour
+  mark mid-form. What happens?</p>
+  <button type="button">Renewal succeeds — the iframe is created by your own page, so it inherits your origin and third-party cookie rules do not apply to it</button>
+  <button type="button">Renewal fails — the iframe's request to login.microsoftonline.com cannot carry Entra's session cookie, so MSAL throws InteractionRequiredAuthError and falls back to a full sign-in redirect</button>
+  <button type="button">MSAL falls back to its refresh token and renews in the background, so the user notices nothing</button>
+  <p class="why" data-for="0">An iframe's origin is the origin of the document it <i>loads</i>, not
+  of the page that created it. This one loads <code>login.microsoftonline.com</code>, so from the
+  browser's perspective it is a cross-site context embedded in your page — precisely the shape
+  tracking prevention exists to block. The cookie belongs to Microsoft's domain and is judged by
+  that relationship, not by who wrote the <code>&lt;iframe&gt;</code> tag.</p>
+  <p class="why" data-for="1">Correct, and the detail that makes it hard to catch is that it works
+  perfectly in whichever browser the team develops in until that browser changes its defaults —
+  then the same build starts failing with no deploy. The fix is the registration itself: move the
+  redirect URI to the Single-page application platform so Entra issues a refresh token, and the
+  iframe stops being the only path.</p>
+  <p class="why" data-for="2">This is exactly what happens with the <i>right</i> registration —
+  which is what makes it such a useful wrong answer here. Entra issues refresh tokens to public
+  clients only under the SPA platform (with rotation and a sliding window, because the token lives
+  in a browser). Registered as Web, there is no refresh token to fall back to, and the fallback
+  people assume exists simply is not there.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A generation of web patterns quietly depended on cookies crossing sites.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Single sign-out, and why it mostly does not work any more</h4>
+    <p>Front-channel logout worked the same way: the IdP loaded a hidden iframe per relying party
+    to clear each session. Same third-party cookie dependency, same erosion — which is why
+    back-channel logout, a server-to-server call, replaced it. Identical problem, identical shape
+    of fix: move the mechanism off the browser.</p>
+    <div class="hf-scatter"><span>front-channel → back-channel</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>OAuth's implicit flow — deprecated for a related reason</h4>
+    <p>Implicit returned tokens in the URL fragment because SPAs could not keep a secret and PKCE
+    did not exist yet. It was a workaround that became a standard, and it was retired once the
+    real mechanism arrived. Hidden-iframe renewal is the same species of workaround, at the same
+    point in its life.</p>
+    <div class="hf-scatter"><span>workarounds age badly, standards age slowly</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>SameSite=Lax becoming the default, and the POST callbacks it broke</h4>
+    <p>A browser default changed, and payment and SAML callbacks that had worked for a decade
+    started arriving without a session cookie. Nobody deployed anything. The pattern to take from
+    all three: <b>if your flow depends on a cookie crossing a site boundary, treat that as a
+    dependency with a deprecation schedule you do not control.</b></p>
+    <div class="hf-scatter"><span>cross-site cookies are borrowed time</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> three layers — MSAL runs Auth Code + PKCE in Angular and
+  attaches Bearers, Spring's resource server validates the JWT against Entra's JWKS (issuer ending
+  <code>/v2.0</code>), and On-Behalf-Of exchanges the user's token when Spring calls Graph so the
+  delegation chain survives the hop. One sentence more for production: <b>silent renewal via hidden
+  iframe rests on a third-party cookie</b> — register the SPA platform so you get a refresh token,
+  or put a BFF in front, and stop betting on a browser behaviour that is on its way out.
+</div>
+
   <!-- ── HERO: animated MSAL↔Entra↔Spring round-trip · happy path, silent refresh, app-role 403, On-Behalf-Of · live inspector ── -->
   <div class="panel" style="border:1px solid #22d3ee">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:#22d3ee">▶ Watch the Entra full-stack round-trip — four real moments</h2>
@@ -738,6 +923,7 @@ original user. audience is exchanged, identity is kept.</span>`},
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

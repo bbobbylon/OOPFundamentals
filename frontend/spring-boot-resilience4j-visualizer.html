@@ -179,6 +179,199 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> Ping Directory slows under peak load — without a breaker, every lookup blocks 30s, threads saturate, the API dies. With <code>@CircuitBreaker(name="ping", fallbackMethod="getCachedUser")</code> on <code>getUser(id)</code>, the circuit opens at 50% failure and lookups serve from Redis, keeping the API up; Ping recovers, the circuit closes, fresh data returns. Alert on the <code>resilience4j.circuitbreaker.state=open</code> Micrometer metric.</div>
   </div>
 
+<p class="hf-deck">or, slidingWindowSize counts calls, not seconds — and a quiet endpoint can go a long time before the circuit notices anything's wrong</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Same annotation, same numbers, a completely different outcome — because nobody asked how often this method actually gets called.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The support tool's circuit breaker sat CLOSED through a six-hour outage</div>
+  <p>An internal support tool's <code>findUserForSupport(id)</code> calls Ping Directory maybe
+  twice an hour — nowhere near the peak-load traffic this page's own intro described. It's wrapped
+  in <code>@CircuitBreaker(name="pingAdminLookup", fallbackMethod="lookupFallback")</code> with
+  <code>slidingWindowSize=10</code> and <code>failureRateThreshold=50</code> — deliberately chosen
+  small so it would react "within moments" if Ping went down. Ping Directory has a total outage
+  from 2am to 8am. Every single call in that window fails. And yet the on-call dashboard shows
+  <b>CLOSED</b> for almost the entire outage, with each failed lookup still paying the full
+  timeout before erroring out — precisely the cascading-failure pain this annotation exists to
+  prevent.</p>
+  <div class="hf-scatter">
+    <span>slidingWindowSize=10 ✓ configured</span>
+    <span>failureRateThreshold=50% ✓ configured</span>
+    <span>6 hours, 100% failures ✓ actually happening</span>
+    <span>circuit state: CLOSED ⚠ for most of it</span>
+  </div>
+  <p class="hf-foot">Nothing is misconfigured. The circuit is doing exactly what it was told — it's just measuring something other than time.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Decide what "window" means before you decide how big it is</div>
+  <div class="hf-ladder">
+    <b>slidingWindowType: TIME_BASED (was implicitly COUNT_BASED — the unset default)</b>
+    <i>↓ slidingWindowSize now means seconds of wall-clock time, not a count of calls</i>
+    <b>slidingWindowSize: 60 — evaluate whatever happened in the last 60 seconds, no matter how few calls that was</b>
+    <i>↓ but an evaluation still needs enough calls to trust — that gate doesn't go away</i>
+    <b>minimumNumberOfCalls: 2 — sized for this endpoint's real traffic, not copied from the checkout flow's config</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A sliding window measured in calls needs calls to slide. A quiet endpoint can fail completely
+  and still read CLOSED, because nothing has arrived yet to prove otherwise.</b> slidingWindowSize
+  answers "how much history" — it never answers "how long might that take to collect."
+</div>
+
+<div class="hf-note">Think of <code>minimumNumberOfCalls</code> as a <b>smoke detector that
+needs ten breaths of air before it'll test any of them</b>. In a crowded room, ten breaths pass in
+seconds. In an empty room, it waits until someone finally walks back through — however long that
+takes — before it tests anything at all, no matter how much smoke has been sitting there the whole
+time.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I set slidingWindowSize=10 specifically so we'd know within moments if Ping went down. It
+    was down for six hours overnight and the circuit barely opened before it recovered on its own.
+    Why?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">slidingWindowSize</span>
+    <p>I did exactly what you told me — keep the last 10 calls. I never agreed to mean seconds.
+    That's a different setting, and you didn't set it, so I'm COUNT_BASED by default.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">minimumNumberOfCalls</span>
+    <p>And even once my buddy here has 10 slots to fill, I'm the one who decides whether anyone's
+    allowed to look at them yet. Ten calls at two an hour is five hours. I wasn't being cautious —
+    that's just how long quiet takes.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The CircuitBreaker</span>
+    <p>Put the two of them together and you get the real story: not broken, just built for a rate
+    of traffic this endpoint never sees.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One outage. One ring buffer. Follow it to the exact gate that decided nothing had happened yet.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The @CircuitBreaker proxy intercepts <code>findUserForSupport(id)</code> — the same AOP-proxy idea you've already met guarding @PreAuthorize</span><span class="tag">a familiar shape</span></li>
+    <li class="open"><span>On completion, success or exception, the CircuitBreaker records one entry into its sliding window — a ring buffer sized exactly <code>slidingWindowSize</code></span><span class="tag">one slot per call, not per second — unless TIME_BASED</span></li>
+    <li><span>The state machine asks: has this buffer recorded at least <code>minimumNumberOfCalls</code> entries yet?</span><span class="tag">the gate before the gate</span></li>
+    <li class="open"><span>Below that minimum, no failure rate is computed and no transition is even considered — regardless of what those calls actually were</span><span class="tag">this is where a 12-call outage hides for hours</span></li>
+    <li><span>Once enough calls have landed, only then does it compute failureRate = failures ÷ numberOfCalls and compare it to failureRateThreshold</span><span class="tag">the check everyone remembers</span></li>
+    <li class="open"><span>At two calls an hour with slidingWindowSize=10, "enough calls" takes about five hours to arrive — the timer nobody configured is the endpoint's own traffic volume</span><span class="tag">the real waitDurationInOpenState</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the whole lesson. failureRateThreshold gets all the attention because
+  it's the number with a percent sign — but it never runs at all until minimumNumberOfCalls says
+  it's allowed to. Tune the threshold all you like; on a quiet enough endpoint, that gate is the
+  actual bottleneck.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">CLOSED</span>
+      <span class="go"><em>failureRate ≥ threshold AND ≥ minimumNumberOfCalls recorded</em> <span class="arrow">→</span> OPEN — both halves of that AND are required, and the second half is the one nobody remembers configuring</span></div>
+    <div class="stt"><span class="nm">OPEN</span>
+      <span class="go"><em>waitDurationInOpenState elapses</em> <span class="arrow">→</span> HALF_OPEN</span></div>
+    <div class="stt"><span class="nm">HALF_OPEN</span>
+      <span class="go">probe calls succeed <span class="arrow">→</span> CLOSED &nbsp;·&nbsp; probe calls fail <span class="arrow">→</span> OPEN</span></div>
+  </div>
+  <p class="hf-annot">Every diagram of this state machine — including the one earlier on this page
+  — draws one arrow out of CLOSED, labeled with the threshold. There are actually two conditions
+  guarding that arrow, and only one of them is about failure rate.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q"><code>findUserForSupport(id)</code> is wrapped in
+  <code>@CircuitBreaker(name="pingAdminLookup", …)</code> with <code>slidingWindowSize=10</code>
+  and <code>failureRateThreshold=50</code> — no <code>slidingWindowType</code> set anywhere. It's
+  called about twice an hour. Ping Directory has a total outage for six straight hours (12 calls,
+  every one fails). Roughly when does the circuit open?</p>
+  <button type="button">Almost immediately — every call in the outage fails, and 100% is well past a 50% threshold</button>
+  <button type="button">Around the 10th call — roughly five hours in, because slidingWindowSize defaults to counting calls, not seconds</button>
+  <button type="button">After 10 seconds, since slidingWindowSize is measured in seconds unless told otherwise</button>
+  <p class="why" data-for="0">failureRateThreshold only gets evaluated once
+  <code>minimumNumberOfCalls</code> calls exist in the window. A handful of failures "in a moment"
+  isn't enough calls yet for a size-10, count-based window — the percentage is real, but nobody's
+  checking it yet.</p>
+  <p class="why" data-for="1">Right. <code>slidingWindowType</code> defaults to COUNT_BASED, so
+  this window fills one call at a time. At roughly two calls an hour, the 10th call — and the
+  first moment a failure rate even gets computed — lands close to five hours into a six-hour
+  outage. The breaker isn't broken; it's waiting on volume that a quiet endpoint doesn't have.</p>
+  <p class="why" data-for="2">This is the trap itself, not the escape from it.
+  <code>slidingWindowSize</code> only means seconds when <code>slidingWindowType</code> is
+  explicitly set to <code>TIME_BASED</code>. Leave that line out — as this config did — and you
+  get COUNT_BASED, where the number means calls.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three places "enough samples" quietly gates a decision — and one you'd tune differently on purpose.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Kubernetes liveness probes — count × interval = real detection time</h4>
+    <p>A pod's liveness probe with <code>failureThreshold: 3</code> and
+    <code>periodSeconds: 10</code> doesn't restart a hung pod for 30 seconds, minimum — three
+    failed checks, ten seconds apart. Turn either number up "to be safe" and you've also turned up
+    how long a genuinely dead pod keeps taking traffic. Same multiplication as
+    slidingWindowSize × your actual call rate.</p>
+    <div class="hf-scatter"><span>failureThreshold × periodSeconds = detection latency</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Why a 2-sample 100% failure rate never convinces anyone</h4>
+    <p>Two failed coin flips isn't evidence the coin is rigged, and no statistician would act on
+    that sample size regardless of what percentage it produces. <code>minimumNumberOfCalls</code>
+    is that same instinct, hard-coded: a rate computed from too few calls isn't wrong, it's just
+    not trustworthy yet — so Resilience4j refuses to act on it at all.</p>
+    <div class="hf-scatter"><span>100% of 2 ≠ 100% of 100, statistically</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your own overnight Entra sweep</h4>
+    <p>A de-provisioning batch job calls Entra's Graph API once every few minutes, guarded by its
+    own <code>@CircuitBreaker</code> with defaults nobody revisited. If Graph API rate-limits or
+    fails for an hour, that job's low call frequency means its breaker is the last thing in the
+    system to notice — @Retry and a Micrometer alert on the fallback path catch it faster than the
+    breaker ever will, for exactly the reason above.</p>
+    <div class="hf-scatter"><span>low-frequency jobs need alerting, not just a breaker</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">So should slidingWindowSize always be TIME_BASED, to be safe?</p>
+  <p class="a">No — for a busy endpoint, COUNT_BASED is often exactly right: it gives you a
+  predictable memory footprint (a ring buffer of exactly N entries) and it's immune to a traffic
+  spike skewing one time bucket. TIME_BASED earns its keep specifically when call volume is low or
+  uneven enough that "the last N calls" could span anywhere from seconds to hours.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does minimumNumberOfCalls apply the same way to a TIME_BASED window?</p>
+  <p class="a">Yes — it's an independent setting either way. Switching slidingWindowType alone
+  doesn't fix a minimumNumberOfCalls that's still sized for a busy endpoint's traffic. Both need to
+  match the volume you actually expect, not the default that shipped with the annotation.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">If a low-traffic path just can't trip a breaker quickly, what actually protects it?</p>
+  <p class="a">Pair it with a short @TimeLimiter so one call fails fast instead of hanging for a
+  full default timeout, and put an alert on the fallback method itself (a Micrometer counter,
+  logged and shipped to your monitoring). For genuinely rare calls, "notice it happened" beats
+  "prevent the next one" — there often isn't a next one for hours.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  A nightly job calls <code>syncEntraGroups()</code> once every 10 minutes, wrapped in
+  <code>@CircuitBreaker(name="entraSync")</code> with nobody having touched
+  <code>slidingWindowSize</code> or <code>slidingWindowType</code> — both sit at Resilience4j's own
+  defaults. Entra's Graph API returns 5xx for every call, for four straight hours. Before you
+  scroll back up — has the circuit opened by the time someone checks the dashboard at hour four?
+  What single number would you need to know to answer that for certain?
+</div>
+
   <!-- ── HERO: animated circuit breaker state machine · live per-step inspector ── -->
   <div class="panel" style="border:1px solid var(--accent)">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch the circuit breaker trip — CLOSED → OPEN → HALF_OPEN → CLOSED</h2>
@@ -1383,6 +1576,7 @@ renderNodes(cur);
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>

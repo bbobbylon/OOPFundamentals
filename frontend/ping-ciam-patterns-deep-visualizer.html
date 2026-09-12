@@ -66,6 +66,188 @@
     <div class="intro-ciam"><span class="tag">In CIAM / Your Job:</span> In your Angular + Spring + Ping stack: <strong>social login</strong> means Angular has no Google SDK — AM brokers it and Angular just gets a standard Ping JWT. <strong>Risk-based auth</strong> puts a risk-score claim in the JWT — gate high-risk operations (large transfers, account changes) on it. <strong>Consent</strong> means your API checks IDM's consent records before sending marketing or processing PII (a GDPR/CCPA violation is a legal event, not a bug). <strong>Progressive registration</strong> means your profile page updates the IDM record incrementally.</div>
   </div>
 
+
+<p class="hf-deck">or, "link by email address" is a sentence that gives away accounts</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Nobody guessed a password. Nobody phished anything. They clicked "Sign in with Google" and landed in someone else's account.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Account linking matched on the one attribute the user does not have to prove</div>
+  <p>Social login is a genuine win: fewer passwords for you to store, fewer for the user to forget,
+  and a signup form that is one button instead of eight fields. So you add the obvious linking
+  rule — when a social login arrives and the email in the token already exists in PingDS, treat it
+  as the same person and link the accounts. Otherwise every user who signed up with a password in
+  March and clicked Google in April ends up with two accounts, and your support queue fills with
+  "where did my order history go?"</p>
+  <p>Now read the rule back with an attacker's eyes. It grants access to an existing account on the
+  strength of an <b>email claim in a token from a provider you do not run</b>. Some providers verify
+  that address. Some let you type anything at signup and never check. Some send no
+  <code>email_verified</code> claim at all, and a linking rule that does not look for the claim
+  cannot tell those cases apart. Register at the weakest IdP in your list using
+  <code>someone.else@company.com</code>, click your login button, and the linking rule does the
+  rest — <b>quietly, with no password reset, no notification, and an audit log that records a
+  perfectly normal successful login.</b></p>
+  <div class="hf-scatter">
+    <span>token signature valid ✓</span>
+    <span>issuer is one you configured ✓</span>
+    <span>the login genuinely succeeded ✓</span>
+    <span>email_verified: never checked ⚠</span>
+    <span>proof of control: never asked for ⚠</span>
+  </div>
+  <p class="hf-foot">Federation moved where the password lives. It did not move where the trust
+  decision has to be made.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Link on proof, key on identifiers that cannot be re-typed</div>
+  <div class="hf-ladder">
+    <b>Key the account on <code>iss</code> + <code>sub</code> — the issuer and its subject identifier — never on the email address</b>
+    <i>↓ sub is opaque, stable and unique to that provider; email is a mutable contact detail the user can change and the provider can reassign</i>
+    <b>Refuse to auto-link unless <code>email_verified</code> is true AND the provider is one you actually trust to have verified it</b>
+    <i>↓ an absent claim is not a true one — treat missing as unverified, the same way you would treat an absent risk score as risky</i>
+    <b>Then make the user prove control of the existing account before the link is created — sign in with the old credential, or confirm from the mailbox</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>An email address is a way to reach someone, not a way to identify them.</b> It is mutable, it
+  is re-assignable, it is asserted by whichever provider the user chose, and it is the one field in
+  the token the user can usually type themselves. Identity keys have to be stable and
+  issuer-controlled — which is exactly what <code>sub</code> is for, and exactly why linking logic
+  keyed on the friendly human-readable field is where CIAM systems get taken apart.
+</div>
+
+<div class="hf-note">Linking by email is <b>letting someone into the building because they know the
+name on the mailbox</b>. The name is public. Knowing it was never the point — having the key
+was.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>The token is signed by a provider we configured. Why is the email in it not good enough?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The social IdP</span>
+    <p>Because the signature covers what I <i>said</i>, not how carefully I checked it. I am telling
+    you truthfully that this account at my service carries that email address. Whether anyone ever
+    proved control of that mailbox depends entirely on my signup policy — which is mine, not yours,
+    and which I can change next quarter without telling you.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The <code>email_verified</code> claim</span>
+    <p>Which is why I exist, and why my absence matters as much as my value. Plenty of providers
+    omit me. A rule that reads <code>if (token.email_verified)</code> treats me as false when I am
+    missing, which is the right instinct — but only if someone wrote the rule at all.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Your linking rule</span>
+    <p>And I am the one actually granting the access. Everything upstream of me is a statement;
+    I am the decision. Which means the assurance has to be checked here, in my logic, and not
+    assumed from the fact that a signature verified three steps earlier.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps. Every one of them is a feature working as designed.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A real customer registers with a password. PingIDM creates a managed user with <code>mail: j.smith@example.com</code></span><span class="tag">the account being targeted</span></li>
+    <li class="open"><span>An attacker signs up at the weakest social provider in your list, typing the same address into a form that never verifies it</span><span class="tag">no attack yet — just a signup</span></li>
+    <li><span>They click <b>Sign in with…</b> on your site. AM brokers it, the provider returns a validly signed token carrying that email</span><span class="tag">the token is genuine</span></li>
+    <li class="open"><span>Your linking rule finds an existing user with that <code>mail</code> value and links the social identity to it</span><span class="tag">the decision, made on one string</span></li>
+    <li><span>AM issues your standard session and JWT. To every downstream system this is the customer, and nothing distinguishes it</span><span class="tag">indistinguishable from here on</span></li>
+    <li class="open"><span>Order history, saved cards, stored addresses, support chat — all of it, without a password reset email ever being sent</span><span class="tag">and no notification fires</span></li>
+  </ol>
+  <p class="hf-annot">Step 6 is what makes this worse than a stolen password: the usual takeover
+  leaves fingerprints — a reset email the victim did not request, a login from an unfamiliar
+  country, a locked-out customer who calls you. Here the victim can still log in normally with
+  their own password, because nothing was changed. There is no lockout, no reset, no anomaly. The
+  <i>only</i> record is an ordinary successful federated login, which is why this is usually found
+  during an unrelated investigation rather than reported.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">one string: <code>j.smith@example.com</code><small>typed by a human, asserted by a provider, verified by nobody in particular</small></div>
+    <div class="fan">everything downstream that treats it as an identity ↓</div>
+    <div class="obs">
+      <span>the support tool — searches by email, so two people look like one</span>
+      <span class="new">your account-linking rule — grants access on the strength of it</span>
+      <span>marketing and consent records — keyed on it, so preferences follow the string</span>
+      <span>your audit log — records it, making the two logins indistinguishable</span>
+    </div>
+  </div>
+  <p class="hf-annot">Only one of these four is a security decision, and it is sitting in the same
+  pile as three conveniences. That is the real lesson: <b>an identifier picks up trust simply by
+  being used everywhere</b>. The address is genuinely the right key for search, for messaging and
+  for preferences — it is only catastrophic in the one place that grants access. Worth noting the
+  slower version of the same bug, too: corporate mail systems recycle addresses, so keying on email
+  means the next J. Smith inherits the last one's account, and no attacker is required at all.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Your CIAM stack auto-links a social login to an existing account whenever the token's
+  <code>email</code> claim matches an existing user's <code>mail</code> attribute. The tokens are
+  properly signed, the issuer is one you configured, and the signature is verified every time. Why
+  is this an account-takeover risk?</p>
+  <button type="button">It is not — a valid signature from a configured issuer proves the provider authenticated the user, and that is the property account linking depends on</button>
+  <button type="button">Because an attacker can forge the <code>email</code> claim after the token is issued, since that claim sits outside the signed portion of a JWT</button>
+  <button type="button">Because the signature proves who issued the token, not that anyone ever verified the address inside it — so an attacker who registers the victim's email at a provider that does not verify it gets linked straight in</button>
+  <p class="why" data-for="0">The signature proves the provider authenticated <i>an account at that
+  provider</i>. It says nothing about whether the email attached to that account was ever verified,
+  which is a separate question decided by that provider's signup policy. The two get conflated
+  constantly, and the conflation is the whole vulnerability.</p>
+  <p class="why" data-for="1">The signature covers the entire payload, so a modified claim fails
+  verification — that part of the design is sound, and this is the attack people expect and
+  correctly defend against. No forgery is needed here. The attacker gets a <i>genuine</i> token
+  containing that email, because the provider was willing to issue one.</p>
+  <p class="why" data-for="2">Right — and the fix is the same shape as everywhere else in identity:
+  key on something the user cannot type. Match on <code>iss</code> + <code>sub</code>, require
+  <code>email_verified</code> to be explicitly true from a provider you trust to mean it, and
+  require proof of control of the existing account before creating the link.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Every system eventually picks the human-readable field as its key, and every one of them regrets it.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Usernames are not primary keys either</h4>
+    <p>Any database that keyed rows on a display name learned the same lesson when someone renamed
+    themselves, or when a deleted handle was released and re-registered by a stranger who inherited
+    the mentions. Surrogate keys exist so identity survives the user editing their own attributes.
+    Entra's immutable object ID is the same idea wearing a different name.</p>
+    <div class="hf-scatter"><span>natural keys are not keys</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Pre-hijacking — the same trick, run in the other direction</h4>
+    <p>The attacker registers first, using an address the victim has not signed up with yet. The
+    victim later arrives via social login, the service merges them into the waiting account, and the
+    attacker keeps a session in something the victim believes is theirs alone. Same defect, reversed
+    timeline — which is why "did they exist first?" is not a defence.</p>
+    <div class="hf-scatter"><span>order of arrival proves nothing</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Trusting a header your gateway "always sets"</h4>
+    <p>An app that believes <code>X-Authenticated-User</code> because only the proxy is supposed to
+    set it has made the identical mistake: taking an assertion's <i>presence</i> as evidence of the
+    process that was meant to produce it. The question is never "is this field here?" — it is
+    "what, exactly, had to be true for it to be here?"</p>
+    <div class="hf-scatter"><span>presence is not provenance</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> CIAM is workforce IAM turned inside out — self-service
+  registration, progressive profiling so you ask for as little as possible up front, social login
+  brokered by AM so your app never touches a Google SDK, passkeys and push instead of passwords,
+  risk-based step-up, and consent records you can prove. The sentence to carry into the linking
+  logic: <b>match on <code>iss</code> + <code>sub</code> and require proof of control — an email
+  address identifies a mailbox, never a person.</b>
+</div>
+
   <section>
     <h2>1. CIAM vs workforce IAM</h2>
     <div class="card">
@@ -260,6 +442,7 @@ rkRender(); rkScore();
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

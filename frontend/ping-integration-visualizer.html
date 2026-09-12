@@ -104,7 +104,193 @@
     <div class="intro-ciam"><span class="tag">In CIAM / Your Job:</span> This is your exact stack — Angular (angular-oauth2-oidc/MSAL) + Spring (spring-security-oauth2-resource-server) + PingFederate — built and debugged daily. Internalize the bounded responsibilities: Angular runs the auth flow and token storage, Spring validates tokens (never issues), Ping issues them and owns authorization. When something breaks, isolate the layer: is the token being <em>obtained</em>, <em>sent</em>, or <em>accepted</em>? Three different problems, three different fixes.</div>
   </div>
 
-  <!-- ── HERO: animated Angular→Ping→Spring round-trip · happy path + the 3 classic failures · live per-hop inspector ── -->
+  
+<p class="hf-deck">or, the one property line that decides whether your API can start before Ping does</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The API was down for seven minutes after PingFederate came back healthy. Ping was not the reason.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle"><code>issuer-uri</code> is not configuration — it is an HTTP call, made once, during startup</div>
+  <p>Every guide tells you to set one property and let Spring work the rest out:</p>
+  <p>When Spring Boot sees <code>spring.security.oauth2.resourceserver.jwt.issuer-uri</code> and no
+  <code>jwk-set-uri</code>, it builds the decoder with <code>JwtDecoders.fromIssuerLocation(...)</code>
+  — which <b>fetches <code>/.well-known/openid-configuration</code> from PingFederate while the
+  application context is starting</b>, to discover the JWKS URL and confirm the issuer matches. If
+  that call fails, the bean fails, the context fails, and the process exits. Your API cannot start
+  while the IdP is unreachable — and that dependency is invisible, because it lives inside a
+  property that looks like a constant.</p>
+  <p>Nothing is wrong on an ordinary deploy: Ping has been up for months. It bites during a
+  <b>correlated restart</b> — a patching window, a node drain, a cluster upgrade — when everything
+  comes back at once and PingFederate takes ninety seconds. Twelve pods crash on boot, Kubernetes
+  restarts them, they crash again, and <code>CrashLoopBackOff</code> stretches the retry interval
+  out toward five minutes. By the time Ping is healthy your pods are all sitting in a long backoff
+  timer. <b>The outage now outlives its own cause</b>, and the incident review blames the IdP.</p>
+  <div class="hf-scatter">
+    <span>config is correct ✓</span>
+    <span>issuer matches discovery ✓</span>
+    <span>works on every normal deploy ✓</span>
+    <span>startup requires the IdP live ⚠</span>
+    <span>backoff outlasts the recovery ⚠</span>
+  </div>
+  <p class="hf-foot">A runtime dependency degrades requests. A startup dependency kills the process
+  — and then makes you wait.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Set both properties, and the startup call disappears</div>
+  <div class="hf-ladder">
+    <b>Set <code>jwk-set-uri</code> as well as <code>issuer-uri</code></b>
+    <i>↓ with a jwk-set-uri present, Spring builds the decoder directly and skips discovery entirely — and the JWKS itself is fetched lazily, on the first token it validates</i>
+    <b>Keep <code>issuer-uri</code> alongside it, because that is what still registers the issuer validator</b>
+    <i>↓ you lose the discovery round trip, not the <code>iss</code> check — dropping issuer-uri to "simplify" is how a token from a neighbouring tenant starts being accepted</i>
+    <b>Then let the liveness probe cover the rest: a pod that starts and reports unready beats a pod that never starts at all</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Turning a runtime dependency into a startup dependency multiplies its blast radius.</b> If the
+  IdP is briefly unreachable while your API is running, some requests fail and recovery is
+  automatic. If it is unreachable while your API is <i>starting</i>, the process dies, the
+  orchestrator backs off, and your recovery is now gated on a timer rather than on the dependency.
+  Anything a service does eagerly at boot should be something it can also survive.
+</div>
+
+<div class="hf-note">Eager discovery at startup is <b>a car that will not start unless the petrol
+station is open</b>. Perfectly reasonable most mornings, and a genuinely strange thing to find out
+about your car at 3am.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>It is one line of YAML. How is one line of YAML a network call?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Spring Boot's auto-configuration</span>
+    <p>Because I have to turn your issuer into a JWKS URL somehow, and the standard way is to ask
+    the issuer. When only <code>issuer-uri</code> is set I call
+    <code>JwtDecoders.fromIssuerLocation()</code> while building the bean — so the call happens
+    where beans are built, which is startup. Give me a <code>jwk-set-uri</code> and I have nothing
+    to look up, so I do not look anything up.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The JWKS fetch</span>
+    <p>And I am a different call entirely — the one that actually gets the keys. I am lazy: I do not
+    run until the first token needs verifying, and I cache what I find. That is why a resource
+    server with <code>jwk-set-uri</code> starts perfectly well with the IdP down, and only begins
+    failing requests once traffic arrives.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Kubernetes</span>
+    <p>Meanwhile I do exactly what I was designed to do. A container that exits gets restarted, and
+    a container that keeps exiting gets restarted more slowly — otherwise a crash loop would burn a
+    node. That backoff is protecting the cluster from your pod. It is not going to notice that the
+    reason has since been fixed.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps between "the IdP blinked" and "the API is still down".</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A maintenance window restarts the platform. PingFederate and your API pods come back at the same moment</span><span class="tag">correlated, not independent</span></li>
+    <li class="open"><span>Your context starts, reaches the JWT decoder bean, and calls <code>/.well-known/openid-configuration</code> — Ping is still booting, so the call fails</span><span class="tag">the hidden network call</span></li>
+    <li><span>Bean creation fails, the context fails, the JVM exits. The pod is marked <code>Error</code></span><span class="tag">no degraded mode to fall into</span></li>
+    <li class="open"><span>Kubernetes restarts it, and it fails again. After a few rounds the backoff interval grows toward five minutes</span><span class="tag">protecting the node from you</span></li>
+    <li><span>Ninety seconds in, PingFederate is healthy. Nothing tells your pods, because a pod in backoff is not running anything that could notice</span><span class="tag">the recovery goes unobserved</span></li>
+    <li class="open"><span>Pods return when their timers expire, not when the dependency recovers — several minutes of outage caused entirely by the retry policy</span><span class="tag">self-inflicted tail</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the part worth remembering, because it inverts the usual intuition
+  about retries. Backoff is the right policy for a dependency that may be overloaded — hammering it
+  makes recovery slower for everyone. But it is the wrong policy for a dependency that recovers on
+  its own schedule and does not care how often you ask, and it is actively harmful when the thing
+  backing off is the only thing that could detect the recovery. Which is the general shape:
+  <b>an exponential backoff on a boot-time check converts a short dependency outage into a longer
+  one of your own making.</b></p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">how your resource server learns Ping's signing keys<small>and what that costs you at boot</small></div>
+    <div class="arrow">what each configuration actually does →</div>
+    <div class="opts">
+      <span><code>issuer-uri</code> alone → discovery call at startup; validates <code>iss</code>; will not start if Ping is down</span>
+      <span class="on">both properties → no discovery call, lazy JWKS fetch, <code>iss</code> still validated</span>
+      <span><code>jwk-set-uri</code> alone → starts fine, but nothing validates <code>iss</code></span>
+      <span>neither → no resource server configured at all</span>
+    </div>
+  </div>
+  <p class="hf-annot">Rows one and three are the two obvious configurations, and each trades away
+  something the other keeps — which is exactly why people end up choosing between availability and
+  a security check that they should never have had to choose between. Row two is not a compromise;
+  it is strictly better than both, and it costs one extra line. The only reason it is not the
+  default is that discovery is genuinely convenient when you do not know the JWKS URL — so look it
+  up once, by hand, and write it down.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your Spring API sets only
+  <code>spring.security.oauth2.resourceserver.jwt.issuer-uri</code>. A maintenance window restarts
+  PingFederate and your API pods simultaneously; Ping takes 90 seconds to become healthy. What
+  happens to the API?</p>
+  <button type="button">It starts normally and simply returns 401 for any request that arrives during those 90 seconds, because key fetching is lazy and only affects token validation</button>
+  <button type="button">It fails to start — the decoder bean makes a discovery call during startup — and then stays down past Ping's recovery, because the crash-loop backoff has grown to minutes</button>
+  <button type="button">It starts normally; Spring retries the discovery call in the background with a short interval and begins serving as soon as the IdP responds</button>
+  <p class="why" data-for="0">This is the behaviour of <code>jwk-set-uri</code>, and it is the one
+  you want — the JWKS fetch really is lazy and really does fail gracefully per request. With
+  <code>issuer-uri</code> alone, a <i>different</i> call happens first: discovery, during bean
+  creation, before the application is serving anything at all.</p>
+  <p class="why" data-for="1">Correct, and the second half is what turns an annoyance into an
+  incident. The crash loop is not a bug in Kubernetes — backoff is the right default for a
+  container that keeps dying. It just means your recovery is now driven by a timer rather than by
+  the dependency's actual state, which is why the outage outlasts its cause and why the postmortem
+  usually points at the wrong system.</p>
+  <p class="why" data-for="2">There is no background retry: the decoder is built once, when the
+  context starts, and a failure there is fatal to the context. That is a deliberate design — a
+  half-configured resource server would be far more dangerous than one that refuses to run. The
+  cure is to remove the startup call rather than to make it forgiving.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Every service eventually does something at boot it cannot survive failing.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Flyway migrating on startup against a database still electing a primary</h4>
+    <p>Same shape exactly: a boot-time call to a dependency that is also restarting, no degraded
+    mode, and a crash loop that outlives the failover. The general rule is worth stating plainly —
+    <b>if it can fail, it should not be the reason the process cannot exist.</b></p>
+    <div class="hf-scatter"><span>boot-time calls are boot-time risks</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Readiness and liveness probes being different things for this reason</h4>
+    <p>Readiness says "do not send me traffic yet"; liveness says "kill me". A dependency that is
+    temporarily unavailable is a readiness concern, and a service that treats it as a liveness
+    concern removes its own ability to wait. Starting up and reporting unready is almost always the
+    better failure.</p>
+    <div class="hf-scatter"><span>not ready ≠ not alive</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>The thundering herd, and why correlated restarts are their own category</h4>
+    <p>Failures that would be harmless independently become an outage when they happen together — a
+    cache flush, a token expiry wave, a deploy that restarts every pod at once. It is why the
+    interesting question about any dependency is not "how often does it fail?" but "what else is
+    failing at the same moment?"</p>
+    <div class="hf-scatter"><span>test the restart, not just the request</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Angular gets a token from PingFederate, sends it to Spring as a
+  Bearer, and Spring validates it against Ping's JWKS — with the classic breakages being an issuer
+  mismatch, a CORS preflight blocked before the CORS filter, a redirect URI that does not match
+  character for character, and roles arriving in a custom claim your converter has to be told about.
+  The operational sentence to add: <b><code>issuer-uri</code> alone makes discovery a startup call,
+  so set <code>jwk-set-uri</code> too</b> — same validation, no boot-time dependency on the IdP.
+</div>
+
+<!-- ── HERO: animated Angular→Ping→Spring round-trip · happy path + the 3 classic failures · live per-hop inspector ── -->
   <div class="panel" style="border:1px solid var(--accent)">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:#ff6070">▶ Watch one API call — working, and the 3 ways it breaks</h2>
     <p style="font-size:13px;color:var(--muted);margin:6px 0 12px">Integration bugs almost always live in <b>one specific hop</b>. Pick a scenario and press ▶ — the chip is the request (or response) in flight, and the inspector shows the <b>real artifacts</b>: the Bearer header, the JWT's iss/aud/exp/groups claims, the CORS preflight, and the authority mapping. The last three scenarios reproduce the page's top support tickets — and end on the fix.</p>
@@ -661,6 +847,7 @@ conv.setAuthorityPrefix("ROLE_");
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

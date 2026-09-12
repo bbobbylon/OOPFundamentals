@@ -71,6 +71,12 @@
  *                    declarations onto <html>, plus a light-only rule. It
  *                    silently killed the entire component half of the cream
  *                    theme once; nothing throws and the dark theme looks fine
+ *   9  stats denom    the backend's app.progress.total-topics default equals the
+ *                     number of pages tracks-data.js registers. The backend cannot
+ *                     read tracks-data.js, so it mirrors the count — and a mirror
+ *                     with nothing checking it drifts: this shipped as a hard-coded
+ *                     200 against a registry of 521, inflating every learner's
+ *                     completion percentage ~2.6x. Skipped when backend/ is absent.
  *
  * Failures are errors; drift that is not yet clean is reported as a warning
  * so the gate can land before every last page is perfect.
@@ -155,6 +161,19 @@ if (tracks) {
     if (!registered.has(f) && !ALLOW_UNREGISTERED.has(f)) {
       warn(f, 'on disk but not registered in tracks-data.js (unreachable from the hub)');
     }
+  }
+}
+
+/* ── 9. the backend's completion denominator mirrors this registry ──────── */
+const APP_YML = join(HERE, '..', 'backend', 'src', 'main', 'resources', 'application.yml');
+if (tracks && existsSync(APP_YML)) {
+  const m = readFileSync(APP_YML, 'utf8').match(/total-topics:\s*\$\{[A-Z_]+:(\d+)\}/);
+  if (!m) {
+    err('backend/application.yml', 'app.progress.total-topics not found — ProgressService needs it to size the completion percentage');
+  } else if (+m[1] !== registered.size) {
+    err('backend/application.yml',
+        `app.progress.total-topics is ${m[1]} but tracks-data.js registers ${registered.size}. ` +
+        'Update the default so the stats endpoint stops reporting a percentage of the wrong total.');
   }
 }
 

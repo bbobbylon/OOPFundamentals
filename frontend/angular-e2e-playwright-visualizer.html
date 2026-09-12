@@ -63,6 +63,224 @@
     </div>
   </div>
 
+<p class="hf-deck">or, sharding makes your tests parallel — it doesn't make your database parallel</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The test is right. The assertion is right. It fails one CI run in ten anyway.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The suite is "flaky" again — except this flakiness has nothing to do with waiting</div>
+  <p>A spec seeds five orders for a test user, then asserts
+  <code>expect(ordersTable.rows).toHaveCount(5)</code>. Run it alone —
+  <code>npx playwright test order.spec.ts</code> — and it passes every single time, instantly.
+  Push it to CI, where the pipeline runs <code>--shard=2/4</code> across four parallel workers
+  against the one Postgres container the pipeline spins up for the whole job, and it fails roughly
+  one run in ten with a count of 6, 7, or 8. Nobody touched a fixed delay. <code>getByRole</code>
+  is auto-waiting exactly like it should. The test is reading the DOM correctly — the DOM is
+  correctly reflecting a database table that a completely different shard's test, committing at
+  that exact moment, also just inserted a row into.</p>
+  <div class="hf-scatter">
+    <span>passes locally, every time ✓</span>
+    <span>no waitForTimeout anywhere in the spec ✓</span>
+    <span>4 shards, 1 shared Postgres container ⚠</span>
+    <span>count assertion reads rows another shard just wrote ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption underneath: that "fresh, seeded database" (true once, at
+  pipeline start) means "isolated database, per test" — sharding parallelizes the browsers; nobody
+  parallelized the data.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Give every test its own slice of data, not just its own browser</div>
+  <div class="hf-ladder">
+    <b>First move: scope every assertion to data THIS test created — count orders WHERE user_id = testUser.id, not the whole table</b>
+    <i>↓ a concurrent shard inserting unrelated rows can no longer move your number</i>
+    <b>Better: one throwaway schema (or database) per shard, instead of one shared instance for the whole job</b>
+    <i>↓ parallel workers stop being able to see each other's writes at all, which is what "parallel" was supposed to mean</i>
+    <b>The result: 4 shards run 4x faster AND stop being able to interfere with each other's data</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Parallel workers and a shared database are two different kinds of "isolated" pretending to
+  be one.</b> Sharding genuinely gives every worker its own browser, its own process, its own test
+  run — but if all four still point at the one Postgres container the pipeline spun up, the data
+  underneath every one of those "isolated" tests is the same table, being written to by strangers,
+  at the same time. It's the same shape of bug as a previous test's toast still fading over a
+  button — leftover state colliding with this run — just one layer down, in the database instead
+  of the DOM.
+</div>
+
+<div class="hf-note">Think of CI sharding as <b>four cashiers ringing up four different customers
+at four different registers, sharing one stockroom shelf in the back</b>. Each register really is
+independent — separate line, separate customer, separate receipt. But if two cashiers both grab
+from the same shelf of "5 remaining blue shirts" at the same moment, neither sale waits for the
+other, and both cashiers walk away confident there are still shirts left. The registers were never
+the problem. The shelf was never split.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I sharded my suite across 4 workers so it runs 4x faster. The database is fresh and seeded
+    before the run starts. What could two workers possibly step on?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Postgres</span>
+    <p>I don't know "shard 2" from "shard 3." I see two ordinary transactions inserting into the
+    same orders table a few milliseconds apart, and I do exactly what I'm built to do with
+    concurrent writes: commit them both.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Playwright's actionability check</span>
+    <p>I did my job perfectly. The row genuinely was there — attached, visible, stable, not
+    animating — the moment I checked. I have no way to know it belongs to someone else's test.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The count assertion</span>
+    <p>And I trusted the row count because nobody told me to scope it. <code>WHERE user_id =
+    testUser.id</code> was always sitting right there in the query I could have written.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Four shards. One database. Zero coordination between them — by design, until you add it.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>CI starts one Postgres service container and seeds it once, before any shard begins</span><span class="tag">"fresh" happens once per pipeline run, not once per test</span></li>
+    <li class="open"><span>The pipeline launches 4 parallel workers, each running <code>--shard=N/4</code> — separate processes, separate browsers, <b>the same database connection string</b></span><span class="tag">this line is what creates the sharing</span></li>
+    <li><span>Shard 2's test inserts 5 rows for its own test user and asserts <code>toHaveCount(5)</code> against the whole table</span><span class="tag">correct, in isolation</span></li>
+    <li class="open"><span>At nearly the same instant, Shard 3's completely unrelated test inserts 2 rows of its own into the same table, for a different test user</span><span class="tag">also correct, also in isolation</span></li>
+    <li><span>Shard 2's <code>SELECT count(*) FROM orders</code> has no <code>WHERE</code> clause narrowing it to its own user — it counts every row that exists at that instant, from anyone</span><span class="tag">the actual defect</span></li>
+    <li class="open"><span>The count lands on 5, 7, or somewhere else entirely, purely by scheduling luck — the test is flaky not because anything raced a clock, but because it raced <b>other tests' data</b></span><span class="tag">timing-flaky and data-flaky look identical in a CI log</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the lesson. Steps 1 through 4 are the pipeline working exactly as
+  configured — a shared service container, four honest parallel workers, two tests that are each
+  individually correct. The only line that's actually wrong is the query with no
+  <code>WHERE</code> clause, silently counting the whole table instead of the slice this test
+  owns. Fix step 5 alone and steps 1-4 stop mattering, because nothing about them was ever the
+  bug.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>Shard 1 · order.spec.ts</span>
+      <span>Shard 2 · checkout.spec.ts</span>
+      <span>Shard 3 · admin.spec.ts</span>
+      <span>Shard 4 · refund.spec.ts</span>
+    </div>
+    <div class="funnel">all four INSERT/SELECT against ↓</div>
+    <div class="instance">one shared orders table<small>seeded once at pipeline start — not reset between shards, not scoped per test</small></div>
+  </div>
+  <p class="hf-annot">Sharding drew four separate lanes for the browsers and never touched the
+  table at the bottom — that was never sharding's job. Every one of those four specs is,
+  individually, a well-written test. Put one unscoped count assertion in any of them and this
+  diagram is the whole explanation for why it only fails when the other three lanes happen to be
+  busy at the same moment.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">You fix the flaky <code>toHaveCount(5)</code> assertion by scoping it to
+  <code>WHERE user_id = testUser.id</code> instead of counting the whole table. Later, someone
+  disables sharding entirely — the whole suite now runs sequentially, one worker,
+  <code>--shard=1/1</code> — reasoning that "there's no concurrency left, so the scoping fix
+  doesn't matter anymore." Are they right to revert it?</p>
+  <button type="button">No — a sequential run still executes other spec files against the same seeded database, and any of their leftover, un-cleaned-up rows land in the same unscoped count; the fix protects against shared data, not just concurrent writes</button>
+  <button type="button">Yes — with one worker there's no concurrent writer, so an unscoped count is safe again</button>
+  <button type="button">No — but only because a single worker can still race its own test's async database write against its own next assertion, the same kind of timing issue as the fixed-delay scenario</button>
+  <p class="why" data-for="0">Right — concurrency made this bug fail loudly and often, but it was
+  never the actual cause. The cause is an assertion that counts rows it doesn't own. Any earlier
+  spec file in the same sequential run that seeds an order and doesn't clean up leaves rows
+  sitting in that same table, and the very next spec's unscoped count reads them too — just less
+  often, and more confusingly, because now it depends on test order instead of shard timing.</p>
+  <p class="why" data-for="1">This is the reasonable-sounding trap: "no parallelism" does feel like
+  "no shared state." But every spec file in that one sequential run still shares the same database
+  instance and the same tables across the whole run — <code>order.spec.ts</code> running before
+  <code>checkout.spec.ts</code> and leaving rows behind reproduces the identical symptom, just
+  triggered by test order instead of two shards landing on the same millisecond.</p>
+  <p class="why" data-for="2">By the time this assertion runs, Playwright has already auto-waited
+  for the DOM to reflect whatever the database actually contains — that part genuinely isn't
+  racing anything. The bug isn't about WHEN the count becomes visible, it's about WHICH rows are
+  in it. That's a scope problem, not a timing problem, which is exactly why the fixed-delay fix
+  from earlier doesn't apply here.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Many workers, one shared thing, nobody coordinating — the oldest bug shape in concurrent systems.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Your shared CIAM test tenant has the exact same disease</h4>
+    <p>A throwaway Postgres container at least gets destroyed every pipeline run. A shared Entra ID
+    or PingOne test tenant usually doesn't — it's one long-lived environment the whole team's local
+    runs and every CI pipeline point at together. Two engineers' E2E suites both trying to register
+    the same <code>e2e-test-user@…</code> email at the same moment collide exactly like the orders
+    table did, except the fix is harder: you can't spin up a fresh throwaway IdP tenant per shard
+    the way you can spin up a fresh database.</p>
+    <div class="hf-scatter"><span>same disease, harder to reset</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Two threads incrementing one counter — the original version of this bug</h4>
+    <p>This is the same shape as the classic "two threads, one shared counter, no lock" race from
+    every concurrency textbook: each thread reads the current value, computes current+1, and
+    writes it back, and if both read before either writes, one increment is silently lost. Sharded
+    Playwright workers aren't threads and Postgres isn't a bare int in memory, but the shape is
+    identical — independent actors mutating one shared piece of state with nothing coordinating
+    the order.</p>
+    <div class="hf-scatter"><span>read-modify-write, no lock, shared state ⚠</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Why Spring's @Transactional has an isolation level at all</h4>
+    <p>Postgres's default READ_COMMITTED isolation is exactly why Shard 2's SELECT can see
+    Shard 3's just-committed INSERT — that's not a Postgres bug, it's the whole point of
+    READ_COMMITTED. A SERIALIZABLE transaction would prevent that phantom read, at the cost of
+    throwing serialization failures under real contention instead. E2E tests don't reach for
+    isolation levels, though — scoping every query to data the test actually owns is cheaper and
+    doesn't need a database expert to tune.</p>
+    <div class="hf-scatter"><span>READ_COMMITTED allows phantom reads by design</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Why not just give every shard its own database instead of scoping every query?</p>
+  <p class="a">That works too, and for a big suite it's often the better long-term fix — a
+  throwaway schema (or a full ephemeral container) per shard makes cross-shard interference
+  structurally impossible instead of relying on every author remembering to scope every assertion.
+  The trade-off is setup cost: spinning up N database instances instead of one is more pipeline
+  configuration, and it doesn't retroactively fix a spec someone runs locally against a shared dev
+  database anyway. Scoping the query is the cheaper fix that also protects you outside CI.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">How would I even notice this kind of flakiness, versus the fixed-delay kind?</p>
+  <p class="a">Look at what changes between the passing run and the failing one. Timing-flakiness
+  (the fixed-delay kind) correlates with load — it gets worse on a slow or busy runner and often
+  clears up on an immediate rerun. Data-flakiness like this correlates with what ELSE was running
+  at the same time — it gets worse with MORE parallel shards, not a slower one, and a trace replay
+  will show the assertion reading a row count that includes data your test never created. The DOM
+  was never wrong; the table was.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does this affect the network-interception scenario too, since that mocks the backend entirely?</p>
+  <p class="a">No, and that's worth noticing: a fully-mocked backend (<code>page.route()</code>
+  returning canned JSON) has no shared database at all, so it can't have this exact bug — each
+  test's mock is scoped to that test by construction. This is specifically a hazard of the CI
+  scenario's other approach — a real, shared, ephemeral backend — which is the trade-off you take
+  on for testing against something real instead of a fake.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  Your fix scopes every assertion to <code>WHERE user_id = testUser.id</code>, and each spec
+  creates its own fresh, randomly-generated test user — so no two specs ever share a user's rows
+  again. A different spec asserts
+  <code>expect(adminDashboard.totalActiveTenants).toHaveText('12')</code>, a single global number
+  with no owning user to scope by. Does the same fix apply to that assertion — and if four shards
+  run it at once, what actually has to change?
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -342,5 +560,6 @@ DevHubCodeWalk.mount('#cw-e2e-mount', {
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

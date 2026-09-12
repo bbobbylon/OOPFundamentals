@@ -96,6 +96,189 @@
     </div>
   </div>
 
+
+<p class="hf-deck">or, a vault whose keyholder list you are allowed to edit is not really locked</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">"Only the app can read production secrets." True about permissions. False about outcomes.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The platform team has Contributor so they can manage the vault — and the access policy is part of the vault</div>
+  <p>The separation looks clean and everybody agrees to it. The <b>control plane</b> is the Azure
+  Resource Manager surface: create the vault, configure networking, set diagnostics, manage tags.
+  The <b>data plane</b> is the secrets themselves: get, list, set. Contributor gets you the first
+  and, as Microsoft's own documentation says plainly, not the second. So the platform team manages
+  infrastructure, the app reads secrets through its managed identity, and no human is in the path.</p>
+  <p>Now ask where the data-plane permissions are stored. Under the classic <b>vault access
+  policy</b> model, they are a property <i>of the vault resource</i> — and editing the vault
+  resource is a control-plane operation, which Contributor has. So a Contributor cannot read a
+  secret in one call, and can in two: add themselves to the access policy, then read whatever they
+  like. No approval, no role assignment, no escalation request. <b>The boundary between the two
+  planes is configured by a setting that lives on the wrong side of it.</b></p>
+  <div class="hf-scatter">
+    <span>no data-plane permission granted ✓</span>
+    <span>app uses a managed identity ✓</span>
+    <span>no secret in any config file ✓</span>
+    <span>Contributor can edit access policies ⚠</span>
+    <span>two calls from infra rights to every secret ⚠</span>
+  </div>
+  <p class="hf-foot">And the second call looks entirely ordinary in the audit log, because reading a
+  secret you have access to is not an anomaly.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Switch the vault to the RBAC permission model, where granting requires a different right than managing</div>
+  <div class="hf-ladder">
+    <b>Set the vault's permission model to <b>Azure RBAC</b> instead of access policies</b>
+    <i>↓ data-plane access now comes from role assignments, and creating a role assignment needs <code>Microsoft.Authorization/roleAssignments/write</code> — which Contributor does not have</i>
+    <b>Grant the app <code>Key Vault Secrets User</code> and nothing more; keep <code>Key Vault Administrator</code> off everything that runs unattended</b>
+    <i>↓ read-only at the data plane is almost always the whole requirement, and it is a role you can hand out without a conversation</i>
+    <b>Then treat Owner and User Access Administrator as the real crown jewels, because those are the rights that can re-grant anything</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A separation of duties that one of the parties can edit is not a separation of duties.</b> The
+  useful question about any control is never "who is allowed through it?" but "who is allowed to
+  change who is allowed through it?" — because those two lists are the same list, one step removed.
+  Control-plane and data-plane is a genuine and valuable distinction; it only holds when the
+  configuration that defines it is itself governed by a right that neither side casually has.
+</div>
+
+<div class="hf-note">Under the access-policy model, Contributor is <b>the person who cannot open the
+safe but can rewrite the list of people who can</b>. Nobody puts that on an access review, because
+it is not access — it is one edit away from access.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>Contributor explicitly does not grant data-plane access. Isn't that exactly the guarantee I want?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The control plane</span>
+    <p>It is an accurate statement about a single API call, and it is the one people quote. What it
+    does not say is that I can modify the vault resource — and under the access-policy model, the
+    list of who may read secrets is a property of that resource. I am not breaking the rule. The
+    rule was drawn around the wrong object.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The RBAC permission model</span>
+    <p>Which is why I moved it. With me, data-plane permission is a role assignment, and creating
+    role assignments is its own right that Contributor does not hold. Same two planes, same
+    intuition — the difference is that the boundary is now enforced by something outside the
+    resource being protected.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Your managed identity</span>
+    <p>And I am unaffected either way, which is worth saying: I get a token from the platform, with
+    no secret anywhere, and I read what I am entitled to read. The vulnerability was never in how
+    the app authenticates. It was in who else could quietly join the list.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps, and nothing in the audit log looks unusual.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The vault is created with the access-policy model — the default for years, and still what most older templates produce</span><span class="tag">where most vaults start</span></li>
+    <li class="open"><span>The app's managed identity is granted <code>get</code> and <code>list</code> on secrets, via an access policy on the vault</span><span class="tag">least privilege, correctly</span></li>
+    <li><span>The platform team is granted <b>Contributor</b> on the resource group so they can manage the infrastructure around it</span><span class="tag">a normal, necessary grant</span></li>
+    <li class="open"><span>Contributor includes <code>Microsoft.KeyVault/vaults/write</code> — and the access policy is part of the vault object it writes</span><span class="tag">the two planes meet here</span></li>
+    <li><span>One <code>az keyvault set-policy</code> adds a human to the list. The operation is a legitimate configuration change and is logged as one</span><span class="tag">indistinguishable from real work</span></li>
+    <li class="open"><span>Every secret is now readable, and the read itself raises nothing, because by then the permission genuinely exists</span><span class="tag">the escalation is the config change</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is where detection has to happen, and it is the step that looks least
+  like an incident. By the time a secret is read, the read is authorised and unremarkable; the only
+  moment that carries information is the policy edit, which sits in the resource-change log
+  alongside every tag update and diagnostic setting the team makes each week. <b>When an escalation
+  is a configuration change, your alerting has to watch configuration, not access.</b> Alert on
+  changes to vault access policies and on new role assignments at the vault scope — both are rare
+  enough to alert on and boring enough that nobody thinks to.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">Subscription — where Owner and User Access Administrator live</span>
+      <div class="ring"><span class="lbl">Resource group — where Contributor is usually granted</span>
+        <div class="ring"><span class="lbl">The vault resource — and, under the access-policy model, the keyholder list itself</span>
+          <div class="core">The secrets<small>protected by a list stored one ring out, where Contributor can write</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">The bug is a containment mistake, and drawing it makes that obvious: the thing
+  guarding the core is stored in the ring <i>outside</i> the core, so write access to that ring is
+  effectively read access to the middle. Switching to the RBAC permission model does not change
+  this picture by moving the secrets — it moves the <b>keyholder list</b> out to the subscription
+  ring, where a different and much rarer permission governs it. That is the general move worth
+  remembering: <b>when a control can be edited from inside the blast radius, relocate the
+  control</b>, do not add another layer beneath it.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">Your Key Vault uses the classic access-policy permission model. The app's managed
+  identity has <code>get</code>/<code>list</code> on secrets; the platform team has
+  <b>Contributor</b> on the resource group and no access policy entry. Can the platform team read
+  production secrets?</p>
+  <button type="button">Yes, in two steps — Contributor can write to the vault resource, and the access policy is part of that resource, so they can add themselves and then read every secret</button>
+  <button type="button">No — Contributor is a control-plane role, and Azure evaluates data-plane requests against access policies only, so a Contributor with no policy entry is refused on every secret operation</button>
+  <button type="button">Only for secrets created after they were granted Contributor, since existing secrets keep the access policy that was in force when they were written</button>
+  <p class="why" data-for="0">Correct, and the second step is the one that hides it: once they have
+  added themselves, the read is legitimately authorised and looks like any other read. Switching the
+  vault to the RBAC permission model fixes it properly, because granting data-plane access then
+  requires the right to create role assignments — which Contributor does not have.</p>
+  <p class="why" data-for="1">Every clause here is true of a single request, which is exactly why
+  this is the answer most people give. A data-plane call from a principal with no policy entry
+  really is refused. The gap is that the principal can change the policy first, and nothing in the
+  control-plane / data-plane framing warns you that the boundary is stored on the control-plane
+  side.</p>
+  <p class="why" data-for="2">Access policies are evaluated at request time against the vault's
+  current configuration — there is no per-secret snapshot of who could read it when it was written,
+  and secrets carry no ACL of their own. Worth holding onto generally: permissions in Azure are
+  evaluated live, so changing a policy changes access to everything already there, retroactively and
+  immediately.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">The permission to change the guard list is always the permission that matters.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>S3 bucket policies and <code>s3:PutBucketPolicy</code></h4>
+    <p>Denying <code>s3:GetObject</code> means nothing to a principal who can rewrite the policy that
+    denies it. AWS's answer was to move the durable controls outward — Block Public Access and SCPs,
+    which sit above the bucket and cannot be edited from the account holding it. Same relocation,
+    same reasoning.</p>
+    <div class="hf-scatter"><span>move the control up a level</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Branch protection edited by the people it protects</h4>
+    <p>A required-review rule that repository admins can switch off is a convention, not a control —
+    and it is how "we require two reviewers" quietly becomes untrue for the handful of people most
+    likely to be in a hurry. Organisation-level rulesets exist to put the switch out of reach.</p>
+    <div class="hf-scatter"><span>a rule you can disable is a suggestion</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Entra: who can consent to an app's permissions</h4>
+    <p>The dangerous right is rarely the permission itself — it is being able to grant it. Whoever
+    can consent on the tenant's behalf decides what every application may do, without ever holding
+    that access personally. <b>Ask who can change the answer, not just what the answer currently
+    is.</b></p>
+    <div class="hf-scatter"><span>granting beats having</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a managed identity lets compute prove who it is with no
+  credential at all — the platform hands it a token, the vault checks the identity, and no secret
+  ever reaches a config file; system-assigned identities live and die with the resource while
+  user-assigned ones outlive it; and soft delete plus purge protection mean a deleted vault is not
+  really gone. The sentence worth adding: <b>under the access-policy model, Contributor can add
+  itself to the keyholder list</b> — use the RBAC permission model so granting access needs a right
+  that managing infrastructure does not include.
+</div>
+
   <section>
     <h2>1. The identity chain: how compute proves itself with no credential</h2>
     <div class="code-block"><span style="color:#a78bfa"># what DefaultAzureCredential does inside an App Service — you never write this</span><br>GET http://<span style="color:#50e6ff">169.254.169.254</span>/metadata/identity/oauth2/token<br>&nbsp;&nbsp;?resource=https://vault.azure.net&amp;api-version=2019-08-01<br>Metadata: true<br><br><span style="color:#a78bfa"># IMDS answers with an Entra token for the resource's managed identity</span><br>{ <span style="color:#c3e88d">"access_token"</span>: <span style="color:#c3e88d">"eyJ0eXAi…"</span>, <span style="color:#c3e88d">"expires_in"</span>: <span style="color:#c3e88d">"86400"</span>,<br>&nbsp;&nbsp;<span style="color:#c3e88d">"resource"</span>: <span style="color:#c3e88d">"https://vault.azure.net"</span>, <span style="color:#c3e88d">"token_type"</span>: <span style="color:#c3e88d">"Bearer"</span> }</div>
@@ -284,6 +467,7 @@ DevHubCodeWalk.mount('#cw-kv',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

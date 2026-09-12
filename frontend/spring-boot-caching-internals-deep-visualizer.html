@@ -107,6 +107,198 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> <code>@Cacheable(value="user-roles", key="#userId")</code> on <code>getUserRoles(userId)</code> (frequent, cheap to cache) paired with <code>@CacheEvict(value="user-roles", key="#userId")</code> on <code>updateUserRoles(...)</code>. Cache the JWKS with a 10-min TTL so token validation doesn't hammer Ping/Entra. Watch self-invocation: if <code>updateRoles()</code> calls <code>getRoles()</code> inside the same class, the evict + re-fetch bypass the proxy.</div>
   </div>
 
+<p class="hf-deck">or, <code>this</code> inside a Spring bean never points at the object Spring actually built</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Same method, same arguments, same class — one call gets cached, the other hits the database every single time.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle"><code>getUser()</code> has <code>@Cacheable</code> on it. Called from inside the class, it never once returns a cached value.</div>
+  <p>Section 5's <code>load()</code> method calls <code>getUser(id)</code> as a bare, unqualified
+  call — no <code>userService.</code> in front of it, just <code>getUser(id)</code>, because
+  <code>load()</code> and <code>getUser()</code> live on the same <code>UserService</code> class.
+  That reads as an ordinary internal helper call. It compiles. It runs. It returns the right
+  <code>User</code> every time. The only thing missing is the one thing <code>@Cacheable</code> was
+  there to provide: at no point does anything check the "users" cache, generate a key, or store a
+  result — the annotation is still sitting right there on the method signature, completely inert
+  for this call path.</p>
+  <div class="hf-scatter">
+    <span><code>@Cacheable</code> is present and spelled correctly ✓</span>
+    <span>the method returns the correct <code>User</code> every time ✓</span>
+    <span><code>this.getUser(id)</code> never reaches <code>CacheInterceptor</code> ⚠</span>
+    <span>no key is generated, no cache is consulted — not even once ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that <code>@Cacheable</code> is a property of the
+  <i>method</i>, checked wherever the method is invoked from. It's a property of the <i>call</i> —
+  and it only fires on calls that arrive through the proxy Spring built around this bean.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make the call originate from outside the raw object</div>
+  <div class="hf-ladder">
+    <b>Quick fix: self-inject a proxy reference — <code>@Lazy @Autowired UserService self;</code> — and call <code>self.getUser(id)</code></b>
+    <i>↓ that field holds the CGLIB proxy, not the raw object, so the call now leaves and re-enters through the interceptor</i>
+    <b>Better: move <code>load()</code> to a different <code>@Service</code> that has <code>UserService</code> injected normally</b>
+    <i>↓ every call between two different beans is, by definition, a call through a proxy reference — no special-casing needed</i>
+    <b>Best: design read paths so a cached method is only ever called by controllers or other services — never by a sibling method in the same class</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A Spring proxy wraps calls INTO your bean, not the bean itself — and <code>this</code> always
+  resolves against the raw object, proxy or not.</b> That's the whole mechanism behind self-invocation
+  breaking <code>@Cacheable</code>, <code>@Transactional</code>, and <code>@Async</code> identically:
+  none of them are really "on" the method. They're on the door you have to walk through to reach it,
+  and <code>this</code> already knows a way around the door.
+</div>
+
+<div class="hf-note">Picture a building where every guest signs in at the front desk before going
+anywhere — that sign-in sheet is the <b>proxy</b>. But an employee with their own badge for the back
+stairwell doesn't walk past the desk at all; they're already inside. The sign-in sheet has no idea
+they were ever in the building — not because it's broken, but because it only ever sees the front
+door. <code>this.getUser(id)</code> is the back stairwell. The annotation is the sign-in policy. The
+policy didn't fail; it was never asked.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I called <code>getUser(42)</code> from inside <code>refreshDashboard()</code> — same class, same
+    object, same method. Why didn't it cache?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">this</span>
+    <p>Because I'm not the proxy. I'm the raw <code>UserService</code> you wrote. The CGLIB subclass
+    with the caching logic wrapped around me doesn't exist from where I'm standing — I have no
+    reference to it, and Java resolves an unqualified call straight to me.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">CacheInterceptor</span>
+    <p>I only run on calls that arrive through the proxy — the object reference every <i>other</i>
+    bean gets handed by <code>@Autowired</code>. A call that starts and ends inside the same raw
+    instance never travels through me. I'm not ignoring it. I never see it happen.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">@Cacheable("users")</span>
+    <p>I'm not disabled, and I'm not misconfigured. I'm still sitting right here on the method
+    signature exactly as written. Nobody's even asking me a question this time.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps. Only one of them is the bug — everything else is Spring doing exactly what you'd expect.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>At startup, Spring sees <code>@Cacheable</code> on <code>getUser()</code> and builds a CGLIB subclass — <code>UserService$$SpringCGLIB$0</code> — wrapping <code>UserService</code></span><span class="tag">the proxy is the real bean now</span></li>
+    <li class="open"><span>That proxy — not your original class — is what gets registered in the <code>ApplicationContext</code> and handed to every <code>@Autowired UserService</code> field elsewhere</span><span class="tag">everyone else already has the proxy</span></li>
+    <li><span>An external call — <code>orderController.userService.getUser(42)</code> — arrives at the proxy first; <code>CacheInterceptor</code> checks the "users" cache before <code>getUser()</code>'s body ever runs</span><span class="tag">this is the normal, working path</span></li>
+    <li class="open"><span>Inside <code>UserService</code> itself, <code>load()</code> calls <code>getUser(id)</code> as a bare, unqualified call — Java compiles that as <code>this.getUser(id)</code>, a direct call on the raw object</span><span class="tag">the one different step</span></li>
+    <li><span>That direct call never reaches the proxy — <code>CacheInterceptor</code> is never invoked, no key is generated, <code>cache.get()</code>/<code>cache.put()</code> never happen</span><span class="tag">not skipped — never contacted</span></li>
+    <li class="open"><span>Fix: self-inject (<code>self.getUser()</code>) or split <code>load()</code> into a separate bean — either way the call now starts OUTSIDE the raw object, so it has to pass through the proxy like everyone else's calls do</span><span class="tag">make it an external call, structurally</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the entire bug. Steps 1 through 3 are Spring doing exactly what the
+  intro promised — building a proxy and routing external calls through it. The failure is one
+  unqualified method call that Java resolves to <code>this</code> before Spring ever gets a vote in
+  the matter.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">UserService$$SpringCGLIB$0 — what every OTHER bean is handed</span>
+      <div class="core">raw UserService object<small>what "this" resolves to inside every one of its own methods, no matter which one is calling</small></div>
+    </div>
+    <p class="note">load() calling this.getUser(id) never leaves the core</p>
+  </div>
+  <p class="hf-annot">Every call drawn from outside the ring has to cross it — that's where
+  <code>CacheInterceptor</code> lives. A call that starts inside the core and stays inside the core
+  never touches the ring at all. There's no gap in the ring to sneak through; the call was simply
+  never on a path that goes near it.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q"><code>AdminService.reconcileUsers()</code> calls <code>this.getUser(id)</code>
+  directly — <code>getUser()</code> is <code>@Cacheable("users")</code> in the SAME class. A nightly
+  job calls <code>reconcileUsers()</code> 10,000 times, cycling through the same 50 user IDs
+  repeatedly. How many times does <code>getUser()</code>'s actual database query run?</p>
+  <button type="button">Fifty times — once per distinct ID, then every repeat is served from the cache</button>
+  <button type="button">All 10,000 times — self-invocation means CacheInterceptor is never on the call path, so every call runs the real method body</button>
+  <button type="button">Zero times — Spring detects the <code>@Cacheable</code> annotation is present and short-circuits internal calls too</button>
+  <p class="why" data-for="0">That's exactly what would happen if this call went through the proxy — it's the correct behavior for an EXTERNAL caller hitting the same 50 IDs repeatedly. But <code>reconcileUsers()</code> and <code>getUser()</code> are two methods on the same class calling each other directly; the proxy is never in the loop, so this describes a call path that isn't the one being asked about.</p>
+  <p class="why" data-for="1">Right. Self-invocation doesn't mean "caching happens slower" or "caching happens sometimes" — it means CacheInterceptor is structurally never reached, so there's no partial caching, no occasional hit. All 10,000 calls run the query, and a hit-rate dashboard watching this cache from the outside won't show anything wrong, because as far as the cache is concerned, these 10,000 calls never happened.</p>
+  <p class="why" data-for="2">There's no such detection, and this is worth being explicit about: nothing at the call site inspects whether the target method carries <code>@Cacheable</code>. Annotation-driven behavior in Spring is wired in at proxy-creation time, not checked per-call — an unqualified <code>this.getUser(id)</code> is indistinguishable, to the JVM, from calling any other plain method.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Same shape, three different places.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>.NET's <code>DynamicProxy</code> / Castle Windsor interceptors</h4>
+    <p>A different runtime, the identical failure: an interceptor woven around a service only fires
+    on calls that arrive through the proxy instance. A method calling a sibling method on
+    <code>this</code> inside the same C# class bypasses a caching or logging interceptor exactly
+    the way <code>this.getUser()</code> bypasses <code>CacheInterceptor</code> here — proxy-based
+    AOP has this exact blind spot in every language that implements it this way.</p>
+    <div class="hf-scatter"><span>DynamicProxy ≈ CGLIB proxy</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Python's <code>@lru_cache</code> — the counter-example</h4>
+    <p>Worth knowing precisely because it does NOT share this bug: a Python decorator rebinds the
+    function's own name to the wrapped version, so a recursive call to itself goes through the
+    decorator every time. Spring can't do that — <code>this</code> is a JVM-level reference to the
+    raw object, not a name lookup Spring controls. Different mechanism, which is exactly why the
+    Java version breaks and the Python version doesn't.</p>
+    <div class="hf-scatter"><span>decorators wrap the name; proxies wrap the reference</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>CIAM: an "impersonate user" flow that quietly stops caching</h4>
+    <p>An admin-impersonation feature inside <code>UserService</code> builds an impersonation token
+    by calling <code>this.getUserRoles(targetUserId)</code> as one step of a larger internal method.
+    Every impersonation request now re-hits the identity provider for role data, even for a target
+    user whose roles are already warm in the cache — and it's invisible on a hit-rate dashboard,
+    because the other 95% of calls to <code>getUserRoles()</code> still arrive externally and still
+    cache normally. The bug only shows up as "why does impersonation feel slower than everything
+    else," during exactly the kind of incident where Ping is already rate-limiting you.</p>
+    <div class="hf-scatter"><span>a healthy-looking hit-rate can still hide this</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">The page says the same proxy rule applies to @Transactional and @Async — is the fix identical too?</p>
+  <p class="a">Yes, because it's literally the same CGLIB proxy doing the intercepting for all three.
+  Self-injection or splitting the call into a separate bean fixes self-invocation for
+  <code>@Cacheable</code>, <code>@Transactional</code>, and <code>@Async</code> in exactly the same
+  way, for exactly the same reason. The only thing that differs between them is what the
+  interceptor does once a call actually reaches it — check a cache, open a transaction, or submit to
+  a thread pool.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Is this a CGLIB-specific problem, or would a JDK interface-based proxy have it too?</p>
+  <p class="a">Same problem either way. Spring picks a JDK dynamic proxy instead of CGLIB when the
+  bean implements an interface, but that only changes HOW the proxy is built, not what
+  <code>this</code> means inside the target class. Either proxying strategy still leaves
+  <code>this</code> pointing at the raw object from the inside — self-invocation bypasses both
+  identically.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">If getUser() is called from a totally different class, is it always safe?</p>
+  <p class="a">Safe as long as that other class got its <code>UserService</code> reference through
+  dependency injection — which is the normal case, so yes, almost always. The exception: code that
+  manually writes <code>new UserService()</code> instead of asking Spring for the bean gets a raw,
+  un-proxied instance permanently. Every call on THAT reference behaves like self-invocation forever,
+  regardless of which class it's sitting in.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll back up.</p>
+<div class="hf-napkin">
+  <code>getUser(Long id)</code> is <code>@Cacheable(value="users", key="#id")</code>. A batch job
+  inside <code>UserService</code> calls <code>this.getUser(id)</code> 100 times in a loop, all for
+  the same <code>id</code>. You already know the cache itself is never touched — so does the
+  <code>#id</code> key expression get evaluated zero times, or all 100 times?
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -535,5 +727,6 @@ renderStore(); renderStats();
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

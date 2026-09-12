@@ -59,6 +59,215 @@
     <div class="intro-ciam"><span class="tag">CIAM in production:</span> a query built from unsanitized input is exactly how a CIAM system leaks credentials — a login form is the highest-value SQL-injection target on the whole site, because success returns "you are this user." Parameterized queries and ORMs both close that door by construction; the mistake to watch for in review is a stray <code>`WHERE email = '${email}'`</code> template literal that looks fine in a demo and is a full account-takeover in production. The same discipline applies to Spring's <code>JdbcTemplate</code> — <code>queryForObject("... = '" + email + "'", ...)</code> is the identical bug in Java.</div>
   </div>
 
+<p class="hf-deck">or, a database call that finishes doesn't mean the connection came back</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Your queries are all parameterized. Injection isn't the bug that takes this app down.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The return statement that quietly keeps a connection forever</div>
+  <p>An endpoint checks out a connection, looks up a row, and — if nothing matched — returns a
+  404 straight away. Perfectly reasonable code. It passes every test, because every test either
+  finds a row or doesn't care what happens next. In production, the app runs fine for hours, then
+  every single request — not just this endpoint — starts hanging with no error, no stack trace,
+  no crash. Nobody touched the SQL. Nobody touched the schema. The queries were never the
+  problem.</p>
+  <div class="hf-scatter">
+    <span>every query is parameterized ✓</span>
+    <span>404 is the correct status code here ✓</span>
+    <span>client.release() sits right after the happy path ⚠</span>
+    <span>the early return skips straight past it ⚠</span>
+  </div>
+  <p class="hf-foot">"The code runs" and "the code always returns the connection it borrowed" are two different claims — this bug is what happens when only the first one gets checked.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make release() unconditional, not a step in the happy path</div>
+  <div class="hf-ladder">
+    <b>client.release() as the last line of the function</b>
+    <i>↓ any early return, throw, or middleware short-circuit skips right past it</i>
+    <b>client.release() inside a finally block</b>
+    <i>↓ finally runs on every exit from try — return, throw, or falling off the end</i>
+    <b>The connection always goes back, no matter which path the code takes out</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A connection you forgot to release isn't lost — it's permanently "in use."</b> Nothing
+  crashes, nothing throws, nothing logs an error, because from the pool's point of view nothing
+  went wrong: a client asked for a connection, and simply hasn't given it back <i>yet</i>. Section
+  4 of this page already shows the fix — <code>client.release()</code> inside <code>finally</code>
+  — for the transaction code. The exact same rule has to apply to every plain
+  <code>pool.connect()</code> call too, including ones that never touch <code>BEGIN</code> at all.
+</div>
+
+<div class="hf-note">Think of the pool as a car-rental counter with exactly ten cars. Each renter
+must return the keys before the next customer can drive. If a renter parks in their own garage and
+just keeps the keys — even though their trip is long over — the counter still lists that car as
+"out." Ten renters like that and the counter has zero cars for an eleventh customer, who waits at
+the desk not because there are no cars in the city, only because none of <i>this counter's</i> ten
+ever came back. Where the analogy stops: a real rental company eventually writes off a
+no-show car. <code>pg.Pool</code> never does — a leaked connection stays "checked out" forever,
+with nothing watching the clock on it.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>The app ran fine for six hours, then every request just hangs — not only the endpoint I touched today. No errors anywhere. What broke?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Pool</span>
+    <p>Nothing broke, from where I sit. I have exactly ten connections. Ten requests checked one
+    out from me, hit a 404 branch that returns before <code>release()</code>, and never told me
+    they were done. I have no idea those ten are never coming back — I'm just out of connections
+    for everyone else.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">One of the leaked clients</span>
+    <p>I'm still marked "checked out." The variable holding me went out of scope the moment that
+    request handler returned — nobody called anything on me again, ever. I'm not running a query.
+    I'm not doing anything. I'm also not available to anyone else. I'm just... open.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Pool</span>
+    <p>And request eleven, whatever it needs, calls <code>pool.connect()</code> and asks me for
+    one. I don't have one. I don't reject the request — I queue it and wait for a release that is
+    never going to happen. That "hang with no error" you're seeing? That's request eleven, still
+    waiting.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One skipped line, repeated ten times, is indistinguishable from a production outage.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>new Pool({ max: 10 })</code> — ten live connections is the WHOLE budget for this process, forever</span><span class="tag">not a soft suggestion</span></li>
+    <li class="open"><span>A handler calls <code>pool.connect()</code>, gets connection #7, queries, finds no row, and <code>return</code>s a 404 — before the <code>client.release()</code> line</span><span class="tag">the lesson</span></li>
+    <li><span>Connection #7 is still marked <b>checked out</b> in Pool's bookkeeping — nothing ever told Pool otherwise</span><span class="tag">leaked, not lost — the object still exists</span></li>
+    <li class="open"><span>Over the next few hours, nine more requests hit that same 404 branch</span><span class="tag">one leak looks like nothing; ten is the whole pool</span></li>
+    <li><span>Pool now has zero free connections; a completely unrelated, correctly-written request calls <code>pool.connect()</code></span><span class="tag">not an error yet — a pending promise</span></li>
+    <li class="open"><span>node-postgres has no connection-acquire timeout configured by default — the call just waits, because none of the ten checked-out clients will ever be released</span><span class="tag">this is the "random hang," fully explained</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is the entire lesson. Every step after it is just arithmetic — how many
+  leaks it takes to reach <code>max</code> — and a default (no acquire timeout) doing exactly what
+  it's documented to do. Fix step 2 with a <code>finally</code> block and steps 3 through 6 never
+  get a chance to happen, no matter how many requests hit that 404 branch.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">FREE — sitting in the pool</span>
+      <span class="go">a request calls <em>pool.connect()</em> <span class="arrow">→</span> CHECKED OUT</span></div>
+    <div class="stt"><span class="nm">CHECKED OUT — doing work</span>
+      <span class="go">handler finishes, calls <em>client.release()</em> <span class="arrow">→</span> back to FREE</span></div>
+    <div class="stt"><span class="nm">CHECKED OUT — forgotten</span>
+      <span class="go">an early <em>return</em> skips release() <span class="arrow">→</span> nowhere. ever.</span></div>
+  </div>
+  <p class="hf-annot">The top two rows are the entire healthy lifecycle — a connection cycles
+  between FREE and CHECKED OUT for as long as the process runs. The third row isn't a third state
+  in that cycle at all; it's a connection that <i>left</i> the cycle and never came back. Ten
+  connections stuck in row three is the same as having a pool of size zero.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A route handler does <code>const client = await pool.connect()</code>, runs a
+  query, and on a "not found" result does <code>return res.status(404).json(...)</code> — before
+  its <code>client.release()</code> line. The pool was created with <code>new Pool({ max: 10 })</code>.
+  This 404 branch gets hit 10 times over the next hour. What happens when the 11th request —
+  to any endpoint sharing this pool — calls <code>pool.connect()</code>?</p>
+  <button type="button">It gets routed to one of those same 10 connections and receives whatever result is left sitting on it — connections are reused round-robin regardless of release() state</button>
+  <button type="button">node-postgres silently opens an 11th physical connection beyond max to avoid blocking the caller, then closes it once the query finishes</button>
+  <button type="button">The call waits — by default indefinitely — because all 10 connections are marked checked-out in the pool's bookkeeping, and none of them will ever be released</button>
+  <p class="why" data-for="0">A reasonable guess if you picture the pool as a dumb round-robin
+  list. It isn't — the pool tracks per-connection state (free vs. checked-out) precisely so it
+  never hands the same physical connection to two callers at once. A checked-out connection is
+  simply unavailable, not reused.</p>
+  <p class="why" data-for="1">This describes <code>max</code> as a soft cap that gets exceeded
+  under pressure — the opposite of what it is. <code>max</code> is a hard ceiling on how many
+  physical connections the pool will ever open; node-postgres will not create an 11th to relieve
+  pressure, no matter how many callers are waiting.</p>
+  <p class="why" data-for="2">Right. All 10 connections are marked "in use," and node-postgres has
+  no connection-acquire timeout configured out of the box, so <code>pool.connect()</code> queues
+  the request and waits for a release. Since the 10 leaked connections were never released — and
+  never will be — that wait has no end. This is exactly what "the app just hangs" looks like from
+  the outside.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three different pools, the exact same failure mode: a resource that isn't returned isn't available.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring's HikariCP has a feature for this exact bug</h4>
+    <p>This page's own intro already calls <code>pg.Pool</code> the equivalent of Spring's
+    <code>DataSource</code> pool, HikariCP — and HikariCP ships a setting node-postgres simply
+    doesn't have: <code>leakDetectionThreshold</code>. Set it, and HikariCP logs a full stack
+    trace the moment any connection has been checked out longer than that threshold without being
+    returned — turning this exact bug from a silent multi-hour production mystery into a log line
+    pointing at the offending code, often within seconds of the leak happening.</p>
+    <div class="hf-scatter"><span>HikariCP can tell you it's leaking; pg.Pool cannot</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>"Too many open files" is the OS-level version</h4>
+    <p>Every process has a fixed limit on open file descriptors (often 1024 by default on Linux).
+    An <code>fs.createReadStream</code> that never gets closed on an error path leaks a descriptor
+    the exact same way a forgotten <code>client.release()</code> leaks a connection — one leak is
+    invisible, and the process throws <code>EMFILE</code> only once enough of them have piled up
+    to exhaust the limit. Same shape, different fixed-size pool.</p>
+    <div class="hf-scatter"><span>a fixed pool + one unclosed handle per request = eventual exhaustion</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your browser does this to itself on purpose</h4>
+    <p>Chrome and Firefox cap plain HTTP/1.1 connections at six per origin. Open a page that fires
+    eight simultaneous requests to the same API and you'll watch two of them sit as
+    <code>(pending)</code> in the Network tab — not failed, not slow, just queued behind the other
+    six exactly the way request 11 queues behind Pool's ten. The difference is those six
+    connections DO eventually free up; that's what makes this a size limit instead of a leak.</p>
+    <div class="hf-scatter"><span>same queueing behavior, no leak — just a small number</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Doesn't <code>idleTimeoutMillis</code> eventually clean up a leaked connection for me?</p>
+  <p class="a">No, and this is the misconception that costs people the most debugging time.
+  <code>idleTimeoutMillis</code> only closes connections sitting <b>idle inside the pool</b> —
+  ones that were properly released and are just waiting for the next caller. A leaked connection
+  was never released, so it never re-enters the pool's free list in the first place; there's no
+  idle clock running on it at all. The pool has nothing to time out, because as far as its
+  bookkeeping goes, that connection is still busy doing legitimate work.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">If I use <code>pool.query()</code> everywhere instead of <code>pool.connect()</code>, am I immune to this?</p>
+  <p class="a">For single statements, yes — <code>pool.query()</code> checks a connection out AND
+  releases it back automatically around that one call, so there's no manual
+  <code>release()</code> for you to forget. The risk in this lesson is specific to the manual
+  <code>pool.connect()</code> / <code>client.release()</code> pattern, which section 4 of this
+  page shows you actually need — a multi-statement transaction has to pin every statement to the
+  <i>same</i> connection, and <code>pool.query()</code> gives you no way to guarantee that.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Would just raising <code>max</code> to, say, 50 fix this?</p>
+  <p class="a">It buys you time, not a fix — a bigger pool just takes longer to leak down to zero.
+  The exact same 404 branch, hit 50 times instead of 10, produces the identical outage; you've
+  only changed how many hours of uptime it takes to get there. The only real fix is making
+  <code>release()</code> unconditional with <code>finally</code>, so the leak never happens at
+  any pool size.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  Section 4's <code>transferFunds</code> already does this correctly — <code>client.release()</code>
+  sits in a <code>finally</code> block, after both the <code>try</code> and the <code>catch</code>.
+  A teammate "simplifies" it by moving that <code>release()</code> call out of <code>finally</code>
+  and up into the <code>try</code>, right after <code>COMMIT</code> — reasoning that the
+  <code>catch</code> block already re-throws, so cleanup only matters on success anyway. Does
+  connection exhaustion become possible again — and if so, under which one of the four scenarios
+  on this page does the leak now actually happen?
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
@@ -264,6 +473,7 @@ DevHubCodeWalk.mount('#cw-nd',{
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>

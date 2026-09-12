@@ -151,6 +151,210 @@
     </div>
   </div>
 
+<p class="hf-deck">or, once a service worker moves in, your app stops asking the server what's true</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You shipped the fix an hour ago. Half your users are still running the bug.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The deploy succeeded. The bug reports didn't stop.</div>
+  <p>You pushed a critical fix — <code>ng build --configuration production</code>, deployed,
+  watched the new files land on the server. Ten minutes later, support tickets are still
+  describing the exact bug you just fixed. You check: the server really is serving the new JS.
+  But the affected users have the app open in a tab from this morning — and their service worker,
+  once installed, keeps serving <i>them</i> the version it already cached, because nothing told it
+  to stop. It even downloaded your new files in the background — that's
+  <code>VERSION_READY</code> — and then just waited. It isn't broken. It's doing exactly what a
+  service worker is designed to do: never interrupt a session that's already running.</p>
+  <div class="hf-scatter">
+    <span>new files live on the server ✓</span>
+    <span>new SW finished downloading (VERSION_READY) ✓</span>
+    <span>old SW still active for open tabs ⚠</span>
+    <span>nothing told it to take over ⚠</span>
+  </div>
+  <p class="hf-foot">The service worker isn't malfunctioning. Its entire design goal is to never
+  swap code out from under a page that's mid-session — you have to ask for that on purpose.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Ask the waiting version to take over — don't assume it will</div>
+  <div class="hf-ladder">
+    <b>Subscribe to swUpdate.versionUpdates, filter for VERSION_READY</b>
+    <i>↓ your only signal that a new version finished downloading and is sitting idle in the background</i>
+    <b>Show a real prompt — "Update available: refresh now?" — never auto-reload silently</b>
+    <i>↓ a silent reload mid-form-fill loses whatever the user was doing</i>
+    <b>On accept: swUpdate.activateUpdate() then location.reload() — the hard reload isn't optional</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A service worker doesn't check for a new version on your behalf — it only tells you when one
+  has already finished downloading, uninvited.</b> That's why <code>ng serve</code> disables it
+  outright (nobody wants yesterday's build haunting today's debugging session), why the whole
+  <code>SwUpdate</code> API is a notification system rather than an automatic one, and why the
+  CIAM version of this bug is scarier than a UI glitch — a session still running stale code can
+  keep using an auth flow the identity provider has already moved on from.
+</div>
+
+<div class="hf-note">Think of a service worker as a <b>roommate who does your grocery shopping
+unasked, but never puts anything away until you tell them to</b>. It goes to the store, buys the
+new groceries — <code>VERSION_READY</code> — and leaves the bags by the door. The fridge, what
+your open tab is actually running off, still has yesterday's food in it until you explicitly say
+"put the new stuff away now." Unlike a real roommate, it will wait through as many trips to the
+store as it takes — indefinitely — unless your code says otherwise.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I deployed a fix an hour ago. Why is this user still hitting the bug?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Service Worker</span>
+    <p>Because their tab has been open since this morning, and I already had a perfectly good
+    cached version doing its job. I did download your new one in the background — check
+    <code>VERSION_READY</code> — but nobody told me to switch, so I kept serving what was already
+    running.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The open tab</span>
+    <p>And I never noticed a thing. No error, no flicker. As far as my JavaScript is concerned,
+    nothing about this page has changed at all.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">SwUpdate</span>
+    <p>That's what I'm for. Subscribe to me and I'll tell you the moment a new version finishes
+    downloading — but activating it, and reloading, is still a call you have to make yourself.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One deploy. Two versions running at once, on purpose, until somebody says otherwise.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>You deploy new files; the next time an open tab's service worker checks <code>ngsw.json</code>, it notices the hash changed</span><span class="tag">the SW polls quietly, on its own schedule</span></li>
+    <li class="open"><span>It downloads every changed asset in the background into a <b>new</b> cache, while the <b>old</b> cache keeps serving the page that's currently running</span><span class="tag">two full versions coexist</span></li>
+    <li class="open"><span>Once every asset is fetched, it fires <code>VERSION_READY</code> on <code>swUpdate.versionUpdates</code> — the new version is complete and idle, not active</span><span class="tag">downloaded ≠ running</span></li>
+    <li><span>If nothing subscribes to that event, the new version simply waits — indefinitely, through as many deploys as it takes</span><span class="tag">no built-in timeout, no auto-swap</span></li>
+    <li class="open"><span>Your code calls <code>swUpdate.activateUpdate()</code> — the waiting worker becomes active for the <i>next</i> navigation, not the current page</span><span class="tag">activation isn't the same as taking effect</span></li>
+    <li><span><code>location.reload()</code> forces that next navigation right now, so the running page actually picks up the new JS/CSS instead of finishing its session on the old bundle</span><span class="tag">the step people forget</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the lesson. Everything downstream — the update banner, the reload —
+  exists only because Angular refuses to invent step 4's answer for you. A service worker that
+  silently swapped a running page's code out from under it mid-session would be a worse bug than a
+  stale one, so the framework hands you an event instead of an opinion — and a stale user is the
+  default outcome of never reading it.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt"><span class="nm">INSTALLING</span>
+      <span class="go">new SW downloads every changed asset <span class="arrow">→</span> WAITING</span></div>
+    <div class="stt on"><span class="nm">WAITING (VERSION_READY)</span>
+      <span class="go">nothing happens until <em>activateUpdate()</em> is called <span class="arrow">→</span> ACTIVATING</span></div>
+    <div class="stt"><span class="nm">ACTIVATING</span>
+      <span class="go">takes over for the next navigation <span class="arrow">→</span> ACTIVE</span></div>
+    <div class="stt"><span class="nm">ACTIVE</span>
+      <span class="go">serves every request until the next deploy restarts this cycle <span class="arrow">→</span> INSTALLING</span></div>
+  </div>
+  <p class="hf-annot">WAITING is the state a stale user is stuck in, sometimes for days. Nothing in
+  this cycle moves them out of it automatically — the only arrow leaving WAITING is one your own
+  code has to draw, by calling <code>activateUpdate()</code>.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A user has the app open when you deploy. Their <code>versionUpdates</code>
+  subscription fires <code>VERSION_READY</code> and your code immediately calls
+  <code>swUpdate.activateUpdate()</code> — but skips <code>location.reload()</code>. What does the
+  user see on their currently open tab?</p>
+  <button type="button">The page seamlessly starts running the new JS immediately — activateUpdate() swaps the running code in place</button>
+  <button type="button">The tab shows a blank white screen, because the old JS and the newly active cache are now mismatched</button>
+  <button type="button">Nothing visibly changes on the current page — the new version only takes over the next time the app navigates or reloads</button>
+  <p class="why" data-for="0">This is exactly what "activate" sounds like it should mean, but the
+  running page already has the old module graph loaded in memory — JavaScript doesn't hot-swap
+  itself mid-execution just because a background worker flipped a switch. Activation changes who
+  answers the <i>next</i> request, not what's already running in this tab.</p>
+  <p class="why" data-for="1">A real failure mode lives somewhere in this territory, but not on
+  this path — the update lifecycle is specifically designed to keep the old and new caches
+  cleanly separated until a real navigation happens. Skipping the reload doesn't corrupt anything;
+  it just means the reload you needed never actually occurred.</p>
+  <p class="why" data-for="2">Right. <code>activateUpdate()</code> only promotes the waiting
+  service worker to "active" for whichever request comes next — it doesn't touch the JavaScript
+  already executing in the open tab. Without <code>location.reload()</code>, that tab quietly
+  keeps running the old bundle, possibly for the rest of the session, even though the SW behind it
+  has already moved on.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three systems, the same deliberate refusal to interrupt something already running.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A native app's "Update Available" badge</h4>
+    <p>An iOS or Android update downloads to the device and sits there while the currently running
+    process keeps executing the old binary in memory — nothing changes until you force-quit and
+    relaunch. Same shape as a waiting service worker: the new version exists on disk before it
+    exists in any running session.</p>
+    <div class="hf-scatter"><span>relaunch the app ≈ location.reload()</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Blue-green deploys with sticky sessions</h4>
+    <p>A load balancer can keep an existing session pinned to the "old" server pool through a
+    rolling deploy while new requests land on the "new" pool — two versions serving traffic
+    simultaneously, on purpose, until old sessions drain. The service worker does the identical
+    thing client-side: two caches, two versions, coexisting until something rotates.</p>
+    <div class="hf-scatter"><span>session draining ≈ a tab that never reloads</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A stale PWA session breaking an OAuth2 redirect</h4>
+    <p>This page's own SwUpdate walkthrough flags it directly: ship a new MSAL or OAuth2
+    <code>redirect_uri</code> while a user's tab is still running the old cached bundle, and that
+    tab keeps authenticating against a target the identity provider no longer recognizes — Entra
+    answers with <code>AADSTS50011</code> instead of a token. Same bug as the one above; the
+    stakes are just higher, because "stale" here means broken login, not outdated UI text.</p>
+    <div class="hf-scatter"><span>stale SW = stale auth code, not just stale UI</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">If ng serve doesn't run the service worker, how do I ever test this stuff locally?</p>
+  <p class="a">Build for production and serve the dist folder with a plain static server —
+  <code>ng build --configuration production</code>, then something like
+  <code>npx http-server dist/my-app/browser -p 8080</code>. There's no dev-mode shortcut, and
+  that's deliberate: a service worker caching your live-reloading dev server would mean half your
+  <code>ng serve</code> sessions are secretly debugging yesterday's code without telling you.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">What's the difference between checkForUpdate() and the versionUpdates subscription?</p>
+  <p class="a"><code>versionUpdates</code> is passive — it emits automatically whenever the SW
+  notices a new version on its own schedule, roughly after the app stabilizes and then
+  periodically. <code>checkForUpdate()</code> is active and on-demand: call it from a "check for
+  updates" button, an interval, or a tab-focus handler, and it forces an immediate check instead
+  of waiting for the SW's own timing. Most real apps want both — the passive subscription to catch
+  it eventually, and an active check on tab-focus so a long-idle tab catches up fast.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why exclude /api/** entirely instead of just being careful with cache durations?</p>
+  <p class="a">Because a dataGroup cache sits in front of whatever cache-control headers your API
+  already sends — getting the duration "right" doesn't help if the real problem is <i>whose</i>
+  data got cached. A cached 200 for <code>/api/users/me</code> doesn't know the session that
+  produced it has since ended; the next use of that browser profile, or the same user after their
+  token expires, can get served stale — or someone else's — authenticated data with no network
+  round trip to catch it. Excluding the path removes the failure mode instead of tuning it.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  Your <code>ngsw-config.json</code> sets the app shell's assetGroup to <code>performance</code>
+  (cache-first) and a dataGroup for <code>/api/reports</code> to <code>freshness</code>
+  (network-first, 5s timeout). The network is up but slow — a call to <code>/api/reports</code>
+  takes 8 seconds to respond. Does the user see cached report data, or a spinner waiting on the
+  live response — and does your answer change for a request to the app's own <code>main.js</code>
+  under that exact same slow network?
+</div>
+
   <!-- ── EXTREME-VIZ HERO: Angular PWA / Service Worker ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -1005,6 +1209,7 @@ DevHubCodeWalk.mount('#cw-pwa',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

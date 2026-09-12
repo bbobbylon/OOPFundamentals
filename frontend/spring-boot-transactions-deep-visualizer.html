@@ -166,6 +166,216 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> Role assignment saves the assignment + an audit entry in one <code>@Transactional</code>. If the main tx fails the audit would vanish too — so move it to <code>@TransactionalEventListener(AFTER_COMMIT)</code> (no entry if nothing happened, which is correct). Need "log even on failure"? Put <code>@Transactional(propagation=REQUIRES_NEW)</code> on <code>AuditService.log()</code> so it commits independently.</div>
   </div>
 
+<p class="hf-deck">or, @Transactional is a bodyguard standing outside your method — call yourself directly and he never sees you leave</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You wrapped the risky call in try/catch specifically so the order would survive. It didn't.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The catch block ran. The commit still failed.</div>
+  <p><code>placeOrder()</code> and <code>writeAuditLog()</code> are both <code>REQUIRED</code> —
+  same transaction, on purpose. <code>writeAuditLog()</code> throws (a constraint violation, say),
+  so you defensively wrap the call: <code>try { auditService.writeAuditLog(o); } catch
+  (RuntimeException e) { log.warn("audit failed"); }</code>. The warning logs, your code moves on,
+  you return <code>200</code>. Then Spring throws <code>UnexpectedRollbackException</code> on the
+  way out and the <i>entire</i> transaction rolls back — the order you were sure you'd saved
+  vanishes with it.</p>
+  <div class="hf-scatter">
+    <span>exception caught ✓</span>
+    <span>warning logged, nothing crashed ✓</span>
+    <span>proxy already flagged rollback-only ⚠</span>
+    <span>commit refuses everything ⚠</span>
+  </div>
+  <p class="hf-foot">Catching an exception stops it from reaching your caller. It does nothing to
+  the transaction, because the proxy already made its decision before your catch block ever ran.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Give the side effect its own transaction — or stop fighting the rollback</div>
+  <div class="hf-ladder">
+    <b>Mark writeAuditLog REQUIRES_NEW, called through the AuditService bean</b>
+    <i>↓ it suspends the caller's transaction and commits independently — its failure can't poison the order</i>
+    <b>Route the call through an injected bean, never <code>this</code></b>
+    <i>↓ self-invocation skips the proxy entirely, and a skipped proxy means REQUIRES_NEW was never even read</i>
+    <b>Or leave it REQUIRED, on purpose</b>
+    <i>↓ if an order without a matching audit entry should never exist, all-or-nothing was correct all along</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>You can't out-argue a transaction the proxy already marked for rollback.</b> Catching an
+  exception controls what <i>your</i> code does next; it does not un-flag <code>rollbackOnly</code>
+  once the proxy has set it. That one fact explains <code>UnexpectedRollbackException</code>, why
+  <code>REQUIRES_NEW</code> exists at all, and why "just wrap it in try/catch" is almost never the
+  fix people assume it is.
+</div>
+
+<div class="hf-note">Think of <b>REQUIRED</b> as everyone in the room signing the <i>same</i> sheet
+of paper. If anyone refuses to sign, the whole sheet is void — it doesn't matter that three other
+people already signed happily and one refusal got handled quietly in the corner.
+<b>REQUIRES_NEW</b> hands that one person a brand-new sheet instead: their signature, or their
+refusal, is theirs alone and never touches what's already been signed in the room. The analogy
+stops working for <b>NESTED</b> — that's the same sheet, but with a perforated tear-off corner
+just for their line.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I caught the exception. My code moved on fine. Why did Spring roll back the whole order anyway?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The proxy</span>
+    <p>Because I don't wait for your catch block. The instant an exception crosses my
+    <code>invoke()</code> boundary — even for a split second before your catch grabs it — I mark
+    the transaction <code>rollbackOnly=true</code>. That flag is mine, not yours, and it's set
+    before your method body even gets a chance to react.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>So my try/catch was pointless?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The proxy</span>
+    <p>Not pointless — it stopped the exception from reaching whoever called <code>placeOrder()</code>.
+    But at commit time I check my own flag first, see <code>rollbackOnly</code>, and refuse to
+    commit no matter what your code did afterward. That refusal is
+    <code>UnexpectedRollbackException</code> — me telling you that you handled the symptom, not
+    the cause.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Same annotation, same catch block — routed through <code>this</code> instead of a bean, and the outcome flips completely.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>placeOrder()</code> is called from outside the class — the call goes through the proxy Spring generated around <code>OrderService</code></span><span class="tag">the only door that opens a transaction</span></li>
+    <li class="open"><span>The proxy calls <code>txManager.getTransaction()</code>, opens TX-1, and invokes your real method body</span><span class="tag">the physical transaction starts here</span></li>
+    <li class="open"><span>Inside your method, <code>this.writeAuditLog()</code> — a call on <code>this</code> — never leaves the object, so it never reaches any proxy, <code>REQUIRES_NEW</code> included</span><span class="tag">the self-invocation gotcha</span></li>
+    <li><span><code>writeAuditLog()</code> runs as an ordinary nested Java call, sharing TX-1 whether the annotation says <code>REQUIRES_NEW</code> or not — its INSERT lands as pending SQL on the same connection</span><span class="tag">the annotation was decoration</span></li>
+    <li class="open"><span>It throws. Your try/catch is also just regular Java inside that same un-intercepted method body — it catches the exception <b>before it ever reaches a proxy boundary</b></span><span class="tag">nothing marks rollback — there was no boundary to mark it at</span></li>
+    <li><span><code>placeOrder()</code> returns normally. The only proxy in this whole story — the one around <code>placeOrder()</code> itself — sees a clean return and commits TX-1, pending audit INSERT included</span><span class="tag">commits silently, error and all</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the lesson, and it's worse than "REQUIRES_NEW got ignored." In the
+  properly-proxied version of this exact mistake (see "The problem," above) it fails <i>loud</i> —
+  <code>UnexpectedRollbackException</code>, nothing saved. Self-invocation fails <i>quiet</i>: the
+  proxy that would have flagged the problem never even got asked, so <code>placeOrder()</code>
+  commits as if nothing happened — audit row and all. Bypassing the proxy doesn't just skip the
+  propagation rule, it skips Spring's entire rollback bookkeeping for that call.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">placeOrder()'s open transaction — TX-1<small>waiting to find out what writeAuditLog() will do</small></div>
+    <div class="arrow">propagation = ?</div>
+    <div class="opts">
+      <span class="on">REQUIRED — joins TX-1; same commit/rollback fate as the caller</span>
+      <span>REQUIRES_NEW — suspends TX-1, opens independent TX-2, commits or rolls back alone</span>
+      <span>NESTED — sets a SAVEPOINT inside TX-1; a failure undoes only the nested part</span>
+      <span>NOT_SUPPORTED — suspends TX-1 and runs with no transaction at all</span>
+    </div>
+  </div>
+  <p class="hf-annot">Every one of those is the exact same method body and the exact same call
+  site — properly proxied, called through a real bean, not <code>this</code>. The only thing that
+  changes is one enum value. That's the whole surface area of propagation: it was never about your
+  code, only about how independent the inner transaction is allowed to be from the one that called it.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A <code>@Transactional</code> method calls <code>repo.save(order)</code>, then
+  later in the same method writes a receipt to disk, which throws a checked
+  <code>IOException</code> that the method declares but doesn't catch. No <code>rollbackFor</code>
+  is configured. What happens to the saved order at commit?</p>
+  <button type="button">It commits — Spring's default rollback rule only triggers on unchecked exceptions (RuntimeException/Error), and IOException doesn't qualify</button>
+  <button type="button">It rolls back — any exception that escapes a @Transactional method triggers a rollback, checked or not</button>
+  <button type="button">It depends on the method's throws clause — declaring IOException disables rollback, omitting it would enable one</button>
+  <p class="why" data-for="0">Right, and this is exactly the trap this page names directly: rollback is opt-out for RuntimeException/Error and opt-<i>in</i> for everything else. If the order genuinely needs to roll back when the receipt write fails, the fix is <code>@Transactional(rollbackFor = IOException.class)</code> — or make the failure a RuntimeException in the first place.</p>
+  <p class="why" data-for="1">The natural assumption — "an exception happened, so obviously it rolls back" — and it's wrong specifically for checked exceptions, which is exactly why this default catches almost everyone the first time. Spring picked it on purpose: checked exceptions were traditionally used for expected, recoverable conditions; unchecked ones for the "something is actually broken" case that deserves a rollback.</p>
+  <p class="why" data-for="2">The <code>throws</code> clause is just the Java compiler's bookkeeping for checked exceptions — Spring's rollback logic never inspects it. It inspects the runtime <i>type</i> of whatever was actually thrown against its rollback rules: the RuntimeException/Error default, or your <code>rollbackFor</code>/<code>noRollbackFor</code> overrides.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">A proxy that only hears what goes through the front door — you've met this shape before, under other names.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A SQL SAVEPOINT — what NESTED actually compiles to</h4>
+    <p><code>NESTED</code> isn't a Spring invention. Under the hood it issues a real SQL
+    <code>SAVEPOINT</code> before the inner call runs and a <code>ROLLBACK TO SAVEPOINT</code> if
+    that inner call fails — a vendor-level primitive that's been in Postgres and MySQL for
+    decades, that most developers never touch directly because Spring already wraps it in an
+    annotation.</p>
+    <div class="hf-scatter"><span>NESTED = SAVEPOINT with a label on top</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>EJB container-managed transactions — the original version of this bug</h4>
+    <p>Spring's <code>@Transactional</code> was explicitly modeled on Java EE's EJB
+    container-managed transactions, right down to the failure mode: an EJB method calling another
+    transactional method on <code>this</code> bypasses the container's interceptor for the
+    identical structural reason Spring's proxy gets bypassed — the interception happens
+    <i>outside</i> the object, never inside it. Anyone who's been burned by this in an older Java
+    EE shop isn't being paranoid when they warn you about it.</p>
+    <div class="hf-scatter"><span>proxy-based AOP ⇒ the same trap, twice</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>MFA enrollment — where REQUIRED's bluntness is the safety, not the bug</h4>
+    <p>Enrolling a user in MFA: save the TOTP secret and generate ten backup codes in <i>one</i>
+    <code>@Transactional</code> method. If backup-code generation throws partway through — a
+    duplicate-code collision, say — <code>REQUIRED</code> correctly rolls back the TOTP secret
+    too. A half-enrolled user with a secret and zero backup codes is worse than no enrollment at
+    all. This is the case where all-or-nothing is exactly the guarantee you want, not something to
+    engineer around with <code>REQUIRES_NEW</code>.</p>
+    <div class="hf-scatter"><span>all-or-nothing is a feature here</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">When would I actually reach for NESTED instead of REQUIRES_NEW?</p>
+  <p class="a">When the inner work needs to be individually undoable <i>without</i> losing the
+  outer transaction's other changes — but you still want the whole thing to live or die together
+  if the outer transaction later fails. Picture a batch import running one row per
+  <code>NESTED</code> call: a bad row rolls back to its savepoint and gets skipped while the rest
+  of the batch continues, but if the whole job is cancelled afterward, everything — including the
+  "successful" rows — rolls back together. <code>REQUIRES_NEW</code> can't do that second part:
+  once its independent transaction commits, it's committed, permanently, even if the outer one
+  fails ten seconds later. One caveat: NESTED needs a driver and transaction manager that actually
+  support savepoints — not every setup does.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Can I put @Transactional on a private method if I just really need to?</p>
+  <p class="a">No — and it's not a setting you can flip, it's structural. Spring's default
+  proxying (CGLIB subclassing or JDK dynamic proxies) can only intercept calls that go through the
+  object's public/protected surface; a private method isn't visible to the subclass or interface
+  the proxy generates, so there's nothing to attach the interception to. The annotation is
+  silently ignored, exactly like a self-invoked call — same root cause, different trigger. If the
+  logic is conceptually private, extract it to a public method on a separate collaborator bean
+  instead of fighting the proxy model.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">We're on READ_COMMITTED everywhere. When would we actually need something stricter?</p>
+  <p class="a">When one transaction reads the same data twice and both reads must agree, or when
+  two concurrent transactions must not both act on the same "gap" of rows. A read-balance-then-
+  deduct across two separate statements is the classic case for <code>REPEATABLE_READ</code> —
+  otherwise another transaction can commit a change between your two reads and you deduct from a
+  balance you already re-read as stale. <code>SERIALIZABLE</code> is rarer still — real financial
+  ledgers, inventory counts where a phantom row changes an aggregate mid-transaction. For a CIAM
+  system, <code>READ_COMMITTED</code> is almost always right; a permission check that must be
+  airtight is usually better solved with row-level locking (<code>SELECT ... FOR UPDATE</code>) at
+  the one point that matters than by raising isolation for the whole transaction.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  <code>placeOrder()</code> (REQUIRED) calls <code>this.writeAuditLog()</code> directly —
+  self-invocation. <code>writeAuditLog()</code> is annotated <code>REQUIRES_NEW</code>, saves an
+  audit row, then throws a <code>RuntimeException</code> that <code>placeOrder()</code> catches
+  and swallows. When <code>placeOrder()</code> returns, is the order saved? Is the audit row saved
+  too? Now suppose <code>writeAuditLog()</code> is called through a separately injected
+  <code>AuditService</code> bean instead of <code>this</code> — does either answer change?
+</div>
+
   <!-- 1 ─────────────────────────────── -->
   <section>
     <h2>1. First: how @Transactional even works (the proxy)</h2>
@@ -788,6 +998,7 @@ renderNodes(); resetStage();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -138,6 +138,202 @@
     <div class="intro-ciam"><span class="tag">CIAM / your job:</span> This is the core of your day job — APIs that accept JWTs from both Ping AM and Entra ID. Ping uses <code>scp</code> for scopes; Entra uses <code>scp</code> for delegated but <code>roles</code> for app-role assignments. JWKS URIs: Ping <code>https://am.example.com/oauth2/jwks</code>, Entra <code>https://login.microsoftonline.com/{tenantId}/discovery/v2.0/keys</code>. Accepting both (multi-IdP) needs a custom <code>JwtDecoder</code> that tries multiple issuers — see the multi-idm-claims page. Top production failures: <code>aud</code> mismatch (your client ID must be in <code>aud</code>), clock skew (time drift fails <code>exp</code>), and a key-rotation gap (the JWKS cache refreshing too slowly).</div>
   </div>
 
+<p class="hf-deck">or, your API never asks the identity provider a single question after startup — it just does math</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You revoked her admin role at 2:03pm. Her token kept working at 2:03, 2:04, and 2:14.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">You disabled the account. The bearer token never got the memo.</div>
+  <p>An employee's access is pulled in Ping — account disabled, <code>ADMIN</code> role stripped,
+  ticket closed. Except she's still got the admin console open in another tab, and her Angular
+  app's already-issued JWT — signed twenty minutes ago, valid for ten more — keeps sailing through
+  your resource server's checks. Every request she sends still comes back <code>200</code>,
+  because revoking her account in Ping didn't change a single byte of the token already sitting in
+  her browser's memory.</p>
+  <div class="hf-scatter">
+    <span>account disabled in Ping ✓</span>
+    <span>role removed at the IdP ✓</span>
+    <span>signature still verifies locally ⚠</span>
+    <span>exp hasn't been reached yet ⚠</span>
+  </div>
+  <p class="hf-foot">A resource server validates a token's shape and signature — not whether the
+  identity provider would still hand it out today. Revocation and expiry are two different
+  mechanisms, and only one of them touches a token already in someone's hands.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Design for the gap — don't pretend it isn't there</div>
+  <div class="hf-ladder">
+    <b>Keep access tokens short — 5 to 15 minutes, not hours</b>
+    <i>↓ the "still valid after revocation" window shrinks to match</i>
+    <b>Revoke the refresh token at the IdP the moment access changes</b>
+    <i>↓ the next silent refresh fails, bounding the blast radius to the access token's own lifetime</i>
+    <b>For the rare case that truly can't wait, a token denylist your resource server checks</b>
+    <i>↓ the one deliberate exception to "no per-request network call" — used sparingly, on purpose</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A signature proves the token wasn't forged. It says nothing about whether it should still be
+  honored.</b> That distinction is exactly why a resource server validates locally at zero network
+  cost — and it's the same distinction that makes revocation genuinely hard. The fast path
+  (verify the math) and the fresh path (ask the IdP) are mutually exclusive, and every
+  resource-server design is a choice of how much of one to trade for the other.
+</div>
+
+<div class="hf-note">Think of a JWT like a paper concert ticket with the date and time printed on
+it. Security at the door doesn't call the box office to check whether you still deserve to be
+there — they check that the hologram is real and the date hasn't passed. If the box office bans
+you five minutes after you bought it, that ticket still gets you in the door until showtime,
+because nobody at the door has a phone line back to the box office. That's the trade-off. It isn't
+a bug in the door.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I revoked her role two minutes ago. Why does she still have admin access?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The resource server</span>
+    <p>Because nobody told me to check. I look at three things on every request: is the signature
+    real, is <code>exp</code> still in the future, does <code>aud</code> match me. Your revocation
+    touched none of those — it lives entirely in the IdP's database, and I've never once called
+    the IdP mid-request. That's the whole reason I'm fast.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Ping (the IdP)</span>
+    <p>And to be fair, I did my part. I won't hand out a <i>new</i> token with her old role, not
+    anymore. But the one she's already holding? I minted that, signed it, handed it over. I don't
+    get it back. I don't even know where it is right now.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">You</span>
+    <p>So the fix isn't "tell the resource server faster." It's "stop handing out tokens that live
+    long enough to matter."</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Four checks, zero network calls, one request.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The request arrives with <code>Authorization: Bearer eyJhbGc...</code> — three base64url segments joined by dots</span><span class="tag">header.payload.signature</span></li>
+    <li class="open"><span>The filter decodes the header (plain base64, unsigned) to read <code>kid</code> and <code>alg</code> — which of the IdP's public keys supposedly signed this</span><span class="tag">a lookup key, not proof of anything yet</span></li>
+    <li class="open"><span>It fetches the matching public key from the cached JWKS set and recomputes the signature over header + payload</span><span class="tag">the only truly cryptographic step</span></li>
+    <li><span>Match → the payload is provably untampered since the IdP's private key touched it. Mismatch → 401, full stop — claims are never even read</span><span class="tag">the gate everything else depends on</span></li>
+    <li class="open"><span>With the signature trusted, claims are checked as plain data: <code>exp</code> not past, <code>iss</code> matches config, <code>aud</code> contains this API's client ID</span><span class="tag">data checks, not crypto</span></li>
+    <li><span>A <code>JwtAuthenticationConverter</code> maps <code>scp</code>/<code>roles</code> claims to <code>GrantedAuthority</code> objects — only now does <code>@PreAuthorize</code> have anything to compare against</span><span class="tag">authorization starts here, not before</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the lesson. Everything from step 5 onward is just reading fields out
+  of a struct you now trust — and you only get to trust it because step 3 already proved nobody
+  altered a byte since the IdP's private key touched it. That's why a bad signature short-circuits
+  straight to 401 without Spring ever bothering to check <code>exp</code> or <code>aud</code>:
+  there's no point validating data you can't yet believe.</p>
+</div>
+
+<div class="hf-card hf-nest">
+  <p class="note">nothing inside a ring is trusted until the ring around it passes ↘</p>
+  <div class="ring"><span class="lbl">shape — three dot-separated segments?</span>
+    <div class="ring"><span class="lbl">signature — does the cached JWKS key verify it?</span>
+      <div class="ring"><span class="lbl">claims — iss / aud / exp all correct?</span>
+        <div class="core">GrantedAuthority list<small>built only once every outer ring has passed</small></div>
+      </div>
+    </div>
+  </div>
+</div>
+<p class="hf-annot">A forged signature never gets its claims read at all — the request is rejected
+at the second ring, before <code>iss</code>/<code>aud</code>/<code>exp</code> are inspected, and
+long before any authority is granted. That ordering is deliberate: cheap, structural checks fail
+fast so the resource server never spends cycles validating claims it can't trust yet.</p>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">The IdP rotates its signing keys — a new <code>kid</code> starts appearing in
+  freshly issued tokens. Your resource server has had its JWKS cached since startup, an hour ago.
+  What happens on the very first request bearing the new <code>kid</code>?</p>
+  <button type="button">It's rejected with 401 — the resource server only trusts the keys it cached at startup and won't accept an unrecognized kid</button>
+  <button type="button">Spring re-fetches the JWKS endpoint on encountering an unrecognized kid, caches the new key set, and validates the token against it — succeeding on the same request</button>
+  <button type="button">It's accepted without verification — an unrecognized kid is treated as a signal to trust the token's claims instead of checking a key</button>
+  <p class="why" data-for="0">This is the safe-sounding assumption, and it's what a naive "cache forever" implementation would do — but it would also mean every key rotation breaks your API until the next restart, which defeats the entire purpose of rotating keys.</p>
+  <p class="why" data-for="1">Right — an unrecognized <code>kid</code> reads as "my cache might be stale," not "this token is invalid." Spring re-fetches the JWKS set, and if the new set contains that kid and the signature checks out, the very same request that triggered the refresh succeeds. It's also exactly why a resource server should point at a JWKS <i>URI</i> rather than a hardcoded public key — the URI is what makes rotation possible without a redeploy.</p>
+  <p class="why" data-for="2">An unrecognized kid never lowers the bar — it raises it. The resource server still needs a real key that verifies the real signature before it trusts anything in the payload; "I don't recognize this key yet" triggers a refresh, never a bypass.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Local trust rooted in a cached key, not a live phone call — you've used this shape before.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A browser trusting a TLS certificate</h4>
+    <p>Checking a JWT's signature against a cached JWKS key is structurally the same move as a
+    browser checking a TLS certificate against a trusted root — a chain of trust rooted in a key
+    you already hold, not a live phone call to ask "is this really you?" Neither mechanism revokes
+    instantly either: TLS grew OCSP/CRL for the exact same reason JWTs lean on short lifetimes —
+    revocation was bolted on after the fact, because the fast path never had a "call home" step
+    built in.</p>
+    <div class="hf-scatter"><span>signature trust ≈ certificate trust</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Session cookies — the thing this pattern replaced</h4>
+    <p>A session cookie is a <i>pointer</i>: the server looks up the session store on every
+    request, so revocation is instant because the server owns the data. A JWT is the
+    <i>data itself</i> — the server has nothing left to look up, which is exactly the speed you
+    gain and the revocation you lose. That trade is the whole reason resource servers exist as a
+    pattern distinct from classic server-side-session Spring MVC apps.</p>
+    <div class="hf-scatter"><span>cookie = pointer, JWT = payload</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>One Ping-issued token, two APIs</h4>
+    <p>Ping can issue a single access token whose <code>aud</code> claim lists more than one
+    resource server — say, both your user-service and your notification-service behind one
+    gateway. Each resource server only accepts a token whose <code>aud</code> contains <i>its own</i>
+    client ID; a token minted for a different downstream API is rejected even with a perfectly
+    valid signature and issuer. Being well-signed was never enough on its own — it also has to be
+    signed <i>for you</i>.</p>
+    <div class="hf-scatter"><span>same signature, different aud, different verdict</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">If the resource server never calls Ping or Entra per request, how does it know the JWKS endpoint is legitimate in the first place?</p>
+  <p class="a">Trust gets bootstrapped once, at configuration time. The <code>issuer-uri</code> (or
+  <code>jwk-set-uri</code> directly) is a value you set over HTTPS, pointing at an endpoint your
+  own deployment config controls. Spring fetches the key set from that fixed, trusted URL at
+  startup and caches it — there's no runtime discovery step an attacker could redirect. The trust
+  isn't "ask the IdP every time," it's "trust the IdP's keys, fetched once from a URL only your
+  config can change."</p>
+</div>
+<div class="hf-ask">
+  <p class="q">We accept tokens from both Ping and Entra. How does one JwtDecoder handle two different issuers with two different JWKS endpoints?</p>
+  <p class="a">It doesn't — you don't get one <code>JwtDecoder</code>, you get a
+  <code>JwtIssuerAuthenticationManagerResolver</code> that picks between several, keyed by the
+  token's own <code>iss</code> claim. Spring reads <code>iss</code> first, routes to the decoder
+  configured for that specific issuer (each with its own <code>jwk-set-uri</code> and its own
+  accepted <code>aud</code>), and validates from there. A token claiming an issuer you haven't
+  explicitly configured is rejected outright — there's no "try every IdP until one works."</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why 15-minute access tokens at all — why not skip refresh tokens and just make access tokens long-lived?</p>
+  <p class="a">Because the access token is what gets attached to every request, which makes it the
+  most exposed credential you carry — browser memory, a proxy log, a stack trace in an error
+  report. A short lifetime bounds how long a leaked one is useful. It pairs with a refresh token
+  that's sent far less often, to exactly one endpoint, and can be revoked at the IdP immediately.
+  A long-lived access token trades a convenience you rarely need (fewer refresh calls) for a
+  security property you always want (a small, predictable blast radius).</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  Your resource server accepts tokens from both Ping and Entra via a
+  <code>JwtIssuerAuthenticationManagerResolver</code>. Someone crafts a JWT with a perfectly valid
+  signature — genuinely signed by Ping's real private key, nothing forged — but sets the
+  <code>iss</code> claim to Entra's issuer URL instead of Ping's own. What happens when it hits
+  your API?
+</div>
+
   <!-- ── HERO: animated Bearer-token validation walk · live per-step inspector of the real header/claims/JWKS/authorities ── -->
   <div class="panel" style="border:1px solid var(--accent)">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch a Bearer token run the gauntlet — 200 vs the 3 rejections</h2>
@@ -859,6 +1055,7 @@ to get a token that carries SCOPE_write.</span>`},
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

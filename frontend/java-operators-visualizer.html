@@ -101,7 +101,108 @@
     <div class="intro-ciam"><span class="tag">CIAM / Spring Boot:</span> Short-circuit for null-safe claims — <code>jwt != null &amp;&amp; !jwt.getClaimAsStringList("groups").isEmpty()</code>. Bitwise reads a JWT scope bitmask — <code>(scopeBitmask &amp; SCOPE_READ_USERS) != 0</code>. Never sort roles with <code>a.getPriority() - b.getPriority()</code> (overflow); use <code>Integer.compare(...)</code>. And always compare role names with <code>.equals("CIAM_ADMIN")</code>, never <code>==</code>.</div>
   </div>
 
-  <!-- ── TRY IT LIVE ── -->
+  <p class="hf-deck">or, the crash that never comes — and the bug that gets to keep hiding because of it</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You defensively guard against a <code>NullPointerException</code> that string concatenation was never, ever going to throw — and the real bug that null was warning you about gets to keep hiding.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The cache key every broken session shares</div>
+  <p>A per-user response cache is keyed like this: <code>String cacheKey = "profile:" + userId;</code> where <code>userId</code> comes from <code>session.getAttribute("userId")</code>. It works perfectly for every logged-in user.</p>
+  <p>A separate bug occasionally lets a request through with an expired or missing session, so <code>userId</code> is <code>null</code>. Surely <code>"profile:" + null</code> throws — right? It doesn't. Java converts <code>null</code> to the four characters <code>"null"</code>, and the cache key becomes the literal string <code>"profile:null"</code>. Every request with a null <code>userId</code> — from completely different users hitting completely different edge cases — now reads and writes the exact same cache entry. User B can be served user A's cached profile.</p>
+  <div class="hf-scatter">
+    <span>the code compiles ✓</span>
+    <span>every real, logged-in user's cache entry works fine ✓</span>
+    <span>every null-session request collides on one shared key ⚠</span>
+  </div>
+  <p class="hf-foot"><code>+</code> never crashed, so nobody ever looked. A <code>NullPointerException</code> here would genuinely have been the good outcome.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Treat a null-shaped input as a bug to catch, not a string to print</div>
+  <div class="hf-ladder">
+    <b>Check for null explicitly wherever it's meaningful, before it ever reaches concatenation</b>
+    <i>↓ <code>if (userId == null) throw new IllegalStateException("no session id for cache lookup");</code> — fail loudly at the source</i>
+    <b>Never build an identity-bearing key — cache key, filename, SQL fragment — with raw <code>+</code> on a value that might be null</b>
+    <i>↓ <code>"null"</code> is a perfectly valid-looking key; nothing downstream will ever complain that it's wrong, which is exactly the danger</i>
+    <b>And if you genuinely want friendly logging, make the null-handling a decision, not an accident: <code>Objects.toString(userId, "&lt;none&gt;")</code></b>
+    <i>↓ now the fallback text is something you chose, not something the <code>+</code> operator chose for you</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Java's <code>+</code> never calls <code>.toString()</code> on a null reference — the JLS defines string concatenation to convert a null operand directly into the four-character literal <code>"null"</code>, so <code>x + y</code> cannot throw a <code>NullPointerException</code> just because <code>x</code> or <code>y</code> is null. That's a safety net for printing and logging, and a trap the instant that string becomes a key, an identifier, or anything else compared for equality.
+</div>
+
+<div class="hf-note"><b>"+" doesn't ask "is this null?" — it just prints the word null and moves on.</b> It's the one operator in Java that treats a null reference as a perfectly good answer.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I'm concatenating a possibly-null session ID into this cache key. That should throw if it's null, right? Let me wrap it defensively just in case.</p></div>
+  <div class="hf-bub right"><span class="who">The + operator, personified</span><p>Throw? I don't even see a problem here. Null just becomes the word "null." Four letters, all lowercase.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So nothing ever tells me my session logic is broken?</p></div>
+  <div class="hf-bub right"><span class="who">The + operator, personified</span><p>Not from me. I turned your bug into a perfectly valid-looking string. Whether that's a favor is your call, not mine.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Trace exactly where the JLS inserts that null-to-"null" conversion — and where a <code>.toString()</code> call is conspicuously absent.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>String userId = session.getAttribute("userId");</code> — null this time</span><span class="tag">the bug's actual source</span></li>
+    <li class="open"><span><code>"profile:" + userId</code> — one operand is a <code>String</code>, so this is concatenation, not addition</span><span class="tag">+ picks a meaning from the operand types</span></li>
+    <li><span>per JLS §15.18.1, the non-String operand is converted via <code>String.valueOf(userId)</code></span><span class="tag">the conversion rule</span></li>
+    <li class="open"><span><code>String.valueOf(Object)</code> is defined as <code>(obj == null) ? "null" : obj.toString()</code></span><span class="tag">null is special-cased, not handed to toString()</span></li>
+    <li><span><code>userId.toString()</code> is never called — the null check happens first, inside <code>valueOf</code></span><span class="tag">this is why there's no NPE</span></li>
+    <li class="open"><span>the expression evaluates to the literal 12-character string <code>"profile:null"</code></span><span class="tag">valid-looking, completely wrong</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the one that surprises people who assume <code>+</code> just calls <code>.toString()</code> on everything it touches. If it did, <code>null.toString()</code> would throw exactly the <code>NullPointerException</code> you were expecting. Instead, <code>String.valueOf</code> checks for null <em>first</em> and short-circuits straight to the literal string before <code>.toString()</code> is ever reached. The null check you assumed was missing was there all along — it just resolves in the opposite direction from the one you assumed.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>user A's session times out</span><span>user B's login never finishes</span><span>an unauthenticated bot hits the endpoint</span></div>
+    <div class="funnel">userId is null → identical string conversion ↓</div>
+    <div class="instance"><code>cacheKey = "profile:null"</code><small>one shared cache entry, three unrelated broken requests</small></div>
+  </div>
+  <p class="hf-annot">Three completely different bugs — a timeout, an incomplete login, an unauthenticated bot — have nothing in common except that each one leaves <code>userId</code> null. String concatenation doesn't know or care which bug produced the null; it converts all three, identically, into the same four letters. One symptom — an occasional wrong profile served — can trace back to any of several unrelated root causes upstream, and by the time they reach the cache, concatenation has made them indistinguishable.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A teammate writes <code>log.info("user=" + user);</code> where <code>user</code> is a <code>User</code> object that might be null, expecting it to throw so the bug gets noticed immediately. What actually happens when <code>user</code> is null?</p>
+  <button type="button">It throws a <code>NullPointerException</code> from inside <code>User.toString()</code>, exactly as expected</button>
+  <button type="button">It logs the line <code>user=null</code> and returns completely normally — no exception, because <code>+</code> converts a null operand to the string <code>"null"</code> instead of calling <code>toString()</code> on it</button>
+  <button type="button">It throws a <code>NullPointerException</code>, but only if <code>User</code> doesn't override <code>toString()</code></button>
+  <p class="why" data-for="0"><code>toString()</code> is never called on a null reference here — that's the whole point. <code>+</code> converts the operand through <code>String.valueOf()</code>, which checks for null before attempting any method call at all, so <code>User.toString()</code>'s implementation never enters into it, overridden or not.</p>
+  <p class="why" data-for="1">Right. <code>String.valueOf(null)</code> returns the literal string <code>"null"</code> without invoking any method on the null reference. The log line reads <code>user=null</code>, the call returns completely normally, and nothing anywhere signals that <code>user</code> was unexpectedly null.</p>
+  <p class="why" data-for="2">Whether <code>User</code> overrides <code>toString()</code> is irrelevant, because that method is never invoked on a null reference in the first place — <code>String.valueOf</code> special-cases null before any dispatch to an instance method could happen, overridden or not.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"What happens when you concatenate something with nothing" gets a different answer from every layer of the stack.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Plain JavaScript makes the same call</h4>
+    <p><code>"count: " + null</code> and <code>`count: ${null}`</code> both produce the text <code>"count: null"</code> — no exception, same reasoning as Java: the language converts the absent value to visible text instead of failing.</p>
+    <div class="hf-scatter"><span>same rule, another C-family language</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Angular overrides that default on purpose</h4>
+    <p>Bind that same null value into a template — <code>{{ value }}</code> — and Angular's interpolation renders an empty string, not the word "null". A framework built on JavaScript deliberately hid the exact signal JavaScript itself would have shown, because "null" printed in a UI helps no one.</p>
+    <div class="hf-scatter"><span>a framework overriding the language's own default</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Excel takes a third option</h4>
+    <p><code>=A1&amp;"!"</code> where <code>A1</code> is a blank cell doesn't error and doesn't print a placeholder word — it silently treats the blank as an empty string, so the result is just <code>"!"</code>. Absence disappears instead of announcing itself.</p>
+    <div class="hf-scatter"><span>blank becomes nothing, quietly</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> this page is the field guide to Java's operators — arithmetic, comparison, logical, bitwise, assignment, ternary, <code>instanceof</code> — and the precedence rules deciding how they combine, including classic traps like silent integer overflow and <code>Integer</code> caching. <b>The one new sentence this block adds:</b> the <code>+</code> operator is specifically engineered to never throw on a null operand — it prints the word "null" instead — so the one crash you were bracing for at a null-shaped bug is the one crash Java has permanently ruled out, and the bug gets to hide inside a perfectly normal-looking string instead.
+</div>
+
+<!-- ── TRY IT LIVE ── -->
   <div class="tryit" data-lang="java"
        data-title="🧪 Try it: i++ vs ++i, % signs, and short-circuit rescue"
        data-predict="What are x and y after the ++ lines — and does the last line crash with divide-by-zero?">
@@ -748,6 +849,7 @@ function bitViz() {
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

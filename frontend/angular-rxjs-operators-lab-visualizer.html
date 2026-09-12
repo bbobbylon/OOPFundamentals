@@ -150,6 +150,216 @@
     </div>
   </div>
 
+<p class="hf-deck">or, a pipe isn't a translation — it's an obstacle course, and most values never finish it</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You typed "angular" fast. Five requests went out. The box briefly showed results for "ang" — after you could already see the ones for "angular".</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Every request succeeded. The UI still showed the wrong one.</div>
+  <p>You wired the typeahead with <code>mergeMap</code> instead of <code>switchMap</code> — an
+  easy swap to make, since it's usually the first flattening operator people learn. Each keystroke
+  starts its own <code>http.get()</code>, and <code>mergeMap</code> never cancels anything; it
+  just lets every inner request run and passes each response through the moment it arrives. On a
+  real network, response time isn't guaranteed to match send order — a short early query can take
+  <i>longer</i> to search than a longer, more specific one sent after it. So the early response for
+  "ang" lands <i>after</i> the correct response for "angular", and because nothing told the stream
+  which response was stale, it overwrites the right answer with the wrong one.</p>
+  <div class="hf-scatter">
+    <span>every request: 200 OK ✓</span>
+    <span>five requests in flight ✓</span>
+    <span>none of them cancelled ⚠</span>
+    <span>an old response lands last and wins ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: "the response for my query" and "the last response that
+  arrived" are the same thing. <code>mergeMap</code> only ever guarantees the second one.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Say which requests are even allowed to finish</div>
+  <div class="hf-ladder">
+    <b>mergeMap(q =&gt; http.get(...)) — every keystroke starts a request, none get cancelled</b>
+    <i>↓ nothing tells RxJS that a new keystroke makes the previous search irrelevant</i>
+    <b>switchMap(q =&gt; http.get(...)) — a new value unsubscribes the previous inner call first</b>
+    <i>↓ the earlier response, even if it lands late, has nothing left downstream listening for it</i>
+    <b>Only the most recent query's result can ever reach subscribe()</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The flattening operator you choose is a promise about which requests are allowed to
+  finish.</b> <code>mergeMap</code> says "all of them, whenever they land." <code>concatMap</code>
+  says "one at a time, in order, patiently." <code>switchMap</code> says "only the newest — cancel
+  the rest." Same code shape, three different promises, which is why a search box, a payment
+  submit, and a route resolver each want a different one even though every call site looks
+  identical.
+</div>
+
+<div class="hf-note">Think of switchMap as a barista who abandons your current drink the second
+you change your order. You say "latte" — they start steaming milk. You say "actually, cappuccino"
+before it's done — they dump the latte and start over, and you never see that first drink, no
+matter how far along it was. mergeMap is the barista who never dumps anything: now three drinks
+are being made at once, and whichever finishes first lands on the counter — not necessarily the
+one you still want.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>Every request I sent got a 200. Why is the wrong answer on screen?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">switchMap</span>
+    <p>Because I only forward what I'm still subscribed to. The moment your next keystroke
+    arrived, I unsubscribed from the previous HTTP call. Its response might still exist somewhere
+    on the wire, but nothing downstream of me is listening for it anymore.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">mergeMap</span>
+    <p>I would have let all of them through — I never cancel a thing. Whichever response's round
+    trip happens to finish first is the one your subscriber sees, whether or not it's the most
+    recent question you actually asked.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">debounceTime</span>
+    <p>And before either of you gets involved, I'm the one deciding whether a keystroke even
+    becomes a value worth flattening. Type fast enough and most keystrokes never reach switchMap
+    or mergeMap at all — I only forward the one after a 300ms pause with nothing new behind it.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Type "ng" fast. Watch how few of those keystrokes actually reach the network.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Every keyup fires <code>map(e =&gt; e.target.value)</code> — pure, synchronous, every keystroke survives this one</span><span class="tag">no gate yet, just a shape change</span></li>
+    <li class="open"><span><code>debounceTime(300)</code> starts (or restarts) a 300ms timer on every value and only forwards the <b>last</b> one if nothing new arrives before it fires</span><span class="tag">most keystrokes die right here</span></li>
+    <li><span><code>distinctUntilChanged()</code> compares the surviving value to the previous surviving value and drops it if identical</span><span class="tag">protects against a no-op re-search</span></li>
+    <li class="open"><span><code>filter(q =&gt; q.length &gt;= 2)</code> drops anything still too short to search — where a lone leftover "a" gets discarded</span><span class="tag">a synchronous, one-value decision</span></li>
+    <li><span><code>switchMap</code> subscribes to a <b>new</b> <code>http.get()</code> for the surviving value, tearing down any previous inner subscription first</span><span class="tag">cancellation lives here, and nowhere else</span></li>
+    <li class="open"><span>Only a value that survives all four gates <i>and</i> wins the switchMap race ever reaches <code>subscribe()</code></span><span class="tag">the whole pipeline's job was disqualification</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the one worth memorizing, because it's the only step in the entire
+  chain that can retroactively cancel work already in progress. Everything before it decides
+  whether a value gets to <i>start</i> a request. switchMap is the only operator here that can
+  also decide a request doesn't get to <i>finish</i>.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>"n"</span><span>"ng"</span><span>"ngr"</span><span>"ngry"</span>
+    </div>
+    <div class="funnel">switchMap keeps only the newest ↓</div>
+    <div class="instance">one active HTTP request<small>every earlier inner subscription already torn down</small></div>
+  </div>
+  <p class="hf-annot">Four keystrokes, four inner Observables started — but never four requests
+  racing to the finish. switchMap tears down each previous inner subscription the instant a new
+  source value arrives, so by the time this settles, only the request for "ngry" is still capable
+  of ever reaching <code>subscribe()</code>.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">The pipeline is <code>switchMap(q =&gt; this.http.get('/search', {params:{q}}))</code>.
+  It subscribes to the request for "ng", then the user types "ular" a moment later, before that
+  response arrives. What actually happens to the "ng" request out on the network?</p>
+  <button type="button">Nothing — HTTP requests can't be cancelled once sent, so it completes normally in the background; only its response gets ignored</button>
+  <button type="button">Angular's HttpClient aborts the underlying XHR the moment switchMap unsubscribes from the previous inner Observable — the request is actually cancelled on the wire</button>
+  <button type="button">It depends on whether the server has already started processing the request</button>
+  <p class="why" data-for="0">True for a lot of APIs — a bare <code>fetch()</code> with no
+  <code>AbortController</code>, a hand-wrapped Promise, plenty of non-Angular HTTP clients. Once
+  you've handed off a Promise there's no unsubscribe to hook into. But Angular's
+  <code>HttpClient</code> isn't a Promise wrapper — it returns a real Observable whose teardown is
+  wired straight to the underlying XHR, specifically so this scenario doesn't waste bandwidth.</p>
+  <p class="why" data-for="1">Right — and it's not a coincidence, it's the actual reason
+  switchMap is the standard advice for typeahead search with HttpClient specifically. Unsubscribing
+  — which switchMap does automatically to the previous inner Observable the instant a new source
+  value arrives — runs that teardown, and the teardown calls the XHR's <code>abort()</code>. The
+  stale request doesn't just get ignored downstream; it stops existing on the wire.</p>
+  <p class="why" data-for="2">Server-side progress doesn't factor into this at all from the
+  client's point of view. The abort is a client-side XHR operation triggered purely by
+  unsubscription — it fires whether the server has started, finished, or hasn't received the
+  request yet. What the server does with a connection that drops mid-flight is a separate concern
+  from whether Angular's Observable considers the request cancelled.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">A browser API doing by hand what switchMap does for free, a server-side mirror of the same race, and the interceptor guarding your own login flow.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4><code>AbortController</code> — the manual version of the same move</h4>
+    <p>Every "cancel the old search when a new one starts" feature you've seen built with plain
+    <code>fetch()</code> is solving exactly this problem by hand: call <code>.abort()</code> on the
+    previous request's controller before firing the next one. switchMap is that exact pattern,
+    pre-wired into the operator, so you stop reimplementing it per component.</p>
+    <div class="hf-scatter"><span>switchMap ≈ AbortController.abort() on every new keystroke</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Idempotency keys solve the mirror-image problem</h4>
+    <p>An idempotency key on a <code>POST /payments</code> endpoint handles almost the opposite
+    side of the same fact: instead of a client discarding a stale <i>response</i>, the server
+    recognizes and collapses duplicate <i>requests</i> that arrived because a client retried before
+    a slow response came back. Same root cause — a slow response and a new attempt can arrive in an
+    order nobody planned for — solved from the other end of the connection.</p>
+    <div class="hf-scatter"><span>same race, opposite side of the wire</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your own token-refresh interceptor has a close cousin of this bug</h4>
+    <p>A CIAM auth interceptor that refreshes an expired access token can hit a related trap: if
+    two requests 401 within milliseconds of each other, a naive interceptor calling
+    <code>authService.refreshToken()</code> on each one fires two refresh calls against Ping's or
+    Entra's token endpoint — burning a refresh token or tripping a rate limit. The fix shares this
+    lab's whole operator family: gate the refresh behind one in-flight <code>Subject</code>, or use
+    <code>exhaustMap</code> — which, unlike switchMap, ignores new triggers entirely while one is
+    already running instead of cancelling it — so every 401 waits on the single refresh call and
+    retries once it resolves.</p>
+    <div class="hf-scatter"><span>exhaustMap: one refresh call, no matter how many 401s pile up</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Why not just use debounceTime alone and skip switchMap entirely?</p>
+  <p class="a">debounceTime controls how <i>often</i> a request starts; it does nothing about what
+  happens once one is already running. Even with a generous debounce, a user can pause, trigger a
+  request, then type again before that request resolves — and without switchMap (or something
+  like it) you're back to mergeMap's behavior for that one overlap. They solve different halves of
+  the same problem: debounce reduces how many requests happen, switchMap controls what happens to
+  the ones that overlap anyway.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Is switchMap always the right flattening operator for an HTTP call?</p>
+  <p class="a">No — it's right specifically when a newer request makes an older one obsolete, which
+  is true for search-as-you-type and false for submitting a form or saving a comment. Cancel a
+  <code>POST /orders</code> mid-flight with switchMap and you may cancel an order that had already
+  reached the server and started processing, with no way to know afterward whether it succeeded.
+  For anything that must run to completion — payments, saves, deletes — reach for
+  <code>concatMap</code> (run them one at a time, in order) or <code>exhaustMap</code> (ignore new
+  attempts while one's already running, which also happens to be the right fix for double-submit
+  on a button).</p>
+</div>
+<div class="hf-ask">
+  <p class="q">If I only care about the latest value, why not just unsubscribe and resubscribe by hand instead of learning switchMap?</p>
+  <p class="a">Because you'd be rebuilding switchMap's teardown logic yourself, and it's easy to get
+  wrong — miss one edge case and you leak a subscription, or a pending HTTP request that never
+  gets cleaned up. The flattening operators exist precisely so the common shapes of "cancel the old
+  one," "run them all," and "ignore new ones while busy" don't need hand-rolled subscription
+  management in every component that needs one. Reaching for manual unsubscribe/resubscribe is
+  usually the signal you want a different operator, not no operator.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  The pipeline is <code>debounceTime(300), switchMap(q =&gt; http.get(...))</code>, subscribed to
+  manually with <code>.subscribe(...)</code> inside <code>ngOnInit</code> — no
+  <code>takeUntilDestroyed()</code>, no <code>async</code> pipe. A request is 100ms into flight
+  when the user navigates away and the component is destroyed. Does that HTTP request get
+  cancelled — and would your answer change if the component instead consumed the stream through
+  the <code>| async</code> pipe in its template?
+</div>
+
   <!-- ── HERO: animated operator-pipeline walk · gliding chip · live stream inspector ── -->
   <section>
     <div class="card card-blue">
@@ -794,6 +1004,7 @@ resetStage();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

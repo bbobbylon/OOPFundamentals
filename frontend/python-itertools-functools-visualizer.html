@@ -95,7 +95,110 @@ print("product 1..6:   ", functools.reduce(operator.mul, range(1, 7)))
   </div>
 
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the lazy-iterator trick that quietly builds the list you were trying to avoid</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say"><code>tee()</code> looks like a free way to read one generator twice. Read the two copies at different speeds and it starts hoarding.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">tee(fetch_rows(), 2) looked exactly as memory-light as the original</div>
+  <p>A 4 GB export needs to be both counted and processed, so it seems wasteful to call <code>fetch_rows()</code> twice: <code>counter, worker = itertools.tee(fetch_rows(), 2)</code>. First you run <code>total = sum(1 for _ in counter)</code> to log a row count, then <code>for row in worker: process(row)</code> afterward.</p>
+  <p>The moment <code>sum()</code> finishes, every single row has already been pulled out of <code>fetch_rows()</code> — and since <code>worker</code> hasn't consumed anything yet, <code>tee</code> had nowhere to put those rows except an internal buffer, one entry per row, all held in memory until <code>worker</code> catches up. The generator you reached for specifically to avoid materializing 4 GB in RAM just materialized 4 GB in RAM.</p>
+  <div class="hf-scatter">
+    <span>tee() returns independent-looking iterators ✓</span>
+    <span>both branches stay light IF consumed together ✓</span>
+    <span>one branch running far ahead of the other ⚠ buffers everything between them</span>
+  </div>
+  <p class="hf-foot">The Python docs say this plainly, in words nobody reads until after the pager goes off: "if one iterator uses most or all of the data before another iterator starts, it is faster to use <code>list()</code> instead of <code>tee()</code>."</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Keep the branches in step — or stop pretending you need laziness at all</div>
+  <div class="hf-ladder">
+    <b>Consume tee'd branches together, interleaved, not one fully drained before the other starts</b>
+    <i>↓ the buffer only ever has to hold the GAP between branches, not the whole dataset</i>
+    <b>If one branch always finishes first anyway, just call list(fetch_rows()) once and loop the list twice</b>
+    <i>↓ same memory cost as tee's worst case, with none of the bookkeeping and none of the surprise</i>
+    <b>Never touch the original iterator again after tee() — advancing it directly desyncs every copy tee is tracking</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>tee() shares ONE underlying iterator and gives each returned handle its own catch-up buffer.</b> It does not re-run <code>fetch_rows()</code> per branch, and it does not know in advance how far apart your branches will drift. Every item the fastest branch consumes that a slower branch hasn't reached yet gets appended to that slower branch's buffer instead of being thrown away — because tee has no way to know you won't eventually ask for it.
+</div>
+
+<div class="hf-note">tee() is one photocopier feeding two trays. If someone empties tray A immediately and nobody touches tray B for an hour, the copier doesn't stop copying out of consideration for tray B — it keeps every page tray B hasn't collected yet stacked up on the machine, because it can't un-print a page tray A already asked for.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I thought tee() gave me two lazy iterators. Why is my process suddenly using 4 GB?</p></div>
+  <div class="hf-bub right"><span class="who">tee()</span><p>I gave you two HANDLES. Underneath, there's still only one real iterator over your rows, plus a buffer for whichever handle falls behind. You drained "counter" completely before touching "worker" — so "worker"'s buffer IS your 4 GB now.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Could you have just thrown away the rows counter already finished with?</p></div>
+  <div class="hf-bub right"><span class="who">tee()</span><p>Not safely — I have no idea whether "worker" is about to ask for them. Discarding early would mean silently breaking the second iterator the moment you touched it. Buffering everything is the only option that keeps both handles honest.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Two handles, one real source, and a buffer that grows exactly as fast as the gap between them.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>itertools.tee(fetch_rows(), 2)</code> returns two independent-looking iterators, counter and worker</span><span class="tag">looks independent</span></li>
+    <li class="open"><span>Underneath, both share ONE real iterator over fetch_rows(), plus a small FIFO buffer per branch</span><span class="tag">one real source</span></li>
+    <li><span><code>sum(1 for _ in counter)</code> starts pulling — each pull advances the one shared source</span><span class="tag">counter runs ahead</span></li>
+    <li class="open"><span>Every item counter consumes that worker hasn't reached yet is appended to worker's buffer instead of discarded</span><span class="tag">buffered, not dropped</span></li>
+    <li><span>counter reaches the end of the file — every row that ever existed is now sitting in worker's buffer</span><span class="tag">worst case: everything</span></li>
+    <li class="open"><span>worker's loop finally starts, reading from its own buffer first, catching up to where counter already finished</span><span class="tag">catching up from memory</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the entire cost of tee, one item at a time. It is not a bug and not a leak — it is the only correct behavior available, given that tee has promised you two fully independent iterators over data it can only pull from the source once. The bill for that promise is a buffer sized to however unevenly you actually consume the two handles.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>counter drains eagerly</span><span>worker hasn't started</span><span>a third late reader, if you added one</span>
+    </div>
+    <div class="funnel">every gap between branches becomes buffered items ↓</div>
+    <div class="instance">one growing FIFO per lagging branch<small>worst case: the entire dataset, held for the slowest reader</small></div>
+  </div>
+  <p class="hf-annot">However many branches you tee, the shape of the cost is identical: it is never about how many handles you made, only about how far apart the fastest and slowest ones are allowed to drift. Two branches consumed in lockstep cost almost nothing extra; two branches consumed one-then-the-other cost the whole dataset, exactly once, in memory.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q"><code>a, b = itertools.tee(open('access.log'), 2)</code>. A loop fully exhausts <code>a</code>, just counting lines, before touching <code>b</code> at all. <code>access.log</code> is 4 GB. What is true right after that count finishes, before <code>b</code> is touched?</p>
+  <button type="button">Memory usage barely moved — tee() streams from disk for each branch independently</button>
+  <button type="button">tee has buffered roughly the whole file in memory, waiting for b to catch up</button>
+  <button type="button">b has been silently invalidated and will raise as soon as you try to iterate it</button>
+  <p class="why" data-for="0">tee() opens the file once, not once per branch — it can't re-stream from disk for b, because b's copy only exists as whatever tee chose to keep in memory on b's behalf.</p>
+  <p class="why" data-for="1">Right. a ran all the way to the end while b never advanced, so every line a read past b's position had nowhere to go but b's buffer. That buffer is now close to the full 4 GB.</p>
+  <p class="why" data-for="2">b is still completely valid — tee's whole job is to keep it valid. It just has a large backlog to read through from memory before it reaches the point where fresh reads from the file would resume.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"A slow reader forces something upstream to hold a buffer for it" shows up anywhere one producer feeds consumers at different speeds.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Kafka consumer lag</h4>
+    <p>A topic doesn't stop retaining messages because one consumer group is behind — it holds everything within the retention window so that slow consumer can still catch up. A large enough lag on one consumer is exactly a large enough tee buffer on one branch: the straggler is who determines how much has to stay in memory (or on disk).</p>
+    <div class="hf-scatter"><span>fast consumer — reads and moves on</span><span>slow consumer ⚠ — the broker holds messages for it</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>TCP receive buffers — the one with a limit</h4>
+    <p>A fast sender and a slow reader on a socket also produce a buffer of unread bytes — but TCP's window is bounded. Once it fills, backpressure kicks in and the sender is forced to slow down. tee() has no such ceiling; it will keep buffering until your process runs out of memory.</p>
+    <div class="hf-scatter"><span>TCP — bounded, pushes back</span><span>tee() ⚠ — unbounded, never pushes back</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>RxJS's <code>ReplaySubject</code></h4>
+    <p>A plain <code>Subject</code> gives late subscribers nothing — they simply miss whatever already fired. A <code>ReplaySubject</code> buffers every emission (or up to a configured count) so a subscriber who arrives late still gets the backlog — the same "buffer for whoever shows up behind" trade-off tee makes for you automatically, whether you wanted it or not.</p>
+    <div class="hf-scatter"><span>ReplaySubject ⚠ buffers for late subscribers, by design</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> itertools and functools replace manual loops with lazy, composable combinators and higher-order helpers — chain, islice, groupby, reduce, partial, and lru_cache — evaluating one item at a time instead of building intermediate lists.
+  <b>The one new sentence this block adds:</b> tee() only keeps that one-item-at-a-time promise when its branches are consumed in step — let one branch run far ahead, and tee quietly builds, in memory, the very list the rest of this page taught you to avoid.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="pyitSeg">
@@ -309,6 +412,7 @@ DevHubCodeWalk.mount('#cw-pyit',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

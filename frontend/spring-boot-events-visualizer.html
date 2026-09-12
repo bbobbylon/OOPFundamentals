@@ -146,6 +146,213 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> <code>UserCreatedEvent</code>, <code>UserLockedEvent</code>, <code>RoleAssignedEvent</code>, <code>PasswordResetRequestedEvent</code>. <code>createUser()</code> publishes <code>UserCreatedEvent</code>; a <code>@TransactionalEventListener(AFTER_COMMIT)</code> sends the welcome email and an <code>@Async @EventListener</code> writes the audit entry — three listeners today, and a fourth changes nothing in <code>UserService</code>.</div>
   </div>
 
+<p class="hf-deck">or, @Order tells listeners when to run — not whether the ones after it ever get the chance</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Three listeners, one event, one throws. How many actually ran?</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">auditOrderCreation() throws, and updateInventory() just… never happens</div>
+  <p><code>OrderEventHandlers</code> — the class from Section 3 — registers three listeners for
+  <code>OrderCreatedEvent</code> that matter here: <code>auditOrderCreation()</code> at
+  <code>@Order(1)</code>, <code>updateInventory()</code> at <code>@Order(2)</code>, and
+  <code>sendConfirmationEmail()</code>, which carries no <code>@Order</code> at all. Order #4521
+  comes in. <code>auditLog.record("ORDER_CREATED", 4521)</code> hits a connection pool that's
+  momentarily exhausted and throws. Nothing about that should touch inventory or email — separate
+  methods, separate concerns, the entire pitch of pub/sub is that they don't know about each
+  other. And yet: no inventory reservation. No confirmation email. No error logged for either one
+  — because neither one was ever called. The order exists. The warehouse has no idea it exists.</p>
+  <div class="hf-scatter">
+    <span>OrderCreatedEvent published ✓</span>
+    <span>auditOrderCreation() @Order(1) — throws</span>
+    <span>updateInventory() @Order(2) — never invoked</span>
+    <span>sendConfirmationEmail() (unordered) — never invoked</span>
+  </div>
+  <p class="hf-foot">Not two bugs. One exception, and a dispatch loop that had nowhere else to go.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Give the loop somewhere to go besides up</div>
+  <div class="hf-ladder">
+    <b>Define your own bean named applicationEventMulticaster</b>
+    <i>↓ that exact name is what Spring looks for before it falls back to creating its own SimpleApplicationEventMulticaster</i>
+    <b>Call setErrorHandler(ex -&gt; log.error("listener failed", ex)) on it</b>
+    <i>↓ now invokeListener() wraps each call in try/catch and hands the throwable to your handler instead of rethrowing it</i>
+    <b>auditOrderCreation() can still throw on connection-pool exhaustion — updateInventory() and sendConfirmationEmail() run anyway</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Pub/sub decouples who publishes from who's listening. By default, it does not decouple one
+  listener's exception from the next listener's turn.</b> @Order gives you a sequence. It was
+  never a promise that the sequence survives contact with a thrown exception.
+</div>
+
+<div class="hf-note">Think of a synchronous <b>@EventListener</b> chain as a <b>bucket brigade,
+not a group text</b>. A group text reaches every phone on its own — one dead phone doesn't touch
+the others. A bucket brigade hands the <i>same</i> bucket down a line of people, one at a time;
+drop it at position one, and positions two and three never even see it, fire or no fire.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>auditOrderCreation() failed on order #4521 last night. Why didn't the warehouse get its
+    inventory update anyway? Those are two completely unrelated listeners.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">publishEvent()</span>
+    <p>Unrelated to each other, sure. Not unrelated to me. I don't run either one myself — I hand
+    your event to the multicaster and wait for it to hand control back. Last night, it didn't hand
+    control back. It handed me an exception instead.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">SimpleApplicationEventMulticaster</span>
+    <p>I run every listener registered for one event in a single loop, in @Order sequence, one at
+    a time, on whatever thread called me. Nobody told me what to do when one throws, so my default
+    is the obvious one: I stop, and I let it throw right back at whoever's iterating me.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">updateInventory()</span>
+    <p>And I was next in that loop. I wasn't skipped with a warning. I wasn't called at all.
+    There's a difference — last night it was the difference between a missing shipment and a
+    logged one.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One publishEvent() call. One loop. Follow it to the exact line that decides this.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>createOrder() calls <code>publisher.publishEvent(new OrderCreatedEvent(4521, …))</code> — one line, no try/catch around it</span><span class="tag">your code</span></li>
+    <li class="open"><span>AbstractApplicationEventMulticaster resolves every listener registered for OrderCreatedEvent and sorts them — @Order value ascending, unordered listeners default to <code>Ordered.LOWEST_PRECEDENCE</code> and sort last</span><span class="tag">happens once, at dispatch</span></li>
+    <li class="open"><span>SimpleApplicationEventMulticaster walks that sorted list in a plain for-loop, on the calling thread, one listener at a time — unless a given listener is @Async, in which case only that one gets handed to an executor</span><span class="tag">this loop is the whole story</span></li>
+    <li><span>For each listener, invokeListener() checks whether a custom ErrorHandler bean was ever configured. Out of the box: no</span><span class="tag">the missing safety net</span></li>
+    <li class="open"><span>auditOrderCreation() throws. With no ErrorHandler, invokeListener() doesn't catch it — it climbs straight out of multicastEvent(), and the for-loop dies mid-iteration</span><span class="tag">the loop stops, it doesn't continue</span></li>
+    <li><span>Everything later in that sorted list — updateInventory(), sendConfirmationEmail(), however many more you add next year — is simply never reached. publishEvent() then rethrows the same exception back to createOrder()</span><span class="tag">collateral, not a bug report</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the whole lesson. There's a real hook for making this loop
+  fault-tolerant — Spring built it in — and out of the box, nobody wires it. That's not a bug in
+  Spring; a shared, ordered, synchronous loop with no error handler is exactly what @Order asked
+  for. The mistake is assuming @Order also bought you isolation. It bought you sequence.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">OrderCreatedEvent<small>published once, from one line of code</small></div>
+    <div class="fan">multicastEvent() walks its sorted listener list ↓</div>
+    <div class="obs">
+      <span>auditOrderCreation() @Order(1) — throws</span>
+      <span class="new">no ErrorHandler configured — the loop dies right here</span>
+      <span>updateInventory() @Order(2) — never reached</span>
+      <span>sendConfirmationEmail() unordered — never reached</span>
+    </div>
+  </div>
+  <p class="hf-annot">Swap in a custom applicationEventMulticaster with an ErrorHandler and this
+  fan doesn't change shape — every listener still gets a turn, in the same order. What changes is
+  that a thrown exception stops being a roadblock and becomes just… a logged line, with the loop
+  already past it.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">OrderEventHandlers registers <code>auditOrderCreation()</code> at
+  <code>@Order(1)</code>, <code>updateInventory()</code> at <code>@Order(2)</code>, and
+  <code>sendConfirmationEmail()</code> with no <code>@Order</code> at all — all three listening
+  for <code>OrderCreatedEvent</code>, all synchronous, no custom ErrorHandler configured anywhere.
+  On order #4521, <code>auditOrderCreation()</code> throws. Which of the three actually ran?</p>
+  <button type="button">Only auditOrderCreation() — it ran (and threw); updateInventory() and sendConfirmationEmail() were never invoked at all</button>
+  <button type="button">All three — @EventListener methods for the same event run independently of each other by design, so one throwing can't stop its siblings</button>
+  <button type="button">auditOrderCreation() and updateInventory() — only sendConfirmationEmail() gets skipped, because it's the one without an explicit @Order</button>
+  <p class="why" data-for="0">Exactly. Spring's default SimpleApplicationEventMulticaster runs
+  listeners for one event in a single synchronous for-loop, sorted by @Order, on the calling
+  thread. With no ErrorHandler configured — the out-of-the-box state — invokeListener() doesn't
+  catch what auditOrderCreation() throws; it lets it climb out, and the loop dies right there.
+  updateInventory() and sendConfirmationEmail() don't fail. They're never called.</p>
+  <p class="why" data-for="1">This is the trap the whole page sets up for you: pub/sub decouples
+  the <i>publisher</i> from needing to know its listeners. It says nothing about decoupling the
+  listeners from <i>each other</i>. They share one loop, one thread, one @Order sequence —
+  "independent" describes who calls them, not what happens when one of them throws.</p>
+  <p class="why" data-for="2">Missing @Order doesn't mean "skipped" — it means
+  <code>Ordered.LOWEST_PRECEDENCE</code>, dead last in line, but still in line. If
+  auditOrderCreation() hadn't thrown, sendConfirmationEmail() would have run fine, just after the
+  other two. What actually determines who runs isn't whether a listener has an @Order — it's
+  whether the loop is still alive by the time it's their turn.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three places you've already trusted a chain to keep going — and one where you helped build it.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Array.prototype.forEach — same trap, same fix</h4>
+    <p><code>orders.forEach(o =&gt; processOrder(o))</code> runs the same way: one synchronous
+    loop, and a thrown exception inside one callback stops the iteration cold — everything after
+    it in the array never gets processed. <code>Promise.allSettled()</code> exists specifically
+    because <code>forEach</code>/<code>for...of</code> give you zero isolation between iterations;
+    it runs every promise to completion and hands you a result per item, failures included.</p>
+    <div class="hf-scatter"><span>forEach() ≈ the multicaster's loop</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Spring Security's own FilterChain — the pattern you use every day</h4>
+    <p>You've spent five pages watching a Spring Security filter chain: each filter calls
+    <code>chain.doFilter(request, response)</code> to hand off to the next one. A filter that
+    throws instead of calling that method stops the chain exactly the way
+    auditOrderCreation() does — everything registered after it, including filters with nothing to
+    do with whatever went wrong, never runs. Same shape: an ordered, synchronous, shared loop with
+    no isolation baked in.</p>
+    <div class="hf-scatter"><span>FilterChain.doFilter() ≈ multicastEvent()'s loop</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your own SCIM sync, one listener behind an audit log</h4>
+    <p>Say <code>RoleAssignedEvent</code> — already on this page's own CIAM list — fires two
+    synchronous listeners: <code>auditRoleChange()</code> at @Order(1), then
+    <code>syncRoleToEntra()</code> at @Order(2) pushing the new role to Entra via Graph API. Let
+    the audit call throw — a timeout, a transient 500 — and the Entra sync never fires. Nothing
+    logs "SCIM sync skipped." The user just quietly keeps the wrong permissions in the downstream
+    IdP until someone notices.</p>
+    <div class="hf-scatter"><span>one throw, one silently un-synced identity</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Doesn't @Async fix this too, the same way @TransactionalEventListener's AFTER_COMMIT does?</p>
+  <p class="a">Differently, but yes for isolation specifically. An @Async listener is handed to an
+  executor — <code>executor.execute(...)</code> — and that call returns immediately, before the
+  listener body ever runs; the throw, if any, happens later, on a pool thread, completely outside
+  the synchronous for-loop. It can't block or skip siblings dispatched in the same pass. The
+  tradeoff: nobody who called publishEvent() will ever see that exception either, unless you
+  separately register an <code>AsyncUncaughtExceptionHandler</code> — a silent failure of a
+  different kind.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">So should every listener just be @Async, if I don't want one failure to cancel the others?</p>
+  <p class="a">If strict cross-listener ordering doesn't matter to you, that's the cleanest fix —
+  each one gets its own dispatch call, so there's no shared loop left to break. Reach for the
+  custom ErrorHandler instead when you need to stay synchronous on purpose: because a later
+  listener's timing genuinely depends on an earlier one finishing first, or because you're relying
+  on @TransactionalEventListener's phase to fire before the method returns.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does this apply to @TransactionalEventListener the same way?</p>
+  <p class="a">Same multicaster, same loop, same rule. Register two
+  @TransactionalEventListener(AFTER_COMMIT) methods for one event, and if the first one (by
+  @Order) throws, the second one in that phase is skipped exactly like updateInventory() was. The
+  phase only decides <i>when</i> the loop runs, relative to the transaction — not what happens
+  once something inside it throws.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  <code>PaymentAuthorizedEvent</code> fires three synchronous listeners: <code>chargeLedger()</code>
+  at @Order(1), <code>recordReceiptNumber()</code> at @Order(2), and <code>sendReceiptEmail()</code>
+  with no @Order. The payment gateway times out and <code>chargeLedger()</code> throws. Before you
+  scroll back up — does <code>recordReceiptNumber()</code> run? Does
+  <code>sendReceiptEmail()</code>? And what does the code that called <code>publishEvent()</code>
+  actually receive back?
+</div>
+
   <!-- ── HERO: animated Spring event flow · live per-step inspector ── -->
   <div class="panel" style="border:1px solid var(--accent)">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch an event travel — publish → bus → listener → action</h2>
@@ -796,6 +1003,7 @@ renderNodes(cur);
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>

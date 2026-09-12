@@ -118,6 +118,195 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> After <code>POST /api/users</code>, <code>@Async sendActivationEmail(user)</code> lets the 201 return to Angular instantly while the email sends in the background. <code>@Scheduled(cron="0 0 3 * * *")</code> deletes refresh tokens where <code>expiresAt &lt; now()</code>; <code>@Scheduled(fixedRate=600_000)</code> syncs Entra ID group memberships every 10 min — guarded by <code>@SchedulerLock(name="tokenCleanup", lockAtMostFor="10m")</code>.</div>
   </div>
 
+<p class="hf-deck">or, @Async only works if you call it through the front door</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The annotation is right there on the method. It just... doesn't run async anymore.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">POST /api/users used to return in 40ms. After a refactor, it takes 800ms — and @Async is still on the method</div>
+  <p>Someone tidies up <code>UserService</code> and moves <code>sendActivationEmailAsync()</code> into the
+  same class as <code>createUser()</code>, for locality. <code>createUser()</code> now calls
+  <code>this.sendActivationEmailAsync(user)</code> directly instead of going through a separately injected
+  bean. The method still has <code>@Async</code> on it. It still compiles. It still looks completely
+  correct in review — the annotation is right there. But the HTTP thread now blocks on the entire email
+  send, because the call never passes through the proxy that's actually responsible for the "run this
+  later, on another thread" behavior.</p>
+  <div class="hf-scatter">
+    <span>@Async annotation still present ✓</span>
+    <span>method signature unchanged ✓</span>
+    <span>code compiles and passes review ✓</span>
+    <span>called via this. inside the same class ⚠</span>
+    <span>request thread blocks on the full send ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that the annotation itself does the work, rather than the proxy Spring wraps around external calls to it.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Never call a @Async/@Scheduled method on yourself — route it through a bean</div>
+  <div class="hf-ladder">
+    <b>Notice the method being called with <code>this.</code> from inside the same class</b>
+    <i>↓ a self-call never passes through the Spring-generated proxy that redirects the call to a thread pool</i>
+    <b>Move the method to its own small service (or self-inject with <code>@Lazy</code>) and call it through THAT reference</b>
+    <i>↓ calling through an injected reference forces the call through the proxy — the only place @Async's logic actually lives</i>
+    <b>The annotation and the actual behavior finally agree again</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>An annotation on a method is a request to the proxy, not a property of the method itself.</b>
+  <code>@Async</code> and <code>@Scheduled</code> both work because Spring wraps your bean in a proxy at
+  startup; call the method through that proxy — from outside the class, via an injected reference — and
+  the extra behavior runs. Call it as a bare <code>this.</code> reference from inside the same class, and
+  you've walked around the proxy entirely: the plain, un-annotated method body just runs, on the calling
+  thread, as if the annotation were never written.
+</div>
+
+<div class="hf-note">Think of <code>@Async</code> as a note taped to a receptionist's desk, not a rule
+burned into the method itself: "always put this caller on hold and have someone call them back."
+Instructions like that only get followed by whoever answers the phone at reception. Walk directly into a
+coworker's office and ask them yourself, and there's no receptionist there to intercept anything. It
+stops being a perfect analogy in one place: a blocked intercom fails loudly and obviously — a self-call
+doesn't fail at all, it succeeds instantly and quietly, in exactly the wrong way.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>@Async is right there on the method. Why did this call run synchronously?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The proxy</span>
+    <p>Because you never went through me. I'm the object Spring actually registered in the container — I'm the one who knows how to hand this off to a thread pool.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">this.</span>
+    <p>And I'm not the proxy. I'm a raw reference to the real object, sitting right next to the method I'm calling — so I called it directly, the plain way, with zero interception.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Spring's container</span>
+    <p>I only ever get a chance to substitute the proxy in when something asks me for the bean — through constructor or field injection. A this. call never asks me anything.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">The proxy only exists between beans. Inside one class, there's no gap left to intercept.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>At startup, Spring sees <code>@Async</code> on a method and builds a proxy wrapping the real bean</span><span class="tag">one proxy per bean, built once</span></li>
+    <li class="open"><span>Every OTHER bean that gets <code>UserService</code> injected receives a reference to that proxy, not the raw object</span><span class="tag">injection is where the substitution happens</span></li>
+    <li><span>An external caller (a controller) calls <code>sendActivationEmailAsync(user)</code> on the injected reference</span><span class="tag">this is the call that gets intercepted</span></li>
+    <li class="open"><span>The proxy submits the real method to a <code>TaskExecutor</code> and returns immediately, before the method body runs</span><span class="tag">the caller's thread is free at this exact point</span></li>
+    <li class="open"><span>Inside <code>UserService</code>, <code>createUser()</code> calls <code>this.sendActivationEmailAsync(user)</code> directly</span><span class="tag">bypasses the proxy entirely — it's a raw reference</span></li>
+    <li><span>The plain method body executes right there, on the calling thread, exactly as if @Async didn't exist</span><span class="tag">no exception, no warning — just the wrong behavior</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the lesson. Every other step happens through the proxy, which is the only
+  place <code>@Async</code>'s thread-hopping logic actually lives. A <code>this.</code> call from inside
+  the same class reaches the real object directly, never touching the proxy, so there's genuinely
+  nothing there to intercept it. This isn't a bug Spring forgot to handle — it's a direct consequence of
+  how Java's dynamic proxies work: they can only intercept calls that arrive from outside the object.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <p class="note">this.sendActivationEmailAsync(user) ↘ — called from inside the ring</p>
+    <div class="ring"><span class="lbl">the proxy · what Spring actually injects everywhere else</span>
+      <div class="core">the real UserService<small>createUser() and sendActivationEmailAsync() both live here — @Async only takes effect if the call arrives through the ring</small></div>
+    </div>
+  </div>
+  <p class="hf-annot">A call that arrives from outside — through the ring — gets intercepted and
+  redirected to a thread pool. A call placed from inside the ring, at the core, using
+  <code>this.</code>, never crosses that boundary at all. Same object, same method, same annotation — the
+  only thing that changed is which side of the ring the call started from.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q"><code>UserService.createUser()</code> calls <code>this.sendActivationEmailAsync(user)</code>,
+  and <code>sendActivationEmailAsync</code> is annotated <code>@Async</code>. What actually happens when
+  <code>createUser()</code> runs?</p>
+  <button type="button"><code>sendActivationEmailAsync</code> runs on a background thread from the pool, exactly as @Async promises — the annotation doesn't care how the method gets called</button>
+  <button type="button"><code>sendActivationEmailAsync</code> runs synchronously, on the same thread as <code>createUser()</code>, which waits for it to finish before returning</button>
+  <button type="button">The app throws an exception at startup, because Spring detects the self-call and refuses to wire the proxy</button>
+  <p class="why" data-for="0">A very natural reading of what an annotation "should" do — attach a
+  behavior to a method, period, regardless of who's calling. That's true for annotations the compiler or
+  reflection process at the call site. <code>@Async</code> isn't one of those; it only does anything
+  through a proxy, and a <code>this.</code> call never reaches the proxy.</p>
+  <p class="why" data-for="1">Right — and the dangerous part is that nothing fails loudly here. No
+  exception, no log line, no startup warning. The method returns a value (or void) exactly like an
+  ordinary synchronous call, which is exactly what lets this bug survive code review and only surface
+  later as "the endpoint got slower."</p>
+  <p class="why" data-for="2">This assumes Spring does more static analysis of your code than it
+  actually performs. Detecting a self-call would require inspecting every method body's bytecode at
+  startup for internal invocations — Spring's proxy-based AOP doesn't do that. The proxy gets built
+  correctly; it's simply never invoked for this particular call path, and nothing flags that.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">"Only the wrapper gets intercepted" is older than Spring, and shows up anywhere a proxy sits in front of the real thing.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>JavaScript's own <code>Proxy</code> object</h4>
+    <p><code>const p = new Proxy(target, handler)</code> only intercepts operations performed on
+    <code>p</code>. Code that holds a reference to the raw <code>target</code> and calls it directly
+    skips every trap in <code>handler</code>, silently — the exact same shape as a <code>this.</code> call
+    skipping Spring's AOP proxy. Same word, same underlying idea, two unrelated runtimes.</p>
+    <div class="hf-scatter"><span>only the wrapper reference gets intercepted</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>The GoF Proxy/Decorator pattern, by design</h4>
+    <p>Every design-pattern book's Proxy and Decorator patterns work only if callers hold a reference to
+    the wrapper, not the wrapped object. Spring's <code>@Async</code> proxy isn't a special case invented
+    for annotations — it's a textbook application of a pattern that has this exact requirement built in,
+    whether or not any annotation is involved.</p>
+    <div class="hf-scatter"><span>callers must hold the wrapper, not the core</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Calling a downstream service directly instead of through the gateway</h4>
+    <p>A microservice that calls another service's internal pod address directly, instead of routing
+    through the API gateway or BFF, skips whatever that gateway does on every request — token
+    validation, rate limiting, logging. Same failure shape as the self-call bug: the cross-cutting
+    behavior lives in something you can walk around, not in the destination method itself.</p>
+    <div class="hf-scatter"><span>bypass the gateway, skip everything it does</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Is there any way to make a self-call still go through the proxy?</p>
+  <p class="a">Yes — the standard fixes all boil down to "call it from outside." Cleanest: move the
+  method to its own small service and inject that. Workable but a little unusual: self-inject with
+  <code>@Autowired @Lazy private UserService self;</code> and call <code>self.sendActivationEmailAsync(user)</code>
+  — <code>@Lazy</code> avoids a circular-dependency failure at startup. Least preferred: grab the live
+  proxy at runtime with <code>AopContext.currentProxy()</code>, which needs <code>exposeProxy=true</code>
+  and directly couples your code to Spring AOP internals.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does @Transactional have the exact same self-call problem?</p>
+  <p class="a">Yes — identical mechanism, identical failure. <code>@Transactional</code>,
+  <code>@Async</code>, <code>@Scheduled</code>, <code>@Cacheable</code>, and method-security's
+  <code>@PreAuthorize</code> are all implemented as Spring AOP advice wrapped in a proxy around the bean,
+  so all of them share this exact self-invocation blind spot. A transaction that silently doesn't commit
+  the way you expected from a self-called method is this same bug, wearing a different annotation.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why doesn't Spring just detect this at compile time and fail the build?</p>
+  <p class="a">Because that would require a fundamentally different mechanism than the one Spring uses.
+  Proxy-based AOP is built at runtime, around whichever object got registered as the bean — Spring never
+  rewrites your class's bytecode to intercept internal calls. AspectJ compile-time or load-time weaving
+  <i>does</i> handle self-invocation correctly, precisely because it modifies bytecode directly instead of
+  wrapping the object — it's a heavier, opt-in tool because it trades away this simplicity on purpose.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  <code>SchedulerTrigger</code> (a different class) is <code>@Scheduled</code> and calls the injected
+  <code>userService.runNightlyJob()</code>. Inside <code>UserService</code>, <code>runNightlyJob()</code>
+  calls <code>this.sendReport()</code> directly, and <code>sendReport()</code> is <code>@Async</code>.
+  Which thread does <code>sendReport()</code> actually run on?
+</div>
+
   <!-- ── HERO: animated @Async dispatch · live per-step inspector ── -->
   <div class="panel" style="border:1px solid var(--accent)">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch @Async free the HTTP thread — proxy → pool → task → done</h2>
@@ -686,6 +875,7 @@ TaskExecutor asyncExecutor() {
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

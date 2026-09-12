@@ -100,6 +100,136 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> A security test per role-protected endpoint — "USER_MANAGER searches (200), can't delete (403); CIAM_ADMIN deletes (204); anonymous → 401." For claim mapping, assert a Ping token (<code>groups=[CIAM_ADMIN]</code>) and an Entra token (<code>roles=[CIAMAdmin]</code>) both yield <code>ROLE_CIAM_ADMIN</code> (200 on the admin endpoint). These catch a broken converter in CI before prod.</div>
   </div>
 
+<p class="hf-deck">or, a green unit test suite can prove your business logic works and prove nothing about whether @PreAuthorize does</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">RoleServiceTest has thirty-one green tests. Not one of them would notice if @PreAuthorize vanished from the class tomorrow.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A fully green test suite for a method @PreAuthorize is supposed to protect</div>
+  <p><code>RoleService.assignRole(...)</code> is annotated <code>@PreAuthorize("hasRole('CIAM_ADMIN')")</code>. Its test class looks completely normal: <code>@ExtendWith(MockitoExtension.class)</code>, <code>@InjectMocks RoleService roleService</code>, <code>@Mock RoleRepository repo</code> — fast, isolated, no Spring context to boot, exactly the way a service-layer unit test is "supposed" to look. The tests call <code>roleService.assignRole(42L, "ADMIN")</code> directly and assert the repository was updated correctly. Every one of them passes. Nobody ever set up a non-admin caller and expected a rejection — and if someone had deleted <code>@PreAuthorize</code> from the method entirely last sprint, this exact test file would still be 100% green today.</p>
+  <div class="hf-scatter">
+    <span>the business logic is genuinely correct ✓</span>
+    <span>every test passes ✓</span>
+    <span>roleService is a plain object, not a Spring bean ⚠</span>
+    <span>@PreAuthorize has never once been evaluated by any test here ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that a passing test for a method proves something about every annotation on that method. @InjectMocks gives you the method body — never the proxy that makes @PreAuthorize real.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Call the method through the same proxy production calls it through</div>
+  <div class="hf-ladder">
+    <b>@SpringBootTest (or a slice that loads @EnableMethodSecurity) + @Autowired RoleService, not @InjectMocks</b>
+    <i>↓ the bean under test is now the AOP proxy Spring built around it, exactly like production</i>
+    <b>@WithMockUser(roles="USER") + assertThrows(AccessDeniedException.class, () -&gt; ...)</b>
+    <i>↓ this only compiles into a meaningful assertion because a real interceptor is now in the call path</i>
+    <b>Delete @PreAuthorize from the method and THIS test goes red — the business-logic tests still won't</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A passing unit test proves your method's logic is correct — it says nothing about whether an annotation on that method is being enforced.</b> <code>@PreAuthorize</code> isn't code inside the method; it's metadata a Spring-built proxy reads before the method runs. Mockito's <code>@InjectMocks</code> hands you the bare object straight from its constructor — no proxy, no interceptor, no enforcement, and no test failure to warn you it's missing.
+</div>
+
+<div class="hf-note">Think of <code>@PreAuthorize</code> like a "staff only" sign taped to a door, and the proxy like the security guard who actually reads signs before letting anyone through. Mockito's <code>@InjectMocks</code> doesn't hand you the door with the guard standing at it — it teleports you straight into the room. The sign is still taped up, perfectly legible, doing absolutely nothing, because the one person whose job was to enforce it was never there.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>Thirty-one green tests on RoleService. Are we covered on "only admins can assign roles"?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">@InjectMocks</span>
+    <p>I built you a RoleService by calling its constructor directly and stuffing in your mocks. That's genuinely all I do — I have no idea Spring even has a concept called method security.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">@PreAuthorize on assignRole()</span>
+    <p>I'm still right here on the method, spelled correctly, pointed at the right role. I've just never been read by anything in this test file — nobody ever built the proxy whose whole job is reading me.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The Spring-managed bean, in production</span>
+    <p>When the container assembles me, method security wraps me in a proxy first. Every call to assignRole() actually reaches that proxy before it reaches my real code. The object under test just now was never that bean.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Same class, same annotation, same test framework — one setup enforces it, the other can't see it exists.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>@EnableMethodSecurity</code> registers a BeanPostProcessor that wraps eligible beans in an AOP proxy when Spring builds them</span><span class="tag">enforcement lives in the wrapper</span></li>
+    <li class="open"><span>A bean obtained from the Spring ApplicationContext (<code>@Autowired</code>, <code>@SpringBootTest</code>) IS that wrapped proxy — calling a method on it goes through the interceptor first</span><span class="tag">this is the object production calls too</span></li>
+    <li><span><code>@InjectMocks</code> builds the class with <code>new RoleService(...)</code> and reflection — no ApplicationContext involved at any point</span><span class="tag">fast, isolated, and exactly the problem</span></li>
+    <li class="open"><span>There is no proxy around this object, so there is nothing to intercept the call and read <code>@PreAuthorize</code> at all</span><span class="tag">not "denies incorrectly" — never runs</span></li>
+    <li><span>The method body executes immediately, exactly as written, regardless of any SecurityContext</span><span class="tag">business logic: correctly tested</span></li>
+    <li class="open"><span>Whether <code>@PreAuthorize</code> is present, absent, or has a typo in its SpEL makes zero difference to whether this test passes</span><span class="tag">the coverage that was never there</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the lesson. This isn't <code>@PreAuthorize</code> failing open or misfiring — it's a complete no-op, because the one piece of Spring infrastructure that reads security annotations for a living was never involved in building the object this test is holding.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring">
+      <span class="lbl">the AOP proxy @EnableMethodSecurity builds around a real Spring bean</span>
+      <div class="core">RoleService.assignRole(...)<small>@PreAuthorize is read HERE, before this code ever runs</small></div>
+    </div>
+    <p class="note">@InjectMocks builds this same core directly — with no ring around it at all.</p>
+  </div>
+  <p class="hf-annot">The method body is identical either way — the picture is the whole difference. A Spring-managed bean is never just the core; it's the core plus whatever the container wrapped around it. Reach the core directly and every ring, including this one, simply isn't there to ask.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q"><code>RoleServiceTest</code> uses <code>@ExtendWith(MockitoExtension.class)</code> and <code>@InjectMocks RoleService roleService</code> — no Spring context boots at all. <code>assignRole()</code> is annotated <code>@PreAuthorize("hasRole('CIAM_ADMIN')")</code>. A test calls <code>roleService.assignRole(42L, "ADMIN")</code> with no <code>SecurityContext</code> ever set up, and asserts the repository mock was updated. What happens?</p>
+  <button type="button">AccessDeniedException is thrown — @PreAuthorize denies the call because there's no authenticated user in the SecurityContext</button>
+  <button type="button">A NullPointerException surfaces from inside the security framework, because it expects a SecurityContext that was never initialized</button>
+  <button type="button">The method runs normally and the assertion passes — @PreAuthorize is never evaluated because roleService isn't a proxied Spring bean</button>
+  <p class="why" data-for="0">A completely reasonable guess if you assume <code>@PreAuthorize</code> is always active. On a real Spring-managed bean, an empty <code>SecurityContext</code> really would produce exactly this exception. But that enforcement lives entirely inside a proxy this particular object was never wrapped in.</p>
+  <p class="why" data-for="1">Tempting, because "missing security context" sounds like exactly the kind of thing that throws — but nothing in this call path ever asks the <code>SecurityContext</code> a question. The method body doesn't reference it, and no interceptor exists here to reference it on the method's behalf.</p>
+  <p class="why" data-for="2">Right. <code>@InjectMocks</code> builds <code>roleService</code> with <code>new RoleService(...)</code> directly — there's no Spring container, so no BeanPostProcessor ever wrapped it in the proxy that reads <code>@PreAuthorize</code>. The annotation sits there, completely inert, and the method just runs.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">A rule enforced by a wrapper, not by the thing it's written on, vanishes the moment you skip the wrapper — you've met this trap before.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Database constraints your repository-mocking tests never touch</h4>
+    <p>A <code>NOT NULL</code> or <code>CHECK</code> constraint enforced by the database only fires when a real <code>INSERT</code>/<code>UPDATE</code> reaches it. A service test that mocks the repository interface entirely proves the service calls the repository correctly — it proves nothing about whether the real database would accept or reject that data, because the constraint lives in a layer the mock skipped completely.</p>
+    <div class="hf-scatter"><span>enforcement one layer below the mock</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Unit-testing a handler function instead of the running server</h4>
+    <p>Calling an HTTP handler function directly, in-process, skips every piece of middleware sitting in front of it on a real server — authentication, rate limiting, request logging. The handler's own logic can be perfectly tested and simultaneously give zero evidence that any of that middleware actually applies to it.</p>
+    <div class="hf-scatter"><span>enforcement one layer in front of the mock</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>In CIAM: this is exactly why testing a service behind a gateway isn't optional</h4>
+    <p>A microservice sitting behind an API gateway that enforces token validation and scope checks can have flawless unit tests and zero evidence the gateway policy protecting its routes actually applies. A proxy, a gateway, a database constraint, a security interceptor — enforcement living in front of your code instead of inside it is the recurring shape, and a test that bypasses the wrapper only ever proves the core.</p>
+    <div class="hf-scatter"><span>the wrapper is the security boundary, not the class</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Doesn't fixing this mean giving up fast Mockito unit tests entirely?</p>
+  <p class="a">No — keep the fast, isolated tests for the actual business-logic branches; there are usually many of those, and they genuinely don't need a container. Add a small, separate test class (or a slice that loads <code>@EnableMethodSecurity</code>) specifically to prove the <code>@PreAuthorize</code> boundary itself — a handful of tests, not thirty-one. The two test classes are answering two different questions, and neither one can answer the other's.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Would @WebMvcTest have caught this, since this page's other examples all use it?</p>
+  <p class="a">Only if the method under test is a controller method reached through <code>mockMvc.perform(...)</code> — <code>@WebMvcTest</code> boots the web layer and method security together, so a controller's <code>@PreAuthorize</code> genuinely gets exercised. This gap is specific to testing a <code>@Service</code> (or other non-controller) method directly with a plain Mockito unit test — a completely different, and extremely common, test shape.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">How would I even notice this gap in an existing codebase?</p>
+  <p class="a">Temporarily delete the <code>@PreAuthorize</code> annotation and re-run the test suite for that class. If nothing goes red, no test in that file was ever exercising it — a five-minute check worth running on any security-sensitive service once, and a good thing to script into CI as a periodic mutation check if the service is sensitive enough to justify it.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  The team adds a second test class for <code>RoleService</code>: <code>@SpringBootTest</code>, <code>@Autowired</code> (not <code>@InjectMocks</code>) <code>RoleService roleService</code>, <code>@WithMockUser(roles="CIAM_ADMIN")</code>, and asserts the admin path still works. Does this new test, by itself, prove that a non-admin caller would be rejected? What's the one additional test still missing, even now?
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -623,6 +753,7 @@ document.querySelectorAll('#setupbtns button').forEach(b=>b.onclick=()=>run(b.da
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -343,6 +343,213 @@
       </div>
     </div>
 
+<p class="hf-deck">or, subscribing again is not a retry — some streams remember how they died</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The network came back two minutes ago. Your login screen still says it didn't.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A component that mounted AFTER the outage still renders the outage</div>
+  <p>Your auth service holds <code>currentUser$ = new BehaviorSubject&lt;User|null&gt;(null)</code>. A
+  silent token refresh fails once — a network blip — and the interceptor's error handler, trying to
+  "surface the problem," calls <code>currentUser$.error(err)</code>. The network heals itself ten
+  seconds later. But a settings page the user opens ten minutes after that still renders "session
+  error" on mount, with zero network activity in the tab — not stale data, <i>zero requests</i>. You
+  checked the token (valid), the network (fine), and the component's own code (correct). Nobody
+  checked whether subscribing to <code>currentUser$</code> still means what it used to mean.</p>
+  <div class="hf-scatter">
+    <span>token in memory: valid ✓</span>
+    <span>network tab: no failed requests ✓</span>
+    <span>currentUser$.error() ran once, 10 minutes ago ⚠</span>
+    <span>every subscribe() since then replays that same error ⚠</span>
+  </div>
+  <p class="hf-foot">The bug isn't the blip. It's treating a Subject you plan to keep using like a
+  retryable HTTP call.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Never let a stream you depend on for the app's whole life call error()</div>
+  <div class="hf-ladder">
+    <b>catchError(() =&gt; of(null)) between the failing source and the Subject</b>
+    <i>↓ the Subject only ever receives next() — its error path stays permanently unused</i>
+    <b>Better: a separate authError$ Subject just for the failure itself</b>
+    <i>↓ components that care about errors can watch for them without holding every other component hostage</i>
+    <b>currentUser$ now outlives any single failed request</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A cold Observable forgets. A hot one remembers — including how it died.</b> Subscribing to
+  <code>http.get()</code> after a failure is a brand-new attempt, because subscribe() re-runs the
+  producer from nothing. Subscribing to a <code>Subject</code> that already called
+  <code>error()</code> or <code>complete()</code> gets you that same stored terminal notification,
+  immediately, forever — there's no producer left to re-run. That's why <code>shareReplay</code>'s
+  cache and a dead Subject's memory are the same kind of thing: once it's over, replaying it just
+  replays the ending.
+</div>
+
+<div class="hf-note">Think of a cold Observable as <b>ordering a coffee</b> — every
+<code>subscribe()</code> places a brand-new order, so a burnt pot ten minutes ago has nothing to do
+with the cup in front of you now. A hot <code>Subject</code> is more like <b>a shared radio
+station</b>: if the DJ has a heart attack on air and the broadcast dies, tuning in five hours later
+gets you the same dead silence, not a fresh show. Where the analogy stops holding: a real station
+eventually comes back on its own. A dead Subject never does — somebody has to build a new one.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>The network's fine now. Why does the settings page still say "session error"?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">currentUser$</span>
+    <p>Because somebody called <code>error()</code> on me, and error is terminal — same rule as any
+    Observable. I'm not "the current user, refreshed on demand." I'm one execution that already
+    ended. Every <code>subscribe()</code> you run now just hands back the notification I ended on.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The interceptor</span>
+    <p>I only meant to report that one refresh failed. I didn't know that telling you meant killing
+    you.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The async pipe</span>
+    <p>And I make it look even stranger: I unsubscribe and re-subscribe every time my host view is
+    torn down and recreated. Every one of those fresh subscriptions still lands on your exact same
+    dead notification. I'm not malfunctioning — I'm accurately reporting a Subject that never got
+    better.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One error() call. Every subscribe() after it, for the rest of the app's life, gets
+the same envelope back unopened.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A <code>BehaviorSubject</code> starts as a live multicast producer — one current value, plus a list of current subscribers</span><span class="tag">just an object with a list</span></li>
+    <li class="open"><span>Something calls <code>.error(err)</code> on it — maybe from inside a <code>catchError</code>'s error handler, maybe from a failed refresh</span><span class="tag">the point of no return</span></li>
+    <li><span>RxJS marks the Subject's internal state as stopped and synchronously calls <code>.error(err)</code> on every <b>currently</b> subscribed observer</span><span class="tag">existing subscribers die together</span></li>
+    <li class="open"><span>Any later <code>.next(value)</code> call on it is silently swallowed — no throw, no observers notified, nothing buffered</span><span class="tag">the part nobody expects</span></li>
+    <li class="open"><span>The Subject never resets, because it has no producer to re-run — unlike <code>http.get()</code>, a Subject has no "recipe," only whatever you pushed into it by hand</span><span class="tag">the actual reason retrying doesn't help</span></li>
+    <li><span>A <b>new</b> <code>.subscribe()</code> — even minutes later, from a component that has never seen this Subject before — checks the stored terminal state first and immediately replays that same <code>error(err)</code>, never touching the network</span><span class="tag">where the settings page bug comes from</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the lesson. A cold Observable's "forgiveness" after a failure was
+  never a recovery feature — it's just what happens when <code>subscribe()</code> means "run the
+  recipe again." A Subject has no recipe to re-run, so calling <code>error()</code> on one isn't a
+  bad attempt you can retry. It's a broken object you can only replace.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">currentUser$.error() — 2:03pm<small>BehaviorSubject, now permanently stopped</small></div>
+    <div class="fan">every subscribe() since 2:03pm ↓ gets the SAME notification</div>
+    <div class="obs">
+      <span>NavBar (live at 2:03pm)</span>
+      <span>ProfileCard (live at 2:03pm)</span>
+      <span>LoginGuard (2:04pm)</span>
+      <span class="new">SettingsPage — mounted 2:13pm, network already healthy</span>
+    </div>
+  </div>
+  <p class="hf-annot">SettingsPage didn't even exist at 2:03pm. It still inherits a death from ten
+  minutes before it was born, because subscribing to a stopped Subject is a status check against
+  stored state — not a new attempt at anything.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A service holds <code>currentUser$ = new BehaviorSubject&lt;User|null&gt;(null)</code>.
+  A refresh fails once and the interceptor calls <code>currentUser$.error(err)</code>. Ten seconds
+  later the network recovers and application code calls <code>currentUser$.next(freshUser)</code>
+  with a fully valid user. A component subscribes to <code>currentUser$</code> right now. What does
+  it see?</p>
+  <button type="button">freshUser — next() delivers it, since the retry succeeded and the payload is a valid user</button>
+  <button type="button">Nothing — subscribing to an already-errored Subject throws immediately</button>
+  <button type="button">The original error — new subscribers replay the stored terminal notification, and the later next(freshUser) call was silently dropped</button>
+  <p class="why" data-for="0">The natural assumption — the network really did succeed, and
+  <code>next()</code> really was called with good data. But by the time it runs, the Subject's
+  internal state is already stopped from the earlier <code>error()</code> call. Once stopped,
+  <code>next()</code> is a silent no-op: no observers are notified, nothing is buffered. That's what
+  would happen on a healthy Subject. This one isn't healthy anymore.</p>
+  <p class="why" data-for="1">Reasonable, but wrong in the other direction — subscribing to (or
+  pushing into) an errored Subject doesn't throw. Throwing is reserved for a Subject you've
+  explicitly <code>unsubscribe()</code>'d yourself, a separate and rarer case. This one just quietly
+  does nothing, which is arguably worse than an error, since nothing points at the problem.</p>
+  <p class="why" data-for="2">Right — and notice the operational cost: <code>subscribe()</code> on an
+  already-errored Subject doesn't run anything, it hands back the stored terminal notification
+  synchronously. The new component renders the stale failure instantly, with no network request at
+  all. The fix is never calling <code>error()</code> on a Subject you intend to keep using — route
+  failures through <code>next(null)</code> or a separate error channel instead.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three systems, one rule: a broadcast that's died stays dead for everyone who shows up after.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's CompletableFuture — same broadcast, same amnesia</h4>
+    <p>Call <code>completeExceptionally(ex)</code> on a shared <code>CompletableFuture</code> and
+    every <code>.thenApply()</code> / <code>.whenComplete()</code> callback attached from that point
+    on — even ones attached minutes later, on a perfectly healthy thread pool — fires immediately
+    with that same stored exception. It's one-shot for the identical reason a Subject is: there's no
+    producer behind it to re-run, just a slot holding whatever terminal state it was given.</p>
+    <div class="hf-scatter"><span>completeExceptionally() ≈ subject.error()</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A poisoned JDBC connection — the pool doesn't try to heal it either</h4>
+    <p>When a pooled connection throws a fatal SQL error, HikariCP doesn't hand that same connection
+    to the next borrower hoping it recovered — it evicts it and hands out a fresh one from a fresh
+    connection. Nobody expects a broken connection to heal itself. RxJS Subjects don't get that same
+    benefit of the doubt: a dead one just keeps circulating until you build the replacement yourself.</p>
+    <div class="hf-scatter"><span>broken connection: evicted, not retried</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your CIAM auth state — this bug ships the first time nobody's watching for it</h4>
+    <p>A production Ping- or Entra-backed front end that keeps <code>currentUser$</code> or
+    <code>isAuthenticated$</code> in a <code>BehaviorSubject</code> has to treat every refresh
+    failure as a value, never as <code>subject.error()</code>. It's exactly why mature auth
+    libraries expose separate <code>authState$</code> and <code>authError$</code> streams instead of
+    one stream that can die — the state channel has to outlive any single failed request.</p>
+    <div class="hf-scatter"><span>state channel ≠ error channel</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">So is BehaviorSubject just... dangerous to use for state?</p>
+  <p class="a">No — it's still the right tool for "one current value that late subscribers should see
+  immediately," which is exactly why it fits auth state, feature flags, and selected-tab state so
+  well. The danger isn't the type, it's calling <code>.error()</code> on one you plan to keep using.
+  Treat that call as being about as final as throwing the reference away — because operationally, it
+  is. If you need to signal failure, emit a value that <i>represents</i> failure through
+  <code>next()</code> instead.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Doesn't catchError() at the end of my pipe already protect me from this?</p>
+  <p class="a">Only if it sits between the failing source and the Subject.
+  <code>catchError(() =&gt; of(null))</code> placed before <code>subscribe(v =&gt; subject.next(v))</code>
+  intercepts the failure and turns it into a value, so the Subject never sees an error at all. But if
+  your subscribe callback's own error handler is the thing calling <code>subject.error(err)</code>,
+  you've defeated your own <code>catchError</code> — you caught the failure just to re-throw it into
+  the one place it does permanent damage.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why doesn't RxJS just let you "un-error" a Subject and keep going?</p>
+  <p class="a">Because that would break a promise every downstream operator relies on: once
+  terminated, no more <code>next()</code>. Operators like <code>takeUntil</code>,
+  <code>first()</code>, and anything that caches a "final" value assume a completed or errored
+  stream stays that way permanently. Making Subjects resumable would mean every one of those
+  operators has to re-check that assumption on every emission instead of trusting it once. The
+  library is faster and simpler because "terminal means terminal" has zero exceptions.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  A <code>ReplaySubject&lt;number&gt;(2)</code> has received <code>next(1)</code>,
+  <code>next(2)</code>, <code>next(3)</code> — no error, no complete. A new subscriber arrives right
+  now. What do they receive — and does your answer change if <code>complete()</code> had been called
+  immediately after <code>next(3)</code>, before this subscriber showed up?
+</div>
+
     <!-- ── HERO: animated Observable lifecycle · notification chip + live observer inspector ── -->
     <div class="panel" style="border-color:#22d3ee">
       <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:#22d3ee">▶ Watch an Observable live and die — notification by notification</h2>
@@ -1893,6 +2100,7 @@ two intervals / two HTTP calls / two everything`},
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>

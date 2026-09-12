@@ -59,7 +59,110 @@
   </div>
 
   <div style="margin:0 0 28px">
-    <div class="rt-ctlbar">
+    <p class="hf-deck">or, the one panic your recover() used to miss on purpose</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say"><code>if r := recover(); r != nil</code> is the textbook idiom — right up until the thing you panicked with was nil to begin with.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A safety net that recovers... and reports nothing happened</div>
+  <p>A refactor removes the line that sets <code>lastErr</code> on one code path, but leaves <code>if !ok { panic(lastErr) }</code> in place. Nobody notices — until that path runs, and <code>lastErr</code> is <code>nil</code>.</p>
+  <p><code>panic(nil)</code> still unwinds the stack. Your boundary's deferred function still runs. But on Go 1.20 and earlier, <code>recover()</code> hands back exactly what you panicked with: <code>nil</code>. Your <code>if r != nil</code> branch — the one that logs the error and returns 500 — never fires. The function just returns, quietly, as if nothing went wrong.</p>
+  <div class="hf-scatter">
+    <span>panic(lastErr) compiles ✓</span>
+    <span>deferred function runs ✓</span>
+    <span>recover() called ⚠ but look what it returns</span>
+  </div>
+  <p class="hf-foot">Your recover() didn't fail to fire. It fired, looked at what you panicked with, and told you: nothing to see here.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Don't let "no evidence" mean "no problem"</div>
+  <div class="hf-ladder">
+    <b>Never panic with a value that might legitimately be nil</b>
+    <i>&#8595; if you're not certain lastErr is set, panic(fmt.Errorf("invariant broken: %v", lastErr)) instead</i>
+    <b>Put "go 1.21" or later in go.mod</b>
+    <i>&#8595; the runtime itself now guards this exact mistake for you</i>
+    <b>Treat any non-nil recover() result as real — PanicNilError included</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>recover() returning nil means "nothing to report," not "nothing happened."</b> Before Go 1.21, those were the same case for <code>panic(nil)</code>, and your code had no way to tell them apart. Go 1.21 closed the gap: the runtime now guarantees a real panic always produces a non-nil <code>recover()</code> value — even one that started life as literally <code>panic(nil)</code>.
+</div>
+
+<div class="hf-note">A smoke detector with a dead sensor doesn't sound an alarm during a fire — it just stays quiet. Pre-1.21, <code>panic(nil)</code> was that dead sensor: the evacuation (stack unwinding) happens either way, but <b>the alarm panel (recover()) reads all clear</b>.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>Wait — if recover() returns nil, did the panic even get stopped? Is my program about to crash anyway?</p></div>
+  <div class="hf-bub right"><span class="who">recover()</span><p>No, I stopped it either way. The panic sequence halts the moment I'm called from the right place — what I return is a separate question from whether I did my job.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So the crash is prevented, but I have no idea it almost happened.</p></div>
+  <div class="hf-bub right"><span class="who">*runtime.PanicNilError</span><p>Which is exactly the gap I exist to close. Since Go 1.21, I'm what recover() hands back when someone calls panic(nil) — so "a panic occurred" and "nothing happened" are never the same nil again.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Same source code, same defer — a different Go version gives it a different ending.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Deep in a helper, a bug causes panic(lastErr) to run with lastErr == nil</span><span class="tag">trigger</span></li>
+    <li class="open"><span>The panic begins unwinding the stack, running deferred calls along the way</span><span class="tag">unwind</span></li>
+    <li><span>Your boundary's deferred function executes: if r := recover(); r != nil { ... }</span><span class="tag">recover() called</span></li>
+    <li class="open"><span>Go &#8804; 1.20: recover() literally returns nil — the same value you panicked with, unchanged</span><span class="tag">pre-1.21</span></li>
+    <li><span>The "if r != nil" branch never runs — no log line, no error returned, function exits normally</span><span class="tag">silently swallowed</span></li>
+    <li class="open"><span>Go 1.21+: the runtime substitutes a non-nil *runtime.PanicNilError before recover() ever sees it — the same branch now fires</span><span class="tag">fixed</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the trap: nothing in your code is wrong by the rules this very page just taught you. <code>if r := recover(); r != nil</code> is the textbook idiom. It just can't distinguish "no panic happened" from "somebody panicked with literally nothing" — and pre-1.21 Go handed you the second case dressed up as the first.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt"><span class="nm">Something panics with a real value</span>
+      <span class="go"><em>panic(errors.New("disk full"))</em> <span class="arrow">&rarr;</span> recover() returns the error — handled correctly, on every Go version</span></div>
+    <div class="stt on"><span class="nm">Something panics with nil (Go &#8804; 1.20)</span>
+      <span class="go"><em>panic(nil)</em> <span class="arrow">&rarr;</span> recover() returns nil — indistinguishable from no panic at all</span></div>
+    <div class="stt"><span class="nm">The exact same code, Go 1.21+</span>
+      <span class="go"><em>panic(nil)</em> <span class="arrow">&rarr;</span> runtime substitutes *runtime.PanicNilError — recover() is never nil for a real panic again</span></div>
+  </div>
+  <p class="hf-annot">Read the middle state as the one this whole page is about: it's not that recover() breaks, or that the panic escapes and crashes the process — it's that your one piece of evidence (a non-nil return value) goes missing for exactly the panic value most likely to slip in by accident: nil.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A validation helper does <code>if !ok { panic(err) }</code>, where <code>err</code> is supposed to always be set beforehand — except a refactor removed the line that set it, so <code>err</code> is <code>nil</code> on that path. Your HTTP recovery middleware has <code>if r := recover(); r != nil { logAndRespond500(r) }</code>. Running on <b>Go 1.21</b>, what happens when that path triggers?</p>
+  <button type="button">The server crashes, because recover() can't catch panic(nil)</button>
+  <button type="button">The middleware silently returns 200, exactly like pre-1.21</button>
+  <button type="button">logAndRespond500 runs, because recover() returns a non-nil *runtime.PanicNilError</button>
+  <p class="why" data-for="0">recover() catches panic(nil) exactly like any other panic value — it always could, on every Go version. What changed in 1.21 is only what recover() returns, not whether it stops the crash.</p>
+  <p class="why" data-for="1">That was the pre-1.21 behavior. This question is running Go 1.21 — the same source code takes the other branch now.</p>
+  <p class="why" data-for="2">Right. Go 1.21 wraps a bare <code>panic(nil)</code> in a non-nil <code>*runtime.PanicNilError</code> specifically so <code>r != nil</code> is true here — your recovery path fires, logs, and returns 500 instead of silently succeeding.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A signal that can't tell "nothing happened" from "something happened, with no details" is a much older problem than Go.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's empty catch block</h4>
+    <p><code>catch (Exception e) {}</code> swallows the exception's information exactly where an unchecked <code>recover()</code> swallows the panic's — the failure is stopped, but every trace that it happened disappears with it.</p>
+    <div class="hf-scatter"><span>empty catch &rarr; silent success</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An endpoint that always returns 200</h4>
+    <p>A handler that returns <code>200 OK</code> whether or not it actually did anything makes "it worked" and "nothing happened" look identical from the caller's side — the same success-shaped absence of information.</p>
+    <div class="hf-scatter"><span>200, no evidence anything ran</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>SQL's NULL vs zero</h4>
+    <p><code>NULL</code> means "no value recorded"; <code>0</code> means "recorded as zero." A lazy <code>if amount == 0</code> check collapses them into the same branch — two different states, one falsy-looking value.</p>
+    <div class="hf-scatter"><span>NULL and 0 look the same to a sloppy check</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> defer schedules cleanup that always runs, panic unwinds the stack while firing those defers, and recover() inside a deferred function stops the unwind. <b>And recover()'s own return value can be nil for a real panic — Go 1.21 finally closed the one case, panic(nil), where that used to be true.</b>
+</div>
+
+<div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="gdpSeg">
         <button class="on" data-s="lifo">defer is LIFO</button>
@@ -271,6 +374,7 @@ DevHubCodeWalk.mount('#cw-godpr',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

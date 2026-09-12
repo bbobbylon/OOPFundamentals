@@ -67,6 +67,190 @@
     <div class="intro-ciam"><span class="tag">In CIAM / Your Job:</span> You'll rotate signing keys in production: generate a new pair in Ping AM / Entra, publish the new public key to JWKS (old key stays during the grace period), new tokens carry the new <code>kid</code>, old tokens validate until they expire (1-2h), then drop the old key. Spring handles this via <code>kid</code> lookup. What breaks: too-long a JWKS cache TTL means Spring misses the new key — fix with <code>spring.security.oauth2.resourceserver.jwt.jwk-set-cache-timeout=5m</code>.</div>
   </div>
 
+<p class="hf-deck">or, never let the token tell you how to check the token</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The forged token verified. It verified <i>because</i> the key was public.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">You published the public key on purpose. That was correct. Then someone signed a token with it.</div>
+  <p>Everything above this section is true: the IdP signs with its private key, publishes the
+  public half at JWKS, and your API verifies offline. Publishing that key is not a leak — it is
+  the entire design. But now look at the first thing a hand-rolled verifier usually does:
+  it reads <code>alg</code> out of the token's own header to decide how to check the token.</p>
+  <p>An attacker takes a real, low-privilege token. They edit the payload to say
+  <code>"roles":["ADMIN"]</code>. They change the header from <code>"alg":"RS256"</code> to
+  <code>"alg":"HS256"</code>. Then they sign it with HMAC — using <b>your published public key,
+  verbatim, as the shared secret</b>. It is a public key; they downloaded it from your own JWKS
+  endpoint. A verifier that obeys the header now computes HMAC-SHA256 over
+  <code>header.payload</code> with that same public key and gets a perfect match.</p>
+  <div class="hf-scatter">
+    <span>signature valid ✓</span>
+    <span>iss matches ✓</span>
+    <span>exp in the future ✓</span>
+    <span>kid resolves ✓</span>
+    <span>roles: ADMIN ⚠ forged</span>
+  </div>
+  <p class="hf-foot">Nothing detected an attack, because at no point was there one to detect —
+  every check passed honestly. The attacker did not break RSA. They asked you to stop using it.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Decide the algorithm before you ever see the token</div>
+  <div class="hf-ladder">
+    <b>Wrong: alg = token.header.alg — then verify with whatever that says</b>
+    <i>↓ the attacker controls that field, so the attacker chose your algorithm</i>
+    <b>Right: the verifier is built for RS256 and rejects everything else on sight</b>
+    <i>↓ an HS256 token is now malformed input, not a candidate to be checked</i>
+    <b>Spring already does this: NimbusJwtDecoder.withJwkSetUri(uri) is pinned to RS256 unless you call .jwsAlgorithm(…)</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A JWT header is attacker-controlled input, exactly like the payload.</b> It arrives in the
+  same untrusted string, over the same wire, from the same stranger. The only reason we read it at
+  all is convenience — <code>kid</code> tells us which of your rotating keys to try. Convenience is
+  fine; <i>authority</i> is not. The header may narrow a choice you already made. It must never
+  make the choice.
+</div>
+
+<div class="hf-note">A signing key is a <b>notary's stamp, not a door key</b>. It proves who wrote
+the document — nothing about who may walk through the door. And algorithm confusion is the trick
+of handing the notary a rubber stamp along with a note reading <i>"please use this one
+instead."</i></div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>How is publishing the public key not the bug here? The attacker signed a token with it.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The public key</span>
+    <p>Publishing me is the whole point — every resource server in your estate needs me to verify
+    offline, which is what saves you a call to the IdP on every single request. I am safe to
+    publish because RSA verification is one-directional: holding me lets you <i>check</i> an
+    RS256 signature and never <i>make</i> one.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">HMAC</span>
+    <p>And that guarantee is mine to break, because I have no such asymmetry. I take a secret and
+    some bytes and produce a tag; anyone holding the same secret produces the same tag. Hand me a
+    public key as "the secret" and I will happily do exactly that. I am not malfunctioning —
+    I was simply never meant to be reachable here.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">NimbusJwtDecoder</span>
+    <p>Which is why I never ask. I am constructed around one algorithm family before your app
+    finishes starting, and my key selector only offers RS256 keys. A token arriving with
+    <code>alg: HS256</code> does not fail my signature check — it never reaches it.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps, no cryptography broken, one question asked of the wrong party.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Attacker fetches <code>/.well-known/jwks.json</code> from your IdP — public, unauthenticated, exactly as designed</span><span class="tag">not a breach</span></li>
+    <li class="open"><span>They convert the JWK to PEM. Now they hold the same bytes your resource server holds</span><span class="tag">both sides "have the key"</span></li>
+    <li><span>They take any real token, rewrite the payload (<code>roles</code>, <code>scp</code>, <code>exp</code> — whatever they want) and flip the header to <code>"alg":"HS256"</code></span><span class="tag">the header is just base64</span></li>
+    <li class="open"><span>They compute <code>HMAC-SHA256(header.payload, <b>that PEM as the secret</b>)</code> and append it as the signature</span><span class="tag">the forgery, in one line of script</span></li>
+    <li><span>A verifier that trusts <code>alg</code> loads your public key, sees "HS256", and runs the same HMAC — byte-identical result</span><span class="tag">valid, and wrong</span></li>
+    <li class="open"><span>A verifier pinned to RS256 rejects at step 5's door: HS256 is not in its algorithm set, so there is nothing to compare</span><span class="tag">the whole fix</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the one people find hardest to believe, so it is worth saying
+  plainly: the header <i>is</i> inside the signed region — <code>header.payload</code> is what
+  gets signed — but that only means editing it <b>invalidates the original signature</b>. The
+  attacker is not trying to keep the original signature. They are replacing it with one you will
+  compute for them. <code>kid</code> deserves the same suspicion, incidentally: a verifier that
+  turns <code>header.kid</code> into a file path or a SQL lookup has handed an attacker a lookup
+  key, which is how <code>kid</code> injection became its own bug class.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>alg: HS256 signed with the JWKS public key</span>
+      <span>alg: none with an empty signature</span>
+      <span>alg: ES256 with a curve you do not use</span>
+      <span>kid pointing at ../../etc/passwd</span>
+    </div>
+    <div class="funnel">all of it decided before the token arrives ↓</div>
+    <div class="instance">RS256, from this JWKS, or it is not a token<small>one pinned algorithm, one key source, chosen at startup</small></div>
+  </div>
+  <p class="hf-annot">Four different attacks, one defence — and notice it is not a check you
+  <i>add</i>. It is a choice you refuse to delegate. Everything on the left stops being a
+  dangerous input the moment the algorithm and the key source are decided by configuration you
+  control instead of by a string the caller sent you.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A hand-rolled verifier reads <code>alg</code> from the token header and picks the
+  matching algorithm. An attacker takes a genuine RS256 token from your IdP, rewrites the payload,
+  sets the header to <code>"alg":"HS256"</code>, and signs it with HMAC using your
+  <b>published JWKS public key</b> as the secret. What does the verifier conclude?</p>
+  <button type="button">Rejected — the public key can only verify RSA signatures, so using it as an HMAC secret produces garbage that cannot possibly match</button>
+  <button type="button">Rejected — editing the header invalidates the original signature, and the signature covers the header as well as the payload</button>
+  <button type="button">Accepted — the verifier HMACs with the same public bytes the attacker used and gets an identical tag</button>
+  <p class="why" data-for="0">This is the intuition the attack is built to defeat. A public key is
+  not "an RSA-shaped object" to HMAC — it is a byte string, and HMAC accepts any byte string as a
+  secret. Nothing in the key itself marks it public or asymmetric; that meaning lives entirely in
+  the algorithm you chose to use it with. Choose HMAC and the key becomes simply a shared secret
+  that you also published.</p>
+  <p class="why" data-for="1">Half right, and the half that is right is what makes the answer
+  wrong. The signature does cover <code>header.payload</code>, so the original signature is indeed
+  dead the moment the header changes — but the attacker is not keeping it. They replaced it with a
+  new one, computed under the algorithm they just named. The verifier is not comparing against the
+  old signature; it has no memory of it.</p>
+  <p class="why" data-for="2">Exactly. Both sides compute
+  <code>HMAC-SHA256(header.payload, publicKeyBytes)</code> and both get the same tag, because that
+  is what HMAC does with a shared secret — and the attacker downloaded the "secret" from your own
+  JWKS endpoint. Every honest check then passes, which is why nothing logs an error. The fix is
+  never a better check; it is refusing the question — pin the algorithm in configuration, as
+  <code>NimbusJwtDecoder.withJwkSetUri(uri)</code> already does by defaulting to RS256.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Any time untrusted input gets to name the handler that processes it.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java deserialization — the payload names its own class</h4>
+    <p>The classic RCE: a serialized stream carries the class name, and
+    <code>ObjectInputStream</code> loads whatever it is told, running that class's
+    <code>readObject</code>. Same shape exactly — the attacker chose the code path. The fix was
+    the same shape too: an allow-list of permitted classes decided by the application, not by the
+    stream. <code>alg</code> is a class name and the JWT is the stream.</p>
+    <div class="hf-scatter"><span>input names the handler = input is in charge</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Content-type sniffing, and why <code>X-Content-Type-Options: nosniff</code> exists</h4>
+    <p>Browsers used to guess a response's type from its bytes when the header looked wrong — so
+    an uploaded "image" that happened to contain HTML got executed as HTML. One header ended it by
+    saying <i>believe the declared type, never re-derive it</i>. Pinning
+    <code>jwsAlgorithm</code> is the same instruction aimed at your own verifier.</p>
+    <div class="hf-scatter"><span>guessing the format is deciding the format</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your own <code>@PreAuthorize</code>, and why it exists at all</h4>
+    <p>A verified signature tells you the token was not altered — it says nothing about what the
+    holder may do. That is why authorization lives in a separate layer reading claims the IdP put
+    there, rather than trusting anything the request asserts about itself. The lesson repeats at
+    every layer: <b>authentication is who signed it, authorization is what you allow, and neither
+    is the caller's to decide.</b></p>
+    <div class="hf-scatter"><span>signed ≠ permitted</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> the IdP signs with a private key nobody else has; you verify
+  with a public key everybody may have; <code>kid</code> tells you <i>which</i> public key during a
+  rotation, and JWKS is where you fetch it. That is why verification is offline, and why rotation
+  does not break anyone. And the one sentence to carry out of here: <b>you decide the algorithm
+  and the key source at startup — the token only ever gets to narrow that choice, never to
+  make it.</b>
+</div>
+
   <div class="jwt" id="sampleJwt">
     <span class="h">eyJhbGciOiJSUzI1NiIsImtpZCI6IjA3a3oifQ</span>.<span class="p">eyJzdWIiOiJhYmMiLCJzY3AiOiJyZWFkIn0</span>.<span class="s">SflKxwRJ_signature_bytes_here</span>
     <div style="margin-top:8px;font-size:11px;color:var(--muted)"><b style="color:#fb7185">header</b> (alg + kid) · <b style="color:#a78bfa">payload</b> (the claims) · <b style="color:#22d3ee">signature</b> (proves the first two weren't tampered with)</div>
@@ -238,7 +422,7 @@ DevHubCodeWalk.mount('#cw-keysign',{
       note:'Key rotation: authorization servers periodically rotate their signing keys. The new key is published in the JWKS with a new kid before the old key retires. Tokens signed with the old kid are still valid until their exp claim. NimbusJwtDecoder handles this automatically: if verification fails (unknown kid), it re-fetches the JWKS and retries once. In production: cache JWKS aggressively (they change rarely) but support cache-invalidation on unknown kid.',
       vars:{'kid mismatch re-fetch':'if the JWT kid is not in the cached JWKS, NimbusJwtDecoder fetches the JWKS again once; prevents failing during key rotation','key overlap period':'authorization server publishes new key before retiring old one; tokens signed with old key are valid until their exp; overlap = max token lifetime','JWKS caching':'cache JWKS for 1 hour default; but refresh immediately when an unknown kid is encountered; Spring JWKSource handles this automatically'},
       tone:'ok',
-      callout:'CIAM: your Spring Boot API only needs one property: spring.security.oauth2.resourceserver.jwt.jwk-set-uri pointing to Entra\'s or Ping\'s JWKS endpoint. NimbusJwtDecoder fetches the RS256 public keys, caches them, verifies signatures, and checks exp/iss/aud automatically. Add an AudienceValidator for your API\'s audience (application client ID) — without it, tokens issued for other apps in the same tenant are accepted by your API. This is the most commonly missed configuration in CIAM Spring Boot setups.'
+      callout:'CIAM: your Spring Boot API only needs one property: spring.security.oauth2.resourceserver.jwt.jwk-set-uri pointing to Entra\'s or Ping\'s JWKS endpoint. NimbusJwtDecoder fetches the RS256 public keys, caches them, and verifies signatures — but that is ALL it does by default here. With jwk-set-uri the only claims checked are the timestamps (exp/nbf): NOT iss, and NOT aud. Point at issuer-uri instead and you also get the issuer validator; for the audience, set spring.security.oauth2.resourceserver.jwt.audiences (Boot 3.4+) or register an AudienceValidator for your API\'s audience (application client ID) — without it a perfectly valid, correctly signed token minted for ANOTHER app in the same tenant sails straight through your API. This is the most commonly missed configuration in CIAM Spring Boot setups.'
     }
   ],
   code:[
@@ -399,6 +583,7 @@ document.addEventListener('click', function (e) {
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

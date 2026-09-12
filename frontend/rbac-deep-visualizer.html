@@ -59,6 +59,193 @@
     <div class="intro-ciam"><span class="tag">In CIAM / Your Job:</span> Ping AM injects group/role memberships into the JWT via token-policy claim transforms; Entra app-role assignments (App Registration → App roles) land in the <code>roles</code> claim. Your Spring APIs read these and enforce with <code>@PreAuthorize</code>. The security rule: never trust client-sent claims — only the IdP-signed JWT. And the Entra <code>tid</code> claim is your multi-tenant isolation key — verify the tenant on every resource access.</div>
   </div>
 
+
+<p class="hf-deck">or, you revoked their admin role at 09:00 and they were still admin at 09:47</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Everything above is about getting roles <i>into</i> the token. Nobody warned you how hard they are to get back out.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The offboarding ticket said "access removed 09:00." The audit log says they deleted a user at 09:47.</div>
+  <p>An engineer leaves the team. At 09:00 someone removes their <b>ADMIN</b> role in Entra —
+  correctly, immediately, in the right tenant. The directory is now the truth: this person is a
+  plain user. Everyone signs off on the ticket.</p>
+  <p>But the token in their browser was minted at 08:55, and it says
+  <code>"roles":["ADMIN"]</code>. It is signed by the IdP. Its <code>exp</code> is 09:55. Its
+  <code>tid</code> is right. Your API does exactly what this page taught it to do — reads the
+  claim, maps it to <code>ROLE_ADMIN</code>, hands it to <code>@PreAuthorize</code> — and at
+  09:47 it allows a delete, because <b>nothing in that request is false</b>. The token is not
+  stale in any sense your verifier can express. It is a correct statement about 08:55.</p>
+  <div class="hf-scatter">
+    <span>directory says USER ✓</span>
+    <span>token says ADMIN ⚠</span>
+    <span>signature valid ✓</span>
+    <span>exp 09:55 — not yet ✓</span>
+    <span>55 minutes of ghost admin ⚠</span>
+  </div>
+  <p class="hf-foot">The speed that makes JWT authorization worth using — no DB call, no IdP call —
+  is the exact same property that makes revocation slow.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">You cannot un-issue a token. You can only shorten the window, or ask again.</div>
+  <div class="hf-ladder">
+    <b>Shorten the access token: 60 min → 5-15 min, with silent refresh</b>
+    <i>↓ the refresh is where the IdP gets to re-check the directory, so the blast radius becomes one token lifetime</i>
+    <b>For genuinely destructive operations, ask the IdP: token introspection, or re-read the role from your own store</b>
+    <i>↓ you have paid one network call to buy back real-time truth, on the 1% of endpoints that deserve it</i>
+    <b>And keep a deny-list of revoked jti/sub values that the filter checks, for "remove this person NOW"</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A role claim is a photograph of your directory at the moment the token was minted — not a
+  live view of it.</b> Every property you like about JWT authorization follows from that sentence:
+  it is fast because the photograph is in your hand, it scales because nobody has to call the
+  IdP, and it is stale because photographs do not update. Revocation is not a feature you forgot
+  to turn on. It is the bill for the speed.
+</div>
+
+<div class="hf-note">A token is a <b>printed boarding pass, not a live database query</b>. The
+airline can cancel your seat in their system the instant you shout at the gate agent — and the
+paper in your pocket still says <i>BOARDING, SEAT 14C</i>, because it was true when it printed.
+Which is precisely why boarding passes expire in hours, not months.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I removed the role. Why is my API still letting them in?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Entra / Ping</span>
+    <p>I updated my directory the moment you asked. What I cannot do is reach into tokens I
+    already signed and edit them — they are not stored anywhere I control, they are strings in
+    other people's browsers. All I can promise is that the <i>next</i> token I mint reflects the
+    change. That is what the refresh is for.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The access token</span>
+    <p>And I am not lying. I never claimed to describe the present. I claimed that at
+    <code>iat</code>, this subject held these roles, and I put an <code>exp</code> on myself
+    specifically so nobody would mistake me for a permanent statement.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Your API</span>
+    <p>So I have one real decision to make, and it is not technical: how long am I willing to be
+    wrong about someone's role? Answer sixty minutes and I skip every lookup. Answer zero and I
+    call the IdP on every request and give back everything JWTs bought me. Almost every real
+    system answers "a few minutes, except for the endpoints that scare me."</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Nothing here malfunctions. That is what makes it hard to spot in review.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><b>08:55</b> — user signs in. The IdP reads the directory, sees ADMIN, and mints a token carrying <code>roles:["ADMIN"]</code>, <code>exp</code> 09:55</span><span class="tag">the photograph is taken</span></li>
+    <li class="open"><span><b>09:00</b> — you remove the role. The directory changes. <b>No token anywhere changes</b>, because the IdP does not hold them</span><span class="tag">the gap opens here</span></li>
+    <li><span><b>09:15</b> — a request arrives. Your resource server verifies the signature against JWKS, offline, exactly as designed</span><span class="tag">still no IdP call — by design</span></li>
+    <li class="open"><span>The claim-to-authority converter reads <code>roles</code> out of the token and produces <code>ROLE_ADMIN</code>. It has no other source of truth to consult</span><span class="tag">it is reading the photograph</span></li>
+    <li><span><code>@PreAuthorize("hasRole('ADMIN')")</code> evaluates against those authorities and returns true. The delete runs</span><span class="tag">correct code, wrong outcome</span></li>
+    <li class="open"><span><b>09:55</b> — the token expires. The silent refresh asks the IdP, the IdP re-reads the directory, and the new token finally says USER</span><span class="tag">the gap closes on its own</span></li>
+  </ol>
+  <p class="hf-annot">Read that list again looking for the bug. There isn't one — every component
+  did its job, and the only variable you actually control is the distance between step 1 and step
+  6. That is why "how long is our access token?" is a security question and not a performance
+  one, and why the answer for a CIAM app is usually minutes. It is also why <b>role changes and
+  offboarding are different problems</b>: shrinking the window is enough for "they moved teams",
+  and not enough for "they were dismissed" — that one needs the deny-list, because waiting even
+  five minutes is a policy decision somebody has to sign.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">one role removed<small>09:00, in the directory</small></div>
+    <div class="fan">…reaches nothing already issued ↓</div>
+    <div class="obs">
+      <span>token in their laptop browser</span>
+      <span>token in their phone app</span>
+      <span>token cached by a BFF session</span>
+      <span>token held by a long-running job</span>
+      <span class="new">every one still says ADMIN until its own exp</span>
+    </div>
+  </div>
+  <p class="hf-annot">The fan-out is the part people miss in an incident review: there is rarely
+  <i>one</i> token. Every device and every session that authenticated before 09:00 is holding its
+  own independent photograph, each with its own expiry, and none of them are enumerable from the
+  IdP's side. Revoking the <b>refresh</b> token stops new ones being minted — which is the real
+  offboarding lever — but it does nothing to the access tokens already in flight.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">You remove a user's ADMIN role in Entra at <b>09:00</b>. Their SPA is holding an
+  access token issued at 08:55 that contains <code>"roles":["ADMIN"]</code> and expires at 09:55.
+  At <b>09:15</b> they call <code>DELETE /api/users/42</code>, guarded by
+  <code>@PreAuthorize("hasRole('ADMIN')")</code> on a standard resource-server setup. What
+  happens?</p>
+  <button type="button">403 — Spring re-reads the user's roles from the identity provider before evaluating the expression, so it sees the removal</button>
+  <button type="button">200, the delete succeeds — authorization reads the roles inside the token, and that token is still valid and still says ADMIN</button>
+  <button type="button">401 — removing the role invalidates every token that carries it, so the signature no longer verifies</button>
+  <p class="why" data-for="0">This is the mental model that makes the bug invisible, because it is
+  what "remove the role" <i>feels</i> like it should do. But a resource server deliberately does
+  not call the IdP per request — that round trip is the cost JWT authorization exists to avoid.
+  <code>hasRole('ADMIN')</code> evaluates against the <code>Authentication</code>'s authorities,
+  and on this setup those came from one place: the claim inside the token.</p>
+  <p class="why" data-for="1">Correct — and notice that nothing anywhere is broken. The signature
+  is valid, <code>exp</code> has not passed, <code>tid</code> matches, and the claim accurately
+  records the directory as it stood at 08:55. The exposure lasts until the token expires and the
+  refresh forces the IdP to look again, which is exactly why access-token lifetime is a security
+  control: a 60-minute token buys a 60-minute window, a 10-minute token buys ten.</p>
+  <p class="why" data-for="2">Signatures have no relationship to directory state. The signature
+  proves the IdP minted these bytes and nobody edited them since — a fact about the past that
+  stays true forever, no matter what you change afterwards. There is also nothing to invalidate:
+  the IdP never stored this token, so there is no record of it to mark dead. That is precisely
+  the gap a <code>jti</code> deny-list fills, by making your own side remember.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Every cache is a photograph, and every cache has this exact bug.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>DNS TTL — the reason a cutover is never instant</h4>
+    <p>You repoint a record at a new server. Resolvers worldwide keep answering with the old
+    address until their cached copy ages out, and no amount of correctness on your side reaches
+    them. So the real operational move is the one nobody remembers in the moment: <b>lower the
+    TTL days before the change</b>. An access-token lifetime is a TTL, and it takes the same
+    forward planning.</p>
+    <div class="hf-scatter"><span>lower the TTL before you need it low</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4><code>@Cacheable</code> in the very same Spring app</h4>
+    <p>You cache a product, someone changes the price, and requests keep getting the old number
+    until eviction. Nobody calls that a bug — it is the documented trade you made to skip the
+    query. Claims in a JWT are the same trade, made at a layer where the consequence is an
+    authorization decision rather than a wrong price, which is the only reason it feels
+    different.</p>
+    <div class="hf-scatter"><span>same trade, higher stakes</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>The session cookie this replaced — and what it was quietly good at</h4>
+    <p>Server-side sessions had the opposite shape: every request hit the session store, so
+    deleting the session logged the user out <i>instantly</i> — and that store became the thing
+    you had to scale and replicate. Stateless JWTs traded instant revocation for horizontal
+    scale. Worth remembering as a trade rather than an upgrade, because a BFF holding an
+    httpOnly session cookie deliberately buys the old behaviour back.</p>
+    <div class="hf-scatter"><span>stateless bought scale, and sold revocation</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> roles carry permissions, the IdP stamps them into the token as
+  claims, Spring turns those claims into authorities, and <code>@PreAuthorize</code> decides —
+  no database call in sight, which is the entire point. Carry one extra sentence out with you:
+  <b>those claims describe the moment the token was minted, so the access-token lifetime <i>is</i>
+  your revocation delay</b> — pick it deliberately, and put a real-time check on the handful of
+  endpoints that cannot afford it.
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -256,6 +443,7 @@ DevHubCodeWalk.mount('#cw-rbac',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

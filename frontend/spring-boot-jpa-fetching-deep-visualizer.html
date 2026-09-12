@@ -105,6 +105,225 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> <code>GET /api/users</code> with role names is 1 + 100 = 101 queries without a fix, 1 with <code>@EntityGraph(attributePaths={"roles"})</code>. Audit queries like <code>findAllByTargetUserId(userId)</code> have lazy <code>actor</code>/<code>targetUser</code> — load with an entity graph. Rule: any list endpoint that touches associations must fetch-join or project, paginated ones above all (N+1 × 20/page × thousands of pages is catastrophic).</div>
   </div>
 
+<p class="hf-deck">or, JOIN FETCH doesn't scale past one collection — try a second and Hibernate just refuses</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">One JOIN FETCH works. A second one, right next to it, detonates the query.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The exact fix that worked for lineItems throws the moment you copy it for discounts</div>
+  <p><code>Order</code> has two lazy collections: <code>List&lt;LineItem&gt; lineItems</code> and
+  <code>List&lt;Discount&gt; discounts</code>. You already fixed the N+1 on line items with
+  <code>JOIN FETCH o.lineItems</code> — one query, works fine. Now discounts is N+1 too, so you add
+  <code>JOIN FETCH o.discounts</code> right beside it. Same annotation, same JPQL shape, same
+  entity. Every call to that repository method now throws
+  <code>org.hibernate.loader.MultipleBagFetchException</code>. Nothing about your syntax changed
+  category — you wrote the same kind of line twice.</p>
+  <div class="hf-scatter">
+    <span>JOIN FETCH o.lineItems alone ✓</span>
+    <span>identical syntax added for o.discounts ✓</span>
+    <span>both collections are plain Lists — "bags" ⚠</span>
+    <span>two bags joined at once has no way to pair rows ⚠</span>
+  </div>
+  <p class="hf-foot">The bug isn't in your JPQL. It's in asking Hibernate to cartesian-join two
+  ambiguous lists into one result at the same time.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Fetch one bag per query — or stop making it a bag</div>
+  <div class="hf-ladder">
+    <b>Simplest: split into two queries, one JOIN FETCH per collection</b>
+    <i>↓ each query is single-bag, so each hydrates cleanly — the persistence context merges both onto the same managed Order</i>
+    <b>Or: declare discounts as a Set&lt;Discount&gt; instead of a List</b>
+    <i>↓ Hibernate identifies a Set's members by equality, not row position, so it CAN sit in the same join as a List</i>
+    <b>Either way: never JOIN FETCH two List-typed collections in one query</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A JOIN FETCH multiplies rows; a List can't tell which multiplication it came from.</b> One
+  fetched collection just means duplicate parent rows — <code>DISTINCT</code> or a <code>Set</code>
+  cleans that up. Two fetched List collections mean two independent multiplications tangled into
+  the same row, and Hibernate has no key to untangle them. That's why the fix is never "write
+  better JPQL" — it's changing the shape of the data (a <code>Set</code>) or the shape of the query
+  (split it), and it is the same root cause as the in-memory <code>HHH000104</code> pagination
+  warning above: a List-shaped fetch join always trades away something SQL alone can guarantee.
+</div>
+
+<div class="hf-note">Think of fetching two bags at once as <b>a restaurant order form with your 3
+side dishes and 2 drink choices on separate lines</b> — but the kitchen prints one combined ticket
+listing every side-drink pairing, 6 lines total, with no column saying which side came with which
+drink. One list alone is fine; the kitchen just repeats your table number three times. Two lists
+tangled together and nobody, including the kitchen, can reconstruct your actual order. Where the
+analogy breaks: a real kitchen would just guess and send out something edible anyway. Hibernate
+would rather throw the ticket back at you than hand back a plausible-looking but wrong order.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>JOIN FETCH o.lineItems worked fine. I added JOIN FETCH o.discounts right next to it and now
+    every call to this method throws. Same pattern, same syntax — what's actually different?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Hibernate</span>
+    <p>The SQL is one join either way — that part's identical. What breaks is turning the result
+    back into two Java Lists. Your order has 3 line items and 2 discounts, so the join hands me 6
+    rows for that one order. Nothing in a row says "this discount belongs with this line item" —
+    Lists don't carry that information, so I can't safely split 6 rows into "3 line items" and "2
+    discounts." I refuse rather than guess wrong.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">A Set&lt;Discount&gt;</span>
+    <p>Swap me in for the List and this stops being a problem. I'm identified by equality, not by
+    row position, so Hibernate can de-duplicate me correctly even sitting inside the same cartesian
+    join as a List. I don't remove the multiplication — I just make it safe to untangle.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">3 line items. 2 discounts. One join. 6 rows Hibernate can't safely split back apart.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Your JPQL reads <code>JOIN FETCH o.lineItems JOIN FETCH o.discounts</code> — two
+    collection joins on the same root, in one query</span><span class="tag">looks like ordinary SQL composition</span></li>
+    <li class="open"><span>Hibernate turns each <code>JOIN FETCH</code> into a real SQL
+    <code>JOIN</code>, so the database returns the full cross of
+    <code>line_items × discounts</code> for every order</span><span class="tag">3 × 2 = 6 rows for one order</span></li>
+    <li><span>Both <code>lineItems</code> and <code>discounts</code> are mapped as plain
+    <code>List&lt;T&gt;</code> — Hibernate calls this a <b>bag</b>: no index column, no way to tell
+    two elements apart except identity</span><span class="tag">the actual root cause</span></li>
+    <li class="open"><span>To hydrate the result, Hibernate must split those 6 rows back into "this
+    order's 3 line items" and "this order's 2 discounts" — but nothing in a row records which
+    discount paired with which line item</span><span class="tag">the join manufactured a pairing that never existed</span></li>
+    <li class="open"><span>Rather than guess and return a <code>List</code> that might silently hold
+    garbage, Hibernate throws <code>MultipleBagFetchException</code> instead of running the
+    query</span><span class="tag">fails loud, on purpose</span></li>
+    <li><span>A single fetched bag never hits this — one List's duplicate parent rows collapse
+    cleanly with <code>DISTINCT</code>. It's only a <i>second</i> simultaneous bag that has no safe
+    way to resolve</span><span class="tag">one is fine, two is the wall</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the lesson. The exception isn't really about <code>JOIN FETCH</code>,
+  or even about having two associations — it's about a List specifically having no way to
+  distinguish its own elements once they've been cross-joined with another collection. That's
+  exactly why swapping either collection to a <code>Set</code> resolves it without touching the
+  query at all: a <code>Set</code> is identified by equality, so Hibernate can de-duplicate it
+  correctly no matter how many rows the join produces.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">Order #4471<small>3 line items × 2 discounts</small></div>
+    <div class="fan">JOIN FETCH both, in one query ↓</div>
+    <div class="obs">
+      <span>LI1 + D1</span>
+      <span>LI1 + D2</span>
+      <span>LI2 + D1</span>
+      <span>LI2 + D2</span>
+      <span>LI3 + D1</span>
+      <span class="new">LI3 + D2 — 6 rows for 1 order, no column says which pairing is real</span>
+    </div>
+  </div>
+  <p class="hf-annot">Six rows out of one order — every one a genuine database row, and every one a
+  pairing that never existed in your data. A List has no way to say "ignore the pairing, just give
+  me my 3 and my 2 back separately," which is exactly the ambiguity
+  <code>MultipleBagFetchException</code> exists to stop before it reaches your code as silently
+  wrong data.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q" style="display:block"><code>Order</code> has <code>List&lt;LineItem&gt; lineItems</code> and
+  <code>List&lt;Discount&gt; discounts</code>. <code>JOIN FETCH o.lineItems</code> alone already
+  works. You add <code>JOIN FETCH o.discounts</code> to the same query, right next to it. What
+  happens?</p>
+  <button type="button">It works, but silently returns duplicate line items — the same problem a single JOIN FETCH already has, just doubled</button>
+  <button type="button">It works — Hibernate just adds a second JOIN to the SQL, and you get one row per order back</button>
+  <button type="button">It throws — Hibernate refuses to fetch two Lists in the same query, because the cartesian product gives it no way to know which line item pairs with which discount</button>
+  <p class="why" data-for="0">Reasonable guess — a single fetched List really does duplicate parent
+  rows, and <code>DISTINCT</code> fixes exactly that. But a second simultaneous bag isn't "more of
+  the same duplication" — it's a different failure mode entirely: an exception, not extra rows.</p>
+  <p class="why" data-for="1">This is the natural assumption if you think of <code>JOIN FETCH</code>
+  as ordinary SQL composition — add a join, get a wider row. It IS one more SQL join. The problem
+  is what comes after the SQL: turning that wider row back into two separate Java Lists with no key
+  to pair them by.</p>
+  <p class="why" data-for="2">Exactly — 3 line items × 2 discounts is 6 rows for one order, and
+  nothing in a row says which discount belongs with which line item. Rather than hand back a
+  <code>List</code> that might be silently wrong, Hibernate throws
+  <code>MultipleBagFetchException</code> before the query even runs. Make either collection a
+  <code>Set</code> and the ambiguity disappears, because a <code>Set</code> doesn't need row order
+  to know its own members.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three systems, one rule: fan out two collections at once and something has to break the tie.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Plain SQL — this bug needs zero ORM to exist</h4>
+    <p>Hand-write <code>SELECT * FROM orders o JOIN line_items li ON … JOIN discounts d ON …</code>
+    and a database will run it without complaint — and hand you back the exact same cartesian
+    explosion, silently. A DBA debugging "why does COUNT(*) look impossible" is debugging this same
+    fan-out, just without Hibernate's refusal standing between them and the bad data. The exception
+    is Hibernate being stricter than SQL itself, not inventing a new problem.</p>
+    <div class="hf-scatter"><span>SQL: silent cartesian product; Hibernate: a thrown exception</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>GraphQL's DataLoader — same rule, different framework</h4>
+    <p>A GraphQL <code>Order</code> type with both <code>lineItems</code> and <code>discounts</code>
+    fields gives each one its <i>own</i> batched <code>DataLoader</code> rather than one resolver
+    trying to join both in a single fetch — for the identical reason: combining two one-to-many
+    fans into one fetch has no way to keep the pairings straight. Two independent loaders, each
+    doing its own 1-query-per-batch, sidesteps the ambiguity entirely.</p>
+    <div class="hf-scatter"><span>one loader per collection ≈ one JOIN FETCH per bag</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your CIAM user-detail endpoint</h4>
+    <p>A <code>User</code> with <code>List&lt;Role&gt; roles</code> and
+    <code>List&lt;GroupMembership&gt; groupMemberships</code> — the admin console's user-detail
+    query <code>JOIN FETCH</code>es roles for the same reason this page's intro shows, then someone
+    adds group memberships the same way. Same exception, same fix: map one of the two as a
+    <code>Set</code>, since role and group-membership uniqueness are naturally set-shaped anyway.</p>
+    <div class="hf-scatter"><span>roles + groupMemberships ≈ lineItems + discounts</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Why does Hibernate allow ONE JOIN FETCH of a List, but not a second one?</p>
+  <p class="a">Because one collection's duplication has a single axis: the parent row repeats once
+  per child, and <code>DISTINCT</code> (or a <code>Set</code> result type) collapses exactly that.
+  Two collections multiply against <i>each other</i>, not just against the parent — 3 line items ×
+  2 discounts isn't "some duplicate parents," it's a genuinely different row count with no single
+  key to deduplicate by. There's no query-level fix for that; the fix has to change what's being
+  joined.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does @ElementCollection have the same problem?</p>
+  <p class="a">Yes — the bag restriction applies to any collection-valued association without an
+  index or order column, and that includes <code>@ElementCollection</code> of embeddables or plain
+  values, not just <code>@OneToMany</code>. If you fetch-join two of them together — or one of each
+  — you'll hit the same exception, and the same fix applies: make one a <code>Set</code>, or split
+  the fetch into two queries.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">If I use @EntityGraph instead of JPQL, am I safe from this?</p>
+  <p class="a">No. <code>@EntityGraph(attributePaths = {"lineItems","discounts"})</code> hits the
+  identical <code>MultipleBagFetchException</code>, because underneath, Spring Data still generates
+  a <code>JOIN FETCH</code> for each attribute path. The exception comes from how Hibernate executes
+  the join, not from which syntax you used to ask for it — an entity graph is a convenience over
+  the same fetch mechanism, not a different one.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  <code>Order</code> has <code>List&lt;LineItem&gt; lineItems</code> and
+  <code>Set&lt;Tag&gt; tags</code>. Does
+  <code>JOIN FETCH o.lineItems JOIN FETCH o.tags</code> in one query throw
+  <code>MultipleBagFetchException</code> — and does your answer change if <code>tags</code> were
+  declared as a <code>List&lt;Tag&gt;</code> instead?
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -530,6 +749,7 @@ renderStrats(); build();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

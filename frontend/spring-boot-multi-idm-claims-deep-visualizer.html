@@ -105,6 +105,138 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> The app accepts Ping Federate (internal employees, <code>"groups":["CIAM_ADMIN",…]</code>) and Entra ID (partners, <code>"roles":["CIAMAdmin"]</code>). A <code>JwtIssuerAuthenticationManagerResolver</code> routes by <code>iss</code> and the converter normalizes both to <code>ROLE_CIAM_ADMIN</code>, so <code>@PreAuthorize("hasRole('CIAM_ADMIN')")</code> works for both. Onboarding a third IdP (a partner's Keycloak) is a new decoder + mapping case — zero service changes.</div>
   </div>
 
+<p class="hf-deck">or, giving each issuer its own converter isn't a style choice — it's what stops two IdPs from using the same claim name to mean different things</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The Entra admin's token really does carry an admin role. hasRole('CIAM_ADMIN') still says no.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A "smart" shared converter turns Entra's admin into nobody</div>
+  <p>To avoid writing three near-identical converters, a developer writes one <code>JwtGrantedAuthoritiesConverter</code> with a simple rule: read the <code>groups</code> claim, treat each entry as a role name. It's built and code-reviewed against this deployment's Ping tokens — and it works, because Ping's role-claim name is configurable per environment (this page's own table says so), and an earlier admin happened to name it <code>groups</code>. Then Entra ID is onboarded. Entra <b>also</b> has a claim called <code>groups</code> — but Entra's is always a list of opaque object-ID GUIDs, never role names; Entra's real role names live in a separate <code>roles</code> claim instead. The shared converter matches on the claim <i>name</i> alone, reads Entra's GUID list as if it were role names, and mints <code>ROLE_8f3c2a...</code>. The Entra admin's actual role — sitting right there in <code>roles</code> — is never even looked at, and <code>hasRole('CIAM_ADMIN')</code> returns 403.</p>
+  <div class="hf-scatter">
+    <span>the token really does carry an admin role ✓</span>
+    <span>the converter runs without any error ✓</span>
+    <span>it read groups instead of roles ⚠</span>
+    <span>ROLE_8f3c2a… matches no hasRole check that exists ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that a claim name is a contract. "groups" meant "role names" on one IdP and "opaque GUIDs" on the other, and nothing about the name itself said which.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Route by issuer first — let the converter never have to guess</div>
+  <div class="hf-ladder">
+    <b>JwtIssuerAuthenticationManagerResolver picks the decoder by iss, before any claim is read</b>
+    <i>↓ whatever runs next already knows which IdP it's looking at</i>
+    <b>Give each issuer its own Converter&lt;Jwt, Collection&lt;GrantedAuthority&gt;&gt;</b>
+    <i>↓ the Entra converter only ever reads "roles"; it never touches "groups" at all</i>
+    <b>Entra's groups claim is simply never consulted for authorities — the ambiguity is removed at the source</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Two identity providers using the same claim name is a coincidence, not an agreement.</b> "groups" on this Ping deployment's token and "groups" on an Entra token look identical to a converter that only pattern-matches on claim names — but one holds role strings and the other holds opaque GUIDs. Routing by issuer first, then using a converter written for that specific IdP, isn't just tidier code; it's the only thing that stops a shared claim name from being read the wrong way.
+</div>
+
+<div class="hf-note">Think of it like two countries that both have a form field called "state." On a US form, "state" means California or Texas. On an Indian form, "state" means Maharashtra or Kerala. A form-processing script that just reads "whichever field is called state" and assumes it always means the same thing will file some very confused paperwork the moment it processes both without first checking which country's form it's holding.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>The Entra admin's token clearly has role data in it. Why does hasRole('CIAM_ADMIN') say no?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The shared converter</span>
+    <p>I saw a "groups" claim and read it — that's my one rule. I have no idea "groups" meant something completely different on the Ping tokens I was written and tested against.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Entra's groups claim</span>
+    <p>I'm not lying — I genuinely contain this user's group memberships. I've just always been a list of GUIDs, never role names. Nobody told the converter to leave me alone.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">JwtIssuerAuthenticationManagerResolver</span>
+    <p>I already knew this was an Entra token — that's how I picked the right JWKS to validate it. Nobody wired that knowledge through to which converter runs next.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One rule, one claim name, two issuers walking through it. Only one thing separates a correct read from a wrong one.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A shared converter's rule: read the <code>groups</code> claim, treat each entry as a role name</span><span class="tag">one branch, no per-issuer awareness</span></li>
+    <li class="open"><span>On this Ping deployment, the role claim was configured to be named <code>groups</code> — so the rule is exactly right for Ping tokens</span><span class="tag">correct, but only by local convention</span></li>
+    <li><span>Entra is onboarded. Entra also has a <code>groups</code> claim — always opaque object-ID GUIDs, never role names</span><span class="tag">same name, different meaning</span></li>
+    <li class="open"><span>The converter has no concept of "which issuer wrote this" — it matches the claim NAME, and Entra's GUID list wins the same branch Ping's real role names won</span><span class="tag">the collision</span></li>
+    <li><span>Entra's actual role names, sitting in its separate <code>roles</code> claim, are never reached — the chain already stopped at <code>groups</code></span><span class="tag">correct data, never read</span></li>
+    <li class="open"><span>Only knowing which issuer minted the token — resolving by <code>iss</code> before any claim is touched — would have told the converter these two "groups" claims aren't the same thing</span><span class="tag">the actual fix</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the lesson. A claim-name match feels like identification, but it isn't — it's pattern-matching on a string two completely unrelated systems happened to both choose. The converter was never wrong about what "groups" contained; it was wrong to assume "groups" meant one thing everywhere.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">The shared converter's rule: "groups" = role names<small>correct against the Ping deployment it was written for</small></div>
+    <div class="fan">↓ runs unchanged against every issuer's token</div>
+    <div class="obs">
+      <span>This Ping deployment: groups holds real role names → correct authority</span>
+      <span class="new">Entra: groups holds opaque GUIDs, not roles → ROLE_8f3c2a… (wrong)</span>
+      <span>Entra's real roles claim: never reached — the chain already stopped</span>
+    </div>
+  </div>
+  <p class="hf-annot">Same twelve lines of converter logic, two completely different outcomes — and only one of them is correct. Nothing about the converter changed between these two tokens; only what "groups" happened to mean did.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A shared converter's rule is "read the groups claim, treat each entry as a role name" — written against a Ping deployment where the admin named the role claim <code>groups</code>. An Entra ID token now arrives with <code>"roles": ["App.Admin"]</code> and <code>"groups": ["8f3c2a…"]</code> (Entra's groups are always opaque object-ID GUIDs). What authority does this converter produce for the Entra user?</p>
+  <button type="button">ROLE_8f3c2a… — the converter has no way to tell this token's groups claim apart from Ping's; it reads the GUID list as role names because that's what "groups" has always meant to it</button>
+  <button type="button">ROLE_APP.ADMIN — the converter falls back to reading roles once it notices groups doesn't contain recognizable role-name text</button>
+  <button type="button">Both ROLE_8f3c2a… and ROLE_APP.ADMIN — the converter reads every claim that might plausibly contain roles, not just the first match</button>
+  <p class="why" data-for="0">Right. The converter's rule is purely "read groups, treat entries as role names" — it has no concept of a GUID looking implausible versus a role name looking normal, and no idea this token came from a different issuer than the one it was written against. It reads exactly what's in <code>groups</code> and stops there.</p>
+  <p class="why" data-for="1">Tempting, because it's exactly what a human skimming the token would do — a GUID obviously doesn't look like a role name. But the converter has no such judgment built in. It doesn't evaluate the VALUES for plausibility, only checks whether the <code>groups</code> key exists.</p>
+  <p class="why" data-for="2">This is what a converter that checked every possible claim would produce — and it would sidestep this exact bug. But a single "read groups first" rule, once it matches, has no reason and typically no code path to keep checking <code>roles</code> afterward.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">A shared field name across two systems is a false friend — you've met this trap before.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>SQL column collisions across merged systems</h4>
+    <p>Two tables from different source systems both have a <code>status</code> column — one uses <code>1</code>/<code>0</code> for active/inactive, the other uses <code>'A'</code>/<code>'I'</code>. A migration script that copies "the status column" without checking which source it came from produces rows that are wrong in a way that passes every type check, because both values are valid in their own column — just not the one they landed in.</p>
+    <div class="hf-scatter"><span>same column name, different encoding, silent corruption</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Two webhook payloads both calling a field "timestamp"</h4>
+    <p>One upstream service sends epoch seconds in a field called <code>timestamp</code>; another sends epoch milliseconds under the identical field name. Code that reads "the timestamp field" and feeds it straight to <code>Instant.ofEpochSecond(...)</code> for both produces a date centuries in the future for whichever one used milliseconds — no exception, just a wrong-but-valid-looking date.</p>
+    <div class="hf-scatter"><span>false confidence from a name match alone</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>In CIAM: Ping and Entra can both legitimately use the name "groups"</h4>
+    <p>Nothing in OIDC reserves the word "groups" for any particular shape of value — it's a convention each IdP's admin console lets you name however you like, and this page's own table already notes Ping's role-claim name is "yours to configure." A CIAM platform onboarding a second or third IdP is exactly the scenario where "just read the groups claim" stops being a safe shortcut, because the next IdP wired up is free to reuse that exact name for something else entirely.</p>
+    <div class="hf-scatter"><span>a claim name is not a contract</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Isn't checking every possible claim, instead of stopping at the first match, a simpler fix than per-issuer converters?</p>
+  <p class="a">It dodges this specific bug but trades it for a vaguer one: a coincidental collision (say, both claims containing an entry that happens to match a role name for unrelated reasons) would now merge into one authority set with no way to tell which IdP actually vouched for which role. Per-issuer converters cost a little duplication up front and buy a real guarantee: nothing from Entra's claims is ever even glanced at while processing a Ping token, and vice versa.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">How would this bug actually surface in production?</p>
+  <p class="a">As a false 403, not a crash — the worst kind to triage. The admin insists their account is fine, the token — if anyone thinks to decode it — clearly contains role-looking data, and <code>@PreAuthorize</code> is doing exactly what it's told. The bug is entirely in which claim got read, which stays invisible unless someone logs or inspects the actual <code>GrantedAuthority</code> strings the converter produced, not just whether a claim named "groups" exists.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Would a unit test have caught this before Entra was even onboarded?</p>
+  <p class="a">Only one written with an Entra-shaped token already in mind, which is a hard test to justify writing before you support Entra at all. This is the real argument for testing a shared converter against every issuer's actual token shape the moment you add a second one — not just re-running the tests you already had against the token you happened to build it with first.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  The team fixes this by reordering the shared converter to check <code>roles</code> before <code>groups</code>. Does the original Ping deployment — whose role names live under a claim literally called <code>groups</code> — still authorize correctly after this reorder? What would have to be true (or become true later) about a Ping token for the reordered converter to get it wrong instead?
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -532,6 +664,7 @@ renderRaw();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

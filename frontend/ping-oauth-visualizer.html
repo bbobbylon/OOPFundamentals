@@ -122,7 +122,185 @@
     <div class="intro-ciam"><span class="tag">In CIAM / Your Job:</span> Core to your daily work — Angular uses Auth Code + PKCE through PingFederate (or PingOne), and your Spring APIs use spring-security-oauth2-resource-server with <code>jwk-set-uri</code> on Ping's JWKS to authenticate every call. The common bugs: <strong>aud mismatch</strong> (token issued for a different audience), <strong>scope not granted</strong> (missing from the client registration), and <strong>clock skew</strong> (a drifted server clock makes valid tokens look expired). Always check the decoded JWT at jwt.ms before debugging Spring config.</div>
   </div>
 
-  <!-- ── HERO: animated OAuth grant-selection walk · request chip + live token/scope inspector ── -->
+  
+<p class="hf-deck">or, the authorization code is a single-use ticket, and Angular tore it in half</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Login works. Then, for some users, it works and immediately un-works.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The callback route ran twice, and the second run did not merely fail — it took the first run's tokens with it</div>
+  <p>The Auth Code flow ends with your app holding a <code>?code=…</code> on the callback URL, which
+  it POSTs to PingFederate's token endpoint to exchange for tokens. Your callback component does
+  that in <code>ngOnInit</code>. Reasonable, standard, and what every example shows.</p>
+  <p>Then something makes that component initialise twice. A guard redirects and the route
+  re-enters. The user presses refresh on the callback URL because it looked stuck. A restored
+  session reopens the tab. Two tabs finish the redirect at once. Whatever the trigger, the same code
+  is now sent to the token endpoint a second time — and the spec is unambiguous about what an
+  authorization server must do: an authorization code used more than once <b>must</b> be rejected,
+  and the server <b>should</b> revoke every token it already issued from that code. So the second
+  request does not just return <code>invalid_grant</code>. It can invalidate the perfectly good
+  access and refresh tokens the <i>first</i> request produced. <b>The user is logged in for about
+  two hundred milliseconds, then logged out by their own login.</b></p>
+  <div class="hf-scatter">
+    <span>PKCE verifier correct ✓</span>
+    <span>redirect URI matches ✓</span>
+    <span>first exchange succeeded ✓</span>
+    <span>same code sent twice ⚠</span>
+    <span>first exchange's tokens revoked ⚠</span>
+  </div>
+  <p class="hf-foot">Reported as "it randomly logs me out", which is the least useful true
+  description of any bug.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Redeem once, and make "once" a property of the code rather than of the component</div>
+  <div class="hf-ladder">
+    <b>Guard the exchange on the code itself — record the code you are redeeming and refuse to start a second exchange for the same value</b>
+    <i>↓ a flag on the component only survives as long as the component does, and the whole problem is that a new one appeared</i>
+    <b>Strip the code from the URL the moment you read it, with a history replace rather than a navigation</b>
+    <i>↓ now a refresh, a restored tab or a back button has nothing to redeem, because the ticket is no longer lying on the doormat</i>
+    <b>And let the library do it if you are using one — a certified OIDC client already handles this, and hand-rolling the callback is where this bug is almost always introduced</b>
+  </div>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Code on the URL</span>
+      <span class="go"><em>callback route initialises</em> <span class="arrow">→</span> POST /as/token.oauth2 with the code and verifier</span></div>
+    <div class="stt"><span class="nm">First exchange</span>
+      <span class="go"><em>PingFederate accepts</em> <span class="arrow">→</span> access + refresh token returned, code marked used</span></div>
+    <div class="stt"><span class="nm">Component initialises again</span>
+      <span class="go"><em>code still on the URL</em> <span class="arrow">→</span> the same code is POSTed a second time</span></div>
+    <div class="stt"><span class="nm">Second exchange</span>
+      <span class="go"><em>reuse detected</em> <span class="arrow">→</span> <code>invalid_grant</code>, and the tokens from the first exchange may be revoked — back to the login page, and round again</span></div>
+  </div>
+  <p class="hf-annot">Read the loop and notice where it closes: the failure sends the user back to
+  the start, which mints a fresh code and can reproduce the whole cycle. That is why this often
+  presents as a <i>redirect loop</i> rather than as an error — the app never sits still long enough
+  to show one. The state that has to change to break the loop is the <b>URL</b>, which is why
+  clearing the code is the fix that ends it and a retry is the move that sustains it.</p>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A single-use credential means the second attempt is not a retry — it is an incident.</b> Most
+  of what your frontend talks to is idempotent enough that repeating a request is harmless, and
+  every instinct you have built from HTTP says "just try again". Authorization codes are the
+  opposite: reuse is the signature of a stolen code being replayed, so the authorization server is
+  right to treat it as an attack and tear down everything it issued. Your job is to make sure the
+  only reuse it ever sees is a real one.
+</div>
+
+<div class="hf-note">The code is <b>a cinema ticket, not a season pass</b>. Handing it over twice does
+not get you a second seat — it gets you removed from the one you were already sitting in.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>The second call failed. That should be harmless — why did it log the user out?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The token endpoint</span>
+    <p>Because from where I stand, a code arriving twice looks exactly like a code that was
+    intercepted and replayed. I cannot tell your second tab from an attacker, so I assume the worst:
+    reject the request, and revoke what the first redemption produced. That is the specified
+    behaviour, and it is protecting the user from a case you are not in.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">PKCE</span>
+    <p>And I do not save you here either, though people expect me to. I prove the client redeeming
+    the code is the one that started the flow — which both of your requests genuinely are, since
+    they share a verifier. I was built to stop a <i>different</i> attacker stealing the code, not to
+    stop you from spending it twice.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The browser</span>
+    <p>Meanwhile I keep that URL. It is in the history, it is what a refresh re-requests, and it is
+    what I restore when the tab comes back. As long as the code is sitting in the address bar, I
+    will happily hand it to your app again — I have no idea it was meant to be used once.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps, and only one of them is a mistake.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Angular sends the user to <code>/as/authorization.oauth2</code> with the client id, scope, state and PKCE challenge</span><span class="tag">the flow this page just walked</span></li>
+    <li class="open"><span>PingFederate authenticates, then redirects back to <code>/callback?code=…&amp;state=…</code></span><span class="tag">the ticket, on the doormat</span></li>
+    <li><span>The callback component initialises, reads the code, and POSTs it with the verifier. Tokens come back and are stored</span><span class="tag">login succeeded</span></li>
+    <li class="open"><span>Something re-initialises the component — a guard redirect, a refresh, a restored tab — while the code is <b>still in the URL</b></span><span class="tag">the actual defect</span></li>
+    <li><span>The same code is POSTed again. PingFederate sees a reused code and returns <code>invalid_grant</code></span><span class="tag">correct server behaviour</span></li>
+    <li class="open"><span>It also revokes the tokens issued from that code, so the session the user just got is dead — and your error handler sends them back to log in</span><span class="tag">the loop closes</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the only thing here that is wrong, and it is not in your OAuth code
+  at all — it is in how your router and your component lifecycle interact. That is the general
+  lesson worth taking off this page: <b>the OAuth flow is short, well specified and usually
+  correct; the bugs live in the plumbing around it</b>. Which is also why the fix belongs in the
+  plumbing, and why "retry the exchange" — the reflex a failed HTTP call normally deserves — is
+  precisely the wrong move here.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Your Angular callback component exchanges the authorization code in
+  <code>ngOnInit</code>. A guard causes the route to re-enter, so the same code is POSTed to
+  PingFederate twice. The first exchange already succeeded. What is the likely result?</p>
+  <button type="button">The second exchange returns the same tokens as the first — the authorization server caches its response per code so that a retried request is idempotent</button>
+  <button type="button">The second exchange fails PKCE verification, because the <code>code_verifier</code> is consumed by the first exchange and cannot be presented again</button>
+  <button type="button">The second exchange is rejected as a reused code, and the tokens issued by the first exchange may be revoked along with it — so the user is logged out immediately after logging in</button>
+  <p class="why" data-for="0">Codes are deliberately not idempotent. Replaying one is the signature
+  of an intercepted code, so caching and re-serving the response would hand an attacker exactly what
+  single-use was designed to prevent. The instinct comes from the rest of HTTP, where retrying is
+  usually safe — and it is the instinct to suspend at the token endpoint.</p>
+  <p class="why" data-for="1">The verifier is not consumed; it is a value your app holds and can
+  send as many times as it likes, and both of these requests carry the correct one. PKCE binds the
+  redemption to the client that began the flow — which your second request also is. It defends
+  against a different attacker entirely, which is why it does not help here.</p>
+  <p class="why" data-for="2">Correct — and the revocation is the part that turns a harmless-looking
+  failed request into a logout. Fix it by clearing the code from the URL as soon as you read it and
+  guarding the exchange on the code value rather than on component state, so a second component
+  instance finds nothing to redeem.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Single-use things break in the same way everywhere, and always because something innocent repeated.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>The double-submitted payment form</h4>
+    <p>A user clicks Pay twice, or refreshes on the confirmation page, and a second charge lands.
+    The fix was never "ask them not to" — it was idempotency keys and Post/Redirect/Get, so the
+    repeat has nothing left to submit. Clearing the code from the URL is the same manoeuvre.</p>
+    <div class="hf-scatter"><span>remove the trigger, not the blame</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Refresh token rotation with reuse detection</h4>
+    <p>The same rule one layer along: present a rotated refresh token twice and the whole token
+    family is revoked, because reuse means either a race in your client or a theft, and the server
+    cannot tell which. If you have met that bug, this is the same bug at an earlier point in the
+    flow.</p>
+    <div class="hf-scatter"><span>reuse is treated as theft, on purpose</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Email confirmation links opened by a link scanner</h4>
+    <p>A single-use link consumed by a corporate mail filter before the human ever clicks it — and
+    the user is told their link has expired. Same shape: a one-shot credential in a URL, and a piece
+    of infrastructure that fetches URLs for reasons of its own. <b>Anything one-use that lives in a
+    URL will be used by something you did not write.</b></p>
+    <div class="hf-scatter"><span>URLs get visited by robots</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> pick the grant by who is asking — Auth Code + PKCE for a user
+  in a browser, Client Credentials for a service with no user — PingFederate is the authorization
+  server, your Angular app the client, your Spring API the resource server validating the JWT
+  against the JWKS. The sentence worth adding: <b>the authorization code is single-use, and a second
+  redemption can revoke the tokens the first one produced</b> — so clear it from the URL and guard
+  the exchange on the code, not on your component.
+</div>
+
+<!-- ── HERO: animated OAuth grant-selection walk · request chip + live token/scope inspector ── -->
   <div class="panel" style="border:1px solid #ff6070">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:#ff6070">▶ Pick the right grant — and watch the token get issued &amp; checked</h2>
     <p style="font-size:13px;color:var(--muted);margin:6px 0 12px">OAuth has several grant types, and choosing the wrong one is a real security mistake. Pick a scenario and press ▶ — the chip is the request in flight, and the inspector shows the <b>real OAuth mechanics</b>: which grant fits which client, the machine-to-machine flow with no user, the user's <b>consent</b> to scopes, and how an opaque token is checked via <code>/introspect</code>.</p>
@@ -625,6 +803,7 @@ pick per your revocation needs.`},
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

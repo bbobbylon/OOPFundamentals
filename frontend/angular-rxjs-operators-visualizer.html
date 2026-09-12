@@ -149,6 +149,200 @@ tr:nth-child(even) td{background:#111827}
     </div>
   </div>
 
+<p class="hf-deck">or, catchError doesn't catch a location — it catches everything upstream of where you put it</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">One flaky request, and a search box that debounced perfectly for a week just stops taking input — forever.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">catchError worked exactly once — and that was the whole problem</div>
+  <p>You wrote <code>search.valueChanges.pipe(debounceTime(300), switchMap(term =&gt; http.get(url)), catchError(() =&gt; of([])))</code>.
+  A search hits a flaky 500. The empty-results fallback shows up right on cue — looks like it
+  worked. Then the user keeps typing, and nothing happens. Not "delayed." Nothing, ever again, no
+  matter what they type. You checked the <code>FormControl</code> (still emitting values, confirmed
+  in devtools), the debounce (fine), the endpoint (healthy again seconds later). What nobody
+  checked: whether the subscription driving the whole chain was even still alive.</p>
+  <div class="hf-scatter">
+    <span>FormControl.valueChanges still firing ✓</span>
+    <span>endpoint healthy again seconds later ✓</span>
+    <span>catchError caught the error once ✓</span>
+    <span>the outer subscription completed right there, permanently ⚠</span>
+  </div>
+  <p class="hf-foot">catchError doesn't just handle the error where it happens — it decides what
+  happens to every operator it's directly attached to, all the way up to the subscriber.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Move catchError inside the flattening operator's inner pipe</div>
+  <div class="hf-ladder">
+    <b>catchError(() =&gt; of([])) placed after switchMap, on the outer chain</b>
+    <i>↓ it recovers the value, but the outer Observable it's attached to still runs to completion right there</i>
+    <b>Better: switchMap(term =&gt; http.get(url).pipe(catchError(() =&gt; of([])))) — catchError inside the inner pipe</b>
+    <i>↓ only that one failed inner Observable gets replaced; the valueChanges chain driving switchMap never sees an error at all</i>
+    <b>The next keystroke starts a new search like nothing happened — because from the outer chain's point of view, nothing did</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A pipe chain is one Observable built out of the next — and catchError ends whichever one it's directly wired to.</b>
+  Put <code>catchError</code> after <code>switchMap</code>, wired to the same chain as your
+  <code>valueChanges</code>, and an error anywhere in that chain ends that <i>entire</i> chain, form
+  control included — the fallback runs once and the whole subscription is over. Put
+  <code>catchError</code> inside <code>switchMap</code>'s projection instead, wrapping only the
+  request it just created, and it's attached to nothing but that one attempt — the outer chain,
+  still wired straight to your form control, was never even touched.
+</div>
+
+<div class="hf-note">Think of <code>catchError</code> as <b>a circuit breaker</b>. Wire one to the
+whole house's main line — outside switchMap — and any short anywhere trips it, and the whole house
+goes dark until somebody manually rebuilds the wiring. Wire a separate breaker to just the kitchen
+outlet — inside switchMap's inner request — and a short there trips only that outlet; the lights,
+the router, everything else keeps running. Where the analogy stops holding: a real breaker flips
+back on by hand. A completed RxJS subscription can't be reset — you don't flip it, you rebuild it.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>The search box worked once, then went dead. No errors in the console. Why?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">catchError</span>
+    <p>Because I did exactly what you told me — I sit right after switchMap, wired straight onto
+    your form control's chain. The moment that chain errored, I substituted my fallback, and that
+    fallback finished. I have no way to signal "stay open for the next keystroke." Completing was
+    the only ending available to me.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Your FormControl</span>
+    <p>I'm still emitting every keystroke, for what it's worth. I have no idea anyone stopped
+    listening.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">switchMap's inner request</span>
+    <p>Which is exactly the seam you're missing. Put catchError inside my projection function
+    instead, wrapping just the one http.get() I create per keystroke, and I'm the one who dies on a
+    bad request — not the chain that's still attached to your FormControl.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One error. Two very different blast radii, depending on which side of switchMap catchError is standing on.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A keystroke flows through debounceTime, then into switchMap, which calls your projection function and subscribes to the Observable it returns</span><span class="tag">switchMap owns one inner subscription at a time</span></li>
+    <li><span>That inner Observable — one http.get() — throws a 500</span><span class="tag">the failure always starts here</span></li>
+    <li class="open"><span>catchError placed INSIDE switchMap's projection intercepts it right there and substitutes of([]) — only that one inner Observable was ever involved</span><span class="tag">blast radius: one request</span></li>
+    <li><span>Without an inner catchError, the error propagates out of switchMap itself, because switchMap has no error-handling opinion of its own</span><span class="tag">switchMap doesn't swallow errors for you</span></li>
+    <li class="open"><span>If catchError is instead sitting AFTER switchMap, it's what finally intercepts that propagated error — but by now it's attached to the whole valueChanges → debounceTime → switchMap chain, not to one request</span><span class="tag">blast radius: the entire pipe</span></li>
+    <li class="open"><span>catchError's replacement Observable runs once and completes — and because it's now the end of that entire chain, the WHOLE subscription completes with it, form control included</span><span class="tag">this is where the search box dies</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the lesson. switchMap has no error-handling opinion of its own — an
+  error inside its inner Observable just keeps propagating outward exactly like any other RxJS
+  error, until something catches it. Where you put that something decides whether "something" means
+  one request or your entire feature.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">the outer chain — valueChanges → debounceTime → switchMap — built once, lives for the life of the component</span>
+      <div class="core">one http.get() per keystroke, rebuilt from scratch every time<small>catchError here dies with something that was always about to be replaced anyway</small></div>
+    </div>
+  </div>
+  <p class="hf-annot">catchError inside the core costs nothing — switchMap was going to throw that
+  Observable away on the very next keystroke regardless. catchError on the outer ring is standing
+  right next to your form control, which is NOT rebuilt on every keystroke — so when the ring dies,
+  there's nothing left to replace it.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q"><code>search.valueChanges.pipe(switchMap(term =&gt; http.get('/search?q=' + term)), catchError(() =&gt; of([])))</code>.
+  The third keystroke's request 500s. The user immediately types a fourth and fifth character. What
+  happens?</p>
+  <button type="button">Nothing — the chain already completed when catchError's replacement finished after the third keystroke's error, so the fourth and fifth keystrokes never trigger anything</button>
+  <button type="button">Each new keystroke triggers a fresh search as normal — switchMap cancels the failed request and moves on, same as always</button>
+  <button type="button">The app throws an uncaught error on the fourth keystroke, since catchError already used its one allowed recovery</button>
+  <p class="why" data-for="0">Right, and this is the part that's easy to miss: by the third
+  keystroke's error, catchError's <code>of([])</code> already ran, emitted its one value, and
+  completed — which completed the entire subscription, switchMap included. There's no chain left
+  for a fourth keystroke to flow through; valueChanges is still emitting, but nothing downstream is
+  listening anymore.</p>
+  <p class="why" data-for="1">That's what would happen if the error had been caught INSIDE
+  switchMap's projection instead — then yes, every keystroke keeps triggering fresh, independent
+  searches forever. But this catchError sits after switchMap, wired to the whole chain, so the one
+  error it catches ends that whole chain, not just the request that failed.</p>
+  <p class="why" data-for="2">catchError doesn't have a use-once limit — it would happily catch a
+  second error too, if it ever got the chance. It doesn't get the chance here because there's no
+  active subscription left by the fourth keystroke to error in. The real story is termination, not
+  exhaustion.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Every language has this same seam: where you put the recovery decides what survives it.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A Java for-loop with try/catch outside it, instead of inside it</h4>
+    <p>Wrap <code>try { for (Order o : orders) process(o); } catch (...) {}</code> around the whole
+    loop, and one bad order throws, the catch runs, and every order after it never gets processed —
+    the loop is over. Move the <code>try</code>/<code>catch</code> inside the loop body instead and
+    one bad order gets skipped while every other order still runs. Same seam, same fix, no RxJS
+    involved.</p>
+    <div class="hf-scatter"><span>catch outside the loop ≈ catchError outside switchMap</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>AWS Step Functions — a Catch on one Task vs. an unhandled failure</h4>
+    <p>Attach a <code>Catch</code> to a single Task state and a failure there routes to a fallback
+    state while the rest of the state machine keeps executing. Let an error escape with no
+    <code>Catch</code> anywhere and it fails the entire execution — every state after it, run or
+    not, is over. The scope you attach recovery to is the scope that survives.</p>
+    <div class="hf-scatter"><span>per-task Catch ≈ catchError inside switchMap</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your CIAM interceptor — the same bug, higher stakes</h4>
+    <p>An HTTP interceptor that pipes every outgoing request through <code>catchError</code> has to
+    scope it per request, not onto a shared, long-lived <code>authState$</code> the interceptor
+    reads from. Get the scope wrong and one dropped connection can quietly end the stream that gates
+    every future authenticated request, app-wide, until a full page reload rebuilds it from scratch.</p>
+    <div class="hf-scatter"><span>same bug as the search box, now gating every request</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Doesn't retry() have the same problem as catchError, if I put it in the wrong place?</p>
+  <p class="a">Yes, for the identical reason — <code>retry()</code> re-subscribes to whatever it's
+  attached to. Put it after switchMap and a failure re-subscribes the entire
+  <code>valueChanges</code> chain, which doesn't even make sense for a form control — you'd be
+  re-listening to keystrokes, not re-trying a request. Put it inside switchMap's projection,
+  wrapping the one <code>http.get()</code>, and it retries just that request. Same rule as
+  catchError: wrap the smallest thing you actually want retried.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">How would I catch this in code review, since both versions look almost identical?</p>
+  <p class="a">Ask one question: which Observable is this operator physically inside? If the answer
+  is "the same one my long-lived UI event source feeds," that's the dangerous outer-chain version.
+  If the answer is "the Observable my flattening operator's callback just created and returned,"
+  that's the safe inner version. The tell in the code is indentation — a correctly-scoped
+  catchError sits one <code>.pipe()</code> deeper than the switchMap or mergeMap that contains it.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Is switchMap special here, or does this apply to mergeMap and concatMap too?</p>
+  <p class="a">All of them — mergeMap, concatMap, exhaustMap, and switchMap each subscribe to an
+  inner Observable your projection function returns, and none of them catch errors on your behalf.
+  The only thing that changes between them is how many inner Observables can be in flight at once;
+  the catchError-placement rule is identical for every one.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  <code>clicks$.pipe(concatMap(id =&gt; http.post('/orders/' + id + '/ship')), catchError(() =&gt; of(null))).subscribe()</code>
+  ships orders one click at a time, strictly in order. The third order in the queue fails with a
+  500. Does the fourth order ever get shipped — and does your answer change if
+  <code>catchError</code> is moved inside the <code>concatMap</code>'s projection instead?
+</div>
+
   <!-- ── HERO: animated value-through-the-pipe walk · emission chip + live pipeline inspector ── -->
   <div class="panel" style="border-color:#22d3ee">
     <h2 id="hero-viz" style="margin-top:0;color:#22d3ee">▶ Follow one emission through the pipe — operator by operator</h2>
@@ -1094,6 +1288,7 @@ the error handler never fired`},
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>

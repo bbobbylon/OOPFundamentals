@@ -128,6 +128,138 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> Issuer <code>https://federation.contoso.com</code> (Ping Federate); claims <code>sub</code>, <code>email</code>, <code>ciam_roles</code> (e.g. <code>["CIAM_ADMIN","USER_MANAGER"]</code>). Map with <code>setAuthoritiesClaimName("ciam_roles")</code> + <code>ROLE_</code> prefix so <code>@PreAuthorize("hasRole('CIAM_ADMIN')")</code> works. Missing/invalid token → 401 before the controller; valid token, wrong role → <code>AccessDeniedException</code> → 403. Angular's interceptor re-logs-in on 401 and shows an "Access Denied" toast on 403.</div>
   </div>
 
+<p class="hf-deck">or, a Client Credentials token proves a service authenticated — it doesn't mean a person is on the other end</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The request passed every check Spring runs. The audit column it wrote is empty for a reason none of those checks were ever going to catch.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Every order from the nightly reconciliation job has createdByEmail: null</div>
+  <p><code>OrderService.createOrder()</code> has always pulled the caller's identity straight from the JWT: <code>String createdBy = jwt.getClaimAsString("email"); order.setCreatedByEmail(createdBy);</code>. It's worked flawlessly for a year, because every caller has been an Angular user who signed in through Auth Code + PKCE — and a token from that flow always carries an <code>email</code> claim, because a real person with a real profile logged in to get it. Then a nightly batch job goes live, authenticating with its own <code>client-id</code>/<code>client-secret</code> via Client Credentials to reconcile orders overnight. Its token passes signature, issuer, and expiry, and it holds the correct <code>SCOPE_orders.write</code> authority, so nobody questions its right to call the endpoint. But <code>getClaimAsString("email")</code> quietly returns null, because there was never a login, never a consenting user, never a profile to attach an email address to.</p>
+  <div class="hf-scatter">
+    <span>token signature valid ✓</span>
+    <span>scope authorizes the call ✓</span>
+    <span>no human ever logged in to get this token ⚠</span>
+    <span>code assumed an email claim would always be there ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that every caller hitting this endpoint is a person with a profile. Client Credentials was built for exactly the opposite case.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Decide, on purpose, what a non-human caller's identity looks like</div>
+  <div class="hf-ladder">
+    <b>Stop trusting jwt.getClaimAsString("email") to always return something</b>
+    <i>↓ a missing claim isn't an error — it's just null, silently</i>
+    <b>Check for the claims a real login actually produces before you rely on them</b>
+    <i>↓ their absence tells you exactly what kind of caller you have</i>
+    <b>Give service callers an explicit identity — "system:" + the client-id, never a blank</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A validated JWT proves the caller authenticated successfully — it doesn't prove a human is on the other end of it.</b> Auth Code + PKCE tokens carry a person's profile because a person logged in to get one; Client Credentials tokens don't, because there was never a resource owner to have a profile. Spring validates both identically — the difference lives entirely in which claims happen to be present, and nothing forces your code to check.
+</div>
+
+<div class="hf-note">Think of Client Credentials like the badge issued to a vending-machine restocking contractor instead of an employee. The badge genuinely opens the door — security's reader is completely satisfied, same as any employee's badge. But if the sign-in sheet at the front desk assumes every badge holder has a desk, a manager, and a photo on file, the contractor's visit breaks the sheet, not the door.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>Signature valid, scope correct, the request even succeeded — so why is createdByEmail sitting there null?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Jwt.getClaimAsString("email")</span>
+    <p>Because I don't fail when a claim is missing — I just return null. I have no opinion on whether "email" is supposed to be there. This token simply never had one.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The Client Credentials grant</span>
+    <p>I was never issued to a person. Nobody signed in, nobody consented — a service authenticated with its own secret. There was no profile to put an email claim on top of.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Your OrderService code</span>
+    <p>I assumed the email claim would be there because it has been, every single time, for every Angular user who's ever called me.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Three flows on this page. Only one of them ever had a person behind it.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Auth Code + PKCE: a human authenticates at the IdP's login screen and consents</span><span class="tag">a resource owner exists</span></li>
+    <li class="open"><span>The resulting token's claims include a real profile — <code>email</code>, <code>given_name</code>, <code>preferred_username</code> — because a real profile was sitting behind the login</span><span class="tag">person-shaped claims</span></li>
+    <li><span>Client Credentials: the <b>application itself</b> authenticates with its own <code>client-id</code>/<code>client-secret</code></span><span class="tag">no redirect, no login screen, no consent</span></li>
+    <li class="open"><span>There was never a resource owner, so there's no profile for <code>email</code> or <code>given_name</code> to come from — those claims are simply absent</span><span class="tag">nothing to be missing FROM</span></li>
+    <li><span>Both grants still produce a syntactically identical JWT — same header, same signature scheme, same place a claim <i>would</i> go</span><span class="tag">Spring validates both the same way</span></li>
+    <li class="open"><span>Only the <i>absence</i> of person-shaped claims tells your code which kind of caller it has — nothing forces that check to happen</span><span class="tag">the missing step</span></li>
+  </ol>
+  <p class="hf-annot">Step 6 is the lesson. Spring's validation pipeline was never designed to tell you "this caller is a human" or "this caller is a service" — it only tells you the token is genuine. Once you need to know which kind of caller you're serving, that's a check your own code has to make, on purpose, because nothing upstream is going to make it for you.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>Angular SPA — Auth Code + PKCE (email: bob@contoso.com)</span>
+      <span>Nightly batch job — Client Credentials (no email claim)</span>
+      <span>Downstream service — Token Exchange / OBO</span>
+    </div>
+    <div class="funnel">↓ same JwtAuthenticationToken, same @PreAuthorize check, same getClaimAsString("email") call</div>
+    <div class="instance">OrderService.createOrder()<small>never checks which kind of caller it just received</small></div>
+  </div>
+  <p class="hf-annot">All three callers funnel into the exact same code path. The endpoint's <code>@PreAuthorize</code> only asks "does this caller have the write scope" — a question all three answer correctly. Nothing in that funnel ever asks "does this caller have a human identity to log," which is the only question that actually mattered for the audit column.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A nightly reconciliation job authenticates via Client Credentials and successfully calls <code>POST /api/orders</code> — its token has the required <code>SCOPE_orders.write</code> authority, so <code>@PreAuthorize</code> passes. The handler then runs <code>String createdBy = jwt.getClaimAsString("email"); order.setCreatedByEmail(createdBy);</code>. What ends up stored in <code>createdByEmail</code>?</p>
+  <button type="button">The batch job's registered client-id, since Spring falls back to the app registration's identifier when a profile claim is missing</button>
+  <button type="button">null — getClaimAsString returns null for a claim the token never had, and a Client Credentials token has no email claim to begin with</button>
+  <button type="button">A 403, because Spring detects the missing profile claim and blocks the write before the handler runs</button>
+  <p class="why" data-for="0">A reasonable guess — it would even be a better outcome than what actually happens. But <code>Jwt.getClaimAsString</code> does no such fallback; it reads exactly one key out of the token's payload map and nothing else. Nothing in Spring's resource-server support substitutes the client-id for a missing profile claim.</p>
+  <p class="why" data-for="1">Right. <code>getClaimAsString</code> on a key that isn't in the payload returns <code>null</code> — quietly, with no exception and no warning. The write still succeeds, the row still gets inserted, it just carries a null where a human's email was always assumed to be.</p>
+  <p class="why" data-for="2">Authorization already finished by the time this line runs — <code>@PreAuthorize</code> evaluated the scope and passed. It has no concept of "this caller lacks a profile claim" unless you write a SpEL expression that checks for one explicitly, and nothing here does.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">"Authenticated" and "is a person" split apart everywhere systems let more than humans log in.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Unix cron jobs and service accounts</h4>
+    <p>A cron job running as a <code>svc-backup</code> system user has a real UID and real file permissions — everything the kernel needs to authorize its actions. It has no <code>$HOME</code> full of personal files, no interactive shell history, no human sitting at a terminal. A script that assumes <code>$USER</code> always names a person breaks the moment it runs as a service account instead.</p>
+    <div class="hf-scatter"><span>a valid UID ≠ a person behind the keyboard</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>AWS IAM roles vs. IAM users</h4>
+    <p>An EC2 instance or Lambda function assuming an IAM role can call AWS APIs just as validly as a human IAM user with access keys — the signature check doesn't care which one it is. Code (or a dashboard) that assumes every API call maps to a named person's account misreads every automated call the same way this page's bug misreads a Client Credentials token.</p>
+    <div class="hf-scatter"><span>same authentication proof, no person attached</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>In CIAM: Entra's Graph API splits on exactly this line</h4>
+    <p>Microsoft Graph documents entire endpoints as <b>delegated-permission only</b> — they require a signed-in user and simply refuse an app-only (Client Credentials) token, precisely because some data (like "my manager" or "my calendar") has no meaning without a resource owner behind the call. Your <code>/api/orders</code> bug is that same distinction, minus the courtesy of Graph's explicit refusal.</p>
+    <div class="hf-scatter"><span>delegated = a user is there; application = nobody is</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">How do I actually detect "this token has no human behind it" in code?</p>
+  <p class="a">Don't try to detect Client Credentials directly — detect the thing you actually need, which is whether the profile claim you're about to use is there. Check for a null (or use <code>jwt.hasClaim("email")</code>) before you rely on it, and decide explicitly what a missing value should mean for your feature. That check is honest about what you actually need and doesn't break if a fourth grant type shows up next year.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does a Client Credentials token ever carry role-like claims at all?</p>
+  <p class="a">Often, yes — Entra populates <code>roles</code> on an app-only token with the <b>application permissions</b> granted to that service principal, and Ping can be configured similarly. Those are real authorization claims, which is exactly why <code>hasAuthority(...)</code> checks keep working fine for M2M callers. It's specifically <i>person-shaped</i> claims — email, given name, preferred username — that go missing, not authorization claims.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Isn't the real fix just making createdByEmail nullable?</p>
+  <p class="a">That fixes the database constraint, not the design gap. The actual question is what identity a service caller should be attributed as in an audit trail — "system", the client-id, or a dedicated service-account record — and that's a decision worth making once, on purpose, instead of re-discovering a new null-shaped surprise every time a different automated caller shows up.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  A third caller shows up: a downstream service calls <code>POST /api/orders</code> using a Token Exchange (On-Behalf-Of) token, acting on behalf of a real logged-in user. Does <code>createdByEmail</code> come back null for these calls too, or does it behave like the Angular case? What has to be true about <i>how the downstream service requested its OBO token</i> for the answer to be "it behaves like the Angular case"?
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -676,6 +808,7 @@ renderFlow('code');
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

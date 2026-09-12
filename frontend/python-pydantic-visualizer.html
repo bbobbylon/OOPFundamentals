@@ -109,7 +109,112 @@ except ValueError as e:
   </div>
 
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the validation that only ever runs once</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You put <code>Field(gt=0)</code> on the model. Pydantic checked it once, on the way in, and never again.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">user.age -= 1 sailed straight past the constraint that built the model</div>
+  <p><code>class User(BaseModel): age: int = Field(gt=0)</code>. <code>User(age=1)</code> constructs cleanly — Pydantic checks <code>gt=0</code>, 1 passes, done. Somewhere deep in an expiry-countdown loop, far from the model definition: <code>user.age -= 1</code>. Run that enough times and <code>user.age</code> is sitting at <code>0</code>, then <code>-3</code>, then whatever the loop feels like — and nothing anywhere raises.</p>
+  <p>Try to build a <em>new</em> instance the same way — <code>User(age=-5)</code> — and Pydantic rejects it instantly with a <code>ValidationError</code>. The exact same constraint, on the exact same field, does nothing at all when the value arrives through <code>=</code> instead of through the constructor.</p>
+  <div class="hf-scatter">
+    <span>User(age=-5) → ValidationError ✓ — construction always validates</span>
+    <span>user.age = -5 → … nothing happens ⚠ — assignment does not, by default</span>
+    <span>Field(gt=0) is still sitting right there in the class, doing nothing here</span>
+  </div>
+  <p class="hf-foot">The constraint was never wrong. It was only ever wired to one doorway, and you just watched a value walk in through a window.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Turn assignment validation on — or stop assigning</div>
+  <div class="hf-ladder">
+    <b>Add model_config = ConfigDict(validate_assignment=True)</b>
+    <i>↓ this is the one flag that makes every future attribute assignment re-run the same validators construction uses</i>
+    <b>Or treat the model as immutable and return a new one: user = user.model_copy(update={'age': user.age - 1})</b>
+    <i>↓ every "change" goes through validated construction again instead of a bare setattr, and pairs naturally with frozen=True</i>
+    <b>Never assume a Field constraint applies anywhere except the moment a model is built, unless validate_assignment says otherwise</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b><code>validate_assignment</code> defaults to <code>False</code>.</b> Pydantic's documentation says exactly that: it controls "whether to validate the data when the model is changed," and the out-of-the-box behavior is no. Validation is something Pydantic does <em>while building</em> a model — from <code>__init__</code>, <code>model_validate</code>, or <code>model_validate_json</code> — not something it keeps doing to an object that already exists, unless you explicitly ask.
+</div>
+
+<div class="hf-note">Pydantic's validation is a bouncer at the front door, not a guard patrolling the house. Once you're inside — once the model is built — you can rearrange anything you like and nobody checks ID again, unless you also hired the patrol (<code>validate_assignment=True</code>).</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>Field(gt=0) is right there in the class. Why didn't it catch age going negative?</p></div>
+  <div class="hf-bub right"><span class="who">Field(gt=0)</span><p>I run wherever Pydantic's validation machinery runs — construction, model_validate, model_validate_json. A plain <code>user.age -= 1</code> is just Python's ordinary attribute assignment. Nobody invited me to that party.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>I assumed the model enforced its own rules for its whole lifetime.</p></div>
+  <div class="hf-bub right"><span class="who">BaseModel.__setattr__</span><p>I'm the one who actually runs on <code>user.age = …</code>. By default I check nothing — I check <code>model_config.validate_assignment</code>, see False, and just set the attribute like any normal object would. Flip that one config key and I start calling Field(gt=0) myself.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Two completely different code paths lead to "the value on this object changed."</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>User(age=1)</code> calls <code>__init__</code>, which runs every field's validators</span><span class="tag">construction</span></li>
+    <li class="open"><span><code>Field(gt=0)</code> checks 1 &gt; 0, passes, and the instance is built</span><span class="tag">validated once</span></li>
+    <li><span>Later, <code>user.age -= 1</code> executes — plain attribute assignment, not a call to <code>__init__</code></span><span class="tag">not construction</span></li>
+    <li class="open"><span>Pydantic's <code>BaseModel.__setattr__</code> checks <code>model_config.validate_assignment</code></span><span class="tag">the actual gate</span></li>
+    <li><span>It is <code>False</code> by default, so <code>__setattr__</code> just sets the attribute directly</span><span class="tag">plain assignment</span></li>
+    <li class="open"><span><code>user.age</code> is now 0 — no validator re-ran, and the object gives no sign anything unusual happened</span><span class="tag">silently invalid</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the whole gotcha compressed into one method. <code>__setattr__</code> is not missing a check by accident — it has a check, it is just off by default. Every field constraint you write lives downstream of that one gate, whether the value arrived through a JSON body or a stray <code>-=</code> three services away.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">a validated User, sitting in memory<small>already passed Field(gt=0) and every custom validator</small></div>
+    <div class="fan">everything that can still touch it ↓</div>
+    <div class="obs">
+      <span>user.model_dump() — read-only ✓</span>
+      <span class="new">user.age -= 1 — mutates, unvalidated by default ⚠</span>
+      <span>a service reaching into user.roles directly — same open door</span>
+    </div>
+  </div>
+  <p class="hf-annot">The model doesn't distinguish "code that respects my constraints" from "code that doesn't" — it only distinguishes construction from assignment, and only construction is guarded by default. Anything in your codebase with a reference to the instance can walk straight through the second door.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q"><code>class Account(BaseModel): balance: float = Field(ge=0)</code>. <code>acct = Account(balance=100.0)</code> constructs fine. A refund bug later runs <code>acct.balance = -50.0</code>. With <code>model_config</code> left at Pydantic's defaults, what happens?</p>
+  <button type="button"><code>ValidationError</code> is raised immediately — <code>Field(ge=0)</code> always applies to the field</button>
+  <button type="button"><code>acct.balance</code> silently stays <code>100.0</code> — Pydantic models are immutable by default</button>
+  <button type="button"><code>acct.balance</code> becomes <code>-50.0</code> with no error — Field constraints only run at construction unless validate_assignment is enabled</button>
+  <p class="why" data-for="0">Field(ge=0) only runs where Pydantic's validators are wired in — by default that's construction and the model_validate family, not every later assignment.</p>
+  <p class="why" data-for="1">This is a different, common mix-up: Pydantic models are mutable by default. Immutability is a separate opt-in (<code>frozen=True</code>) — and it wouldn't have saved you here anyway, since the bug is about validation, not mutability.</p>
+  <p class="why" data-for="2">Right. The assignment succeeds, the constraint never runs, and <code>acct.balance</code> is now a negative number sitting inside an object that looks, from the outside, exactly as trustworthy as it did the moment it was built.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Validated at the door, trusted forever after" is a trade-off almost every validation layer makes somewhere.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java Bean Validation's <code>@Positive</code></h4>
+    <p><code>@Valid @RequestBody</code> triggers Bean Validation exactly once, at the controller boundary. A service method that mutates that same entity afterward — <code>account.setBalance(-50)</code> — runs no validator at all unless you inject a <code>Validator</code> bean and call it yourself.</p>
+    <div class="hf-scatter"><span>@Valid at the boundary ✓</span><span>a later setter ⚠ — unchecked</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A SQL CHECK constraint — the opposite choice</h4>
+    <p>A database <code>CHECK (balance &gt;= 0)</code> constraint actually re-evaluates on every <code>UPDATE</code>, not just <code>INSERT</code> — the one layer in this comparison that closes the exact gap Pydantic leaves open by default, because the database enforces its rule at the row level, not at construction time.</p>
+    <div class="hf-scatter"><span>CHECK — re-verified on every write</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Angular reactive forms, mutated by hand</h4>
+    <p><code>Validators.min(0)</code> on a FormControl runs when you go through <code>setValue</code>/<code>patchValue</code> — but grab the plain object from <code>form.value</code> and mutate a property directly on it, and no validator in the form ever sees that change. Same shape: one blessed path is guarded, a second path around it is not.</p>
+    <div class="hf-scatter"><span>form.setValue() ✓ validated</span><span>form.value.x = … ⚠ bypasses every validator</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a Pydantic model declares fields with type hints and Field constraints, validates and coerces untrusted input into one <code>ValidationError</code> with every problem listed, and can serialize back out or read settings from the environment.
+  <b>The one new sentence this block adds:</b> all of that validation is scoped to construction — a model already built is just an ordinary mutable Python object to <code>=</code>, unless <code>validate_assignment=True</code> tells Pydantic to keep watching.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="pypydSeg">
@@ -319,6 +424,7 @@ DevHubCodeWalk.mount('#cw-pydantic',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

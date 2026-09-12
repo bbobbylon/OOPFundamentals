@@ -219,6 +219,216 @@
       </div>
     </div>
 
+<p class="hf-deck">or, a signal doesn't fire when you write it — it fires when someone finally asks</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The effect logged once. You changed the signal three times after that. Silence.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The effect is still alive. It just isn't listening on that line anymore</div>
+  <p>You build a debounced auto-save: an <code>effect()</code> that should fire 300ms after
+  <code>draft</code> changes. You test it and the first save logs perfectly. Then you keep typing
+  and nothing else ever logs, forever. You check every obvious thing: the effect wasn't destroyed
+  (the component is still on screen), <code>draft.set()</code> definitely runs on every keystroke
+  (a separate log line right next to it proves it), and the signal's value really is updating (you
+  can read it straight from the console). Everything you'd normally suspect is fine. The one thing
+  that's different is a single line: you read <code>draft()</code> <i>inside</i> the
+  <code>setTimeout</code> callback the effect schedules, not in the effect's own body.</p>
+  <div class="hf-scatter">
+    <span>effect ran once on mount ✓</span>
+    <span>draft.set() fires every keystroke ✓</span>
+    <span>draft() is read inside setTimeout ⚠</span>
+    <span>Angular stopped watching before that line ran ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption underneath it: that "my effect reads this signal" is
+  true anywhere in the function body. It's only true on the part of the call stack Angular is
+  actually watching.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Read on the stack Angular is watching, then hand off the value</div>
+  <div class="hf-ladder">
+    <b>const d = draft(); setTimeout(() =&gt; save(d), 300)</b>
+    <i>↓ the read happens synchronously in the effect's own body, so the dependency is recorded before the timer is even scheduled</i>
+    <b>Better: toObservable(draft).pipe(debounceTime(300)).subscribe(save)</b>
+    <i>↓ debouncing is a stream problem — hand it to the tool built for time, and stop asking a signal to schedule anything</i>
+    <b>Now every set() reliably re-triggers, and the delay logic lives where it belongs</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A signal read only counts if Angular is watching when it happens.</b> Tracking isn't a
+  property of your code, it's a property of the <i>call stack</i> — active only while a
+  <code>computed</code>'s or <code>effect</code>'s own function is synchronously running. That's
+  why a read inside <code>setTimeout</code> or <code>.then()</code> is invisible to the graph, why
+  a <code>computed</code>'s dependency list rebuilds from scratch on every run (the conditional
+  <code>mode()</code> example above), and why moving one line — a signal call from outside a timer
+  to inside it — silently changes what your code depends on.
+</div>
+
+<div class="hf-note">Think of the tracking window as <b>a security guard's radio check-in</b>.
+While the guard is on shift — the effect's function actually executing — anyone who calls in gets
+logged as a dependency. The second the shift ends, the guard clocks out. A call that comes in one
+second later, even from someone the guard was supposed to be watching, just rings on an empty
+desk. It isn't ignored out of spite; there's nobody there to log it.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I read the signal inside my effect. Why didn't it rerun when I changed it?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Angular's reactive graph</span>
+    <p>I only saw you call <code>draft()</code> while I was actively recording — that's your
+    effect function running synchronously. Whatever happened after your <code>setTimeout</code>
+    callback fired, I'd already stopped listening.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">setTimeout</span>
+    <p>And I don't run for another 300ms, on a completely different turn of the event loop. By the
+    time I call your callback, whatever Angular was tracking against is long gone. I have no idea
+    I'm inside an effect at all — to me it's just a function.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">computed()</span>
+    <p>Same rule catches me too. I rebuild my dependency list from nothing every time I run. Read
+    a signal behind an <code>if</code> this time and a different one next time and my
+    subscriptions just change — nobody promised you a stable list, only an honest one.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One function call. One tiny window where anyone is listening at all.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Angular is about to call your <code>effect</code> or <code>computed</code> function. First it sets itself as the <b>active consumer</b> for this run</span><span class="tag">the window opens</span></li>
+    <li class="open"><span>Every signal you call <code>()</code> while that function is <b>still synchronously executing</b> registers an edge: "this consumer depends on me"</span><span class="tag">the entire job of tracking</span></li>
+    <li><span>Your function returns control to whatever called it</span><span class="tag">the window closes here</span></li>
+    <li class="open"><span>Angular clears the active consumer. Nothing is listening now, no matter what code inside your function hasn't run yet</span><span class="tag">the setTimeout callback is still pending</span></li>
+    <li><span>Later, the timer fires or the promise resolves and calls back into your code. Reading a signal now is just... reading a value</span><span class="tag">a read, not a subscription</span></li>
+    <li class="open"><span>When a signal is written, only the edges recorded in step 2 get walked and marked dirty. An edge that was never recorded can never be marked</span><span class="tag">the actual cause of the silence</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the lesson: closing the tracking window isn't a delay, it's
+  absolute. There's no "catches up later" — either an edge got recorded while the window was open,
+  or it never will exist, and every symptom above (the effect that goes quiet, the computed whose
+  dependencies look wrong, "it worked in my simple test") traces back to exactly where inside the
+  function a signal got called.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt">
+      <span class="nm">TRACKING OPEN</span>
+      <span class="go">Angular calls your fn → sets itself as <em>active consumer</em></span>
+    </div>
+    <div class="arrow">↓ every signal read here registers a dependency edge</div>
+    <div class="stt">
+      <span class="nm">TRACKING CLOSED</span>
+      <span class="go">the function returns → active consumer cleared → <em>nothing</em> registers from here on</span>
+    </div>
+    <div class="arrow">↓ setTimeout / .then() finally fires — but it fires into this state</div>
+    <div class="stt on">
+      <span class="nm">READ, BUT INVISIBLE</span>
+      <span class="go">draft() still returns the right value → no edge gets recorded, ever, for this call site</span>
+    </div>
+    <div class="arrow">↻ the next legitimate dependency reopens the cycle — this call site just never gets invited back</div>
+  </div>
+  <p class="hf-annot">The loop keeps turning: every real dependency read opens and closes this
+  window once per run, forever. <code>draft()</code> inside the timeout is never in it. The loop
+  isn't broken — that particular call was simply never scheduled to attend.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">An effect runs once on mount: <code>effect(() =&gt; setTimeout(() =&gt;
+  console.log('saving', draft()), 300))</code>. After the first scheduled log fires, you call
+  <code>draft.set('h')</code> and then <code>draft.set('hi')</code>. How many more times does
+  "saving" log?</p>
+  <button type="button">Twice — the effect depends on draft, so each set() reruns it</button>
+  <button type="button">Zero — the only read of draft() happens inside setTimeout, so no dependency was ever recorded</button>
+  <button type="button">Once, 300ms after the second set() — that's when draft() actually gets read again</button>
+  <p class="why" data-for="0">This is the reasonable assumption — the effect obviously uses
+  <code>draft</code>, so surely writing to <code>draft</code> reruns it. But "uses" isn't the
+  test. The only call to <code>draft()</code> sits inside the nested <code>setTimeout</code>
+  callback, which runs after the effect's own function has already returned and Angular has
+  already stopped recording dependencies for it.</p>
+  <p class="why" data-for="1">Right. The effect's synchronous body never calls <code>draft()</code>
+  at all — it only schedules a timer. Since no read ever happened while tracking was active, no
+  edge was ever recorded, so <code>draft.set()</code> has nothing to notify. The effect ran
+  exactly once, ever, for the lifetime of the component.</p>
+  <p class="why" data-for="2">Tempting, because it sounds like tracking is merely "delayed" rather
+  than absent — but there's no queue that catches a late read and retroactively subscribes it.
+  When the timeout callback finally calls <code>draft()</code>, it's an untracked read: it returns
+  whatever the value is <i>at that moment</i> and creates nothing.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three systems, one rule: you only get counted if you show up while attendance is being taken.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>React's stale closures — a different mechanism, the identical bug</h4>
+    <p>React has no dependency graph at all, so this isn't the same mechanism — but it produces
+    the exact same felt bug. A <code>setTimeout</code> inside <code>useEffect</code> closes over
+    whatever <code>state</code> was at render time, not a live binding, so it logs a stale value
+    forever if you forgot it in the dependency array. Different cause, same lesson: code inside a
+    timer does not automatically stay in sync with anything.</p>
+    <div class="hf-scatter"><span>stale closure ≈ untracked read</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Vue's reactivity — the same mechanism, a different name</h4>
+    <p>Vue's <code>computed</code> and <code>watchEffect</code> use an <code>activeEffect</code>
+    pointer set for the duration of a synchronous run — literally the same design as Angular's
+    active consumer, with the identical blind spot: read a <code>ref</code> inside a
+    <code>setTimeout</code> inside a tracked function and the read is invisible to it. Same trick,
+    different framework, same rule.</p>
+    <div class="hf-scatter"><span>activeEffect ≈ active consumer</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your CIAM token-refresh effect</h4>
+    <p>A silent-refresh effect schedules a timer off <code>tokenExpiresAt()</code> to renew a Ping
+    or Entra access token before it dies. Read <code>tokenExpiresAt()</code> inside the
+    <code>setTimeout</code> instead of before it, and a manual re-login that issues an earlier
+    expiry never reschedules the refresh — the timer keeps counting down to the OLD expiry while
+    the user silently gets logged out mid-session.</p>
+    <div class="hf-scatter"><span>read early, or refresh late</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">So do I have to avoid setTimeout and promises entirely inside effects?</p>
+  <p class="a">No — you have to avoid signal <i>reads</i> inside them, not async itself. Read every
+  signal synchronously in the effect's own body first, store the values in plain variables, and
+  it's completely fine to hand those variables into a <code>setTimeout</code>, a
+  <code>.then()</code>, or any other callback. The rule is "read on the stack Angular is
+  watching," not "no async allowed."</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does this same rule apply to computed()?</p>
+  <p class="a">Yes, identically, and it's arguably worse there. A <code>computed</code>'s
+  dependency list is exactly whatever it read synchronously during its <i>last</i> run,
+  recalculated fresh every time. Read a signal inside a nested <code>setTimeout</code> inside a
+  <code>computed</code> and you get a value that computed once, depends on nothing, and never
+  invalidates again — it just freezes.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">How would I even catch this in code review, before a user does?</p>
+  <p class="a">Angular doesn't warn you — an untracked read looks exactly like a normal function
+  call from the framework's point of view. The structural tell is any signal call sitting inside
+  an arrow function passed to <code>setTimeout</code>, <code>setInterval</code>,
+  <code>.then()</code>, or an RxJS callback nested inside an <code>effect</code> or
+  <code>computed</code>. That shape is worth a second look every time.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  An effect does exactly this: <code>const a = countA(); setTimeout(() =&gt; console.log(a +
+  countB()), 0)</code>. You call <code>countB.set(10)</code> — does the effect rerun? Now flip it:
+  you call <code>countA.set(10)</code> instead. Same question — same answer?
+</div>
+
     <!-- ── HERO: animated signal-propagation walk · value chip + live graph-state inspector ── -->
     <div class="panel" style="border-color:#22d3ee">
       <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:#22d3ee">▶ Watch one set() ripple through the graph — read by read</h2>
@@ -993,6 +1203,7 @@ defense; memoization is the second`},
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

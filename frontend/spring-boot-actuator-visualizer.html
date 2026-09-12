@@ -117,6 +117,195 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> <code>GET /actuator/health/readiness</code> includes DB, Redis (session store), and Ping checks — if Ping is down, readiness goes DOWN and K8s stops routing new auth requests to that pod while in-session users continue elsewhere. <code>/health/liveness</code> only asks "is the JVM alive?" And flipping <code>com.company.ciam.security</code> to DEBUG via <code>/loggers</code> reveals every JWT validation step without a restart.</div>
   </div>
 
+<p class="hf-deck">or, health isn't one number — it's two different questions with two different consequences</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Ping has a five-minute blip. Kubernetes decides your app itself is broken, and restarts it. Six times.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The pods keep restarting, and the JVM was never the thing that was actually down</div>
+  <p>A K8s manifest wires <code>livenessProbe</code> to plain <code>/actuator/health</code> instead of
+  <code>/actuator/health/liveness</code> — it "worked in testing," because in testing every downstream
+  dependency was always up. In production, Ping has a brief outage. The Ping <code>HealthIndicator</code>
+  reports DOWN, the aggregate health rolls up to DOWN, the liveness probe fails three times in a row, and
+  kubelet kills the container. The new pod boots, checks health, Ping is <i>still</i> down, health is
+  <i>still</i> DOWN — and it gets killed again. Real users on that pod get dropped, repeatedly, on top of
+  an outage that was never the JVM's fault in the first place.</p>
+  <div class="hf-scatter">
+    <span>JVM never crashed or hung ✓</span>
+    <span>request-handling threads healthy the whole time ✓</span>
+    <span>liveness wired to full /actuator/health, not /liveness ⚠</span>
+    <span>a downstream Ping outage now restarts the pod repeatedly ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that "health" is one number, so pointing both probes at the same endpoint is a harmless simplification.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Point readiness at your dependencies, and liveness at nothing but the JVM</div>
+  <div class="hf-ladder">
+    <b>Readiness probe → /actuator/health/readiness, including DB, Redis, Ping</b>
+    <i>↓ readiness saying DOWN just removes the pod from the load balancer's rotation — cheap, reversible, no restart</i>
+    <b>Liveness probe → /actuator/health/liveness specifically — JVM-only, zero downstream calls</b>
+    <i>↓ a liveness failure means "kill and restart," which only fixes what restarting can actually fix — a deadlock, a leak, a stuck process</i>
+    <b>Ping going down now drains traffic from the pod instead of destroying and rebuilding it every 10 seconds</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Readiness and liveness ask different questions, and only one of them should ever depend on
+  something outside your JVM.</b> Readiness asks "can this pod usefully serve traffic right now" — a
+  downstream dependency being down is a completely legitimate reason to say no. Liveness asks "is this
+  specific process broken in a way only a restart can fix" — a third-party outage is never that, no
+  matter how badly it drags down the aggregate. Wire liveness to anything that touches Ping, the
+  database, or any other external system, and "something else is having a bad day" quietly becomes
+  "let's make our own app worse too."
+</div>
+
+<div class="hf-note">Think of readiness as a "kitchen accepting new orders" sign, and liveness as "is
+anyone in the kitchen still breathing." Run out of one ingredient and you flip the sign for that dish —
+nobody calls an ambulance. Only someone collapsing on the floor calls the ambulance — that's the
+restart. It stops holding up in one place: no real restaurant has an automated system that mistakes
+"we're out of an ingredient" for "call an ambulance" — but that's exactly the mix-up a liveness probe
+pointed at the wrong health group makes, over and over, every ten seconds.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>Ping had a five-minute blip. Why did my pods restart six times?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The liveness probe</span>
+    <p>I only know how to ask one question, over and over: is this URL returning 200? Nobody told me which URL I was supposed to be asking that about.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">/actuator/health (aggregate)</span>
+    <p>And I was honest the whole time — I really did say DOWN, because Ping really was unreachable. That part of my answer was completely correct.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Kubelet</span>
+    <p>I don't read nuance. A liveness probe fails three times in a row, my instructions say "kill and restart" — so that's exactly what I did. Six times, because Ping took its time coming back.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Two probes, two completely different consequences, for the exact same word: "down."</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>K8s calls <code>GET /actuator/health/readiness</code> on an interval</span><span class="tag">answers: route new traffic here, or not</span></li>
+    <li class="open"><span>The readiness indicator aggregates DB, Redis, and the Ping <code>HealthIndicator</code></span><span class="tag">downstream dependencies belong here, on purpose</span></li>
+    <li><span>Ping times out; its indicator reports DOWN; readiness rolls up to DOWN</span><span class="tag">correct and useful — pull this pod out of rotation</span></li>
+    <li class="open"><span>Separately, K8s calls <code>GET /actuator/health/liveness</code> on its own interval</span><span class="tag">a different endpoint, a different question entirely</span></li>
+    <li class="open"><span>Liveness checks only JVM-level signals — it never calls Ping, or anything else external</span><span class="tag">no downstream calls belong here, ever</span></li>
+    <li><span>Liveness stays UP through the whole outage; readiness alone flips DOWN and back</span><span class="tag">traffic drains and returns; nothing restarts</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the lesson. Liveness is deliberately, structurally shallow — Spring Boot's
+  own liveness group checks nothing but whether the application context itself is up, by default. Add a
+  downstream dependency check to liveness and you've turned "restart this container" into the response
+  for "a system I don't control had a bad five minutes," and no amount of restarting fixes that.
+  Readiness is the only one of the two probes actually built to carry that kind of external information.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">/actuator/health/readiness<small>one GET request from the kubelet</small></div>
+    <div class="fan">aggregates ↓ asks every registered indicator</div>
+    <div class="obs">
+      <span>DB HealthIndicator</span><span>Redis HealthIndicator</span><span>disk space indicator</span>
+      <span class="new">Ping HealthIndicator ← the one that just went DOWN</span>
+    </div>
+  </div>
+  <p class="hf-annot">Readiness isn't one check — it's a fan-out. Every registered indicator gets asked,
+  and the aggregate is DOWN the moment even one of them is. That's exactly why a single flaky dependency,
+  Ping here, can take a perfectly healthy pod out of rotation all by itself — correct behavior for
+  readiness, and precisely the wrong behavior to hand to liveness.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">Ping goes down for 90 seconds. Liveness is correctly wired to <code>/actuator/health/liveness</code>,
+  readiness to <code>/actuator/health/readiness</code>. What happens to a pod that was already up and serving traffic?</p>
+  <button type="button">The pod keeps running the whole time; readiness flips DOWN so the load balancer stops sending it new requests, then it rejoins rotation once Ping recovers</button>
+  <button type="button">The pod restarts once Ping goes down, then rejoins rotation once Ping recovers and liveness passes again</button>
+  <button type="button">Nothing happens anywhere — Actuator only reports status, it doesn't actually influence how Kubernetes routes traffic or manages a pod</button>
+  <p class="why" data-for="0">Right — and worth noticing: in-flight requests that pod is already handling
+  aren't forcibly killed either. Readiness failing only affects whether <i>new</i> traffic gets routed
+  there; it doesn't reach back and terminate work already in progress.</p>
+  <p class="why" data-for="1">This is exactly the outcome from the broken wiring in the problem section
+  above — a completely reasonable guess if you don't yet know Kubernetes only restarts a container
+  because of a <i>failed liveness probe specifically</i>, never because of readiness. With the two probes
+  correctly split, a downstream outage has no path left to trigger a restart at all.</p>
+  <p class="why" data-for="2">Actuator endpoints are indeed "just HTTP responses" in isolation, so this
+  is a fair guess in a vacuum. What makes them consequential is that Kubernetes is explicitly configured
+  to poll them and take automated action — route or don't-route, restart or don't-restart — based on the
+  status code and body they return.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">"Stop routing here" and "destroy and rebuild this" are two different remedies — every platform that automates recovery ends up splitting them.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>AWS: ALB target health vs. Auto Scaling instance health</h4>
+    <p>An ALB target group can mark one instance unhealthy and simply stop sending it traffic — the
+    instance keeps running, completely untouched. A separate, stricter Auto Scaling health check is what
+    actually terminates and replaces an instance. Same two-tier split as readiness/liveness, wearing
+    AWS's names for the two tiers instead of Kubernetes's.</p>
+    <div class="hf-scatter"><span>stop routing ≠ terminate and replace</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Resilience4j's circuit breaker, OPEN state</h4>
+    <p>A circuit breaker trips OPEN when a downstream call keeps failing, and stops sending it traffic —
+    without restarting or rebuilding anything on the calling side. That's readiness's exact job, just
+    implemented per-call instead of per-pod: isolate a failing dependency without treating your own
+    healthy process as the thing that's broken.</p>
+    <div class="hf-scatter"><span>isolate the failure, don't restart yourself</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Feeding Ping's own status page into your readiness, on purpose</h4>
+    <p>Some CIAM teams go one step further and have their readiness indicator watch Ping/Entra's own
+    published status feed directly, instead of waiting for a live auth call to time out first — flipping
+    readiness DOWN proactively the moment the IdP reports an incident, before a single real user request
+    has to fail to discover it.</p>
+    <div class="hf-scatter"><span>readiness can react before the first real failure</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Why have two separate probes at all — why not one endpoint that just means "everything's fine"?</p>
+  <p class="a">Because "fine" isn't one fact — it's at least two, with completely different fixes. A
+  downstream dependency being down calls for "stop sending traffic here" (readiness). A JVM that's
+  deadlocked or has leaked itself into oblivion calls for "kill and restart it" (liveness). Collapse them
+  into one endpoint and you force Kubernetes to apply a single remedy to both situations — and for a
+  downstream outage, the only remedy it has (restart) does nothing useful. It just adds a restart's
+  worth of extra disruption on top of a problem restarting can't touch.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does Spring Boot split these into separate health groups automatically, or is it manual?</p>
+  <p class="a">You opt in — set <code>management.endpoint.health.probes.enabled=true</code> (on by
+  default once Spring detects it's running on Kubernetes, but worth setting explicitly). That exposes
+  <code>/actuator/health/liveness</code> and <code>/actuator/health/readiness</code> as separate groups.
+  A custom indicator like <code>PingHealthIndicator</code> joins the readiness group by default — you'd
+  have to deliberately reassign one into the liveness group, which is almost never the right call.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">If liveness never checks the database, how does connection-pool exhaustion ever get caught?</p>
+  <p class="a">Through readiness — and that's the correct place for it. A fully exhausted pool means this
+  pod genuinely can't serve DB-backed requests right now, so readiness correctly goes DOWN and traffic
+  routes elsewhere while the pool (or the underlying DB issue) recovers. Restarting the JVM doesn't
+  inherently un-exhaust a pool if the root cause is the database itself being slow — routing that through
+  liveness risks the exact same restart-storm failure as the Ping example above, for the same underlying
+  reason.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  Someone adds a new custom <code>HealthIndicator</code> — reports DOWN once free disk space drops below
+  10% — and it lands in the readiness group only, exactly where Spring Boot's defaults would put it. Disk
+  space drops to 5%. Does the pod get restarted? Does it stay in the load balancer's rotation?
+</div>
+
   <!-- ── HERO: animated actuator request · live per-step inspector ── -->
   <div class="panel" style="border:1px solid var(--accent)">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch an actuator request — security → endpoint → indicators → response</h2>
@@ -693,6 +882,7 @@ Content-Type: application/json
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

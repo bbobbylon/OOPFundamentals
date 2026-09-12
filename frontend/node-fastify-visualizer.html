@@ -57,6 +57,221 @@
     <div class="intro-ciam"><span class="tag">CIAM Fastify gateway:</span> Fastify's speed suits a high-throughput token-validating gateway. An <code>authPlugin</code> decorates the request with a <code>user</code> property and adds a <code>preHandler</code> hook that verifies the Ping/Entra RS256 JWT (via <code>@fastify/jwt</code> + a JWKS fetcher) — encapsulation means only the routes under that plugin require auth. Per-route response schemas guarantee the gateway never accidentally leaks an internal field, because the compiled serializer only emits the properties the schema declares. That schema-as-allowlist behavior is a genuine security win over hand-rolled <code>res.json()</code>.</div>
   </div>
 
+<p class="hf-deck">or, return doesn't add a second response — it's the exact same button as reply.send()</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Bring your Express habits to Fastify and almost all of them just work. This one fails without a sound.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The not-found branch that ships a 200 anyway</div>
+  <p>You port a lookup-by-id handler from Express to Fastify. The natural not-found guard goes in
+  first: <code>if (!user) { reply.code(404).send({ error: 'user not found' }); }</code>, then the
+  happy path: <code>return { ok: true, user };</code>. It looks complete — the 404 case is
+  handled, the success case returns a value the way every Fastify example tells you to. Then a
+  teammate notices the log filling up with <code>"Reply was already sent"</code> warnings, one per
+  missing user, and nobody can explain where a second <code>.send()</code> call is hiding. There
+  isn't one. There's a <code>return</code> statement.</p>
+  <div class="hf-scatter">
+    <span>reply.code(404).send(...) really does run ✓</span>
+    <span>the client really was told "not found", once ✓</span>
+    <span>no return inside the if block ⚠</span>
+    <span>the function's last line runs anyway, every time ⚠</span>
+  </div>
+  <p class="hf-foot">In Express, this exact missing-return mistake crashes immediately and loudly (a second <code>res.json()</code> throws). In Fastify it doesn't crash at all — which is worse, because nothing tells you it happened.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Treat every manual reply.send() as an early exit</div>
+  <div class="hf-ladder">
+    <b>reply.code(404).send(...) inside the if block, nothing after it</b>
+    <i>↓ the async function still runs to its last line and returns a value Fastify will try to use as a payload</i>
+    <b>return reply.code(404).send(...); — one statement, sends AND exits</b>
+    <i>↓ send() itself returns the reply object, so returning its result both stops the function here and satisfies "return something"</i>
+    <b>Exactly one payload ever reaches Fastify's send logic, no matter which branch ran</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>return and reply.send() are the same action, not two different ones.</b> An async Fastify
+  handler's return value exists for exactly one reason: to become the argument to an implicit
+  <code>reply.send()</code> call Fastify makes on your behalf once your function resolves. Call
+  <code>reply.send()</code> yourself and then also <code>return</code> a value, and you haven't
+  sent two responses — you've supplied one argument to <code>send()</code> twice, and the second
+  supply is discarded. The CodeWalk above already shows the safe shape:
+  <code>reply.code(201).send({ id })</code> as the handler's very last line, with nothing after it
+  to compete.
+</div>
+
+<div class="hf-note">Think of <code>reply</code> as a letter you're allowed to seal and hand to
+the mail carrier exactly <b>once</b>. <code>reply.send(x)</code> is sealing envelope X and handing
+it over. <code>return y</code> from an async handler is Fastify sealing envelope Y and handing it
+to the carrier on your behalf, right after your function finishes — but the carrier already left
+with X. Y doesn't get glued to the back of X, and it doesn't knock X out of the truck. Y just never
+leaves the building. Where the analogy stops: the mail carrier wouldn't say anything. Fastify does
+— a log line naming the exact route — which is the only reason you'd ever notice this happened.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I called <code>reply.code(404).send(...)</code> right there inside the if block. My logs still say "Reply was already sent." My code only calls send() once — where's the conflict coming from?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">reply</span>
+    <p>From the line after that if block. Your function didn't stop when I was sent — it kept
+    running, all the way to <code>return { ok: true, user }</code>. Fastify treats that return
+    value as one more attempt to hand me a payload. I was already on my way out the door.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Fastify</span>
+    <p>That warning is mine, not reply's. Every async handler I run, I check what it returns —
+    and if nobody's called <code>reply.send()</code> yet, I send that value myself. Here, somebody
+    already had. So I didn't send your returned value at all. I just logged that you tried.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The client</span>
+    <p>I only ever received one response: the 404, exactly once, with the body you actually sent.
+    Nothing about your extra <code>return</code> statement reached me — there's no mechanism for a
+    second body to arrive after the headers are already on the wire.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six words explain the entire bug: the function keeps running after send().</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Fastify calls your <code>async (req, reply) =&gt; {...}</code> handler and awaits whatever it returns, no matter what happens inside it</span><span class="tag">always awaited, no exceptions</span></li>
+    <li class="open"><span><code>db.findUser(id)</code> resolves to <code>null</code> — the user genuinely doesn't exist</span><span class="tag">a completely normal, expected outcome</span></li>
+    <li><span><code>if (!user) { reply.code(404).send({error:'user not found'}); }</code> runs — a real HTTP response is written to the socket, right now</span><span class="tag">this part works exactly as intended</span></li>
+    <li class="open"><span>There's no <code>return</code> inside that <code>if</code> block, so control falls through to the next line anyway</span><span class="tag">the missing word</span></li>
+    <li><span><code>return { ok: true, user };</code> executes — the async function resolves with a defined, non-empty value</span><span class="tag">a second candidate payload now exists</span></li>
+    <li class="open"><span>Fastify checks <code>reply.sent</code> before using a handler's return value as a payload — it's already <code>true</code>, so the returned value is discarded and a warning is logged instead of a second response</span><span class="tag">discarded, not queued, not appended</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the entire lesson — and it is the exact same missing word that
+  causes the classic Express bug (a second <code>res.json()</code> call throwing
+  <code>ERR_HTTP_HEADERS_SENT</code>). Fastify's implicit "return becomes send()" convenience is
+  what changes the FAILURE MODE, not the root cause: the second attempt at a payload is now a
+  quiet <code>return</code> statement instead of a loud second function call, so the identical
+  mistake stops crashing and starts hiding.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">this request's reply<small>can be sent exactly once</small></div>
+    <div class="arrow">↓ whichever reaches it first wins ↓</div>
+    <div class="opts">
+      <span class="on">reply.code(404).send(...) — fires synchronously, inside the if block</span>
+      <span>return { ok: true, user } — arrives after, discarded with a warning</span>
+    </div>
+  </div>
+  <p class="hf-annot">Both of these are genuine attempts to supply a payload — Fastify doesn't
+  know which one the developer "meant." It just enforces the only rule that makes sense for an
+  HTTP response: first one to actually call <code>send()</code> (directly, or via a
+  <code>return</code> Fastify sends for you) wins, and nothing else about that reply can be
+  changed afterward.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A request arrives for a user id that doesn't exist, so <code>db.findUser</code>
+  resolves to <code>null</code>. <code>reply.code(404).send({ error: 'user not found' })</code>
+  runs inside the <code>if (!user)</code> block — with no <code>return</code> after it — so
+  control falls through to the handler's last line, <code>return { ok: true, user };</code>. What
+  does the client actually receive?</p>
+  <button type="button">The 404 response, <code>{ error: 'user not found' }</code> — the returned value is discarded because a reply was already sent, and Fastify logs a warning about the mismatch, but the 404 is what goes out over the wire</button>
+  <button type="button">A 200 response with <code>{ ok: true, user: null }</code> — the return statement is the last thing the function does, so its value is what Fastify actually sends</button>
+  <button type="button">A 500 Internal Server Error — Fastify can't reconcile two different payloads for one request, so it throws rather than send either one</button>
+  <p class="why" data-for="0">Right. <code>reply.code(404).send(...)</code> already wrote a real
+  response to the socket, synchronously, before the function's last line ever runs. By the time
+  <code>return { ok: true, user }</code> resolves the handler's promise, <code>reply.sent</code>
+  is already <code>true</code> — Fastify sees a return value with nowhere to go, discards it, and
+  logs the mismatch instead of attempting a second write.</p>
+  <p class="why" data-for="1">A reasonable guess if you think of <code>return</code> as always
+  having the final word, like a function's normal output. But in a Fastify handler,
+  <code>return</code> is only ever a REQUEST to send a payload — and requests made after the reply
+  is already sent don't get honored. The 404 fired first and the response can't be reopened to add
+  a different body afterward.</p>
+  <p class="why" data-for="2">Tempting if you're thinking of this like writing to an already-closed
+  stream, which does throw. But nothing here attempts a genuine second write to the socket —
+  Fastify checks <code>reply.sent</code> BEFORE trying to use the returned value, so it never
+  reaches code that would throw. The mismatch is caught and neutralized, not crashed on.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three different platforms, the same rule: a response can be supplied once, and the runtime enforces it differently every time.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring: writing after the response is committed</h4>
+    <p>A Spring <code>@RestController</code> method that returns a <code>ResponseEntity&lt;T&gt;</code>
+    is making the exact same kind of promise a Fastify <code>return</code> makes — "here is the
+    body, send it for me." If that method ALSO manually writes to the raw
+    <code>HttpServletResponse</code> before returning, the response becomes <i>committed</i>, and
+    the servlet container throws <code>IllegalStateException</code> the moment anything tries to
+    touch its status or headers again. Same root rule as this page — respond once — enforced with
+    a hard exception instead of Fastify's soft warning.</p>
+    <div class="hf-scatter"><span>committed response + a second write = IllegalStateException</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A native Promise ignores this problem entirely</h4>
+    <p>Every JavaScript <code>Promise</code> already has a rule for this, one you've used without
+    thinking about it: once a Promise executor calls <code>resolve()</code> or
+    <code>reject()</code>, every later call to either one is a guaranteed, silent no-op per the
+    language spec — no warning, no error, nothing. Fastify's reply is stricter than a raw Promise
+    (it at least logs the conflict); the underlying shape — first settlement wins, the rest are
+    discarded — is identical.</p>
+    <div class="hf-scatter"><span>settle a Promise twice and the second call just vanishes</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Raw Node http: the crash Fastify is deliberately avoiding</h4>
+    <p>Underneath both Express and Fastify sits the same <code>http.ServerResponse</code>, and
+    calling <code>res.end()</code> (or setting a header) after a response is already sent throws
+    <code>ERR_HTTP_HEADERS_SENT</code> — loudly, immediately. Fastify's <code>reply.sent</code>
+    check exists specifically to intercept a return-value conflict BEFORE it reaches that raw,
+    crashing code path — which is exactly why this bug produces a log warning in Fastify instead
+    of taking the process down.</p>
+    <div class="hf-scatter"><span>same underlying rule; Fastify catches it one layer higher, on purpose</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">If I never call reply.send() myself and always just return a value, am I completely safe from this?</p>
+  <p class="a">Yes. If a handler purely computes a value and returns it — no manual
+  <code>.send()</code> call anywhere in its body — there is only ever one candidate payload, so
+  there's nothing for it to conflict with. The risk is specific to handlers that need to call
+  <code>reply.send()</code> manually inside a branch (almost always an early-exit guard clause,
+  like this page's 404 check) and then keep executing code after that branch.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">What's the actual difference between return reply; and just calling reply.send() with nothing after it?</p>
+  <p class="a">Functionally, very little — both tell Fastify "don't touch this again." A bare
+  <code>return;</code> at the end of the branch resolves the function with <code>undefined</code>,
+  which Fastify has nothing to do with once a reply is already sent. <code>return reply;</code> (or
+  the equivalent one-liner, <code>return reply.code(404).send(...)</code>, since
+  <code>send()</code> itself returns <code>reply</code>) is the form Fastify's own docs show,
+  mostly because it reads as an explicit "I handled this" rather than relying on a reader noticing
+  an empty <code>return</code> a few lines below a <code>.send()</code> call.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Would a test catch this before it shipped?</p>
+  <p class="a">Only if the test asserts on the response BODY, not just the status code. In this
+  exact bug, <code>reply.code(404)</code> ran before <code>.send()</code>, so the status code is
+  still correctly 404 — a test that only checks <code>res.statusCode === 404</code> passes cleanly
+  with this bug sitting right there in the code. It takes a body assertion, or someone actually
+  reading the "Reply was already sent" log line, to surface it.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  Rewrite the not-found branch as one line: <code>if (!user) { return reply.code(404).send({
+  error: 'user not found' }); }</code> — an actual <code>return</code> keyword now sits directly
+  in front of the chained call, instead of a bare <code>reply.code(404).send(...);</code> followed
+  later by <code>return { ok: true, user };</code>. On a not-found request, does the "Reply was
+  already sent" warning still appear — and what changed about which lines of the function actually
+  run?
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
@@ -266,6 +481,7 @@ DevHubCodeWalk.mount('#cw-fastify',{
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>

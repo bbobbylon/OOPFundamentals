@@ -85,6 +85,210 @@
     </div>
   </div>
 
+<p class="hf-deck">or, a green checkmark on this form is a prediction, not a fact</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You wired the submit button to <code>form.invalid</code>. Someone still managed to click it too early.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The button re-enabled itself while a check was still in flight</div>
+  <p>You bind <code>[disabled]="registerForm.invalid"</code>. Every rule looks right — required,
+  email pattern, password length, the cross-field match — and by hand the form behaves exactly
+  how you'd expect: type garbage, button stays off; fix the fields, button lights up. Then on a
+  slower connection someone types a username, and in the half-second before the "taken?" check
+  answers, they click submit and it goes through. Nothing about your validators is wrong. The bug
+  is that <code>invalid</code> was never the question you needed to ask.</p>
+  <div class="hf-scatter">
+    <span>required / email / minLength pass ✓</span>
+    <span>confirm matches password ✓</span>
+    <span>form.invalid === false mid-check ⚠</span>
+    <span>the async verdict hasn't arrived yet ⚠</span>
+  </div>
+  <p class="hf-foot">The assumption underneath: "invalid" and "not yet known to be valid" feel
+  like the same thing. Angular tracks them as two different statuses, and only one of them
+  disables anything by default.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Gate on the third status too, not just the second one</div>
+  <div class="hf-ladder">
+    <b>[disabled]="registerForm.invalid"</b>
+    <i>↓ this only ever looks at two of Angular's three settled outcomes</i>
+    <b>[disabled]="registerForm.invalid || registerForm.pending"</b>
+    <i>↓ pending now blocks the click for exactly the window an async validator is running</i>
+    <b>The click becomes impossible until every validator — sync and async — has actually answered</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Valid isn't the opposite of invalid — pending is a third status, and it means "don't know
+  yet."</b> That one sentence is why gating a submit button on <code>invalid</code> alone
+  under-protects the moment you add an async validator, why the async check needs debouncing
+  instead of firing on every keystroke, and why the server re-runs the same rule anyway: nothing
+  the client reports is a promise, only a prediction with a network delay attached.
+</div>
+
+<div class="hf-note">Think of an async validator as a bouncer radioing the front desk to confirm
+your name is on the list. You're standing right at the door while that call happens — not let in,
+but not turned away either, just... pending. The door only stays locked if someone tells it to
+stay shut during the radio call; otherwise you can just walk through while dispatch is still
+talking.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I disabled the button on form.invalid. Why did a bad username get through?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Angular</span>
+    <p>Because at the moment they clicked, the form wasn't invalid — it was pending. I hadn't
+    heard back from your async validator yet, so "invalid" genuinely was false. I never claimed
+    the form was <i>valid</i> either.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">usernameAvailable</span>
+    <p>And I was still checking. I return an Observable, and until it emits, the control I'm
+    attached to sits in PENDING. I don't block a click myself — I only report status. Something
+    else has to read that status and act on it.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Spring, on the other end</span>
+    <p>Which is why I check again regardless of what you decided. I re-run <code>@Size</code> and
+    the uniqueness query myself on every request, click-guarded or not, because I'm the one who
+    actually has to live with a duplicate row.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Type one character in the username box. Four different things start timing themselves.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The keystroke updates the <code>FormControl</code>'s value immediately</span><span class="tag">synchronous, always</span></li>
+    <li class="open"><span>Every <b>sync</b> validator on that control re-runs right away — <code>required</code>, <code>minLength(3)</code>, <code>maxLength(50)</code> — no network, no delay</span><span class="tag">the fast, free pass</span></li>
+    <li><span>Only if every sync validator passes does Angular even call the <b>async</b> validator function at all</span><span class="tag">a failed sync check skips async entirely</span></li>
+    <li class="open"><span>Calling that function already flips the control's status to <b>PENDING</b> — before the debounce timer inside it has elapsed, before any request exists</span><span class="tag">PENDING starts before the request does</span></li>
+    <li><span>Once the pause fires, the HTTP call actually goes out, and the control stays PENDING for the whole round trip</span><span class="tag">this window is where an under-guarded submit button leaks</span></li>
+    <li class="open"><span>The Observable emits <code>null</code> or <code>{taken:true}</code>, the control resolves to VALID or INVALID, and the <code>FormGroup</code>'s own status is <i>recomputed</i> from every child — never stored</span><span class="tag">the parent has no status of its own</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the one to remember. PENDING begins the instant Angular decides to
+  run the async check — not when a network request actually leaves the browser. That gap between
+  "validation is running" and "a request is in flight" is exactly why debounce lives inside the
+  validator instead of on the input event, and exactly why checking <code>pending</code>, not just
+  <code>invalid</code>, is the only way to make a submit button trustworthy.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">one keystroke<small>FormControl.valueChanges</small></div>
+    <div class="fan">every validator on this control runs ↓</div>
+    <div class="obs">
+      <span>required ✓</span>
+      <span>minLength(3) ✓</span>
+      <span>maxLength(50) ✓</span>
+      <span class="new">usernameAvailable — PENDING, request in flight</span>
+    </div>
+  </div>
+  <p class="hf-annot">Three of these settle in the same tick, synchronously, for free. The fourth
+  is the one holding the whole group's status at PENDING until a server round-trip finishes — the
+  box a disabled-submit check has to include, or it isn't really guarding anything.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A field has <code>Validators.required</code> and the async
+  <code>usernameAvailable</code> validator. The user types a username; the async validator's
+  <code>timer(400)</code> hasn't elapsed yet, so no HTTP request has been created. Is the submit
+  button — gated on <code>invalid || pending</code> — disabled right now?</p>
+  <button type="button">No — nothing is pending yet, since no request has actually gone out</button>
+  <button type="button">Yes — the control entered PENDING the moment Angular called the async validator, before the timer or the request existed</button>
+  <button type="button">It depends on whether the control's <code>updateOn</code> is set to <code>'blur'</code></button>
+  <p class="why" data-for="0">A completely reasonable read of the word "pending" — surely nothing
+  is pending until something is actually happening over the network. But Angular's status model
+  doesn't wait for the Observable to do anything observable. The moment it calls your async
+  validator function and gets an Observable back, the control is marked PENDING, full stop. The
+  <code>timer(400)</code> just delays what happens <i>inside</i> that already-pending window.</p>
+  <p class="why" data-for="1">Right — and this is the detail that makes <code>|| pending</code>
+  load-bearing rather than decorative. The 400ms isn't a delay <i>before</i> pending starts, it's
+  a delay <i>while</i> pending, baked into the validator's own pipe. From the FormGroup's point of
+  view, the async check began the instant it was asked to run.</p>
+  <p class="why" data-for="2"><code>updateOn: 'blur'</code> changes <i>when</i> Angular re-runs
+  validators — on blur instead of on every keystroke — not what PENDING means once a validator
+  does run. Set it and you'll see fewer PENDING windows, not different behavior inside the ones
+  you get. It's a real setting in this exact form (line 9 of the code walk above) — just
+  answering a different question than the one being asked here.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">A three-state form model, a database that doesn't care what the browser thought, and the identity provider that has the last word.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>React Hook Form's <code>isValidating</code> — the same third state, a different name</h4>
+    <p>Every serious form library reinvents this exact state machine, because "not yet erroring"
+    and "confirmed fine" genuinely cannot collapse into one boolean once a check leaves the
+    browser. React Hook Form exposes <code>formState.isValidating</code> for precisely this
+    reason. Guard a submit button on <code>isValid</code> alone over there and you've written the
+    identical bug in different syntax.</p>
+    <div class="hf-scatter"><span>PENDING ≈ isValidating</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A SQL UNIQUE constraint doesn't care what your SELECT said a moment ago</h4>
+    <p>The async validator's <code>GET</code> only proves the username was free when that query
+    ran — not when the server's <code>INSERT</code> commits a few hundred milliseconds later. Two
+    people registering the same name inside that window both pass the check. The only thing
+    that's actually authoritative is a <code>UNIQUE</code> index on the column and a handled
+    constraint violation; everything upstream of that, your Angular form included, is a courtesy.</p>
+    <div class="hf-scatter"><span>the SELECT stops being true the instant two people race it</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Self-registration against Ping or Entra hits this window twice</h4>
+    <p>A sign-up screen that checks email or username availability against Ping's directory (or
+    via Microsoft Graph for Entra) races the same PENDING window — and then meets it again one
+    layer up. The directory itself re-validates uniqueness and any server-side password policy at
+    the moment of the actual write, and can reject a submission your Angular form and your own API
+    both already approved. Two layers said "looks fine"; only the last one actually decided.</p>
+    <div class="hf-scatter"><span>the directory write is the only real yes</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">If the server re-validates everything anyway, why bother with async client validation at all?</p>
+  <p class="a">Because the alternative is a full round trip and a page of red text after the user
+  has already filled out the whole form and hit submit. The async validator's entire job is UX:
+  catch the common case — this username is obviously taken — in the few hundred milliseconds
+  while they're still looking at that one field, so the only surprises left at submit are the ones
+  that genuinely require a write to detect, like the UNIQUE-constraint race above. It's an
+  optimization for the common path, never a substitute for the server's own check.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why does the async validator need debouncing — won't Angular only call it once the value "settles"?</p>
+  <p class="a">No — by default a <code>FormControl</code> re-validates on every value change, which
+  for a text input means every keystroke. Undebounced, typing a 10-character username can fire up
+  to 10 requests, most already stale by the time they land — and because responses can arrive out
+  of order, a slow early response can overwrite a fast later one and show the wrong verdict.
+  <code>timer(400).pipe(switchMap(...))</code> fixes both problems: it waits for a pause, and
+  <code>switchMap</code> cancels the previous in-flight request the moment a new one starts.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Should I ever trust <code>form.valid</code> alone to gate a submit button?</p>
+  <p class="a">Only on a form with zero async validators — and even then, only for UX, never as an
+  actual security boundary. The moment you add one async check, <code>valid</code> and
+  <code>invalid</code> stop being a complete pair, because PENDING exists, so
+  <code>invalid</code> alone under-disables. And no matter what the client reports, the request
+  that actually creates the account is validated again server-side — the client's status is a UI
+  convenience, not a gate anyone downstream is relying on.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  A field carries <code>Validators.required</code> then the async <code>usernameAvailable</code>
+  validator. You clear the field down to empty. Does Angular call the async validator on that
+  empty value — and would your answer flip if <code>usernameAvailable</code> were the
+  <i>only</i> validator on the field, with no <code>required</code> at all?
+</div>
+
   <!-- ── EXTREME-VIZ HERO: Auth Forms Flow ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -450,6 +654,7 @@ render();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

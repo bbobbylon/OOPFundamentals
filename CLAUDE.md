@@ -121,6 +121,15 @@ standing goal, not a one-time task. The full Head First rollout state lives in
 - Screenshot design changes with `node frontend/tmp_shot.mjs <page.html>` (phone + desktop).
 - Opt a page into the Head First kit with `node frontend/tmp_hfapply.mjs <page.html>`
   (`--check` dry-runs, `--revert` undoes).
+- AUTHORING a Head First block onto a page: `docs/HEADFIRST-BLOCK-RECIPE.md` is the exact
+  markup contract (every `hf-*` shape, verbatim) plus the method and the gates — follow it
+  rather than copying markup off a page, because a wrong class name (`.lvl` for `.ring`)
+  renders as unstyled text and NO gate catches it. Splice the finished block with
+  `node frontend/tmp_hfsplice.mjs <page.html> <block.html> "<anchor>"`: it matches the
+  page's line endings (pages are a mix of LF and CRLF — splicing the wrong one turns the
+  diff into the whole file), refuses on a non-unique anchor instead of guessing, and adds
+  the `devhub-hf-check.js` tag, without which `.hf-check` renders as dead buttons.
+  **`data-answer` is ZERO-based** and uncheckable by any gate — verify it by hand.
 - Docs are a first-class deliverable: update `README.md` + `docs/DEVHUB-GUIDE.md` +
   `docs/ROADMAP.md` with the code, same commit.
 - During long build runs: don't commit per batch — build continuously, commit once at the

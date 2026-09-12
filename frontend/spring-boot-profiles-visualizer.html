@@ -139,6 +139,196 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> dev (H2, mock Ping, mock email, DEBUG), test (H2, Testcontainers Redis, WireMock Ping), staging (real Postgres, Ping sandbox, staging SMTP, INFO), prod (real Postgres, real Ping Federate, real SMTP, WARN, Actuator on an internal port). <code>@Profile("!prod")</code> routes Ping calls to WireMock; the real Ping OAuth2 client is <code>@Profile("prod")</code> — so dev never hits a prod IDP.</div>
   </div>
 
+<p class="hf-deck">or, a profile group isn't one switch — it's several switches wired to fire together</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You activated one profile. Three showed up as active, and nobody remembers agreeing to that.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle"><code>--spring.profiles.active=staging</code> turns on more than "staging"</div>
+  <p>Someone set up <code>spring.profiles.group.staging=db-staging,feature-flags-staging,metrics</code> for
+  convenience months ago. Today, ops flips on <code>staging</code> for a demo environment expecting exactly
+  one thing to change: the datasource. Instead, the <code>/actuator/metrics</code> endpoint — which everyone
+  assumed was gated behind an explicit, deliberately-opted-into <code>metrics</code> profile — is suddenly
+  reachable, because activating <code>staging</code> made <code>metrics</code> independently active too,
+  exactly as if someone had typed it by hand.</p>
+  <div class="hf-scatter">
+    <span>staging activated on purpose ✓</span>
+    <span>db-staging datasource wired correctly ✓</span>
+    <span>feature-flags-staging enabled as expected ✓</span>
+    <span>metrics is now ALSO independently active ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that a profile group is a single flag, rather than shorthand for activating every one of its members by name.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Treat a profile group as an expansion, not a nickname</div>
+  <div class="hf-ladder">
+    <b>Before enabling a group, read <code>spring.profiles.group.*</code> for every name it expands to</b>
+    <i>↓ each member becomes exactly as active as if you'd typed it yourself — including anything gated behind ITS name specifically</i>
+    <b>Search the codebase for <code>@Profile("that-member-name")</code>, not just the group you meant to flip</b>
+    <i>↓ a bean nobody remembers writing "for staging" can be gated on one of the group's other members, and now it silently applies too</i>
+    <b>"Activating staging" becomes a fully known, enumerated set of consequences — not a surprise</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A profile group isn't one switch — it's several switches wired to fire together.</b> Activating
+  <code>staging</code> is, in every way Spring can see, identical to activating <code>db-staging</code> AND
+  <code>feature-flags-staging</code> AND <code>metrics</code> one at a time by hand. That's exactly why
+  <code>@Profile("!prod")</code> beans like the mocked Ping client, and <code>@Profile("prod")</code> beans
+  like the real one, have to be reasoned about in terms of every name that can land in the final active
+  set — group membership included — not just the literal string somebody typed on the command line.
+</div>
+
+<div class="hf-note">Think of a profile group as a light switch wired to an entire room's fixtures, not
+one bulb. Flip "staging" and every fixture wired to <code>db-staging</code>, <code>feature-flags-staging</code>,
+or <code>metrics</code> turns on together — including the one you forgot was ever on that circuit. It
+stops being a perfect analogy in one place: a real light switch's wiring only changes when an electrician
+touches it, but a brand-new <code>@Profile("metrics")</code> bean can join that circuit next month without
+anyone going near the switch's own definition.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I only typed <code>--spring.profiles.active=staging</code>. Why is the metrics profile active too?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">spring.profiles.group.staging</span>
+    <p>Because I exist. The instant "staging" activates, I expand it into staging, db-staging, feature-flags-staging, and metrics — all four, together.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The @Profile("metrics") bean</span>
+    <p>And I don't know or care HOW I became active — I only ever ask "is metrics in the current active set?" It is. So I load.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The Environment</span>
+    <p>I'm the one holding that active set, and once it's built, it's flat. I can't tell you a name arrived through a group instead of the command line — by the time anyone asks me, that distinction is already gone.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One string on the command line, silently rewritten into a longer list before a single bean is ever considered.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>You pass <code>--spring.profiles.active=staging</code> (or set <code>SPRING_PROFILES_ACTIVE</code>) at startup</span><span class="tag">one name, at this point</span></li>
+    <li class="open"><span>Spring reads <code>spring.profiles.group.*</code> and finds that "staging" names a group, not just a profile</span><span class="tag">group declarations are just more properties, resolved early</span></li>
+    <li class="open"><span>It expands staging into staging plus every listed member: db-staging, feature-flags-staging, metrics</span><span class="tag">the literal group name stays active too, alongside its members</span></li>
+    <li><span>The expanded list becomes the <code>Environment</code>'s flat active-profiles set</span><span class="tag">no record of which names came from the group</span></li>
+    <li class="open"><span>Every <code>@Profile</code>-annotated bean is checked against that flat set, one by one</span><span class="tag">a bean gated on "metrics" has no idea it arrived via "staging"</span></li>
+    <li><span>Only matching beans register — everything else is skipped, not just disabled</span><span class="tag">skipped beans are never even constructed</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the lesson. Expansion happens before anything else — before a single bean
+  is inspected, before a datasource is wired, before you'd have any real chance to notice. Everything
+  from step 4 onward is just Spring doing completely ordinary <code>@Profile</code> matching against a
+  set that's already longer than what you typed — which is exactly why reading the group definition has
+  to happen before you flip it in a real environment, not after something unexpected shows up in it.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">staging<small>one name, on the command line</small></div>
+    <div class="fan">group expansion ↓ activates every member</div>
+    <div class="obs">
+      <span>staging</span><span>db-staging</span><span>feature-flags-staging</span>
+      <span class="new">metrics ← nobody meant to flip this one</span>
+    </div>
+  </div>
+  <p class="hf-annot">Three of these four were exactly what you'd expect from turning on a staging
+  environment. The fourth rides along for free, because it happened to be listed on the same line in
+  <code>spring.profiles.group.staging</code> — and from any bean's point of view, "rode along" and "was
+  activated on purpose" look completely identical.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q"><code>spring.profiles.group.staging=db-staging,feature-flags-staging,metrics</code> is defined
+  in <code>application.yml</code>. Someone starts the app with <code>--spring.profiles.active=staging</code>
+  only. Is a bean annotated <code>@Profile("metrics")</code> active?</p>
+  <button type="button">No — only a bean annotated exactly <code>@Profile("staging")</code> becomes active; group members stay dormant unless individually named on the command line</button>
+  <button type="button">Only if <code>metrics</code> is also listed under a separate <code>spring.profiles.default</code> key — a group definition alone doesn't activate anything</button>
+  <button type="button">Yes — activating staging expands to staging, db-staging, feature-flags-staging, and metrics, and <code>@Profile("metrics")</code> only checks whether "metrics" is in that expanded set</button>
+  <p class="why" data-for="0">A completely reasonable guess if you didn't know groups existed — plain
+  literal-string matching is exactly how <code>@Profile</code> behaves for a name that <i>isn't</i>
+  declared as a group. The gap is not knowing that declaring <code>staging</code> as a group changes what
+  "activating staging" means, for every bean gated on any of its members.</p>
+  <p class="why" data-for="1">This mixes up two unrelated mechanisms. <code>spring.profiles.default</code>
+  governs what runs when <i>no</i> profile is explicitly set at all — it has nothing to do with whether an
+  already-defined group expands. The group definition alone is sufficient; expansion happens the moment
+  its name is activated, by any means.</p>
+  <p class="why" data-for="2">Right. And worth noticing: this expansion happens before Spring even
+  decides which beans to construct, so there's no separate "check both ways" step anywhere in the
+  process — a bean gated on a group member is exactly as active as one gated on the literal name you
+  typed.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">"One name, several things quietly turn on" isn't a Spring idea — it shows up anywhere membership implies inheritance.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A CSS class that pulls in a dozen declarations</h4>
+    <p>A composed utility class — Tailwind's <code>@apply px-4 py-2 bg-blue-600 rounded font-bold;</code>
+    bundled under one name — looks like a single class in your markup. Apply it, and five unrelated
+    declarations activate together, the same way naming "staging" quietly activates three other profile
+    names you never typed.</p>
+    <div class="hf-scatter"><span>one name in markup = many rules applied</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Entra ID / Active Directory nested groups</h4>
+    <p>Add a user to <code>Staging-Team</code>, and if that group is itself nested inside
+    <code>Metrics-Viewers</code>, the user inherits every permission <code>Metrics-Viewers</code> grants —
+    without anyone touching their account directly. Spring's profile groups and Entra's nested groups
+    solve completely different problems with the identical shape: membership in one name silently grants
+    membership in whatever that name is wired to.</p>
+    <div class="hf-scatter"><span>nested membership, not a direct grant</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>npm/Maven transitive dependencies</h4>
+    <p>One line in <code>package.json</code> or a single <code>&lt;dependency&gt;</code> in
+    <code>pom.xml</code>, and dozens of packages show up in <code>node_modules</code> or the dependency
+    tree. Declaring one name pulls in its entire graph, unasked — the same shape as declaring one profile
+    pulling in its entire group.</p>
+    <div class="hf-scatter"><span>one declared name, a whole graph installed</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">What happens if the same profile name shows up in two different groups, and you activate both at once?</p>
+  <p class="a">Nothing dramatic — the active-profiles set behaves like a set, not a list, so duplicates
+  collapse into one entry. If both a <code>staging</code> group and a <code>qa</code> group happen to list
+  <code>metrics</code> as a member, activating both together doesn't double-activate anything or cause a
+  conflict; <code>metrics</code> is simply active, once, the same as if you'd typed it yourself. The only
+  thing a <code>@Profile("metrics")</code> bean ever checks is membership, not how many separate paths led
+  to it.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does @Profile("!prod") mean "prod wasn't typed on the command line," or something more specific?</p>
+  <p class="a">More specific, and it matters: <code>!prod</code> is active whenever <code>prod</code> is
+  absent from the final, resolved active-profiles set — after group expansion, not just the raw
+  command-line string. So if some other group you activated happened to include <code>prod</code> as a
+  member, <code>!prod</code> beans correctly stay off, even though you never typed the word "prod"
+  yourself. That's exactly why the CIAM box above can promise dev never reaches the real Ping OAuth2
+  client: <code>@Profile("!prod")</code> is checking final membership, not literal input.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">If you don't activate any profile at all, does @Profile("default") behave like a normal named profile?</p>
+  <p class="a">Not quite — it behaves like a genuine special case. <code>@Profile("default")</code> beans
+  load only when the resolved active-profiles set is completely empty. The moment you activate anything
+  at all, even a profile with nothing to do with that bean's purpose, the default beans stop loading. That
+  catches people in exactly one direction: a fallback bean quietly disappears the first time literally
+  any other profile gets turned on, not just a conflicting one.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  <code>spring.profiles.group.demo=staging,readonly</code> is defined. Someone starts the app with
+  <code>--spring.profiles.active=demo,prod</code>. Is <code>@Profile("prod")</code> active? Is
+  <code>@Profile("staging")</code>? Is <code>@Profile("!prod")</code>?
+</div>
+
   <!-- ── HERO: animated profile activation · live per-step inspector ── -->
   <div class="panel" style="border:1px solid var(--accent)">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch a profile activate — yml loaded → beans selected → datasource wired</h2>
@@ -926,6 +1116,7 @@ renderNodes(cur);
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

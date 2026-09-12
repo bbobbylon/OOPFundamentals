@@ -8,6 +8,7 @@ import com.bob.devhub.model.User;
 import com.bob.devhub.repository.TopicProgressRepository;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -35,8 +36,16 @@ import java.util.stream.Collectors;
  */
 public class ProgressService {
 
-    // Total topics across all tracks — keep in sync with app.html
-    private static final int TOTAL_TOPICS = 200;
+    /**
+     * The denominator for the completion percentage: how many lessons the site registers.
+     *
+     * <p>The real source of truth is {@code frontend/tracks-data.js}, which the backend
+     * cannot read — so this mirrors it, and {@code frontend/tmp_vcheck.mjs} fails the build
+     * if the two drift apart. That gate exists because they already did: this was a
+     * hard-coded 200 against a registry of 521, which inflated every percentage ~2.6x.
+     */
+    @Value("${app.progress.total-topics:521}")
+    private int totalTopics;
 
     private final TopicProgressRepository progressRepo;
 
@@ -108,19 +117,20 @@ public class ProgressService {
 
     /**
      * The dashboard summary: learned / in-progress / not-started counts and a completion
-     * percentage.
+     * percentage, measured against {@link #totalTopics}.
      *
-     * <p>KNOWN DRIFT: the percentage is computed against the hard-coded
-     * {@code TOTAL_TOPICS} above, which no longer matches the site — tracks-data.js
-     * registers far more pages than that today. Until the two are reconciled this figure
-     * reads optimistically, and a learner can exceed 100%. Counting from the registry
-     * instead of a constant is the real fix.
+     * <p>{@code notStarted} and {@code percentComplete} are clamped rather than trusted.
+     * The denominator mirrors a registry this service cannot read, so a learner who has
+     * touched more lessons than the configured total is a state the drift gate is meant to
+     * prevent but cannot guarantee — a stale deployment is enough. Clamping keeps that
+     * showing as a finished 100% instead of "112% complete, -61 not started".
      */
     public StatsResponse getStats(User user) {
         long learned    = progressRepo.countByUserAndStatus(user, ProgressStatus.LEARNED);
         long inProgress = progressRepo.countByUserAndStatus(user, ProgressStatus.VISITED);
-        long notStarted = TOTAL_TOPICS - learned - inProgress;
-        int pct = (int) Math.round((double) learned / TOTAL_TOPICS * 100);
-        return new StatsResponse(TOTAL_TOPICS, learned, inProgress, notStarted, pct);
+        long notStarted = Math.max(0, totalTopics - learned - inProgress);
+        int pct = totalTopics <= 0 ? 0
+                : (int) Math.min(100, Math.round((double) learned / totalTopics * 100));
+        return new StatsResponse(totalTopics, learned, inProgress, notStarted, pct);
     }
 }

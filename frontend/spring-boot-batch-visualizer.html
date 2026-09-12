@@ -134,6 +134,200 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> A CSV migration from a legacy system: Batch reads the file, validates each row (duplicate email, valid roles), maps to <code>UserEntity</code>, and writes in chunks of 500, skipping duplicates to an <code>import_errors</code> table. Partitioned across 8 threads, 2M users import in ~8 minutes instead of ~64, launched async from <code>POST /api/admin/import/users</code>.</div>
   </div>
 
+<p class="hf-deck">or, a Spring Batch job doesn't remember your intent — it remembers your JobParameters</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Your batch job crashed at row 1.9 million. You reran it, and it started over at row zero.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">You did everything the error message told you, and it still replayed 1.9 million rows</div>
+  <p>The overnight import of 2 million users died at chunk 3,800-something with a deadlock on the write. You go to rerun it in the morning and Spring Batch throws back at you: a job with these parameters is already known. So you do what half the answers online tell you to do — add a fresh timestamp parameter so it'll be treated as a new run — and kick it off again. This time it runs clean. Eight minutes later it's COMPLETED. Except support tickets start rolling in: 1.9 million duplicate-key errors, because the job didn't resume anything — it reprocessed every row from the first one.</p>
+  <div class="hf-scatter">
+    <span>no "already exists" error this time ✓</span>
+    <span>job reached COMPLETED ✓</span>
+    <span>new timestamp param = a JobInstance never seen before ⚠</span>
+    <span>zero of the 1.9M committed chunks were resumed ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that "restart" means "run the same Job class again." Spring Batch's restart is keyed to JobParameters, not to what you meant to do.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Restart with the exact parameters that failed</div>
+  <div class="hf-ladder">
+    <b>Rerun with the identical JobParameters the failed execution used — same inputFile, same runId</b>
+    <i>↓ Spring Batch recognizes the JobInstance, finds its last FAILED JobExecution, and resumes from the last committed chunk</i>
+    <b>Reserve a genuinely new parameter for a genuinely new logical run</b>
+    <i>↓ that's the only thing that should tell Spring Batch "this is a different job," not a retry of the old one</i>
+    <b>1.9 million rows stay committed — only the unfinished chunk replays</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A JobInstance is identified by its parameters, not by which class you ran.</b> That one rule
+  explains why a COMPLETED job refuses to rerun with the same parameters (it's guarding against
+  redoing finished work), why a FAILED job needs those <i>same</i> parameters to resume, and why
+  adding a "helpful" fresh timestamp on every launch quietly turns every restart into a first run.
+</div>
+
+<div class="hf-note">Think of JobParameters as a dry cleaner's claim ticket. Bring back the same
+ticket number and the counter pulls your exact order and picks up wherever it left off — three
+items done, two still pressing. Print a new ticket for the same coat and the counter has no way to
+know it's the same order; it opens a brand-new one from scratch. A real dry cleaner might recognize
+your face. Spring Batch never does — it only ever looks at the ticket number.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I just want to rerun the job that failed last night.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">JobLauncher</span>
+    <p>Then give me the exact JobParameters that execution used. I don't run "jobs" the way you
+    mean it — I run JobInstances, and parameters are the only thing that tells me which one you're
+    talking about.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">JobRepository</span>
+    <p>I'm the one holding the receipt. Same parameters, and I can tell you exactly which chunk
+    committed last and hand the Step back its position. Different parameters, and as far as my
+    tables are concerned I've never seen this JobInstance before — it starts at chunk one, same as
+    any other first run.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The ExecutionContext</span>
+    <p>And I'm the part that actually remembers the position — read count, last key, whatever the
+    Step saved about itself. But I live inside the JobExecution row for that JobInstance. No
+    matching JobInstance, no me to read from.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">1.9 million committed rows. One extra parameter. Zero of them resumed.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>JobLauncher.run(job, params) looks up whether a JobInstance already exists for this exact Job name + JobParameters combination</span><span class="tag">the identity check</span></li>
+    <li class="open"><span>If none exists, a brand-new JobInstance and JobExecution are inserted into <code>BATCH_JOB_INSTANCE</code> / <code>BATCH_JOB_EXECUTION</code></span><span class="tag">first time seeing these params</span></li>
+    <li class="open"><span>If one exists and its last JobExecution was FAILED, Spring Batch opens a new JobExecution under the <b>same</b> JobInstance and reads the ExecutionContext for the last saved position</span><span class="tag">this is the actual restart</span></li>
+    <li><span>The Step resumes reading from that saved position — not from item #1</span><span class="tag">why row 1.9M isn't replayed</span></li>
+    <li><span>Each chunk still commits as its own transaction, updating <code>BATCH_STEP_EXECUTION</code>'s counts exactly as a first run would</span><span class="tag">restart looks identical to a normal run from here</span></li>
+    <li class="open"><span>If the last JobExecution was COMPLETED instead of FAILED, Spring Batch refuses outright — <code>JobInstanceAlreadyCompleteException</code></span><span class="tag">the guardrail your "helpful" new runId just disabled</span></li>
+  </ol>
+  <p class="hf-annot">Step 1 is the lesson. Spring Batch's restart logic isn't watching your data or
+  guessing where it broke — it's a lookup. Same Job name plus the same JobParameters means the same
+  JobInstance, which means check the ExecutionContext for a resume point. Change any parameter,
+  even one added only to dodge an error, and that lookup finds nothing. There's no "position" to
+  resume from, because as far as the JobRepository is concerned this JobInstance has never run
+  before.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">ItemReader.read()</span>
+      <span class="go">pulls one item at a time until the chunk fills, or returns <em>null</em>
+      <span class="arrow">→</span> chunk boundary reached</span></div>
+    <div class="stt"><span class="nm">ItemProcessor.process()</span>
+      <span class="go">transforms each item; returning <em>null</em> filters it out of the chunk
+      <span class="arrow">→</span> survivors move on to the writer</span></div>
+    <div class="stt"><span class="nm">ItemWriter.write(chunk)</span>
+      <span class="go">writes the <em>whole chunk</em> in one call
+      <span class="arrow">→</span> one batched statement, not N single inserts</span></div>
+    <div class="stt"><span class="nm">commit the transaction</span>
+      <span class="go">this is the checkpoint a restart resumes from
+      <span class="arrow">→</span> loop back and read the next chunk</span></div>
+  </div>
+  <p class="hf-annot">The loop doesn't stop at "done" — it stops the moment the reader returns
+  <code>null</code>. That's why a restart isn't a special code path: it's the exact same
+  read → process → write → commit cycle that carried the first 1.9 million rows, just resuming
+  mid-loop at whatever position the ExecutionContext says was last committed — provided the
+  JobParameters actually point Spring Batch at that position in the first place.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A nightly import (<code>runId=2026-06-12</code>) fails at chunk 340 of 500 on a
+  deadlock. The next morning you rerun it with <code>runId=2026-06-13</code> so
+  <code>JobLauncher</code> won't throw an "already exists" error. What happens?</p>
+  <button type="button">It resumes at chunk 340 — Spring Batch matches the JobInstance by the Job's bean name (<code>importCustomerJob</code>), and <code>runId</code> is just a label for your logs</button>
+  <button type="button">It throws <code>JobInstanceAlreadyCompleteException</code>, because a JobInstance for <code>importCustomerJob</code> already exists</button>
+  <button type="button">It runs as a brand-new JobInstance starting at chunk 1 — the 339 already-committed chunks aren't touched, because <code>runId</code> is part of the JobParameters that define identity</button>
+  <p class="why" data-for="0">An easy mix-up — the Job bean really does define the Steps and their order. But whether two launches count as "the same" run is decided by comparing the <i>whole</i> JobParameters set, not the bean name. Change any parameter, including one added only to dodge an error, and Spring Batch has never seen that combination before.</p>
+  <p class="why" data-for="1">That exception is real, but it fires when you resubmit the <i>same</i> parameters as a run that already reached COMPLETED — a refusal to redo finished work. Here you changed <code>runId</code>, so the JobRepository has never seen this exact combination; it won't throw, it'll just run from scratch.</p>
+  <p class="why" data-for="2">Right — and it's the same story as the 1.9-million-row import at the top of this page. Changing a parameter to dodge an "already running / already completed" error is the single most common way to accidentally disable a restart. The fix isn't a new parameter — it's the <i>same</i> parameters the failed execution used.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three systems, one rule: identity lives in a value you hand back, not in what the code does.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Stripe's <code>Idempotency-Key</code> header</h4>
+    <p>Send a payment request twice with the same idempotency key and you get the original charge's
+    result back — not a second charge. It's the same shape as a JobParameters lookup pointed at a
+    different problem: "have I already done this?" answered by comparing a value the caller hands
+    back, not by inspecting what the operation does.</p>
+    <div class="hf-scatter"><span>same key = same operation, not a repeat</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>HTTP's <code>ETag</code> / <code>If-None-Match</code></h4>
+    <p>A client re-requests a resource with the ETag it was given last time; if nothing changed the
+    server answers <code>304 Not Modified</code> instead of redoing the work of building a response.
+    Same "have I already done this, and can I prove it with a value you're handing back to me"
+    check that JobParameters run against a completed batch execution.</p>
+    <div class="hf-scatter"><span>same ETag = skip the work</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>CIAM: a nightly Ping/Entra sync, triggered twice by accident</h4>
+    <p>A user-sync Job is wired to both a cron trigger and a "run now" button in Jenkins for
+    emergencies. If someone hits both on the same day and both pass an identical
+    <code>syncDate</code> parameter, <code>JobInstanceAlreadyCompleteException</code> is the thing
+    that <i>saves</i> you — the second launch is rejected instead of syncing everyone twice. It only
+    works because nobody added a "just in case" timestamp to make the second trigger "safer."</p>
+    <div class="hf-scatter"><span>the guardrail only holds if the params match</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Why not just set <code>skipLimit</code> to something huge so the job never fails?</p>
+  <p class="a"><code>skip</code> exists for <i>bad data</i> — a malformed row you've decided is safe
+  to log and move past — not as a way to make failures invisible. A skip limit set high enough that
+  it never trips means thousands of genuinely broken rows can vanish into a skip log nobody reads,
+  while a limit that's actually tuned to your data's real error rate correctly fails the Step so a
+  human looks at what's wrong upstream. And don't reach for <code>skip</code> for a deadlock or a
+  timeout — that's what <code>retry</code> is for; skip is for rows, retry is for transient
+  infrastructure hiccups, and neither should be a substitute for validating the input.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">If chunk size defines the transaction boundary, why not always use <code>chunk(1)</code> — the safest possible retry?</p>
+  <p class="a">Because <code>chunk(1)</code> means every single row is its own commit — you throw
+  away the entire reason Spring Batch beats a plain loop, which is amortizing the cost of a commit
+  (flush, index maintenance, a disk sync) across a hundred rows instead of paying it a hundred
+  times. Bigger chunks buy throughput but widen the blast radius on failure — more buffered work to
+  redo if that chunk fails partway through, as the retry scenario on this page shows. The real
+  tuning question isn't "which size is safest," it's "how much rework am I willing to redo on a
+  transient failure" — and that's a number, not a reflex toward the smallest chunk possible.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does putting the launch behind <code>@Scheduled</code> instead of a manual trigger avoid the double-trigger risk in the CIAM card above?</p>
+  <p class="a">Not by itself. <code>@Scheduled</code> only decides <i>when</i>
+  <code>jobLauncher.run()</code> gets called — it doesn't change how Spring Batch decides identity.
+  The actual guardrail is still JobParameters: build them deterministically from something like the
+  sync date (<code>addDate("syncDate", today)</code>) instead of
+  <code>System.currentTimeMillis()</code>, so two accidental triggers on the same day collide into
+  the same JobInstance and the second one gets rejected — instead of silently running twice with two
+  different timestamps.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  A Step is configured <code>.chunk(100).reader(r).processor(p).writer(w).faultTolerant()
+  .skip(ParseException.class).skipLimit(5)</code>. Item #340 throws a
+  <code>ParseException</code> — the 6th skip this run, which exceeds the limit and fails the Step.
+  Items #301–#339 already made it through the reader and processor earlier in that same chunk. Do
+  they end up committed, or rolled back along with the rest of the chunk?
+</div>
+
   <!-- ── HERO: animated Spring Batch job execution · live per-step inspector ── -->
   <div class="panel" style="border:1px solid var(--accent)">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch a Batch job run — read chunk → process → write → commit</h2>
@@ -766,5 +960,6 @@ renderNodes(cur);
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

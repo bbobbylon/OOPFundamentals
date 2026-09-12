@@ -56,6 +56,221 @@
     <div class="intro-ciam"><span class="tag">CIAM Express BFF:</span> A typical layout — <code>express.json()</code>, then a request-id + logger, then <code>cors()</code> whitelisting the SPA origin, then a JWT <code>authMiddleware</code> on <code>/api</code> that verifies the Ping/Entra RS256 token and sets <code>req.user = {sub, roles}</code>. Route handlers gate on <code>req.user.roles</code> and return 403 if missing. A final 4-arg <code>errorHandler</code> turns any thrown error into a consistent JSON shape (RFC 7807-style) so the Angular client always parses errors the same way. Order is everything: put <code>cors()</code> before auth so the browser preflight is answered before the token check.</div>
   </div>
 
+<p class="hf-deck">or, Express doesn't read your code — it counts your parameters</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You added a default value to next. Now your error handler never runs.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The function still has four names in its parentheses</div>
+  <p>Someone got a <code>next is not a function</code> warning once, so the team's error handler
+  got "defensively" rewritten as
+  <code>function errorHandler(err, req, res, next = () =&gt; {})</code>. It shipped fine — nothing
+  threw, the linter was happy, and the four-argument shape is right there in the signature. Weeks
+  later a downstream service started timing out, and every failing request came back as Express's
+  default HTML "Cannot GET" error page instead of your JSON envelope — as if the error handler had
+  vanished. It hadn't been deleted. It had been unregistered by a single <code>= () =&gt; {}</code>.</p>
+  <div class="hf-scatter">
+    <span>four names between the parens ✓</span>
+    <span>no typos, no missing import ✓</span>
+    <span>next = () =&gt; {} default value ⚠</span>
+    <span>function length dropped from 4 to 3 ⚠</span>
+  </div>
+  <p class="hf-foot">Express never reads your parameter NAMES. It reads how many of them count toward <code>.length</code> — and a default value stops the count.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Never give the error handler's next a default</div>
+  <div class="hf-ladder">
+    <b>function errorHandler(err, req, res, next = () =&gt; {})</b>
+    <i>↓ a default value on ANY parameter stops Function.length from counting it, or anything after it</i>
+    <b>Better: function errorHandler(err, req, res, next)</b>
+    <i>↓ four plain parameters, no defaults — .length is 4, and Express files it as the error handler again</i>
+    <b>Failures return your JSON envelope again, not Express's default page</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Express doesn't check your syntax — it counts arguments.</b> The only thing that marks a
+  middleware as an error handler is <code>fn.length === 4</code>: not a type, not a name, not
+  where you registered it, just a plain integer JavaScript computes off the function's own
+  parameter list. That single fact is why <code>next</code> "must" be the fourth parameter even
+  though your handler rarely calls it, why a default value is dangerous on that exact signature,
+  and why an error handler that looks completely right can still be invisible to Express.
+</div>
+
+<div class="hf-note">Think of Express's dispatcher as a bouncer who checks party invitations by
+<b>headcount only</b> — never by reading a single name on the guest list. Four people walk up
+together, they're waved into the "error handling" room, no questions asked about who they are.
+Show up as three people and a stroller and the bouncer doesn't debate whether the stroller "kind
+of" counts — three is three. Where it stops being accurate: a real bouncer might still glance at
+faces. Express's headcount check is the entire rule, with no fallback and no second look.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>My error handler has (err, req, res, next) right there in the source. Why is Express treating it like a normal middleware?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Express's router</span>
+    <p>I never look at your source code. When I register a layer I read exactly one thing off it:
+    <code>fn.length</code>. If that number is 4, you're on the error path. If it's anything else,
+    you're on the normal path — forever, no matter what your parameters are named.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Function.length (the JS spec)</span>
+    <p>And I'm the one actually doing that counting — Express just reads what I report. My rule:
+    count parameters left to right, and stop at the first one with a default value or a rest
+    parameter. <code>next = () =&gt; {}</code> has a default, so I stopped counting AT next.
+    Express saw 3, not 4.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Express's router</span>
+    <p>Three parameters means "normal middleware" to me. So on an ordinary request I'd call your
+    "error handler" like any other layer — and during an actual error, I skip right past it,
+    hunting for a real 4-arg layer. If your whole stack doesn't have one, my own built-in handler
+    answers instead: the default HTML page you saw.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One property decides your handler's whole job: fn.length.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>You register middleware with <code>app.use(fn)</code>. Express doesn't run it yet — it just stores the function in an ordered list of layers</span><span class="tag">just a list, so far</span></li>
+    <li class="open"><span>For each stored layer, Express reads <code>fn.length</code> once — a built-in JS property computed from the parameter list</span><span class="tag">the whole test</span></li>
+    <li><span><code>fn.length === 4</code> files a layer as an error handler; anything else files it as regular middleware, no matter the parameter names</span><span class="tag">the branch</span></li>
+    <li class="open"><span>A normal request only ever walks the regular-middleware layers, top to bottom, calling <code>next()</code> to advance</span><span class="tag">the happy path</span></li>
+    <li><span>Something calls <code>next(err)</code>, or an Express 5 handler's promise rejects. Express switches lanes: it now skips every regular layer, hunting only for the next layer with <code>fn.length === 4</code></span><span class="tag">the error path</span></li>
+    <li class="open"><span><code>next = () =&gt; {}</code> on your error handler is scored during step 2, before any request ever arrives — so the misfiling happens once, silently, at startup, and every request after that inherits it</span><span class="tag">why nobody noticed sooner</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is the lesson. Express makes its most important routing decision — "is
+  this an error handler?" — at REGISTRATION time, off a number it computes once and never
+  rechecks against what the function actually does. Everything downstream, step 3's branch and
+  step 5's error-path search, just trusts that one number. Get it wrong and the mistake stays
+  invisible until the exact moment you need the error path.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>express.json() — length 3</span>
+      <span>logger — length 3</span>
+      <span>authMiddleware — length 3</span>
+      <span>errorHandler — length 3 (broken)</span>
+    </div>
+    <div class="funnel">next(err) skips every layer where fn.length !== 4 ↓</div>
+    <div class="instance">Express's own built-in fallback handler<small>because nothing in YOUR stack scored a 4</small></div>
+  </div>
+  <p class="hf-annot">This is the funnel with the bug already baked in: every layer on the stack —
+  including the one written specifically to catch errors — scores 3. The search for a 4 comes up
+  empty, so it funnels all the way down to Express's own generic handler: the one that renders the
+  default HTML page you never wrote.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Two teammates each try to guard the error handler against a missing <code>next</code>.
+  Handler A: <code>function errorHandler(err, req, res, next = () =&gt; {}) { res.status(500).json({error: err.message}); }</code>.
+  Handler B: <code>function errorHandler(err, req, res, next) { next = next || (() =&gt; {}); res.status(500).json({error: err.message}); }</code>.
+  Which one does Express still register as the error handler?</p>
+  <button type="button">Neither — both handlers hand Express something that no longer counts as four real parameters</button>
+  <button type="button">Only A — a default value still counts toward length; reassigning a parameter inside the body does not</button>
+  <button type="button">Only B — A's default drops its length to 3; B's fallback lives in the body, so it stays 4</button>
+  <p class="why" data-for="0">Tempting, because both handlers are visibly trying to guard against a
+  missing <code>next</code> — and one of them really does break arity. But <code>.length</code>
+  only inspects the declared parameter list up to the first default or rest parameter; whatever a
+  function does inside its BODY — an <code>if</code>, a <code>||</code> fallback — is invisible to
+  it. Handler B's parameter list is still four plain names with no default, so its length is still 4.</p>
+  <p class="why" data-for="1">This gets the rule backwards. A default value on a parameter is
+  exactly what stops the count — Handler A declares <code>next = () =&gt; {}</code>, so JavaScript
+  stops counting at <code>next</code> and reports 3. Handler B's
+  <code>next = next || (() =&gt; {})</code> is a plain assignment statement inside the function
+  body, not a parameter default, so it never touches <code>.length</code> at all.</p>
+  <p class="why" data-for="2">Right. <code>.length</code> is computed once, from the parameter
+  list only, up to the first parameter with a default or a rest parameter — the function body is
+  never read. Handler A declares a default on <code>next</code>, so counting stops there and
+  Express sees 3; it gets filed as regular middleware. Handler B declares four plain parameters
+  and does its guarding in the body instead, so it still reports 4 and keeps its job.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three frameworks all read your function's signature to decide what it does — they just trust a different part of it.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring MVC does the same trick, more carefully</h4>
+    <p>Spring picks how to invoke an <code>@RequestMapping</code> method by reflecting over its
+    parameter list too — matching <code>@PathVariable</code>, <code>@RequestBody</code>,
+    <code>Principal</code>, <code>HttpServletResponse</code> by type and annotation, not by
+    position or count. Same underlying idea as Express — read the signature, decide the behavior —
+    but Spring inspects types and annotations instead of one integer, so reordering a controller
+    method's parameters doesn't silently reclassify what the method IS the way a stray default
+    value does in Express.</p>
+    <div class="hf-scatter"><span>signature-based dispatch, sturdier version</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>pytest fixtures: matched by name, not count</h4>
+    <p>pytest inspects a test function's parameters too, but it trusts the NAMES: write
+    <code>def test_login(db_session, mock_idp):</code> and pytest injects whichever fixtures are
+    registered under those exact names. Get the count right but a name wrong and you get a loud
+    "fixture not found" error — nothing like Express quietly rerouting your handler to the wrong
+    internal list. Same goal, different part of the signature trusted, and that choice is what
+    decides how loudly each framework fails you.</p>
+    <div class="hf-scatter"><span>same idea, different part of the signature trusted</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your CIAM gateway's error handler, gone quiet</h4>
+    <p>The intro's error handler formats every failure into one RFC-7807-style JSON envelope for
+    the Angular client. Demote it to regular middleware with one stray default parameter and every
+    JWT failure — expired token, bad RS256 signature, an unreachable JWKS endpoint — falls through
+    to Express's own default HTML error page instead. The Angular app's global HTTP interceptor,
+    built to parse JSON errors, then throws a SECOND, unrelated exception trying to
+    <code>JSON.parse</code> an HTML page — and the real 401 gets buried under a parse error nobody
+    wrote code for.</p>
+    <div class="hf-scatter"><span>one dropped arg, two stacked failures</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Why would Express build something this important around a raw number instead of a special class or a naming convention?</p>
+  <p class="a">Because Express predates a lot of what would make that convenient — no TypeScript in
+  the original codebase, no decorators — while <code>Function.prototype.length</code> already
+  existed as a free, zero-config way to introspect a function. It's pragmatic API design: cheap to
+  implement, cheap to check, and it works right up until a parameter default silently changes the
+  number it reads. The fix the ecosystem converged on isn't a language change; it's a house rule —
+  never put a default value on an error handler's parameters.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does this arity trick apply anywhere else in Express, or just error handlers?</p>
+  <p class="a">It's specifically how error middleware is told apart from regular middleware — the
+  one place in Express where argument COUNT changes what a function IS, not just what it receives.
+  Regular middleware and route handlers don't have this trap: extra or defaulted parameters there
+  just receive <code>undefined</code> or their default value, and nothing reads <code>.length</code>
+  to reroute them. That's exactly what makes the error-handler case surprising — it's the one
+  signature in the whole framework where arity is load-bearing.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">How would I actually catch this before it reaches production?</p>
+  <p class="a">Log your middleware stack's arities at startup —
+  <code>app._router.stack.map(l =&gt; l.handle.length)</code> — and assert your error handler is the
+  one 4 in that list. Or sidestep the whole class of bug: never put a default value or destructured
+  parameter on an error handler's signature, full stop. The cheapest real safety net is a five-minute
+  integration test that deliberately throws inside a route and asserts the response is your JSON
+  shape, not Express's default HTML page.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  Handler A: <code>function errorHandler(err, req, res, next, meta = {}) {...}</code> — a fifth
+  parameter, <code>meta</code>, carries the default. Handler B:
+  <code>function errorHandler(err, req, res, next = () =&gt; {}) {...}</code> — the default sits on
+  the fourth parameter instead. Both look like someone just added a small safety net. Which one
+  does Express still register as the error handler?
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
@@ -264,5 +479,6 @@ DevHubCodeWalk.mount('#cw-express',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

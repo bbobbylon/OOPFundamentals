@@ -217,6 +217,234 @@
       </div>
     </div>
 
+<p class="hf-deck">or, retrying a request doesn't rewind you through the interceptors that built it</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The refresh call succeeded. The retry still failed with 401.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">auth.refreshTokens() returns 200 with a brand-new token. The very next request still gets rejected</div>
+  <p>A CIAM app's error interceptor tries to handle a 401 reactively, right where it happens,
+  instead of only redirecting to login: <code>export const errorInterceptor: HttpInterceptorFn =
+  (req, next) =&gt; { const auth = inject(AuthService); return next(req).pipe(catchError(err =&gt; {
+  if (err.status === 401) { return auth.refreshTokens().pipe(switchMap(() =&gt; next(req))); }
+  return throwError(() =&gt; err); })); };</code> — this looks reasonable: catch the 401, refresh,
+  retry with <code>next(req)</code>. In the network tab, <code>auth.refreshTokens()</code>
+  genuinely returns a fresh access token with a 200. The very next request — the retry — gets a
+  <b>second</b> 401. Not a fluke: it gets one every single time, because <code>req</code> is the
+  exact same <code>HttpRequest</code> object that arrived at this interceptor already carrying the
+  OLD Authorization header, cloned in by <code>authInterceptor</code> upstream, long before the
+  token expired. Retrying with <code>next(req)</code> doesn't ask <code>authInterceptor</code> to
+  run again and re-clone with the new token — it just resends the identical frozen object, stale
+  header and all.</p>
+  <div class="hf-scatter">
+    <span>auth.refreshTokens() → 200 ✓</span>
+    <span>new token stored ✓</span>
+    <span>retry sent ✓</span>
+    <span>retry status: 401 ⚠</span>
+  </div>
+  <p class="hf-foot">The refresh worked. The retry never saw it — because the retry was never
+  given the chance to.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">If you retry from inside an interceptor, YOU own re-attaching the new token — next() won't do it for you</div>
+  <div class="hf-ladder">
+    <b>switchMap(() =&gt; next(req)) — retries with whatever req already was</b>
+    <i>↓ req was cloned ONCE, upstream, before the failure; calling next() again doesn't reach back up and re-clone it</i>
+    <b>Better: clone again, with the token refreshTokens() just handed you</b>
+    <i>↓ switchMap(newToken =&gt; next(req.clone({ setHeaders: { Authorization: `Bearer ${newToken}` } })))</i>
+    <b>Now the retry is a genuinely different request, not a resend of the one that just failed</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>next(req) never re-runs anything upstream of the interceptor that calls it.</b> An
+  interceptor chain is built once and walked top-to-bottom on the way in; calling
+  <code>next()</code> a second time — from inside a <code>catchError</code>, a <code>retry()</code>,
+  or anywhere else — only resends whatever request object you hand it. It does not rewind
+  execution back to <code>authInterceptor</code>, and it does not magically pick up state that
+  changed after the request was originally cloned. If you want a different request on retry, you
+  have to build one yourself.
+</div>
+
+<div class="hf-note">Think of the request object as a <b>sealed envelope</b>, not a live phone
+line back to whoever wrote the letter. <code>authInterceptor</code> sealed it once, with whatever
+token was current at that moment inside. Handing that exact envelope to a second courier — which
+is all <code>next(req)</code> ever does — doesn't change what's inside it, no matter how many
+couriers you hand it to or how many times you ask. Getting different contents into the envelope
+means someone has to seal a <i>new</i> one.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I refreshed the token right before retrying. Why did the retry get a 401 too?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">next(req)</span>
+    <p>Because you handed me the same <code>req</code> you already had — the one authInterceptor
+    cloned with the OLD token, back before any of this happened. I don't inspect what's inside it.
+    I don't compare it to what a fresh request would look like. I just send it.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>So the refresh call was pointless?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">next(req)</span>
+    <p>No — it got you a good token, sitting in the auth service right now. It just never made it
+    into <i>this</i> request, because nothing told me to clone a new one. Refreshing the token and
+    attaching the token are two different jobs, and you only did the first one.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One request object, cloned once, retried unchanged.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The component calls <code>http.get('/api/orders')</code>. HttpClient builds a fresh
+    <code>HttpRequest</code> and walks it through the interceptor chain, starting at
+    authInterceptor</span><span class="tag">the only time the chain runs top-to-bottom</span></li>
+    <li class="open"><span>authInterceptor reads the current token and calls
+    <code>req.clone({ setHeaders: { Authorization: 'Bearer &lt;old-token&gt;' } })</code> — this
+    produces ONE new, immutable request object. Call it reqA</span><span class="tag">reqA now
+    exists, frozen, forever</span></li>
+    <li><span>reqA reaches errorInterceptor via <code>next(reqA)</code>, goes to the network, and
+    comes back 401 — the token expired between page load and this call</span><span class="tag">the
+    failure that triggers everything below</span></li>
+    <li class="open"><span>catchError runs <code>auth.refreshTokens()</code>, which succeeds and
+    stores a new token somewhere the AuthService can read — but nobody has asked for a new
+    HttpRequest yet</span><span class="tag">the token is fixed; the request object
+    isn't</span></li>
+    <li><span><code>switchMap(() =&gt; next(reqA))</code> fires — reqA, the exact same object from
+    step 2, old Authorization header baked in, unchanged</span><span class="tag">this is the bug:
+    reqA, not a new clone</span></li>
+    <li class="open"><span>The server checks the Authorization header it actually received —
+    still the expired one — and returns 401 again. authInterceptor is never called a second time
+    to fix it, because nothing re-entered the chain from the top</span><span class="tag">fixable
+    only by cloning again, explicitly, right here</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the whole lesson. "Retry" sounds like it means "try again,
+  freshly" — but every retry pattern on this page, from a component-level <code>retry()</code> to
+  a <code>catchError</code> inside an interceptor, only ever resends an object that already
+  exists. If nothing about that object has changed, neither has the outcome.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt"><span class="nm">REQUEST SENT (reqA, old token)</span>
+      <span class="go">server checks the Authorization header, finds it expired <span class="arrow">→</span> 401 RECEIVED</span></div>
+    <div class="stt"><span class="nm">401 RECEIVED</span>
+      <span class="go">catchError runs auth.refreshTokens() <span class="arrow">→</span> TOKEN REFRESHED</span></div>
+    <div class="stt on"><span class="nm">TOKEN REFRESHED (new token stored — but reqA still exists, unchanged)</span>
+      <span class="go">switchMap(() =&gt; next(reqA)) resends the SAME object <span class="arrow">→</span> REQUEST RESENT</span></div>
+    <div class="stt"><span class="nm">REQUEST RESENT (still reqA, still the old token)</span>
+      <span class="go">server checks the header again, finds the same expired value <span class="arrow">→</span> back to 401 RECEIVED</span></div>
+  </div>
+  <p class="hf-annot">Without a guard, this cycle repeats — refreshing a token successfully every
+  time and still failing every time, because the one thing never happening is a NEW clone of the
+  request. Break the cycle at the marked step: <code>next(req.clone({ setHeaders: { Authorization:
+  ... } }))</code>, not <code>next(req)</code>.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">An interceptor runs: <code>return next(req).pipe(retry(2), catchError(err =&gt; {
+  if (err.status === 401) { return auth.refreshTokens().pipe(switchMap(() =&gt; next(req))); }
+  return throwError(() =&gt; err); }));</code> The first call gets a 401. <code>refreshTokens()</code>
+  succeeds and the AuthService now holds a valid new token. What does the retried request's
+  Authorization header actually contain?</p>
+  <button type="button">The same expired token as the first attempt — req was already cloned with it before this interceptor ever ran, and next(req) resends that exact object</button>
+  <button type="button">The new token — switchMap only continues once refreshTokens() completes, so next(req) picks up whatever AuthService currently holds</button>
+  <button type="button">No Authorization header at all — retry() and catchError() strip custom headers when they rebuild the request for a retry attempt</button>
+  <p class="why" data-for="0">Exactly. <code>req</code> is a specific, already-built
+  <code>HttpRequest</code> object — its headers were fixed the moment an upstream interceptor
+  cloned it, long before this 401 happened. <code>next(req)</code> just resends that object; it
+  has no way to reach back and ask for a different one, no matter what AuthService holds now.</p>
+  <p class="why" data-for="1">Tempting — it feels like "wait for the refresh, then use the new
+  state" should work, and <code>switchMap</code> genuinely does wait for
+  <code>refreshTokens()</code> to complete first. But waiting for the token to update somewhere
+  else doesn't change what's already baked into <code>req</code>'s headers. AuthService holding a
+  new token and <code>req</code> carrying an old one are two separate facts, and only one of them
+  got updated here.</p>
+  <p class="why" data-for="2">There's no such stripping behavior — RxJS operators don't inspect
+  or rebuild <code>HttpRequest</code> objects. <code>req.clone()</code> is the only thing that
+  ever changes a request's headers, and this code never calls it a second time. Whatever headers
+  <code>req</code> had going in are exactly what it has coming back out.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three systems, one shape: "retry" replays an object instead of rebuilding one.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Axios interceptors hit the identical wall</h4>
+    <p>Axios's response-interceptor pattern for 401-refresh-retry is one of the most repeated
+    "why is this looping" questions in that ecosystem: <code>error.config</code> — the original
+    Axios request config — carries the same stale Authorization header unless you explicitly
+    overwrite <code>error.config.headers.Authorization</code> before calling
+    <code>axios(error.config)</code> again. Different library, identical trap: the retry vehicle
+    is the OLD request, not a new one, unless you touch it yourself.</p>
+    <div class="hf-scatter"><span>error.config ≈ Angular's req</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your browser's own "confirm form resubmission" warning</h4>
+    <p>Refresh a page you reached via POST and the browser offers to resend the exact same
+    request — same body, same headers, same CSRF token — because that's literally all a "resend"
+    ever means at the HTTP layer: replaying a byte-for-byte identical request. If the session or
+    CSRF token has rotated since, the resend fails for the same reason a stale-token retry does:
+    nothing rebuilds the request, it just gets sent again.</p>
+    <div class="hf-scatter"><span>"resend" always means the SAME bytes</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your silent-refresh interceptor, the day the IdP rotates signing keys</h4>
+    <p>A Ping/Entra silent-refresh flow that retries a failed call the way the buggy version above
+    does won't just fail once — it fails on every retry, for every user, the instant tokens
+    issued before a signing-key rotation stop validating. The refresh call itself succeeds every
+    time (it's hitting a healthy IdP with valid credentials); the retried API call fails every
+    time, because it's still carrying a token minted under the old key. Support sees "intermittent
+    401s that a refresh doesn't fix" — the fix is never on the refresh side; it's always in
+    whether the retried request was actually rebuilt.</p>
+    <div class="hf-scatter"><span>refresh succeeds, retry still dies</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Doesn't RxJS's retry() solve this automatically?</p>
+  <p class="a">No — <code>retry()</code> only resubscribes to the Observable it's piped onto. If
+  that Observable is <code>next(req)</code> called with a fixed <code>req</code>, every
+  resubscription sends that same <code>req</code> again. <code>retry()</code> is great for "the
+  network blipped, try the identical call again" (a 503, a timeout) — it was never designed to
+  rebuild the request in between attempts.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">So where should 401-refresh-and-retry actually live?</p>
+  <p class="a">Either proactively, before the request ever goes out — check expiry, refresh if
+  needed, then clone with whatever token you end up with, the pattern this page's own CIAM
+  interceptor uses — or reactively in <code>catchError</code>, as long as you explicitly
+  <code>req.clone()</code> with the new token before calling <code>next()</code> again. Either is
+  fine. Calling <code>next(req)</code> unchanged is the only version that's broken.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">How would this actually surface in production, versus in a quick manual test?</p>
+  <p class="a">You might not catch it manually at all — if you test by refreshing the page, you
+  get a brand-new authInterceptor pass with a valid token and everything looks fine. It only shows
+  up for a session that's been open long enough for the original token to expire mid-session,
+  which is exactly the case automated refresh-and-retry exists to handle — so the bug hides until
+  the one moment it's supposed to matter.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  An interceptor patches the retry like this: after <code>auth.refreshTokens()</code> resolves
+  with <code>newToken</code>, it runs <code>req = req.clone({ setHeaders: { Authorization: 'Bearer
+  ' + newToken } });</code> — reassigning the interceptor's own <code>req</code> parameter — and
+  only then calls <code>next(req)</code>. Does this actually fix the bug? Hint: what's immutable
+  here — the request object, or the variable that happens to be pointing at it?
+</div>
+
     <!-- ── HERO: animated round-trip walk · request flows DOWN, response flows UP · live req/res inspector ── -->
     <div class="panel" style="border-color:#22d3ee">
       <h2 style="margin-top:0;border:0;padding:0;color:#22d3ee">▶ Watch one request make the round trip — down the chain, then back up</h2>
@@ -1168,6 +1396,7 @@ app redirected → <span class="hl-bad">/login</span>`},
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>

@@ -74,6 +74,187 @@
     </div>
   </div>
 
+
+<p class="hf-deck">or, 401 means "try again" and 403 means "don't bother" — and your interceptor needs to know the difference</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The refresh worked perfectly. The request failed anyway. Then it did it again.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A retry loop that burns refresh tokens to re-ask a question that was never about the token</div>
+  <p>The three status codes above look like a severity scale — 401 bad, 403 worse — so a lot of
+  interceptors get written to treat "any auth failure" the same way: run a silent refresh, retry
+  once, and if it fails again, log the user out. It is a reasonable-looking five lines and it is
+  wrong in both directions.</p>
+  <p>A user with a perfectly valid token but no <code>ROLE_ADMIN</code> calls a protected endpoint
+  and gets <b>403</b>. The interceptor sees a failure, refreshes, retries — and receives exactly
+  the same 403, because the server never had any doubt about who they were. <b>Nothing about a
+  new token changes an authorization decision.</b> Best case you have wasted a round trip and a
+  token rotation. Worst case the retry logic loops, or the "log them out after two failures" rule
+  fires and ejects a legitimate user for clicking a button they were never allowed to click.</p>
+  <div class="hf-scatter">
+    <span>token valid ✓</span>
+    <span>signature, exp fine ✓</span>
+    <span>identity known ✓</span>
+    <span>refresh: pointless ⚠</span>
+    <span>same 403, plus a logout ⚠</span>
+  </div>
+  <p class="hf-foot">The two codes answer two different questions. Collapse them into one branch
+  and you have a client that cannot tell "prove who you are" from "you are not allowed."</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Branch on the code, because the code is the instruction</div>
+  <div class="hf-ladder">
+    <b>401 → the server does not know you. Refresh silently, retry once, and only then send them to log in</b>
+    <i>↓ this is the one case where retrying is meaningful, because a fresh token really can change the answer</i>
+    <b>403 → the server knows you and said no. Do not refresh, do not retry — show a real message</b>
+    <i>↓ "You need the Admin role for this" beats a spinner followed by a mysterious logout</i>
+    <b>And on the server: return 404 rather than 403 when the 403 itself would reveal that something exists</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>401 is a question about identity; 403 is a verdict about permission.</b> One invites you to
+  come back with better credentials, the other tells you that credentials were never the problem.
+  That is why they are separate codes rather than degrees of the same one — and why the status
+  code is not just a result but an <i>instruction to the client</i> about what to do next. Getting
+  it wrong does not only mislead a developer reading logs; it makes your frontend behave
+  incorrectly.
+</div>
+
+<div class="hf-note">401 is <b>"I can't hear you, say that again."</b> 403 is <b>"I heard you
+perfectly. No."</b> Repeating yourself is the right response to exactly one of those, and doing it
+to the other is how a conversation becomes an argument.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>They both mean the request failed. Why does the distinction matter to my code?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">401 Unauthorized</span>
+    <p>Because I am a misnomer — I actually mean <i>unauthenticated</i>. No token, an expired one,
+    a bad signature: I cannot tell who you are. I am the one code where retrying with something
+    better genuinely helps, which is why I come with a <code>WWW-Authenticate</code> header telling
+    you how to try.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">403 Forbidden</span>
+    <p>And I am the opposite. I know precisely who you are — your token is valid and I read it. The
+    answer is still no, and it will be no for every identical request you make until somebody
+    changes your roles. There is nothing to retry. Treating me as a transient failure is how
+    clients end up in loops.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">404 Not Found</span>
+    <p>And occasionally you should send me instead of 403 — on a private resource, "forbidden"
+    confirms the thing exists, which is sometimes the only fact the attacker was after. It is why
+    a private repository you cannot see returns "not found" rather than "not allowed." Same
+    instinct as never revealing whether an account exists at the login page.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Where each code is decided — and they are decided in different places.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Request arrives with <code>Authorization: Bearer …</code>. The security filter chain runs <b>before</b> any controller</span><span class="tag">nothing of yours has executed yet</span></li>
+    <li class="open"><span>No token, expired, or a bad signature → the <b>entry point</b> returns <b>401</b>. Your controller is never reached, and never learns a request happened</span><span class="tag">authentication failed</span></li>
+    <li><span>Token valid → an <code>Authentication</code> is built, its claims mapped to authorities, and the request continues</span><span class="tag">identity established</span></li>
+    <li class="open"><span><code>@PreAuthorize</code> evaluates. Denied → the <b>access-denied handler</b> returns <b>403</b>, and the method body still never runs</span><span class="tag">authorization failed</span></li>
+    <li><span>Allowed → your code finally runs, and any 404 from here is a genuine "no such row"</span><span class="tag">the only layer that sees your data</span></li>
+    <li class="open"><span>Except where you deliberately convert a 403 into a 404 to avoid confirming that the resource exists</span><span class="tag">a decision, not an accident</span></li>
+  </ol>
+  <p class="hf-annot">Steps 2 and 4 are handled by <i>two different components</i> — an
+  authentication entry point and an access-denied handler — which is the clearest possible signal
+  that these are not two flavours of one failure. It also explains a detail that confuses people
+  in the logs: a 403 proves your token was valid, so seeing 403s is evidence authentication is
+  working. If you are debugging a login problem and you see 403, stop looking at the token; the
+  token was fine.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">what this endpoint returns<small>and therefore what the client will do next</small></div>
+    <div class="arrow">the honest code is →</div>
+    <div class="opts">
+      <span>no token / expired / bad signature → <b>401</b>, and the client should refresh and retry once</span>
+      <span class="on">valid token, missing role → <b>403</b>, and the client must NOT retry — show why</span>
+      <span>valid token, allowed, no such row → <b>404</b>, an ordinary miss</span>
+      <span>valid token, exists but not yours, and its existence is sensitive → <b>404</b> on purpose</span>
+    </div>
+  </div>
+  <p class="hf-annot">Rows three and four return the identical code for opposite reasons, and that
+  is the point: from outside, a resource you may not see should be indistinguishable from one that
+  is not there. Inside, log them differently — the caller learns nothing, and the on-call engineer
+  reading the logs at 2am learns everything.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your Angular interceptor catches auth failures, runs a silent token refresh, and
+  retries the request once. A logged-in user whose token is valid but who lacks
+  <code>ROLE_ADMIN</code> calls <code>DELETE /api/users/42</code>. What does the interceptor
+  achieve?</p>
+  <button type="button">The retry succeeds — the refreshed token is minted fresh from the directory, so it carries the ADMIN role the expired one was missing</button>
+  <button type="button">Nothing but a wasted refresh and the identical 403 — the server already knew exactly who they were, so a new token cannot change the verdict</button>
+  <button type="button">The refresh itself fails with a 401 and the user is logged out, because a 403 response invalidates the current session</button>
+  <p class="why" data-for="0">A refresh reissues a token for the <i>same</i> user, so unless
+  somebody granted them the ADMIN role in the seconds between the two calls, the new token carries
+  the same authorities as the old one. The old token was not expired in the first place — that is
+  what makes this a 403 rather than a 401. Retrying repeats an identical question and receives an
+  identical answer.</p>
+  <p class="why" data-for="1">Correct, and this is why the interceptor must branch on the status
+  code rather than on "did it fail". Refresh-and-retry belongs under 401, where a better credential
+  genuinely can change the outcome. Under 403 the right move is to surface a real message — "you
+  need the Admin role" — because the user can act on that, and a spinner followed by a silent
+  logout is the worst possible translation of "no".</p>
+  <p class="why" data-for="2">A 403 has no effect on the session at all: the token remains valid,
+  unexpired and usable for every endpoint the user <i>is</i> allowed to call. Sessions end when a
+  token expires or is explicitly revoked, never as a side effect of one denied request. Wiring a
+  logout to 403 means a single misclick on an admin-only button signs a legitimate user out —
+  which is a bug your users will report as "it randomly logs me out."</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Every protocol eventually needs "try again" and "stop trying" to be different words.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>4xx versus 5xx, and what a retry policy is really keyed on</h4>
+    <p>The whole reason HTTP splits client errors from server errors is so a caller knows whether
+    repeating the request could possibly help. A 500 or 503 may succeed on retry; a 400 never
+    will, however many times you send it. 401 and 403 are that same split applied one level
+    deeper, inside the auth failures.</p>
+    <div class="hf-scatter"><span>retryable vs terminal, all the way down</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Checked versus unchecked exceptions, arguing the same point in Java</h4>
+    <p>The intent behind the distinction was exactly this: some failures a caller can do something
+    about, and some it cannot. Catching everything in one <code>catch (Exception e)</code> and
+    retrying is the server-side twin of an interceptor that treats 401 and 403 identically —
+    losing the one piece of information that told you what to do.</p>
+    <div class="hf-scatter"><span>a failure type is advice, not just a label</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Why the names are backwards, and why it is worth knowing</h4>
+    <p>401 is named "Unauthorized" but means <i>unauthenticated</i>; 403 "Forbidden" is the real
+    authorization failure. The names were fixed before the vocabulary settled, and they now mislead
+    every newcomer in the same direction. Worth saying out loud once in a code review, because the
+    mix-up survives entirely on nobody mentioning it.</p>
+    <div class="hf-scatter"><span>401 = who? · 403 = no.</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> log in, get a signed token carrying your roles, attach it as
+  <code>Authorization: Bearer …</code>, and the server verifies the signature and lets
+  <code>@PreAuthorize</code> decide — 200, 401 or 403. The sentence worth carrying into your
+  interceptor: <b>401 means the server does not know you, so refresh and retry; 403 means it knows
+  you and refused, so retrying is pointless — branch on which one you got.</b>
+</div>
+
   <section>
     <h2>Run a real request</h2>
 
@@ -501,6 +682,7 @@ document.addEventListener('click', function (e) {
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

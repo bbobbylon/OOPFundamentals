@@ -172,6 +172,212 @@
     </div>
   </div>
 
+<p class="hf-deck">or, shareReplay's cache has an expiration date: zero subscribers</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You wired up shareReplay so /api/me would only ever fire once. Then it fired again — and the code had done nothing wrong.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">refCount didn't lie to you. It also never promised what you assumed.</div>
+  <p><code>currentUser$ = http.get('/api/me').pipe(shareReplay({ bufferSize: 1, refCount: true }))</code>,
+  <code>providedIn: 'root'</code>, injected in the nav bar, the guard, and the profile page. Works
+  for weeks. Then, during one route transition, the old route's components are destroyed a beat
+  before the new route's components finish constructing — for maybe 40ms, literally nothing in the
+  app holds a subscription to <code>currentUser$</code>. The next page subscribes and the network
+  tab shows a brand-new <code>GET /api/me</code>. You checked that the service is a singleton (it
+  is), that <code>bufferSize</code> is 1 (it is) — the one thing nobody checked was whether the
+  subscriber count ever actually touched zero in between.</p>
+  <div class="hf-scatter">
+    <span>service is a singleton ✓</span>
+    <span>bufferSize: 1 ✓</span>
+    <span>refCount dropped to 0 for one tick ⚠</span>
+    <span>the ReplaySubject holding the cache was torn down with it ⚠</span>
+  </div>
+  <p class="hf-foot"><code>refCount: true</code> isn't "cache forever, and also clean up." It's
+  "cache only while somebody's watching."</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Decide on purpose: leak it deliberately, or keep one permanent subscriber</div>
+  <div class="hf-ladder">
+    <b>shareReplay({ bufferSize: 1 }) — no refCount, cache lives for the app's whole life</b>
+    <i>↓ trades a guaranteed cache for a subscription to /api/me that never tears down</i>
+    <b>Better: keep refCount: true, but hold one long-lived subscription yourself (a root service constructor, an APP_INITIALIZER)</b>
+    <i>↓ refCount never truly reaches zero, so there's nothing left to discard</i>
+    <b>A route transition can no longer silently evict the one call you were trying to avoid repeating</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>refCount: true means "shared while watched," not "cached forever."</b> The buffer lives inside
+  a <code>ReplaySubject</code> that <code>refCount</code> owns outright. The instant the last
+  subscriber leaves, that Subject — and everything it remembered — is discarded with it. The next
+  subscriber doesn't get a stale cache; it gets a brand-new execution, because to
+  <code>shareReplay</code> there is no difference between "nobody has asked yet" and "everybody who
+  asked has left." Pick <code>refCount: false</code> and own the leak on purpose, or make sure
+  something never unsubscribes.
+</div>
+
+<div class="hf-note">Think of <code>shareReplay({ refCount: true })</code> as <b>a whiteboard in a
+shared office</b>. While at least one person is in the room, everyone reads the same board. The
+moment the last person leaves and someone wipes it — that's refCount hitting zero — the board is
+gone. The next person in doesn't get shown yesterday's notes; they get a blank board and have to ask
+around from scratch. It stops working as an analogy for the leaked version,
+<code>shareReplay(1)</code> with no refCount at all: that whiteboard is bolted to the wall and nobody
+is ever allowed to erase it, which is exactly the memory cost the leak warning is about.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I have refCount: true AND bufferSize: 1. Why did /api/me fire twice?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">shareReplay</span>
+    <p>Because refCount: true means I only exist while somebody's subscribed. The instant your
+    subscriber count hits zero, I tear down my internal <code>ReplaySubject</code> — cache and all.
+    I'm not a cache with a cleanup policy. I'm a subscriber-counter that happens to be holding a
+    cache hostage.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Your router</span>
+    <p>That gap was me. I destroy the old route's components before the new route's components
+    finish constructing. For about one tick, nobody in this app held a subscription to anything.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">A keep-alive subscriber</span>
+    <p>And I'm the missing piece. Subscribe to <code>currentUser$</code> once, at app startup, and
+    never unsubscribe. Now refCount never sees zero, so shareReplay never has a reason to forget
+    anything.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">refCount doesn't count views or components. It counts subscriptions — and it checks that number after every single one that ends.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>First subscriber connects: shareReplay builds one <code>ReplaySubject(1)</code> and subscribes it to the real <code>http.get()</code> — the network call fires exactly once</span><span class="tag">the shared execution begins</span></li>
+    <li class="open"><span>Every later subscriber attaches to that <b>same</b> ReplaySubject — no new HTTP call, and if a value already arrived, they get it immediately</span><span class="tag">this part works exactly as advertised</span></li>
+    <li><span>Each subscriber that unsubscribes decrements refCount by one — a destroyed component, a manual <code>.unsubscribe()</code>, an async pipe's host view tearing down all count</span><span class="tag">teardown is just subtraction</span></li>
+    <li class="open"><span>The moment refCount hits exactly zero, shareReplay unsubscribes from the real source <b>and</b> discards the ReplaySubject — both happen together</span><span class="tag">the part everyone misses</span></li>
+    <li class="open"><span>The next subscriber after that has nothing to reconnect to. shareReplay builds a brand-new ReplaySubject and subscribes it to a brand-new call to <code>http.get()</code></span><span class="tag">a second first subscriber</span></li>
+    <li><span>From the outside this looks identical to the very first subscription ever made — same log line, same network call — which is exactly why it's so easy to miss in production</span><span class="tag">no error, no warning, just a fresh cost</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the lesson. shareReplay doesn't distinguish "temporarily unwatched"
+  from "never used" — both look identical from the inside, as <code>refCount === 0</code>, and that
+  count always triggers the same action: tear everything down. The gap doesn't have to be long — one
+  tick during a route transition is enough — because RxJS isn't watching a clock. It's watching a
+  count.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt"><span class="nm">IDLE — refCount 0, no ReplaySubject exists</span>
+      <span class="go">first <em>subscribe()</em> arrives <span class="arrow">→</span> CONNECTING</span></div>
+    <div class="stt"><span class="nm">CONNECTING — ReplaySubject(1) built, subscribed to the real source</span>
+      <span class="go">http.get() resolves, the value lands in the buffer <span class="arrow">→</span> SHARED</span></div>
+    <div class="stt on"><span class="nm">SHARED — refCount ≥ 1, one cached value, N subscribers</span>
+      <span class="go">another <em>subscribe()</em> just replays the cache, zero network calls <span class="arrow">→</span> stays SHARED</span></div>
+    <div class="stt"><span class="nm">SHARED → IDLE</span>
+      <span class="go">the last <em>unsubscribe()</em> drops refCount to 0 <span class="arrow">→</span> ReplaySubject discarded, nothing left cached</span></div>
+  </div>
+  <p class="hf-annot">The arrow everyone forgets is the last one. SHARED doesn't fade or degrade —
+  it's either fully alive with a cache, or it's IDLE with none, and a single unsubscribe() is the
+  entire distance between them. There's no "mostly cached" state to fall back into.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q"><code>currentUser$ = http.get('/api/me').pipe(shareReplay({ bufferSize: 1, refCount: true }))</code>,
+  provided in root. Component A subscribes at 9:00:00 and receives the user at 9:00:01. Component
+  A is destroyed at 9:00:05 — that was its only subscription. Component B subscribes at 9:00:06.
+  Does Component B trigger a new <code>/api/me</code> request?</p>
+  <button type="button">No — Component A was destroyed, not the service, and shareReplay's whole job is caching the last value for exactly this situation</button>
+  <button type="button">Yes — Component A was the only subscriber, so refCount hit zero when it unsubscribed, discarding the cache before Component B ever subscribed</button>
+  <button type="button">No new request, but Component B receives undefined until shareReplay's internal buffer refills from a fresh call</button>
+  <p class="why" data-for="0">That's the story for <code>shareReplay(1)</code> with no
+  <code>refCount</code> option at all — that version really does cache forever, because it never
+  tears down. But <code>refCount: true</code> changes the deal: the cache lives inside a
+  <code>ReplaySubject</code> that only exists while somebody's subscribed. Component A being the
+  <i>only</i> subscriber means its destruction wasn't one of several unsubscribes — it was the last
+  one.</p>
+  <p class="why" data-for="1">Right, and the timing is the whole trap: refCount goes from 1 to 0 the
+  instant Component A's subscription ends, at 9:00:05 — a full second before Component B shows up.
+  By 9:00:06 there is no ReplaySubject left to attach to, so subscribing rebuilds one from scratch
+  and fires a brand-new <code>/api/me</code>.</p>
+  <p class="why" data-for="2">There's no in-between state to catch. shareReplay doesn't leave an
+  empty, waiting buffer around after refCount hits zero — the whole ReplaySubject object is
+  discarded. Subscribing after that isn't "joining a buffer that will refill later"; it's identical
+  to the very first subscription ever made, fresh network call included.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Idle resources get reclaimed everywhere. The next arrival always pays what the first one paid.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>AWS Lambda cold starts — the same "zero means gone" rule</h4>
+    <p>A warm Lambda container serves requests instantly, sharing initialized connections and
+    loaded code across invocations — as long as traffic keeps arriving. Let traffic drop to zero for
+    a while and AWS reclaims the container. The next request doesn't resume the old one; it pays a
+    full cold start, indistinguishable from the very first invocation ever made. Same shape: shared
+    while busy, rebuilt from nothing the moment demand hits zero.</p>
+    <div class="hf-scatter"><span>idle container reclaimed ≈ refCount hits 0</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>The browser's back/forward cache — evicted, not paused</h4>
+    <p>Navigate away and Chrome can freeze the page in memory (bfcache) so pressing Back restores it
+    instantly, JS state and all. But memory pressure or certain page behaviors can evict that frozen
+    page. Press Back after eviction and you get a completely fresh page load — not a restore, a
+    rebuild — and nothing in the UI ever tells you which one you got.</p>
+    <div class="hf-scatter"><span>bfcache eviction ≈ ReplaySubject discarded</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your CIAM route guard — the accidental only subscriber</h4>
+    <p>A route guard that checks <code>currentUser$</code> before activation can itself be the one
+    and only subscriber at that moment. If the guard's subscription completes and tears down before
+    the destination component subscribes, a Ping- or Entra-backed "cached" user your team swears is
+    instant quietly refires on some navigations. The fix is the same keep-alive pattern used to keep
+    an OAuth silent-refresh timer running app-wide: one subscription that never lets go.</p>
+    <div class="hf-scatter"><span>guard subscribes-and-drops ≈ the modal in the example above</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">So should I basically never use refCount: true?</p>
+  <p class="a">No — for a resource you genuinely want cleaned up when nobody's using it (a WebSocket
+  connection, an expensive computation tied to one open view), refCount: true is exactly right; the
+  teardown is the feature. It's the wrong choice specifically when your actual goal is "cache this
+  for the app's entire lifetime" — for that, either drop refCount entirely and accept the standing
+  subscription, or keep refCount and add a permanent subscriber yourself so it never has a reason to
+  fire.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why doesn't providedIn: 'root' keep the subscription alive by itself?</p>
+  <p class="a">Because providedIn: 'root' guarantees the <i>service instance</i> is a singleton — it
+  says nothing about who's subscribed to an Observable that instance happens to expose. The service
+  can live for the entire app session while its <code>currentUser$</code> gets subscribed and fully
+  unsubscribed from many times over. Those are two independent lifetimes, and refCount only ever
+  tracks the second one.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">How would I even notice this happened in a real app?</p>
+  <p class="a">Watch the network tab for repeat requests to an endpoint that should only ever fire
+  once per session. More reliably: pipe a <code>tap({ subscribe: () =&gt; console.log('NEW connection') })</code>
+  in right before the <code>shareReplay</code>. If that log line fires more than once for a value
+  that never changes, refCount touched zero somewhere between those two lines showing up.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  <code>logs$ = interval(1000).pipe(shareReplay({ bufferSize: 3, refCount: true }))</code> runs for
+  10 seconds with one subscriber, who then unsubscribes at second 10. A new subscriber arrives at
+  second 11. How many values land in that new subscriber's first synchronous batch — and does your
+  answer change if the first subscriber had instead used
+  <code>shareReplay({ bufferSize: 3 })</code> with no <code>refCount</code> at all?
+</div>
+
   <!-- ── HERO: animated cold-vs-shared walk · subscriber chip + live execution-count inspector ── -->
   <section>
   <div class="card card-amber" style="border:1px solid var(--blue);border-left:3px solid var(--blue)">
@@ -911,6 +1117,7 @@ late subscriber C replays the cache →
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>

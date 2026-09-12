@@ -636,8 +636,28 @@ degrades to the untouched state rather than erroring. Verified in Chromium: seed
 `dlh_progress_v1` with one step marked `learned` and reloading painted that step's dot
 `dot learned` with a `✓` glyph; clicking the new welcome-screen buttons drove the hub's
 breadcrumb and iframe to `learning-paths.html` exactly as a sidebar click would.
-Authoring the CIAM path's 4 orphan steps into an in-app path (this item's "a day more") is
-still open — this pass was discoverability + completion state only, per the item's own scope.
+**The "a day more" landed 2026-09-11.** `learning-paths.html` gained a 14th path, **CIAM
+App, End to End** — the 11 steps of DEVHUB-GUIDE's featured path, in the guide's own order.
+That is what finally gives the 4 orphans an in-app home: `spring-boot-multi-idm-claims-deep`,
+`spring-boot-http-exchange-deep`, `spring-boot-bff-token-relay-deep`, and
+`angular-openapi-client-deep` were previously reachable only by finding them in the sidebar.
+Re-measured against the guide after the edit: **0 of the 11 steps orphaned.**
+
+It is deliberately a NEW path rather than four steps appended to *Identity & Access*. The two
+teach different things and merging them would have blurred both — the existing path teaches
+the **protocol** (keys → token anatomy → OAuth/OIDC flows → the classic failures), this one
+teaches the **application** (one login, traced through every layer that touches it). Several
+pages legitimately appear in both, which is evidence they are different curricula rather than
+duplicates.
+
+Both paths point at `exam-identity-access.html` as their capstone, so both report the same
+best score. That is not a bug to route around: it is the site's only identity exam, the
+renderer keys history off `examId`, and the alternative would have been inventing a second
+exam id with no question bank behind it.
+
+Verified in Chromium rather than by inspection — the card renders "11 lessons → 1 exam",
+numbered dots 1–11, per-step `○` untouched glyphs, and a capstone row reading "Not
+attempted"; `tmp_vcheck.mjs` green at 537/521 and `tmp_smoke.mjs` clean on the page.
 
 #### 12. Split devhub-hf-theme.js's contrast repair into a read phase and a write phase — ✅ LANDED (2026-09-06)
 
@@ -741,23 +761,43 @@ repeat them): every code snippet explained line-by-line in depth (never a one-li
 syntax coloring on ALL code, the Head First brain-friendly aesthetic on ALL subjects (not just
 the Java patterns pages), colored/manipulated text as a deliberate memory device.
 
-### 1. Head First rhythm — sitewide rollout (design landed, ~363 pages still to author)
+### 1. Head First rhythm — sitewide rollout (⭐ SWEEP IN PROGRESS — 245 of 363 pages left)
 The design language shipped and is opted into on **515 of 530 pages** (`<html data-hf>`), and
-**102 pages are authored to the full nine-point rhythm**: deck line, problem/fix cards, a
+**220 pages are now authored to the full nine-point rhythm** (102 before this sweep): deck line, problem/fix cards, a
 "one thing to remember" principle callout, a three-way dialogue, ONE shape-matched mechanism
 diagram, a knowledge check, "where you've seen this before", back-row Q&A, napkin predict-note.
 
-Current state (`node frontend/tmp_hfaudit.mjs`):
+**✅ SWEEP STARTED 2026-09-11 — in progress.** Bobby approved it ("lets do all of those
+things you proposed, in that order"), so the 40–60 band is being authored one page at a time,
+each block teaching ONE specific, verified gotcha the page did not already cover.
 
-| band | pages |
-|---|---|
-| under 40 (thin) | **0** — was 69 |
-| 40–60 (design, not yet the rhythm) | ~363 |
-| 60–75 | ~5 |
-| 75+ (at the bar) | ~97 |
+Band movement (`node frontend/tmp_hfaudit.mjs`, 474 scored lesson pages):
 
-**Remaining: the ~363 in the 40–60 band.** Bobby gated this sweep on the model-switch
-checkpoint — do not start it unilaterally. Diagram choice is by SHAPE, never at random:
+| band | before the sweep | now |
+|---|---|---|
+| under 40 (thin) | **0** — was 69 | **0** |
+| 40–60 (design, not yet the rhythm) | 363 | **245** |
+| 60–75 | 5 | 9 |
+| 75+ (at the bar) | 102 | **220** |
+| mean score | 57.2 | **68.2** |
+
+Two things the first measurement pass established, both of which shaped how the sweep is being
+run:
+
+- **All 363 pages in the band scored `recall` 0, and 362 of them scored `hooks` 0.** The band was
+  not a spread of partially-finished pages — it was 363 pages with the design language applied
+  and none of the teaching. That is why each block is authored rather than templated: there was
+  nothing to top up.
+- The weakest dimensions sitewide are still `hooks` (44.6 mean) and `recall` (47.8), then
+  `visual` (57.6). `structure` is 99.7 — the scaffolding was never the problem.
+
+Finished by hand on Opus (domain judgement matters most here, and these are Bobby's day job):
+the **10-page identity/CIAM batch** and the **9-page Ping batch**, which took the whole `ping`
+track from 44.8–54.5 to 85.6–93.8. Volume across the other tracks is carried by Sonnet
+subagents working from `docs/HEADFIRST-BLOCK-RECIPE.md` — one page at a time, smoke-tested and scored before
+moving on.
+
+Diagram choice is by SHAPE, never at random:
 `.hf-nest` contains, `.hf-slot` plugs, `.hf-cast` fans out, `.hf-one` funnels, `.hf-steps`
 gates, `.hf-cycle` returns.
 
@@ -2041,19 +2081,36 @@ exactly the `// increment i` noise this item forbids. A handler with a real body
 to say why it exists.
 
 **Two real defects the documenting turned up** (documented in place, not silently changed —
-both are Bobby's call):
+both were Bobby's call). **All three are now closed, 2026-09-11:**
 
-- `ProgressService.TOTAL_TOPICS` is hard-coded to **200**, but `tracks-data.js` registers
-  **521** pages. Every completion percentage the stats endpoint returns is therefore
-  inflated, and a thorough learner can exceed 100%. Real fix: count from the registry
-  instead of a constant.
-- `app.exec.enabled` (env `EXEC_ENABLED`) **defaults to `true`** — server-side execution of
-  learner-supplied code as a real OS process is on unless a deployment turns it off. Bounded
-  by the timeout/output/code-size caps and an authenticated-caller requirement, but the
-  default is "on" for the backend's most dangerous capability.
-- Minor asymmetry, left as-is: `devhub-codegrade.js`'s `pyBooting` latch is never cleared on
-  failure (its `javaBooting` sibling and `devhub-tryit.js`'s version both are), so a Pyodide
-  boot that fails wedges Python grading until reload.
+- ~~`ProgressService.TOTAL_TOPICS` is hard-coded to **200**, but `tracks-data.js` registers
+  **521** pages.~~ **✅ FIXED.** The constant is gone; the denominator is now the config
+  property `app.progress.total-topics` (`application.yml`, default `${TOTAL_TOPICS:521}`),
+  so a deployment overrides it without a recompile. `getStats` also floors `notStarted` at 0
+  and caps the percentage at 100, which the old arithmetic did not — with a 200 denominator a
+  thorough learner could return 260%.
+
+  The real risk was never the wrong number, it was that nothing would notice the next drift.
+  So `tmp_vcheck.mjs` gained **check 9**: it reads `backend/.../application.yml`, pulls the
+  `total-topics` default out, and fails the build if it disagrees with the count of pages
+  `tracks-data.js` actually registers. The backend cannot read the frontend registry, so this
+  gate is the only thing holding the two in sync. Deliberately verified it is not a no-op that
+  silently passes — the *"a gate that under-reports is worse than no gate"* lesson from the
+  three bugs above: confirmed the path resolves, the regex matches, and a planted value of
+  `200` makes it fail. `StatsResponse`'s "KNOWN DRIFT" Javadoc was replaced rather than left
+  to rot.
+- ~~`app.exec.enabled` (env `EXEC_ENABLED`) **defaults to `true`**~~ — **not an open issue;
+  the audit note was measuring the wrong default.** The `true` is the bare
+  `@Value` fallback that only applies when nothing sets the property, and every path that
+  actually deploys this backend sets it: `application-prod.yml` uses `${EXEC_ENABLED:false}`,
+  and the App Runner JSON, the Azure bicep, `deploy.sh`, and the GitHub workflow each pass
+  `false` explicitly. No reachable deployment ships with server-side execution on. Left as
+  documentation rather than "fixed", because the code is already correct and changing the
+  fallback would only move where the reader has to look.
+- ~~Minor asymmetry, left as-is: `devhub-codegrade.js`'s `pyBooting` latch is never cleared on
+  failure~~ **✅ FIXED.** `pyBooting` now carries the same `.catch(() => { pyBooting = null; })`
+  its `javaBooting` sibling has, so a Pyodide boot that fails — an offline first run, a CDN
+  blip — releases the latch and the next grade retries instead of wedging Python until reload.
 
 ---
 

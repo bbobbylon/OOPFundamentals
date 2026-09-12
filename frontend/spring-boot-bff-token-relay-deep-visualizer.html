@@ -103,6 +103,202 @@
     <div class="intro-ciam"><span class="tag">BFF vs bearer tokens:</span> Bearer tokens in <code>sessionStorage</code> are fine for internal/low-risk apps where you control every script on the page. BFF + httpOnly cookies is the right call for customer-facing CIAM handling PII, financial, or regulated identity data — the extra server is justified by eliminating XSS token theft.</div>
   </div>
 
+<p class="hf-deck">or, the point isn't hiding the token from the attacker — it's hiding it from the browser entirely</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The BFF works flawlessly on your laptop. In production, users get logged out mid-session for no reason anyone can find.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Login returns 200. Two clicks later, the app treats you as a stranger.</div>
+  <p>You shipped the BFF, and for redundancy you ran three pods behind a load balancer. Now support
+  tickets read like a ghost story: "logged in fine, then randomly logged out." Nothing crashed. The
+  health checks are green. Ping/Entra shows a clean, successful authentication every single time you
+  check. So the identity provider is innocent, the login endpoint is innocent — which leaves the one
+  thing nobody looked at: where the session actually <i>lives</i> once it's created.</p>
+  <div class="hf-scatter">
+    <span>POST /bff/login → 200 ✓</span>
+    <span>IdP logs a clean auth ✓</span>
+    <span>session held in pod A's heap ⚠</span>
+    <span>next request load-balanced to pod B ⚠</span>
+  </div>
+  <p class="hf-foot">The bug was never in the OAuth2 flow. It's the assumption that "the server" is
+  still one thing, now that there are three of them.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make the session boring — put it somewhere every pod can see</div>
+  <div class="hf-ladder">
+    <b>One BFF instance, sessions in memory</b>
+    <i>↓ "works" only because there's exactly one memory to check</i>
+    <b>Add spring-session-data-redis the moment you add pod #2</b>
+    <i>↓ now every pod reads and writes the SAME session store — which one answers a given request stops mattering</i>
+    <b>The browser never notices anything changed — it was only ever holding a cookie</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A BFF doesn't remove state from your system — it relocates it.</b> The browser used to hold the
+  tokens; now something has to, and that something must be one place every instance of your app can
+  reach, not "whichever pod happened to answer this time." That's the whole reason a shared session
+  store isn't an optional scaling nicety here — without it, a BFF behind more than one instance can
+  be less reliable than the SPA it replaced.
+</div>
+
+<div class="hf-note">Think of the BFF's session as a coat check, not a locker whose key you personally
+carry. You hand your coat to an attendant and keep a numbered ticket — you're not lugging the coat
+(the tokens) around the building yourself (the browser). That works perfectly with one coat-check
+counter. Open two more counters at two more doors and hand your ticket to whichever one you happen to
+walk past, and "boring and safe" turns into "your coat is somewhere in this building" — unless all
+three counters share one rack.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>The login endpoint returned 200 and set my cookie. Why does the very next request say I'm not authenticated?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The session</span>
+    <p>Because I don't exist on the machine that just answered you. The pod that logged you in kept me in its own heap — that's a normal <code>HttpSession</code>, and nobody told it to share.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The load balancer</span>
+    <p>I'm not hiding anything from you. Round-robin is the entire job description. I have no idea what a "session" is, and nobody configured me to care.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Redis</span>
+    <p>Point Spring Session at me and this stops being a scaling problem. Every pod asks me the same question about the same session ID and gets the same answer back — so it genuinely stops mattering which one caught the request.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">The whole OAuth2 dance runs before Angular ever loads — and leaves exactly one thing behind in the browser.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Angular does a full-page redirect to <code>/bff/login</code> — a real navigation, not a <code>fetch()</code></span><span class="tag">has to leave the SPA entirely</span></li>
+    <li><span>Spring redirects again, this time to the identity provider's <code>/authorize</code> endpoint, carrying <code>state</code> and a PKCE challenge</span><span class="tag">the BFF is the OAuth2 client, not Angular</span></li>
+    <li class="open"><span>You authenticate directly against Ping/Entra's own login page — your password goes to <b>them</b>, never anywhere near your app's origin</span><span class="tag">a separate origin the whole time</span></li>
+    <li><span>The IdP redirects back to the BFF's registered callback URL carrying a one-time authorization <code>code</code></span><span class="tag">not a token — not yet usable</span></li>
+    <li class="open"><span>The BFF exchanges that code for real tokens <b>server-to-server</b>, including its own client secret, and stores the result keyed to a brand-new session</span><span class="tag">this exchange happens somewhere JavaScript can never watch</span></li>
+    <li><span>The BFF's response to the browser is just <code>Set-Cookie: SESSION=…; HttpOnly</code> and a redirect back into the Angular app</span><span class="tag">the entire flow leaves ONE artifact behind</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the lesson, and everything else is scaffolding around it. The reason this
+  pattern buys you anything at all is that the moment a real, replayable credential comes into
+  existence, it happens on a machine an attacker's injected script can never reach. In a
+  browser-held-token SPA, that exact moment — the token landing somewhere — happens on the victim's
+  own machine, in the very same JavaScript context the attacker's payload runs in. Move that one step
+  server-side and every step after it inherits the protection for free.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">SESSION cookie · httpOnly, opaque to JS</span>
+      <div class="ring"><span class="lbl">Redis-backed session record</span>
+        <div class="core">access_token + refresh_token<small>the only place the resource API's Bearer header comes from</small></div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Three layers, and client-side JavaScript can reach exactly zero of them. It can
+  confirm a cookie named <code>SESSION</code> exists; it cannot read its value, cannot see the session
+  record that value points to, and never comes within a layer of the tokens sitting inside that
+  record. A browser-held-token SPA has one flat variable where this picture has three nested walls —
+  that gap, drawn out, is the entire security argument for building a BFF at all.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">The BFF's <code>SESSION</code> cookie is <code>Secure</code> and <code>HttpOnly</code>, but
+  someone forgot to set <code>SameSite</code>. A stored-XSS script runs on a different subdomain of the
+  same parent domain, and the cookie's <code>Domain</code> attribute is scoped broadly enough to include
+  it. What can that script actually do to your BFF?</p>
+  <button type="button">Nothing — HttpOnly blocks any script, on any origin, from touching the cookie</button>
+  <button type="button">It can't read the cookie's value, but it can still trigger the browser to send it — forging authenticated requests against the BFF, CSRF-style</button>
+  <button type="button">It gets full read access to the token, because a broad cookie Domain shares the cookie's contents across every subdomain</button>
+  <p class="why" data-for="0">HttpOnly genuinely does block <i>reading</i> the cookie from any script,
+  anywhere — that part of the instinct is correct, and worth keeping. But HttpOnly was never designed
+  to stop the cookie from being <i>sent</i>. A browser attaches a cookie to a request based on domain,
+  path, and <code>SameSite</code> — not on which script triggered the request — so "HttpOnly protects
+  it" quietly stops being the whole answer the moment the attack is forgery instead of theft.</p>
+  <p class="why" data-for="1">Right — and this is exactly the CSRF door a BFF reopens, which is why the
+  trade-off section above pairs it with <code>CookieCsrfTokenRepository</code>. HttpOnly stops the
+  <i>read</i>; <code>SameSite</code> stops the <i>automatic send</i>. Skip <code>SameSite</code> and a
+  script on a related origin can still fire a request that carries your cookie along, even though it
+  can never see what's inside it.</p>
+  <p class="why" data-for="2">A broad <code>Domain</code> attribute is real and worth checking — it
+  controls which hosts the cookie gets <i>attached to</i>. But attachment isn't the same question as
+  readability: HttpOnly governs whether script can read the value, and it answers no regardless of how
+  wide <code>Domain</code> is set. Wide scope makes more places able to <i>send</i> the cookie, not
+  more places able to <i>see</i> it.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">This isn't a new idea — it's an old one, reimported.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Every server-rendered app before SPAs existed</h4>
+    <p>Rails, JSP, classic ASP.NET — none of them ever put a credential in the browser at all. The
+    session cookie was always just a pointer into server memory. SPAs traded that property away for
+    API flexibility and a decoupled frontend; a BFF is the industry admitting it wants both, and
+    paying a small server bill to get it back.</p>
+    <div class="hf-scatter"><span>the "old" model, with a JSON API bolted on</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Stripe Elements / a hosted checkout iframe</h4>
+    <p>Your page never touches a raw card number — it's tokenized inside an iframe Stripe controls,
+    and your server only ever sees a reusable token. Different boundary (an iframe instead of a
+    server), identical goal: keep the sensitive credential out of the one execution context an
+    attacker's script can most easily reach.</p>
+    <div class="hf-scatter"><span>keep the secret off the attacker's turf</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your own Ping/Entra login page, for your own app</h4>
+    <p>Ping Federate and Entra ID already run this exact trust model for their <i>own</i> hosted login
+    screens: your browser gets an IdP session cookie, and everything else — the actual credentials,
+    the tokens it mints — stays on their servers. Building a BFF is adopting, for your app, the
+    identical shape your IdP already trusts with its own front door. Worth saying out loud the first
+    time a teammate calls it over-engineered.</p>
+    <div class="hf-scatter"><span>you're copying your own IdP's homework</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">If the BFF goes down, does every logged-in user get logged out?</p>
+  <p class="a">Depends entirely on where the session lives. In-process (per-pod memory) and that pod
+  dies — yes, every session on it is gone, which is a second reason (beyond horizontal scaling) to put
+  Spring Session on Redis: a routine pod restart during a deploy becomes invisible to users instead of
+  a mass logout. Redis itself is now the thing that can't go down, so a real deployment gives it its
+  own redundancy (Sentinel or a cluster) — you haven't eliminated the "what if this one thing dies"
+  question, you've moved it onto infrastructure that's actually built to answer it.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Doesn't this just move the XSS problem instead of fixing it?</p>
+  <p class="a">No — it removes the specific asset XSS was after, not the vulnerability class. An XSS on
+  a browser-token SPA can still read the DOM, submit forms as the logged-in user, and call your API
+  through the browser's own authenticated <code>fetch</code> — a BFF doesn't stop any of that. What it
+  removes is the attacker's ability to <i>exfiltrate</i> a long-lived, replayable credential and reuse
+  it later, from their own machine, after the XSS is long patched. That's a real, specific reduction —
+  not "fixed" — and it's exactly why you still go fix the XSS.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why not just make the access token short-lived instead of building a whole BFF?</p>
+  <p class="a">Do both — they're not competing fixes. A short-lived token only shrinks the
+  <i>window</i>; it doesn't remove the <i>theft</i>. A 5-minute access token stolen via XSS is still
+  fully usable for 5 minutes per theft, and a stolen refresh token — which typically lives far longer,
+  precisely so the user isn't re-prompted constantly — can go on minting fresh access tokens
+  indefinitely. A BFF removes both from the browser entirely. That's a different, stronger guarantee
+  than "whatever gets stolen expires soon."</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  The BFF's session cookie is <code>Secure</code>, <code>HttpOnly</code>, and <code>SameSite=Lax</code>.
+  An attacker gets a stored-XSS payload running on the <i>exact same page</i> the victim is looking at
+  — same origin, no cross-site request involved at all. Does <code>SameSite=Lax</code> stop them from
+  doing anything useful — and can they get their hands on the access token itself?
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -462,6 +658,7 @@ renderXss();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

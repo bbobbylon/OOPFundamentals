@@ -128,6 +128,201 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> <code>registry.counter("ciam.login.attempts", "result", "success"/"failure")</code> tracks login rates — a failure rate &gt; 20% for 5 min may be credential stuffing. Trace the JWT path: a healthy trace is Security filter 2ms (cached JWKS) + service 5ms + query 3ms = 10ms; accidentally drop JWKS caching and the trace shows the filter at 150ms (a Ping call on every request).</div>
   </div>
 
+<p class="hf-deck">or, @Timed only wires itself up for free on a controller method — everywhere else, it's dead code until you register one bean</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Same annotation. Same import. One of them measures nothing, forever.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">OrderRepository.findAll() has carried @Timed for six months. It has never recorded a single call.</div>
+  <p>This page's own Section 2 shows <code>@Timed(value="orders.list", percentiles={0.5,
+  0.95})</code> as a drop-in alternative to hand-building a <code>Timer</code> — sitting right on
+  <code>OrderRepository</code>, reading like it should just work the same way the
+  <code>Counter</code> and <code>Timer</code> examples above it do. It doesn't. <code>@Timed</code>
+  is only ever evaluated by an AOP aspect called <code>TimedAspect</code> — and Spring Boot's
+  autoconfiguration never registers that bean for you. Without it, the annotation is inert
+  metadata: no proxy reads it, no Timer is created, <code>/actuator/prometheus</code> never shows
+  an <code>orders_list</code> series, and nothing anywhere logs a warning — because as far as
+  Spring is concerned, there was never anything to wire up in the first place.</p>
+  <div class="hf-scatter">
+    <span>@Timed(value="orders.list") on OrderRepository.findAll() ✓ compiles</span>
+    <span>TimedAspect bean ✗ never declared</span>
+    <span>/actuator/prometheus — no orders_list series, ever</span>
+    <span>@GetMapping controller method, same annotation — works fine</span>
+  </div>
+  <p class="hf-foot">It compiles, it deploys, it runs for six months. The only thing it never does is measure anything.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Register the one bean that makes the annotation real</div>
+  <div class="hf-ladder">
+    <b>@Bean public TimedAspect timedAspect(MeterRegistry registry) { return new TimedAspect(registry); }</b>
+    <i>↓ this is the only thing that ever reads an @Timed annotation on a non-controller bean</i>
+    <b>Spring wraps OrderRepository in an AOP proxy the moment that bean exists — the same mechanism as any other method-level annotation</b>
+    <i>↓ now calls to findAll() actually pass through TimedAspect's around-advice first</i>
+    <b>orders_list_seconds finally appears in /actuator/prometheus — six months of silent history you'll never get back</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A method-level annotation is a note left for something else to read. @PreAuthorize needs a
+  security proxy. @Transactional needs transaction advice. @Timed needs TimedAspect.</b> Spring
+  Boot only auto-registers some of those readers — never assume it registered the one your
+  annotation needs.
+</div>
+
+<div class="hf-note">Think of <code>@Timed</code> as <b>a note taped to a machine, not a sensor
+wired into it</b>. Taping "log my cycle time" onto <code>OrderRepository.findAll()</code> doesn't
+create a sensor — it just leaves a note. <code>TimedAspect</code> is the only thing in a Spring
+Boot app that ever walks around reading those notes. No <code>TimedAspect</code> bean, no one ever
+reads it, and the note might as well not be there.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I put @Timed on OrderRepository.findAll() six months ago. There's still no orders_list
+    metric anywhere in Grafana. What happened?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">@Timed</span>
+    <p>I got compiled in, same as always. Annotations don't run — they just sit on the method,
+    waiting for something with an AOP proxy to notice me. Nothing ever did.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">TimedAspect</span>
+    <p>I'm the only thing that notices you. I read @Timed off a method during its proxy's
+    around-advice and record a Timer with your name and percentiles. But I only exist if somebody
+    declares me as a @Bean — and on this app, nobody ever did.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">the @GetMapping method</span>
+    <p>I never had that problem. Spring Boot's own web metrics filter reads @Timed straight off
+    controller handler methods automatically — no bean required. Same annotation as
+    OrderRepository's, completely different plumbing underneath it.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One annotation. Two completely different readers, depending on where you put it.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>@Timed is compiled onto OrderRepository.findAll() as retained annotation metadata — nothing runs yet, this is just a class-file fact</span><span class="tag">true of every annotation</span></li>
+    <li class="open"><span>On a @RestController handler method, Boot's auto-configured web metrics instrumentation — the same machinery already producing http_server_requests_seconds for every endpoint — specifically looks for @Timed on the handler being invoked and folds its settings in</span><span class="tag">automatic, because Boot wired THIS one in</span></li>
+    <li><span>On OrderRepository — a plain @Repository bean, not a controller — nothing in Boot's autoconfiguration ever looks for @Timed at all</span><span class="tag">a completely different code path, or none</span></li>
+    <li class="open"><span>The only thing that CAN read @Timed there is TimedAspect, an AOP @Aspect bean shipped by Micrometer but never auto-registered by Spring Boot</span><span class="tag">you have to ask for this one yourself</span></li>
+    <li class="open"><span>No TimedAspect bean → no AOP proxy is ever built around OrderRepository for this purpose → findAll() runs as plain, unproxied Java → the annotation is never evaluated</span><span class="tag">the exact silence Page 6 showed you for @PreAuthorize</span></li>
+    <li><span>Add the bean, and Spring re-proxies OrderRepository the next time the context starts — same annotation, same value, now it means something</span><span class="tag">one bean, six months late</span></li>
+  </ol>
+  <p class="hf-annot">Boot auto-registers the reader for some annotations (@Transactional,
+  @PreAuthorize under @EnableMethodSecurity, @Timed on controller methods specifically) and not
+  others (@Timed everywhere else, plain @Async without @EnableAsync). There's no visual way to
+  tell which category a new annotation falls into from the annotation itself — you find out from
+  the docs, or from a metric that never shows up.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring">
+      <span class="lbl">the AOP proxy TimedAspect would build around OrderRepository, if it existed</span>
+      <div class="core">OrderRepository.findAll()<small>@Timed is read HERE — if this ring exists at all</small></div>
+    </div>
+    <p class="note">No TimedAspect bean was ever declared, so there's no ring. findAll() runs as
+    the bare, unproxied core — exactly like RoleService did back when @InjectMocks skipped the
+    proxy entirely.</p>
+  </div>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q"><code>OrderRepository.findAll()</code> carries
+  <code>@Timed(value="orders.list", percentiles={0.5,0.95})</code>. No <code>TimedAspect</code>
+  bean exists anywhere in the app. A <code>@GetMapping</code>-annotated
+  <code>OrderController.list()</code> ALSO carries
+  <code>@Timed(value="orders.list.http")</code>. After 10,000 calls to each, what does
+  <code>/actuator/prometheus</code> show?</p>
+  <button type="button">Neither metric — @Timed always requires a TimedAspect bean, with no exceptions</button>
+  <button type="button">Both metrics — @Timed is auto-configured by Spring Boot the moment micrometer-registry-prometheus is on the classpath</button>
+  <button type="button">Only orders_list_http — the controller method is instrumented automatically by Boot's web metrics filter; the repository method's @Timed is never read by anything</button>
+  <p class="why" data-for="0">Almost, but not quite absolute. Boot's own web-request
+  instrumentation reads @Timed directly off controller handler methods without needing
+  TimedAspect at all. The bean is only required off that one automatically-instrumented path.</p>
+  <p class="why" data-for="1">True for HTTP request metrics in general — http_server_requests_seconds
+  shows up with zero extra beans — but not true for an arbitrary @Repository/@Service method.
+  @Timed there depends entirely on TimedAspect, which the Prometheus starter never registers on
+  its own.</p>
+  <p class="why" data-for="2">Right. The controller method rides Boot's existing web-metrics
+  machinery, which already watches every handler invocation and happens to also check for @Timed.
+  The repository method has no such automatic watcher — without TimedAspect, its @Timed is
+  compiled-in metadata that nothing ever reads.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Four annotations into this sweep, and the same rule keeps resurfacing under a different name.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>@Cacheable — the exact same gap, on a different annotation</h4>
+    <p><code>@Cacheable("orders")</code> on a service method does nothing at all without
+    <code>@EnableCaching</code> on a configuration class and a <code>CacheManager</code> bean in
+    context. Same failure mode as @Timed: compiles cleanly, runs cleanly, caches nothing, and nothing
+    ever tells you.</p>
+    <div class="hf-scatter"><span>@Cacheable ≈ @Timed — needs its own switch flipped</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Four annotations, two different rules, no way to tell them apart on sight</h4>
+    <p>This sweep alone has now shown you @PreAuthorize (needs @EnableMethodSecurity, then still
+    needs a real proxy), @TransactionalEventListener (needs an active transaction), @Async (needs
+    @EnableAsync AND loses MDC across the hop), and now @Timed (needs TimedAspect). Some of these
+    Boot wires up by default. None of them look different in the source file.</p>
+    <div class="hf-scatter"><span>the annotation never tells you who's supposed to read it</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your own PingTokenValidationService, quietly unmeasured</h4>
+    <p>Someone adds <code>@Timed("ping.token.validate")</code> to
+    <code>PingTokenValidationService.validateToken()</code> specifically to catch slow Ping calls
+    early. No TimedAspect bean exists. Months later, this page's own intro scenario happens for
+    real — JWKS caching breaks and the filter jumps to 150ms per request — and the one metric that
+    would have paged someone the moment it started never existed to page anyone at all.</p>
+    <div class="hf-scatter"><span>the alert you thought you already had</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Is there a way to tell, just by looking at a Spring Boot app, which annotations need an extra bean and which are automatic?</p>
+  <p class="a">No general rule from the annotation alone. The practical habit: after adding any new
+  behavioral annotation, immediately verify it did something — hit the endpoint, check
+  /actuator/prometheus, watch for a log line — rather than trusting that it compiled. Compiling
+  only proves the annotation exists; it proves nothing about whether anything reads it.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does @Observed have the same gap as @Timed?</p>
+  <p class="a">Same shape, and this page's own Section 2 code already shows the fix:
+  <code>ObservedAspect</code> is @Timed's counterpart for the newer Observation API, and it's just
+  as unregistered by default. The page shows it WITH the required @Bean — that's the pattern to
+  copy for @Timed too.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">If I add spring-boot-starter-aop, does that register TimedAspect for me?</p>
+  <p class="a">No. spring-boot-starter-aop only brings in the AOP/AspectJ proxying infrastructure —
+  a prerequisite for annotation-driven aspects to work AT ALL — but it doesn't register any
+  specific aspect bean for you. You still declare TimedAspect, ObservedAspect, or any other aspect
+  explicitly; the starter only makes it possible for one to intercept calls once it exists.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  <code>PaymentService.charge(request)</code> is a <code>@Service</code> bean with
+  <code>@Timed(value="payment.charge", percentiles={0.99})</code> on it. The app has
+  <code>spring-boot-starter-actuator</code>, <code>micrometer-registry-prometheus</code>, AND
+  <code>spring-boot-starter-aop</code> all on the classpath — no <code>TimedAspect</code> bean
+  anywhere in any <code>@Configuration</code> class. Before you scroll back up — does
+  <code>payment_charge_seconds</code> show up in <code>/actuator/prometheus</code> after
+  <code>charge()</code> is called a thousand times? What's the one bean whose absence decides the
+  answer?
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -836,6 +1031,7 @@ function addSpanBar(svcName, spanId, leftPct, widthPct, color){
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>

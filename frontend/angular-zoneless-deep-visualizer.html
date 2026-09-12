@@ -109,6 +109,202 @@
     </div>
   </div>
 
+<p class="hf-deck">or, going zoneless makes ticks rarer — it doesn't make any single tick cheaper</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The migration got declared "done." One row-heavy component never got the memo.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Six weeks after "zoneless migration complete," one component is still eating 90% of every tick — for a signal it's never even read.</div>
+  <p>A team ships <code>provideZonelessChangeDetection()</code>, converts every service to
+  signals, and marks every component <code>OnPush</code> — except <code>AuditLogTable</code>, a
+  4,000-row grid nobody touched during the migration because "it still worked." Elsewhere, a
+  presence widget writes a <code>heartbeat</code> signal from a WebSocket callback every 2
+  seconds — a tiny, completely unrelated update. CPU profiling shows <code>AuditLogTable</code>
+  re-evaluating all 4,000 rows' bindings twice a second, forever, for a signal it doesn't inject
+  and has never read in its template.</p>
+  <div class="hf-scatter">
+    <span>provideZonelessChangeDetection() shipped ✓</span>
+    <span>every service converted to signals ✓</span>
+    <span>AuditLogTable never got changeDetection: OnPush ⚠</span>
+    <span>heartbeat has nothing to do with anything AuditLogTable renders</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that removing <code>zone.js</code> makes every
+  component's checks cheap. It only makes ticks rarer. A Default-strategy component still pays
+  full price on every tick that happens to run — whoever, or whatever, caused it.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Give the straggler OnPush too — now the walk prunes it like everyone else</div>
+  <div class="hf-ladder">
+    <b>Add changeDetection: ChangeDetectionStrategy.OnPush to AuditLogTable's decorator</b>
+    <i>↓ it now has a dirty flag instead of an unconditional "check me, every time"</i>
+    <b>heartbeat's tick fires exactly as before — nothing about the trigger changes at all</b>
+    <i>↓ the walk still reaches AuditLogTable, finds none of its own four triggers fired, and prunes it — for zero cost</i>
+    <b>4,000 rows now re-evaluate only when AuditLogTable's own input, event, or signal actually changes</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Zoneless decides WHEN a tick starts. OnPush decides WHO gets checked once it does</b> — and
+  Default strategy has no opt-out from a tick that's already running, whether that tick was caused
+  by Zone.js or a scheduler notification. Dropping <code>zone.js</code> without adding
+  <code>OnPush</code> to every component doesn't buy you the savings zoneless is famous for; it
+  just makes the expensive full checks rarer instead of removing them.
+</div>
+
+<div class="hf-note">Think of it as a building where the front-desk buzzer used to ring
+<b>constantly</b> — any delivery, any visitor, anywhere — and every super on every floor walked
+their whole floor each time it rang. Going zoneless is switching to a buzzer that only rings when
+a resident specifically presses it. Great — rounds are rarer now. But <b>the one apartment nobody
+gave a "don't bother me unless I specifically page you" sign to</b> still gets walked in full,
+top to bottom, every single time the buzzer rings for ANY reason — including a neighbor three
+floors up ordering pizza.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>We went zoneless months ago. Why is AuditLogTable still re-rendering every two seconds?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The scheduler</span>
+    <p>A tick runs whenever anything notifies me — right now that's the presence widget's
+    heartbeat signal, once every 2 seconds. I don't inspect who's related to what. I just run the
+    walk.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">AuditLogTable (Default strategy)</span>
+    <p>And nobody ever told me I'm allowed to sit a tick out. Default strategy means: whenever a
+    walk reaches me, check me — full stop. That rule didn't change when zone.js left the
+    building.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">OnPush, once added</span>
+    <p>Give me the annotation and I'll finally have a dirty flag to check. Now the scheduler's
+    heartbeat-triggered walk reaches me, sees nothing of mine fired, and moves on without opening
+    a single row.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One unrelated signal write. One unconditional casualty, until it gets the annotation.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>App is zoneless, and every component is OnPush — except AuditLogTable, missed during migration</span><span class="tag">one straggler is all it takes</span></li>
+    <li class="open"><span>A WebSocket callback writes PresenceWidget's heartbeat signal, once every 2 seconds</span><span class="tag">a real, legitimate, tiny notification</span></li>
+    <li><span>The scheduler coalesces it and schedules exactly one tick</span><span class="tag">zoneless is doing its job perfectly here</span></li>
+    <li class="open"><span>The tick walks from the root down. OnPush siblings with no dirty flag get pruned, same as always</span><span class="tag">this part is genuinely cheap</span></li>
+    <li><span>AuditLogTable has no OnPush annotation, so Default strategy applies: checked unconditionally, every tick, regardless of why the tick fired</span><span class="tag">the walk doesn't ask "are you related?" — only "are you OnPush and clean?"</span></li>
+    <li class="open"><span>4,000 rows' worth of bindings re-evaluate, twice a second, forever — until someone adds the one annotation</span><span class="tag">the fix is one line, once you know to look for it</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the whole lesson. Removing <code>zone.js</code> changed how a tick
+  gets <i>started</i> — nothing about it changed how a Default-strategy component behaves once a
+  tick is already under way. That component was always going to be checked on every tick, in
+  Zone-based Angular or zoneless Angular alike; zoneless just made the ticks themselves rarer.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">A tick fires — triggered by PresenceWidget's unrelated heartbeat signal</div>
+    <div class="arrow">→</div>
+    <div class="opts">
+      <span>OnPush sibling, clean → pruned, zero work done</span>
+      <span>OnPush sibling, dirty from its own trigger → checked, proportionate work</span>
+      <span class="on">AuditLogTable, Default strategy → checked in full, every time, no matter who triggered the tick</span>
+    </div>
+  </div>
+  <p class="hf-annot">Three components see the exact same tick. Two of them get a strategy-based
+  say in whether they're touched. The third was never asked.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A zoneless app is fully migrated to OnPush except one legacy component,
+  <code>AuditLogTable</code>, which nobody got around to annotating. A completely unrelated signal
+  write somewhere else in the app triggers a tick. Does <code>AuditLogTable</code> get checked on
+  that tick?</p>
+  <button type="button">No — zoneless only checks components that specifically depend on whichever signal changed, so AuditLogTable is skipped automatically</button>
+  <button type="button">Only if AuditLogTable happens to be a descendant of the component whose signal changed — otherwise the walk never reaches it</button>
+  <button type="button">Yes — Default strategy means it's checked on every tick that runs, for any reason, exactly like it would have been under Zone.js; zoneless only changed how rarely a tick starts, not what a tick does once it starts</button>
+  <p class="why" data-for="0">Signals ARE fine-grained about marking things dirty — but only for
+  components that have a dirty flag to set in the first place. That's an OnPush concept.
+  <code>AuditLogTable</code> has no strategy telling it to wait for a specific dependency, so
+  there's nothing for the signal to "not match" — it gets swept into every tick regardless.</p>
+  <p class="why" data-for="1">This borrows a rule from the wrong story — that's how a
+  <code>detach()</code>'d branch behaves (unreachable regardless of dirt), not how Default
+  strategy behaves. A tick's walk isn't gated by relation to the trigger; the walk always covers
+  the whole live tree, checking every Default component it reaches and every OnPush component
+  its dirty flag allows through.</p>
+  <p class="why" data-for="2">Right. The walk doesn't ask why the tick started or who's related to
+  the trigger — it only asks, per component, "OnPush and clean, or not?" A component with no
+  strategy annotation always fails that question in the expensive direction.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Making an alarm ring less often never makes what happens after it rings any cheaper.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A cron job with no WHERE clause</h4>
+    <p>Switching a job from running every minute to running every hour cuts the number of runs by
+    98% — and does nothing at all for a run that still executes
+    <code>SELECT * FROM orders</code> with no index and no filter. Fewer wake-ups; identical,
+    still-terrible cost per wake-up.</p>
+    <div class="hf-scatter"><span>rarer trigger ≠ cheaper work</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A React child with no memo()</h4>
+    <p>Batching state updates (React 18's automatic batching, or your own debounce) makes a
+    parent re-render less often — great. A child that was never wrapped in <code>React.memo</code>
+    still fully re-renders every single time its parent does, on every one of those now-rarer
+    renders, whether or not its own props changed at all.</p>
+    <div class="hf-scatter"><span>unmemoized child ≈ Default-strategy component</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your CIAM admin dashboard's audit-log table</h4>
+    <p>An admin console moves session-status from 5-second polling to a WebSocket push — a real
+    win, ticks now fire only when something genuinely changes. But the audit-log table was built
+    before the OnPush convention took hold and nobody circled back. Result: every presence ping
+    from every other logged-in admin fully re-renders a 4,000-row log table that has nothing to do
+    with anyone's presence — the win from switching off polling quietly gets eaten by the one
+    component that never opted in to being skippable.</p>
+    <div class="hf-scatter"><span>fixed the frequency, not the strategy</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">So does OnPush matter MORE in a zoneless app, or the same amount?</p>
+  <p class="a">More, in practice — under Zone.js, ticks were already so frequent that one more
+  wasted Default-strategy check barely registered. Under zoneless, ticks are supposed to be rare
+  and meaningful, which makes one component that's checked on literally all of them stand out far
+  more in a profiler. The bug was always there; zoneless just makes it visible.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">If every component in the app is OnPush, does the "who gets checked" question even come up?</p>
+  <p class="a">Only in the trivial sense — every component now asks "am I dirty?" before doing any
+  work, so the answer is always exactly the components whose own triggers fired. That's the whole
+  point of pairing zoneless with universal OnPush: the walk itself has nothing left to do at any
+  clean node.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">How would I actually catch a component like this before it ships?</p>
+  <p class="a">A profiler flame graph over a few seconds of idle-ish app time is the fastest tell —
+  a component re-rendering at a steady interval that matches some OTHER feature's polling or
+  socket cadence, with none of its own inputs changing, is almost always a missing
+  <code>OnPush</code>. Grepping the codebase for components with no
+  <code>changeDetection:</code> line at all works too, just slower.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  Three siblings under a zoneless root: <b>A</b> (OnPush, currently clean), <b>B</b> (Default
+  strategy), <b>C</b> (OnPush, currently dirty from its own input changing). A totally unrelated
+  timer elsewhere writes a signal, triggering one tick. Which of A, B, and C get checked on that
+  tick — and which get skipped?
+</div>
+
   <!-- ── EXTREME-VIZ HERO: Zoneless Angular ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -513,6 +709,7 @@ setMode('zone');
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>

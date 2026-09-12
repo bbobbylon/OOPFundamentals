@@ -298,6 +298,211 @@
     </div>
   </div>
 
+<p class="hf-deck">or, ofType doesn't check who sent an action — only what its type string says</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Two features that have never heard of each other. One copy-pasted string. A crash in a file that never imported the file that caused it.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">UsersEffects used ofType exactly like the docs say. It still ran against a completely different feature's action.</div>
+  <p><code>UsersFeature</code> ships an effect with <code>ofType(UsersActions.loadUsersSuccess)</code> —
+  the textbook-correct pattern, filtering to exactly the action it cares about. Eight months
+  later, a different engineer scaffolds <code>AdminFeature</code> by copy-pasting a nearby "Load
+  Success" action group and forgets to update the bracketed prefix:
+  <code>createAction('[Users] Load Success', props&lt;{ admins: Admin[] }&gt;())</code>. Both
+  files compile cleanly. Both features work perfectly — in isolation. The first time a user with
+  admin access triggers <code>AdminFeature</code>'s action, <code>UsersEffects</code>' callback
+  fires too, destructures <code>{ users }</code> from a payload that only has
+  <code>admins</code>, and throws — inside a feature that has never imported
+  <code>AdminFeature</code> at all.</p>
+  <div class="hf-scatter">
+    <span>UsersEffects has ofType(UsersActions.loadUsersSuccess) ✓ — textbook-correct</span>
+    <span>AdminFeature: separate file, separate team, separate 8 months later</span>
+    <span>both actions' type string: '[Users] Load Success' ⚠ — one copy-paste, never caught</span>
+    <span>the stack trace points at UsersEffects, not at the file that actually caused it</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that <code>ofType(specificActionCreator)</code> scopes
+  an effect to actions your own feature dispatches. It scopes an effect to a STRING — and NgRx
+  never checks which file, which action-creator object, or which feature produced an action
+  carrying that string.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make the type string impossible to collide — before two teams find out the hard way</div>
+  <div class="hf-ladder">
+    <b>Give every action a prefix specific enough to be unique on its own: '[Admin] Load Users Success', never a copy-pasted '[Users] Load Success'</b>
+    <i>↓ collisions become a search-before-you-paste habit instead of a production incident</i>
+    <b>Add a lint rule (or a 3-line startup script) that scans every createAction() call for a duplicate literal type string</b>
+    <i>↓ a copy-paste collision now fails CI, months before two features ship together</i>
+    <b>If an effect legitimately must react to actions outside its own feature, say so explicitly — don't rely on an accidental string match to do it</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>ofType is filter(a =&gt; a.type === X.type) — nothing more.</b> It has no idea which folder,
+  which import, or which team's action creator produced the object flowing past it. Two actions
+  with the same type string ARE the same action as far as anything downstream of
+  <code>dispatch()</code> can tell, no matter how far apart their source files live.
+</div>
+
+<div class="hf-note">Think of two neighbors' garage-door remotes shipped with the same
+factory-default frequency, in two houses that have never met. Each remote only ever gets pressed
+by its own owner, for its own door — nobody did anything wrong. But the receiver in the garage
+doesn't check WHOSE remote sent the signal, only whether the code matches. The day both remotes
+happen to exist on the same street, pressing one opens both doors — and neither owner can figure
+out why from inside their own garage.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>UsersEffects only listens with ofType(UsersActions.loadUsersSuccess). How did AdminFeature's action get in there at all?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">ofType</span>
+    <p>I'm a filter on one field: the type string. Show me any action, from anywhere in the app,
+    whose <code>.type</code> equals <code>'[Users] Load Success'</code>, and I let it through. I
+    never asked which file created it.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">actions$</span>
+    <p>And I'm the one stream for the entire application. Every <code>dispatch()</code> call from
+    every feature, every team, forever, arrives on me. There's no per-feature lane for me to keep
+    them apart on your behalf.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The two action creators</span>
+    <p>We were written independently, eight months apart, by people who've never spoken. We just
+    both typed the identical string into <code>createAction()</code>. TypeScript checked each of
+    us on our own — it type-checks a string literal, it doesn't cross-reference every other
+    string literal in the codebase.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps. The first three are each individually correct code.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>AdminFeature is scaffolded by copy-pasting a nearby "Load Success" action group, and the bracketed prefix never gets changed from [Users] to [Admin]</span><span class="tag">a one-character-category mistake in one line</span></li>
+    <li class="open"><span>Both action creators compile without a warning — TypeScript checks each createAction() string literal in isolation, with no project-wide uniqueness check</span><span class="tag">nothing catches this at build time</span></li>
+    <li><span>AdminFeature ships and, on a successful API call, dispatches its action with an { admins } payload — correct, in isolation</span><span class="tag">step 3 is not the bug</span></li>
+    <li class="open"><span>That action lands on the single, global actions$ stream — exactly like every other action dispatched anywhere in the app</span><span class="tag">one firehose, no lanes</span></li>
+    <li><span>UsersEffects' ofType(UsersActions.loadUsersSuccess) compares the incoming action's .type string to '[Users] Load Success' — and matches, because AdminFeature's action carries that exact string</span><span class="tag">a correct filter, given a false premise</span></li>
+    <li class="open"><span>UsersEffects' callback runs, destructures { users } from a payload that only has admins, and throws — inside a feature that never imported AdminFeature</span><span class="tag">the crash site is never the mistake site</span></li>
+  </ol>
+  <p class="hf-annot">Steps 1 through 3 are each, individually, unremarkable correct code. Step 5 is
+  where two independently-correct pieces of work collide, entirely inside NgRx's own dispatch
+  mechanism — no stack trace will ever show you AdminFeature's file, because by the time an action
+  reaches UsersEffects, it's just a plain object with a matching string.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>UsersActions.loadUsersSuccess({ users })</span>
+      <span class="new">AdminActions.loadAdminUsersSuccess({ admins }) — same type string</span>
+      <span>NavActions.tabChanged(...)</span>
+      <span>…every other action creator in the app</span>
+    </div>
+    <div class="funnel">every dispatch(), from every feature, funnels into ONE stream ↓</div>
+    <div class="instance">actions$ <small>Observable&lt;Action&gt; — the whole app, forever, no per-feature lanes</small></div>
+  </div>
+  <p class="hf-annot">ofType runs after the funnel, not before it. By the time it's filtering,
+  every feature's actions are already sitting in the same undifferentiated stream, identified by
+  nothing but a string.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q"><code>UsersEffects</code> has <code>ofType(UsersActions.loadUsersSuccess)</code> —
+  the exact recommended pattern. A completely separate <code>AdminFeature</code>, which never
+  imports anything from <code>UsersFeature</code>, dispatches its own action whose
+  <code>type</code> string happens to be the identical string <code>'[Users] Load Success'</code>,
+  carrying a different payload shape. What happens?</p>
+  <button type="button">Nothing — ofType() also checks which action-creator function or file produced the action, so a different creator is filtered out even when the type string matches</button>
+  <button type="button">UsersEffects' callback runs anyway, because ofType matches purely on the type string — it can throw or misbehave if the code assumes the Users payload shape</button>
+  <button type="button">TypeScript raises a compile error the moment two action creators share a type string, so this situation can't happen with strict mode on</button>
+  <p class="why" data-for="0">A common assumption, and the whole reason this bug survives code
+  review — but <code>ofType</code> has no concept of "which creator produced this." At runtime
+  it's a plain equality check against the <code>.type</code> string on whatever object arrives;
+  the action's origin, import graph, or compile-time TypeScript type is never inspected.</p>
+  <p class="why" data-for="1">Right. <code>ofType(UsersActions.loadUsersSuccess)</code> compiles
+  down to filtering on <code>action.type === '[Users] Load Success'</code>.
+  <code>AdminFeature</code>'s action carries that exact string, so it passes the filter and runs
+  <code>UsersEffects</code>' callback against a payload shape it was never written for.</p>
+  <p class="why" data-for="2">TypeScript checks each <code>createAction('...')</code> call
+  independently — a string literal is just a string literal to the compiler. Nothing, even in
+  strict mode, scans the rest of the codebase for a matching literal elsewhere. (A lint rule or a
+  runtime registry can add that check; NgRx itself doesn't.)</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Anything identified by a bare string instead of a reference eventually gets two owners who never met.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Two microservices publishing to the same Kafka topic name</h4>
+    <p>Team A and Team B both name a topic <code>user.updated</code> by convention, with no shared
+    registry to check against. A consumer written against Team A's message schema doesn't error
+    on startup — it just silently mishandles Team B's slightly different shape the first time
+    Team B's producer ships. Same root cause: identity by name, not by producer.</p>
+    <div class="hf-scatter"><span>topic name collision ≈ action type collision</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Two unrelated scripts dispatching the same CustomEvent name</h4>
+    <p><code>window.dispatchEvent(new CustomEvent('user-updated', { detail }))</code> from two
+    <code>&lt;script&gt;</code> tags that have never seen each other's code — any
+    <code>addEventListener('user-updated', …)</code> anywhere on the page receives both, and reads
+    whichever <code>detail</code> shape it happens to get. The DOM's event system is exactly as
+    string-keyed as NgRx's action system.</p>
+    <div class="hf-scatter"><span>same pub/sub-by-string shape, no framework involved</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your CIAM app's cross-micro-frontend session event</h4>
+    <p>Two micro-frontends under the same host — say, an admin shell and a billing shell — both
+    listen on a shared <code>BroadcastChannel</code> for an event named
+    <code>'auth:session-updated'</code>, coincidentally, because both teams picked the same
+    obvious name independently. Billing's silent token-refresh event now also fires Admin's
+    "session changed, re-check permissions" handler, and vice versa — discovered only once both
+    shells are deployed to the same origin at the same time.</p>
+    <div class="hf-scatter"><span>fix: namespace the event name per shell, same as the action prefix fix above</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Is this really an NgRx problem, or just a naming-discipline problem?</p>
+  <p class="a">Naming discipline, at heart — but NgRx's action model makes the failure mode
+  unusually silent. It doesn't throw at dispatch time, Redux DevTools shows nothing more alarming
+  than two actions with the same type from different call sites, and the file that actually breaks
+  is never the file where the mistake was made.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Would a real codebase usually write a longer, safer prefix than '[Users]'?</p>
+  <p class="a">Often, yes — down to the module or team, precisely to shrink the collision space —
+  plus a lint rule scanning every <code>createAction</code> call for a duplicate literal string.
+  Neither habit is automatic; both have to be adopted on purpose.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does @ngrx/signals (SignalStore) have this exact problem too?</p>
+  <p class="a">No — SignalStore methods are called directly on an injected store instance
+  (<code>store.add()</code>), resolved by normal TypeScript imports and references, not a
+  global string-keyed bus. This failure mode is specific to the classic Actions + Effects
+  string-based dispatch model — one more reason, beyond less boilerplate, that the "NgRx vs
+  SignalStore" table above defaults new apps to SignalStore.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  <code>Billing</code> dispatches <code>'[Export] Complete'</code> after generating an invoice
+  PDF; its effect does
+  <code>ofType(BillingActions.exportComplete), tap(({ invoiceId }) =&gt; this.notify(invoiceId))</code>.
+  Built later by a different team, <code>Reporting</code> defines its own,
+  unrelated <code>'[Export] Complete'</code> action after generating a CSV — nobody notices,
+  because both compile and both work fine alone. What happens the first time a user exports a CSV
+  from <code>Reporting</code>, and what one change would have made this collision far less likely?
+</div>
+
     <!-- ── HERO: animated NgRx round-trip · action chip + live state-diff inspector ── -->
     <div class="panel" style="border:1px solid #22d3ee;border-radius:12px;padding:16px 18px;margin-bottom:16px;background:var(--panel)">
       <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:#22d3ee">▶ Dispatch one action — watch it travel the whole loop</h2>
@@ -1306,6 +1511,7 @@ past states get <span class="hl-bad">overwritten</span> — time-travel lies`},
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>

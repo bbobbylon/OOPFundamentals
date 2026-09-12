@@ -150,6 +150,213 @@
     </div>
   </div>
 
+<p class="hf-deck">or, the page number is a promise nobody checked before making it</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The table went blank. The count in the database did not.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">137 rows in Postgres. Zero rows on screen. No error anywhere.</div>
+  <p>Someone reloads a bookmarked admin URL with <code>?page=99</code> still hanging off the
+  end — maybe a filter used to return more rows back then, maybe they just typed a bigger number
+  to be thorough. The request fires, the network tab shows a clean <code>200</code>, the response
+  body is valid JSON. And the table renders nothing. Not a spinner stuck forever, not a red toast —
+  just an empty table, which looks exactly like "there is no data," which is the one explanation
+  that happens to be false.</p>
+  <div class="hf-scatter">
+    <span>GET /api/users?page=99 ✓</span>
+    <span>HTTP 200, valid JSON ✓</span>
+    <span>content: [] ⚠</span>
+    <span>totalPages was 14 the whole time ⚠</span>
+  </div>
+  <p class="hf-foot">Nothing rejected the request. A page index that stopped being valid just
+  never got told.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Let the response correct the request that produced it</div>
+  <div class="hf-ladder">
+    <b>if (page() &gt;= res.totalPages) page.set(Math.max(0, res.totalPages - 1))</b>
+    <i>↓ the client fixes itself the moment a response proves the old page was too big</i>
+    <b>Do it after every response, not just a "page past the end" click</b>
+    <i>↓ a filter that shrinks the result set invalidates yesterday's totalPages just as easily</i>
+    <b>Mirror page into the URL so a refresh can't reintroduce a stale index</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A page number is a guess the client makes before the server has spoken.</b> Every
+  pagination edge case on this page — page past the end, a size change reshuffling what page 5
+  even means, a sort landing you somewhere unrelated — comes from treating that guess as a fact
+  instead of re-checking it against the one thing that actually knows: the response that just
+  arrived.
+</div>
+
+<div class="hf-note">Think of <code>page</code> and <code>size</code> as <b>a locker number and
+a locker size at a gym that keeps renovating</b>. "Locker 5" only means something once you know
+how big the lockers are today — and if the gym re-partitions overnight, locker 5 might now be
+where locker 1 used to be, or might not exist at all. The locker number was never wrong by
+itself. It only ever meant something paired with a size that can change out from under it.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I asked for page 99 and got nothing back. Is my request broken?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Angular</span>
+    <p>Not from here. I sent <code>GET /api/users?page=99&amp;size=10</code> exactly like you
+    told me to, and I got back a <code>200</code> with <code>content: []</code>. That's not a
+    failure I can see — that's just what you asked for, answered.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Spring Data</span>
+    <p>Not from here either. <code>PageRequest.of(99, 10)</code> becomes
+    <code>LIMIT 10 OFFSET 990</code> — a completely legal query against a 137-row table. I don't
+    know what page you meant to land on. I only know the offset you sent me.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">totalPages</span>
+    <p>I was sitting right there in the very last response you got — the number 14, plain as
+    day. Nobody checked me before firing the next request.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Three systems agree that page 99 is a fine request. That is exactly the bug.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A click, a stale bookmark, or a restored URL sets <code>page</code> to an index nobody has confirmed still exists</span><span class="tag">just a number, so far</span></li>
+    <li><span>Angular fires <code>GET /api/users?page=&amp;size=&amp;sort=</code> with that index — there is no lookup step first</span><span class="tag">the client can't know yet</span></li>
+    <li class="open"><span>Spring Data turns it straight into <code>LIMIT :size OFFSET (:page * :size)</code> — a SQL clause, not a decision</span><span class="tag">nobody in this chain asks "is that sane?"</span></li>
+    <li class="open"><span>The database executes the <code>OFFSET</code> literally. Past the last row it returns <b>zero rows</b>, not an error</span><span class="tag">SQL has no concept of "too far"</span></li>
+    <li><span>Spring wraps whatever came back — even empty — in a <code>Page&lt;T&gt;</code> with <code>totalElements</code>, <code>totalPages</code>, <code>first</code>, <code>last</code></span><span class="tag">the truth finally exists here</span></li>
+    <li><span>Only now, reading <b>this</b> response, can Angular clamp <code>page</code> for the next request</span><span class="tag">the fix is always one round-trip behind the fact</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the lesson. SQL's <code>OFFSET</code> doesn't have an opinion about
+  whether 990 is reasonable for a 137-row table — it just skips that many rows and returns
+  whatever is left, which past the end is nothing. Because nothing in this chain refuses an
+  out-of-range page, "past the end" isn't a bug you catch once. It's a state the client has to
+  expect and re-clamp for on <i>every</i> response, not just the first time it bites you.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">page 3 of 14 — a valid window</span>
+      <span class="go"><em>user clicks "next" a lot, or a filter shrinks the set</em>
+      <span class="arrow">→</span> page climbs past what still exists</span></div>
+    <div class="stt"><span class="nm">page 99 — requested, not yet known to be invalid</span>
+      <span class="go"><em>the GET fires anyway — the client can't check first</em>
+      <span class="arrow">→</span> LIMIT 10 OFFSET 990 against 137 rows</span></div>
+    <div class="stt"><span class="nm">content: [], totalPages: 14 — now it's known</span>
+      <span class="go"><em>the response is the first thing that actually knows</em>
+      <span class="arrow">→</span> clamp page to totalPages - 1</span></div>
+    <div class="stt"><span class="nm">page 13 — back inside the real data</span>
+      <span class="go"><em>and the URL updates to match</em>
+      <span class="arrow">→</span> a refresh can't relive step 2</span></div>
+  </div>
+  <p class="hf-annot">The loop only closes at the bottom — every one of the first three states is
+  individually reasonable, which is why the bug survives code review. Nothing before the response
+  in state 3 is in any position to know state 1 already went stale.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">The table is on page index 5 with <code>size=10</code> (rows 51–60 showing). The
+  user changes the page-size dropdown to 50, and the request goes out as
+  <code>page=5&amp;size=50</code>. What lands on screen?</p>
+  <button type="button">Rows 51–60 again, just with more room to show additional rows below them</button>
+  <button type="button">Rows 251–300 — a completely different slice, because page 5 at size 50 starts at offset 250</button>
+  <button type="button">Angular clamps back to whatever's nearest to the rows the user was just looking at</button>
+  <p class="why" data-for="0">That's what you'd expect if <code>page</code> meant "where I'm
+  scrolled to" — but it doesn't. <code>page</code> and <code>size</code> are two independent
+  dials that multiply into one offset, and nothing recomputes one when the other changes.
+  Reasonable guess for a system that isn't actually tracking position, only two separate numbers.</p>
+  <p class="why" data-for="1">Right — and the rows that vanished from the screen didn't error,
+  they just moved 190 rows away. <code>OFFSET = page × size</code>, so bumping <code>size</code>
+  without touching <code>page</code> relocates the window entirely. The fix is to recompute
+  (<code>page = Math.floor(page * oldSize / newSize)</code>) or just reset to page 0 — which is
+  what most production UIs quietly do the moment the size selector changes.</p>
+  <p class="why" data-for="2">Angular has nothing to clamp toward — it isn't tracking scroll
+  position or row identity, only the <code>page</code>/<code>size</code> numbers you hand it.
+  There's no reconciliation step anywhere in this pipeline; whatever slice
+  <code>page × size</code> computes is exactly what renders, no matter how far it lands from
+  what was on screen a second ago.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three systems, one shared decision to trade a page number for a bookmark.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Why deep OFFSET pagination is a performance bug, not just a UX one</h4>
+    <p><code>OFFSET 990</code> isn't free — most databases still have to walk and discard the
+    990 rows before it, then return the next 10. Page 3 and page 3,000 cost wildly different
+    amounts of work for the same <code>LIMIT</code>, even though the query looks identical on
+    the page. It's the other reason (beyond "there is no page 3 concept") that high-traffic APIs
+    move to keyset/cursor pagination — <code>WHERE id &gt; :lastId LIMIT 10</code> costs the same
+    at row 10 or row 10,000,000.</p>
+    <div class="hf-scatter"><span>OFFSET cost grows with page number</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Elasticsearch refuses to paginate past 10,000 at all</h4>
+    <p><code>index.max_result_window</code> defaults to 10,000 — ask for
+    <code>from: 15000</code> and Elasticsearch throws, it doesn't quietly degrade. Past that
+    depth it forces you onto <code>search_after</code>, a cursor anchored to the last document's
+    sort values instead of a row count. Same root cause as the Spring page above — deep offsets
+    get expensive — except this system refuses outright instead of letting you find out the slow
+    way.</p>
+    <div class="hf-scatter"><span>hard limit, not a slow query</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your CIAM job: why Ping and Entra never let you request "page 7"</h4>
+    <p>It isn't only API taste. A directory of users is being created, disabled, and deleted
+    constantly — offset pagination over a moving target can skip a user who moved past your
+    current offset between two of your requests, or hand you the same one twice. A cursor token
+    is anchored to a specific row, not a position count, so someone else's write can't invalidate
+    it. <code>page=7</code> can go stale mid-session; a <code>nextPageToken</code> can't.</p>
+    <div class="hf-scatter"><span>cursors survive concurrent writes; offsets don't</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Why not just fetch everything once and paginate in the browser?</p>
+  <p class="a">Fine at 500 rows, a real cost at 50,000: the payload, the parse time, and the
+  memory all scale with total rows instead of page size, and every one of those 50,000 records
+  crossed the wire to a browser that will render 20 of them. It leaks data, too — a client that
+  "hides" rows 21+ in JS still received them, which matters the moment any row carries something
+  a given user shouldn't see. Server-side paging keeps the response — and the exposure —
+  proportional to what's actually on screen.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">When the sort changes, should the page index reset too?</p>
+  <p class="a">Yes, and skipping this is the sibling of the size-change bug above. Sorting by
+  <code>email</code> ascending and sitting on page 5 does not describe the same 10 people once
+  you re-sort by <code>createdAt</code> descending — <code>page</code> is a position inside a
+  specific ordering, not an absolute location. Reset to page 0 on any sort or filter change; the
+  alternative is a user who very reasonably thinks the sort click "lost" their place.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Doesn't the <code>COUNT(*)</code> behind <code>totalElements</code> get slow on a
+  huge table too?</p>
+  <p class="a">Yes — on Postgres and MySQL a full <code>COUNT(*)</code> without an index-only
+  scan gets noticeably slow well before a table is enormous, and it runs on <i>every single
+  page request</i>, alongside the actual query. It's a real reason some APIs return an
+  <i>estimated</i> count, or drop <code>totalElements</code>/<code>totalPages</code> entirely —
+  which is exactly what cursor-based APIs like Ping's and Entra's tend to do, since a cursor
+  doesn't need a total in order to fetch the next chunk.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  A user is on page 4 with the filter <code>status=ACTIVE</code>, which has 6 total pages. They
+  flip a toggle to <code>status=ALL</code>, which has only 3 total pages once every status is
+  counted. The request goes out as <code>page=4&amp;size=20&amp;status=ALL</code>. What comes
+  back — and is it the same failure mode as the "page 99" problem above, or a different one?
+</div>
+
   <!-- ── HERO: animated pagination round-trip · request chip + live params/payload inspector ── -->
   <section>
   <div class="card card-blue" style="border:1px solid var(--blue);border-left:3px solid var(--blue)">
@@ -875,6 +1082,7 @@ showing a blank table to the user`},
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -113,6 +113,190 @@
     <div class="intro-ciam"><span class="tag">In CIAM / Your Job:</span> The Entra flow is structurally identical to Ping — same Auth Code + PKCE, same JWT output — but config differs: tenant-specific endpoints (<code>login.microsoftonline.com/{tid}</code>), MSAL instead of angular-oauth2-oidc, and an <code>aud</code> of your API's <code>api://{clientId}</code>. The most common Spring bug: an <code>issuer-uri</code> without the <code>/v2.0</code> suffix — v1.0 and v2.0 tokens have different issuers, so always use v2.0.</div>
   </div>
 
+
+<p class="hf-deck">or, three tokens come back and only one of them is for your API</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Somebody sent the ID token as the Bearer. It worked. That is the bad news.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">"It has the user's name and email in it, and Spring accepted it" — both true, and it is still wrong</div>
+  <p>The login above returns three tokens, and the ID token is the friendly one: crack it open and
+  there is <code>name</code>, <code>email</code>, <code>preferred_username</code>, everything the
+  UI wants. The access token is comparatively useless to look at. So somebody wires the
+  interceptor to attach the ID token, tests it against the Spring API, and it <b>works</b>.</p>
+  <p>It works because the ID token is signed by the same tenant, published at the same JWKS, and
+  carries the same <code>iss</code>. A resource server configured with only <code>issuer-uri</code>
+  validates the signature, the issuer, and the expiry — and <b>not the audience</b>. So your API
+  has just accepted a token whose <code>aud</code> is the <i>Angular client ID</i>: a token that
+  says, in writing, <i>I was not issued for you</i>. Nothing in the request is malformed. Nothing
+  logs a warning. The one field that would have caught it is the one nobody turned on.</p>
+  <div class="hf-scatter">
+    <span>signature valid ✓</span>
+    <span>iss matches the tenant ✓</span>
+    <span>exp fine ✓</span>
+    <span>aud = the SPA's client ID ⚠</span>
+    <span>scp claim: absent entirely ⚠</span>
+  </div>
+  <p class="hf-foot">An ID token is a statement <i>to your app</i> about who logged in. An access
+  token is a credential <i>for the API</i>. They are not two formats of the same thing.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Give each token the one job it was minted for</div>
+  <div class="hf-ladder">
+    <b>ID token → stays in the SPA. Read the name, render the avatar, decide what to show. Never leaves the browser.</b>
+    <i>↓ its audience is your client ID, so it is meaningless as a credential anywhere else</i>
+    <b>Access token → attached as the Bearer, and treated as opaque by the client. Its audience is api://your-api-id.</b>
+    <i>↓ the SPA has no business parsing it; the format is a contract between Entra and your API, and it can change</i>
+    <b>Refresh token → MSAL's business alone. It buys new access tokens and touches no API of yours.</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Every token names its intended recipient, and <code>aud</code> is where it says so.</b> That
+  one claim is the difference between "this proves a login happened" and "this authorises a call",
+  and it is why the two tokens exist at all rather than one. Which leads to the configuration line
+  that matters more than any other on your resource server: <b>validate the audience</b>. Signature
+  plus issuer only proves the token is genuine — never that it was genuinely meant for you.
+</div>
+
+<div class="hf-note">Think of the ID token as a <b>wristband at the door</b> and the access token as
+a <b>drink ticket</b>. The wristband proves the bouncer checked you — show it to the bartender and
+they should say "that's lovely, that isn't a drink ticket." A bar where the wristband buys drinks
+hasn't been generous; it has stopped counting.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>Why two tokens? They both come from Entra and both say who I am.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The ID token</span>
+    <p>I answer one question: <i>did this person authenticate, and who are they?</i> My audience is
+    your client ID because I was minted <b>for the app</b> — I am OIDC's whole contribution on top
+    of OAuth. I am also why you must check <code>nonce</code>: it ties me to the specific
+    authorization request your app started, so a replayed ID token from somewhere else fails.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The access token</span>
+    <p>And I answer a different one: <i>may the bearer do this to that resource?</i> My audience is
+    the API, my <code>scp</code> lists what was granted, and I am deliberately boring to read. You
+    should not parse me in the browser at all — my format is between Entra and the API, and neither
+    of them promised it to you.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Your Spring resource server</span>
+    <p>Which is exactly why I need <code>audiences</code> configured. Without it I check that a
+    token is authentic and from the right tenant, and then I will happily accept any of them — the
+    ID token, or a perfectly valid access token minted for an entirely different API in the same
+    tenant. That is the same hole, twice.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One login, three tokens, three destinations — and the failure is putting one in the wrong place.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Angular generates <code>code_verifier</code>, sends <code>code_challenge</code> and a <code>nonce</code> to <code>/authorize</code>, and asks for the API's scope by its full <code>api://&lt;id&gt;/read:users</code> name</span><span class="tag">the scope decides the audience</span></li>
+    <li class="open"><span>The user authenticates at Entra. Your app never sees the password, and Entra returns a one-time <code>code</code></span><span class="tag">the redirect half</span></li>
+    <li><span>Angular POSTs code + verifier to <code>/token</code>. Entra checks <code>SHA256(verifier) == challenge</code>, so a stolen code is inert without the verifier</span><span class="tag">what PKCE actually buys</span></li>
+    <li class="open"><span>Three tokens come back. The <b>ID token</b> gets <code>aud</code> = your client ID and carries <code>nonce</code>; the <b>access token</b> gets <code>aud</code> = the API and carries <code>scp</code></span><span class="tag">the fork in the road</span></li>
+    <li><span>MSAL verifies the ID token's <code>nonce</code> against the value it generated in step 1, then treats it as the session's identity</span><span class="tag">the check nobody remembers exists</span></li>
+    <li class="open"><span>The interceptor attaches <b>the access token</b> — and Spring, with <code>audiences</code> configured, rejects anything whose <code>aud</code> is not its own</span><span class="tag">where the two halves finally meet</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the one to internalise: the two tokens diverge at the moment of
+  minting, and everything after is just carrying them to the right place. Notice also that the
+  audience of the access token was decided all the way back in step 1 — by the <i>scope</i> you
+  asked for. Request a bare <code>read:users</code> instead of
+  <code>api://&lt;id&gt;/read:users</code> and Entra cannot tell which resource you meant, which is
+  why that particular typo produces a token your own API then refuses.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">one successful login<small>Auth Code + PKCE, at /token</small></div>
+    <div class="fan">three tokens, three different owners ↓</div>
+    <div class="obs">
+      <span>ID token → the Angular app (aud = client id)</span>
+      <span>access token → the Spring API (aud = api://…)</span>
+      <span>refresh token → MSAL's storage only</span>
+      <span class="new">send any of them to the wrong place and it may still verify</span>
+    </div>
+  </div>
+  <p class="hf-annot">The last line is the whole risk. These are not three security levels where
+  sending the "stronger" one is safe — they are three envelopes with three different addresses, all
+  posted by the same signer. A verifier that only asks "did Entra sign this?" cannot tell them
+  apart, so the job of telling them apart falls entirely to the audience check.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">An Angular app attaches the <b>ID token</b> as its Bearer header, because it carries
+  the user's name and email. The Spring resource server is configured with
+  <code>spring.security.oauth2.resourceserver.jwt.issuer-uri</code> pointing at the same Entra
+  tenant, and nothing else. What happens to the request?</p>
+  <button type="button">It is accepted — the signature, issuer and expiry all check out, and audience is not validated unless you configure it</button>
+  <button type="button">It is rejected with 401 — an ID token and an access token are different formats, so the decoder cannot parse it</button>
+  <button type="button">It is rejected with 401 — Spring compares the token's aud against the configured issuer and sees the mismatch</button>
+  <p class="why" data-for="0">Correct, and this is the uncomfortable part: the request succeeds, so
+  the mistake ships. Both tokens are ordinary JWTs signed by the same tenant keys with the same
+  <code>iss</code>, and the default validators on <code>issuer-uri</code> cover timestamps and
+  issuer only. The fix is one line — set
+  <code>spring.security.oauth2.resourceserver.jwt.audiences</code> to your API's identifier (or
+  register an audience validator) — after which the ID token, and any access token minted for a
+  different API in the same tenant, both stop working.</p>
+  <p class="why" data-for="1">They are the same format. An Entra v2.0 ID token is a JWT with a
+  header, claims and an RS256 signature, structurally identical to an access token for a custom
+  API — which is exactly why this substitution goes unnoticed. What differs is the <i>meaning</i> of
+  the claims inside: <code>aud</code> points at the client instead of the API, and there is no
+  <code>scp</code> at all. Nothing about parsing it fails.</p>
+  <p class="why" data-for="2">Spring does not derive an expected audience from the issuer, and it
+  could not: one tenant issues tokens for many different APIs, all with the same <code>iss</code>.
+  Only you know which audience <i>this</i> service should answer to, which is why it has to be
+  configuration rather than something the framework infers. Until you supply it, there is no
+  expected value to compare against and the check simply does not run.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Authentic, and addressed to someone else, are two different properties.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A signed letter delivered to the wrong house</h4>
+    <p>The signature proves your bank wrote it. It says nothing about whether it was written to
+    <i>you</i> — that is the name on the envelope. Verifying the signature and ignoring the
+    address is the entire bug, and it reads as obviously wrong the moment it stops being a JWT
+    and starts being post.</p>
+    <div class="hf-scatter"><span>signature = who wrote it · aud = who it is for</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>SAML's <code>AudienceRestriction</code> — the same claim, an older spelling</h4>
+    <p>SAML assertions carry an explicit <code>&lt;AudienceRestriction&gt;</code>, and every
+    interop guide ever written says to enforce it, for the identical reason: one IdP serves many
+    service providers, all trusting the same signing certificate. Token confusion between SPs was
+    a known SAML attack years before OIDC existed. <code>aud</code> is that lesson, carried
+    forward.</p>
+    <div class="hf-scatter"><span>one signer, many relying parties, always</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>The BFF pattern, and why it sidesteps the whole argument</h4>
+    <p>If the browser never holds an access token — a BFF keeps it server-side behind an httpOnly
+    session cookie — there is no interceptor to attach the wrong token in the first place. Worth
+    noticing that a design choice made for a different reason (keeping tokens off the browser)
+    also deletes this entire class of mistake.</p>
+    <div class="hf-scatter"><span>the token you never hand out cannot be misaddressed</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Entra is both the OAuth authorization server and the OIDC
+  provider; a public SPA uses Auth Code + PKCE so a stolen code is useless without the verifier;
+  MSAL drives the redirects, stores the tokens and renews them silently. Carry this out with you:
+  <b>the ID token proves the login and belongs to your app, the access token authorises the call
+  and belongs to your API, and only an audience check can tell them apart</b> — so configure one.
+</div>
+
   <!-- ── HERO: animated Auth Code + PKCE walk · request/token chip + live per-hop payload inspector ── -->
   <div class="panel" style="border:1px solid #22d3ee">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:#22d3ee">▶ Watch a real login — Authorization Code + PKCE, redirect by redirect</h2>
@@ -599,6 +783,7 @@ this is the silent-refresh loop behind every
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -115,6 +115,196 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> The ThreadLocal bug is real — an <code>@Async sendAuditEvent()</code> that reads <code>SecurityContextHolder.getContext().getAuthentication().getName()</code> NPEs in prod. Capture the principal <em>before</em> dispatching: <code>String actor = authentication.getName(); executor.execute(() -&gt; auditService.record(actor, …))</code> — pass the value in, don't read ThreadLocal on the new thread.</div>
   </div>
 
+<p class="hf-deck">or, more submitted work does not mean more concurrency — not until the queue itself is full</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You sized <code>maxPoolSize</code> for a burst of twenty. Production never once used more than five threads.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle"><code>queueCapacity=100</code> looked like a safety margin. It was actually a ceiling nobody noticed.</div>
+  <p>The CodeWalk's own executor is configured <code>corePoolSize(5)</code>,
+  <code>maxPoolSize(20)</code>, <code>queueCapacity(100)</code>. A batch job submits 90
+  <code>@Async</code> report-generation tasks in a tight loop. Tasks 1 through 5 start the 5 core
+  threads — normal so far. Tasks 6 through 90 all land in the queue, because
+  <code>ThreadPoolExecutor</code> only grows the pool past <code>corePoolSize</code> once a new task
+  arrives <i>and finds the queue already full</i>. With 85 tasks fitting comfortably into 100 queue
+  slots, that condition never becomes true. All 90 reports eventually finish — correctly, with no
+  errors — five at a time. The burst capacity everyone assumed was sitting there for exactly this
+  kind of spike never activates once.</p>
+  <div class="hf-scatter">
+    <span>core, max, and queue are all configured, no typos ✓</span>
+    <span>all 90 tasks complete without a single exception ✓</span>
+    <span>pool never exceeds 5 threads, though max allows 20 ⚠</span>
+    <span>"burst capacity" only exists on paper until the queue is actually full ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that more submitted tasks make the pool grow. It's the
+  QUEUE's fullness that makes the pool grow — task volume by itself is irrelevant right up until the
+  queue has nowhere left to put the next one.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Size the queue to your real burst tolerance, not to "big enough to never reject"</div>
+  <div class="hf-ladder">
+    <b>Quick fix: shrink <code>queueCapacity</code> so it actually fills under your real traffic spike, forcing growth toward <code>maxPoolSize</code> sooner</b>
+    <i>↓ a queue that can fill is a queue that can trigger the growth condition at all</i>
+    <b>Better: set <code>corePoolSize</code> near your realistic steady-state load, and let a modest queue plus a larger max absorb genuine bursts</b>
+    <i>↓ now core, queue, and max each do the job their name implies</i>
+    <b>Best: for I/O-bound <code>@Async</code> work on Boot 3.2+/4, set <code>spring.threads.virtual.enabled=true</code> and skip the sizing math entirely</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A thread pool grows when the QUEUE is full, not when tasks pile up.</b>
+  <code>queueCapacity</code> is the switch that decides whether <code>maxPoolSize</code> is a real
+  ceiling your traffic can reach, or dead configuration that sits in a properties file forever
+  unconsulted.
+</div>
+
+<div class="hf-note">A coffee shop runs 2 baristas on the counter (core threads) and a bench with
+room for 4 waiting customers (the queue). Two more baristas are on call in the back (overflow, up to
+max) — but the policy is "only call them in once the bench is completely full and someone else walks
+in with nowhere to sit." Now imagine that bench somehow seats 100 people. The two counter baristas
+can serve a slow, steady trickle of customers forever without the bench ever filling — the two
+on-call baristas nap in the back through every single shift, fully paid, fully idle, because the
+bench just never says no.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I set <code>maxPoolSize</code> to 20. Why did production only ever use 5 threads, even during
+    the morning traffic spike?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">ThreadPoolTaskExecutor</span>
+    <p>Because I don't look at how many tasks are waiting overall. I check exactly one thing before
+    growing past core: is the queue full? Yours has 100 slots. It never got there.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The queue</span>
+    <p>I held everything you threw at me — all 85 extra tasks fit fine, one after another. I never
+    had to turn anything away, so nobody downstream ever asked for more hands.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">maxPoolSize=20</span>
+    <p>I've been sitting here, configured, correctly spelled, the entire time. Nobody's called my
+    number yet. I only start to matter the moment the queue actually turns work away.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps. Only one of them is where the surprise lives — the rest is the executor working exactly as documented.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Tasks 1 through 5 arrive: the pool is below <code>corePoolSize</code> (5), so each one starts a brand-new core thread immediately</span><span class="tag">expected — this matches everyone's intuition</span></li>
+    <li class="open"><span>Task 6 arrives: all 5 core threads are busy, but the queue isn't full yet (0 of 100 slots used) — task 6 goes into the queue, no new thread</span><span class="tag">the first branch point</span></li>
+    <li><span>Tasks 7 through 90 land in the queue the same way, one after another, because 85 tasks fit easily inside 100 slots</span><span class="tag">this repeats 84 more times</span></li>
+    <li class="open"><span>The executor's real growth rule only fires on one exact condition: a new task arrives AND the queue is already full AND the pool is below max — step 2 never satisfied the middle clause</span><span class="tag">core → queue → max, in that order, no shortcuts</span></li>
+    <li><span>Because the queue never filled, that three-part condition is never even evaluated as true — <code>maxPoolSize=20</code> stays a number in a config file, never a ceiling anything actually bumps into</span><span class="tag">not throttled — never invoked</span></li>
+    <li class="open"><span>Fix: a <code>queueCapacity</code> sized to your actual burst tolerance — not "large enough to never reject" — is what makes genuine growth toward <code>maxPoolSize</code> possible when it's actually needed</span><span class="tag">the queue is the gate, not the buffer</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the rule almost everyone gets backwards on first read: intuition says
+  "core fills, then max fills, then the queue absorbs whatever's left over." The real order is
+  core → queue → max → reject — and a queue sized bigger than your worst realistic burst quietly
+  deletes the max and reject stages from ever running at all.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>task #6</span><span>task #7</span><span>task #34</span><span>task #61</span><span>task #90</span>
+    </div>
+    <div class="funnel">↓ ThreadPoolTaskExecutor.execute()</div>
+    <div class="instance">one queue, 100 slots<small>every submission past the first 5 core threads waits here — maxPoolSize is never even consulted until this fills</small></div>
+  </div>
+  <p class="hf-annot">All 85 of those overflow submissions are funneling into the SAME bounded
+  resource, and that resource has plenty of room. From <code>maxPoolSize</code>'s point of view,
+  nothing that happens in this diagram is its business yet — the queue hasn't asked it to get
+  involved.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q"><code>corePoolSize=3</code>, <code>maxPoolSize=10</code>, <code>queueCapacity=50</code>.
+  Fifteen <code>@Async</code> tasks are submitted in a tight burst, and none of them finish before the
+  next one arrives. How many pool threads are actually running once all 15 have been submitted?</p>
+  <button type="button">Ten — the pool grows toward maxPoolSize once submitted tasks exceed corePoolSize</button>
+  <button type="button">Zero — all 15 tasks are rejected immediately, since 15 exceeds corePoolSize plus maxPoolSize</button>
+  <button type="button">Three — the 50-slot queue absorbs all 12 tasks beyond the first 3 core threads, so the pool never grows past core</button>
+  <p class="why" data-for="0">This is the intuition almost everyone brings in — more submitted work should mean more threads. But growth past <code>corePoolSize</code> only happens once the QUEUE is full, and a 50-slot queue has plenty of room left for the 12 tasks beyond the first 3 core threads. <code>maxPoolSize</code> never gets consulted in this scenario.</p>
+  <p class="why" data-for="1">Rejection is the LAST resort in the chain, not an early one — it only fires once BOTH the queue and a pool already at <code>maxPoolSize</code> are full. With 15 tasks and 50 queue slots, nothing here is anywhere close to full; there's no reason for the executor to ever reach for its rejection handler.</p>
+  <p class="why" data-for="2">Exactly. 3 tasks fill the 3 core threads, and the remaining 12 all fit comfortably in the 50-slot queue. The growth condition — queue full AND pool below max — never becomes true, so the pool never grows past <code>corePoolSize</code>, no matter how far the task count is from <code>queueCapacity + corePoolSize</code>.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Same shape, three different places it bites.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>AWS Auto Scaling behind a deep SQS buffer</h4>
+    <p>A worker fleet's scaling policy is keyed off queue depth, and someone sizes the SQS queue
+    generously "for safety." The backlog absorbs load quietly and the scaling policy never triggers —
+    the fleet stays at its minimum size through a sustained traffic spike, for the identical reason
+    <code>maxPoolSize</code> never gets consulted here: the buffer in front of the scaling decision
+    was big enough to hide the exact signal the decision depends on.</p>
+    <div class="hf-scatter"><span>SQS depth ≈ queueCapacity</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Node.js: an unbounded array in front of a worker_threads pool</h4>
+    <p>A hand-rolled task queue in Node — a plain array feeding a fixed <code>worker_threads</code>
+    pool — has the same blind spot in a completely different runtime: the dispatcher only checks "is
+    there room in the array," never "how much backlog pressure is building." Tasks pile up in memory
+    while the worker count sits frozen, because nothing in the dispatch logic was ever watching queue
+    depth as a growth signal.</p>
+    <div class="hf-scatter"><span>same shape, zero JVM involved</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>CIAM: login-notification tasks during a credential-stuffing burst</h4>
+    <p>Failed-login security alerts fire through an <code>@Async</code> notification service backed
+    by a generously-sized queue. During a credential-stuffing attack, thousands of failed-login
+    notification tasks queue up behind a pool that never grows past its core size — the queue
+    happily absorbs the burst instead of forcing more capacity online. The alerts still all get sent
+    eventually, just increasingly late, during precisely the event where fast fraud alerting matters
+    most.</p>
+    <div class="hf-scatter"><span>"eventually consistent" alerting isn't good enough here</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">The interactive playground uses core=2/queue=4/max=4 — totally different numbers from the CodeWalk's core=5/queue=100/max=20. Does the playground actually reach maxPoolSize?</p>
+  <p class="a">Yes, and that's deliberate — with only 4 queue slots, the playground's queue fills
+  after just 6 submissions (2 core threads + 4 queued), so the 7th and 8th submissions actually grow
+  the pool toward max=4, and the 9th gets rejected. Same exact rule as the CodeWalk's config, just
+  small enough numbers to walk through the full core → queue → max → reject sequence by hand instead
+  of stopping at "queue absorbs everything."</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does CallerRunsPolicy or AbortPolicy help with the "queue too big" problem?</p>
+  <p class="a">No — a rejection handler only decides what happens once the pool AND the queue are
+  BOTH already full. With a 100-slot queue absorbing 90 tasks, you never get anywhere near that
+  decision point at all; the rejection handler sits configured and unused, exactly like
+  <code>maxPoolSize</code> does in this scenario.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does spring.threads.virtual.enabled=true make queueCapacity irrelevant?</p>
+  <p class="a">For I/O-bound <code>@Async</code> work, largely yes — each task gets its own cheap
+  virtual thread instead of competing for a small fixed pool, so there's no core/queue/max math to
+  get wrong in the first place. It's not universal, though: CPU-bound work still contends for the
+  same limited physical cores no matter how many virtual threads you spin up, so pool-sizing
+  questions come right back for anything that isn't mostly waiting on I/O.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll back up.</p>
+<div class="hf-napkin">
+  A different executor: <code>corePoolSize=5</code>, <code>maxPoolSize=20</code>,
+  <code>queueCapacity=0</code> — which Spring turns into a <code>SynchronousQueue</code>, a queue
+  that holds nothing and only ever hands a task straight to a thread that's already waiting for it.
+  Tasks 1 through 5 start the 5 core threads. Task 6 arrives while all 5 are still busy. With a queue
+  that can hold zero tasks, does task 6 get queued, grow the pool into a brand-new 6th thread, or get
+  rejected?
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -582,5 +772,6 @@ renderAll();
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

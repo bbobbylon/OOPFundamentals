@@ -93,7 +93,111 @@ await main()
   </div>
 
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the exception that stops you without stopping anything else</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say"><code>gather()</code> raised. You caught it, logged it, and moved on. Two more coroutines kept running behind your back for as long as they felt like it.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">except ValueError: looked like it caught everything gather() was doing</div>
+  <p>Provisioning a new user fans out to three IDPs at once: <code>await asyncio.gather(create_in_ping(user), create_in_entra(user), create_in_keycloak(user))</code>, wrapped in a <code>try/except</code>. <code>create_in_ping</code> raises — duplicate email — almost immediately. You catch it, log "provisioning failed," and tell the caller no account was created.</p>
+  <p><code>create_in_entra</code> and <code>create_in_keycloak</code> were never told any of that happened. A second later — after your response already went out — they finish on their own and create real accounts in Entra and Keycloak for a user your own API just told everyone does not exist.</p>
+  <div class="hf-scatter">
+    <span>gather() raises the FIRST exception ✓ — exactly as documented</span>
+    <span>the other two coroutines get cancelled ⚠ — they do not</span>
+    <span>they keep running, unobserved, until they finish on their own ✓</span>
+  </div>
+  <p class="hf-foot">Your <code>except</code> block was never lying to you — <code>create_in_ping</code> really did fail. It just wasn't the whole story, and <code>gather()</code> never promised to tell you the rest.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Ask for cancel-on-failure explicitly — or stop assuming it's automatic</div>
+  <div class="hf-ladder">
+    <b>Swap gather() for asyncio.TaskGroup() (3.11+)</b>
+    <i>↓ the instant one task in the group raises, TaskGroup cancels every other task in it — structured concurrency, not opt-in</i>
+    <b>Or track the tasks yourself and cancel on failure</b>
+    <i>↓ asyncio.create_task() each call, catch the exception, then call .cancel() on whatever is left running</i>
+    <b>Or pass return_exceptions=True and check every result yourself — nothing gets cancelled, but nothing surprises you either</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>asyncio.gather()'s job is to propagate the first exception — not to stop the others.</b> With its default <code>return_exceptions=False</code>, the moment one awaited coroutine raises, that exception is thrown into whatever is awaiting <code>gather()</code>, immediately. The remaining coroutines are left exactly as they were: scheduled, running, and completely unaware that a sibling failed, because nothing in <code>gather()</code>'s contract ever cancels them for you.
+</div>
+
+<div class="hf-note"><code>asyncio.gather()</code> raising is a fire alarm that gets <b>you</b> out of the building. It does not lock the doors behind you. Everyone else you left inside keeps working until they're done, or until they hit something on fire themselves — and nobody who left with you will ever know which.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I caught the exception. Why is Entra still creating an account a second later?</p></div>
+  <div class="hf-bub right"><span class="who">gather()</span><p>I only promised to hand you the first exception as fast as possible. I never touched the other two Tasks — cancelling them was never part of what I do.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So the event loop just... keeps running code from a request I already told the client failed?</p></div>
+  <div class="hf-bub right"><span class="who">The event loop</span><p>I don't know your request "failed." I just see three scheduled Tasks. Two of them are still runnable, so I keep running them — right alongside whatever request came in after yours.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch what gather() actually does the moment one coroutine raises.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>gather(a(), b(), c())</code> wraps each coroutine in its own Task and starts all three</span><span class="tag">all scheduled</span></li>
+    <li class="open"><span>Your <code>await gather(...)</code> suspends, waiting for every Task to finish</span><span class="tag">waiting</span></li>
+    <li><span><code>a()</code> raises first — gather immediately re-raises that exception to your awaiting code</span><span class="tag">first failure wins</span></li>
+    <li class="open"><span>gather does NOT call <code>.cancel()</code> on <code>b()</code>'s or <code>c()</code>'s Task</span><span class="tag">no cancellation — default</span></li>
+    <li><span>Your <code>except</code> block runs, and your function returns or moves on</span><span class="tag">you've moved on</span></li>
+    <li class="open"><span><code>b()</code> and <code>c()</code> are still live on the same event loop — they run to completion, or fail, entirely on their own</span><span class="tag">still running</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the one line of behavior nowhere in your code. You never told gather to leave the others running, and you never told it to cancel them either — you just never had to, because Python defaults to leaving them alone. Structured concurrency (TaskGroup) exists specifically to flip that default.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">All three launched</span>
+      <span class="go"><em>await gather(ping(), entra(), keycloak())</em> <span class="arrow">→</span> three Tasks start running concurrently</span></div>
+    <div class="stt"><span class="nm">One fails</span>
+      <span class="go"><em>ping() raises ValueError</em> <span class="arrow">→</span> gather re-raises it to your await, immediately</span></div>
+    <div class="stt"><span class="nm">The rest keep going</span>
+      <span class="go"><em>(no signal sent to them at all)</em> <span class="arrow">→</span> entra() and keycloak() run to completion, unseen, after you've already told the caller it failed</span></div>
+  </div>
+  <p class="hf-annot">Read the middle state again: the trigger for "the rest keep going" is <em>nothing</em> — no cancellation, no notification, not even a log line. That blank is the entire bug. Everything gather() does is correct and documented; the missing state transition is the one you assumed existed and nobody wrote.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A checkout handler wraps <code>asyncio.gather(charge_card(order), reserve_inventory(order), send_confirmation(order))</code> in a try/except. <code>reserve_inventory</code> raises <code>OutOfStockError</code> almost immediately; <code>charge_card</code> needs two more seconds to finish. You catch the error and tell the customer "out of stock, nothing was charged." What is actually true two seconds later?</p>
+  <button type="button">Nothing else happens — gather() cancelled charge_card() the moment reserve_inventory() failed</button>
+  <button type="button">charge_card() finished anyway — the customer's card may have been charged despite the message they received</button>
+  <button type="button">gather() raises a second exception from charge_card() that crashes your except block</button>
+  <p class="why" data-for="0">This is the exact assumption gather() doesn't back up. No cancellation is sent to any sibling coroutine when one of them raises — not by default, and not automatically.</p>
+  <p class="why" data-for="1">Right. charge_card() has no idea reserve_inventory() failed, and gather() never told it to stop. It keeps running on the event loop and completes on its own two seconds later — after the customer already heard "nothing was charged."</p>
+  <p class="why" data-for="2">Your except block already ran and finished by the time charge_card() completes — there is nothing left awaiting gather() to receive a second exception into. If charge_card() also raises, asyncio just logs "Task exception was never retrieved" — silently, in a place nobody is looking.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The group fails fast, but the group doesn't stop" is not an asyncio quirk — it shows up anywhere concurrent work is fanned out and joined.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's <code>CompletableFuture.allOf(...)</code></h4>
+    <p>If one future in the set completes exceptionally, the combined future returned by <code>allOf</code> also completes exceptionally — but the other futures are not cancelled. They keep executing on their own executor threads to whatever result they were going to reach anyway.</p>
+    <div class="hf-scatter"><span>allOf fails fast ✓</span><span>sibling futures cancelled ⚠ — they are not</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Several Spring <code>@Async</code> calls fired in parallel</h4>
+    <p>Kick off three <code>@Async</code> methods from one service call and each returns its own independent <code>CompletableFuture</code>. One throwing does nothing to the others — there is no shared cancellation unless you wire an <code>ExecutorService</code> and cancel the rest yourself.</p>
+    <div class="hf-scatter"><span>independent futures ⚠ one failing touches nothing else</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>JavaScript's <code>Promise.all()</code></h4>
+    <p>Rejects the instant one promise rejects — but JS promises cannot be cancelled at all. The other promises keep running to whatever they were going to resolve or reject to, and an unhandled rejection from one of them shows up later as a console warning nobody connects back to the request that already finished.</p>
+    <div class="hf-scatter"><span>Promise.all rejects fast ✓</span><span>the losing promises ⚠ — un-cancellable, keep running</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> the event loop runs many coroutines on one thread, suspending each at its <code>await</code> points so others can make progress, and <code>gather</code>/<code>TaskGroup</code>/queues give you patterns for running several at once.
+  <b>The one new sentence this block adds:</b> gather()'s default behavior fails fast for YOU but does not fail fast for the group — the siblings of a raised exception keep running, unseen, unless you reach for TaskGroup or cancel them yourself.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="paSeg">
@@ -343,6 +447,7 @@ DevHubCodeWalk.mount('#cw-pyasync',{
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

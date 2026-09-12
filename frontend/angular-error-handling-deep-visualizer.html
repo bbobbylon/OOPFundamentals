@@ -108,6 +108,192 @@
     </div>
   </div>
 
+<p class="hf-deck">or, status: 0 tells you the response got lost — never whether the request did</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The create-user request timed out. So you retried it. Now there are two users.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">status: 0 looked like "never landed." For this request, it had already landed</div>
+  <p>Your global interceptor catches errors and retries anything that looks like a network hiccup:
+  <code>err.status === 0</code>. A user clicks "Create User" on a slow connection. The POST reaches
+  Spring, Spring creates the user, commits the transaction, and starts writing the response — and
+  right then the connection drops. A flaky wifi handoff, a proxy timeout, doesn't matter which.
+  Angular never receives that response, so it reports the exact same <code>status: 0</code> it
+  would report for a request that never left the browser at all. Your interceptor can't tell those
+  two cases apart from the client side — they look identical. It retries. Spring receives a second,
+  perfectly honest <code>POST /users</code> and creates a second user.</p>
+  <div class="hf-scatter">
+    <span>status === 0 detected correctly ✓</span>
+    <span>retry logic ran exactly as designed ✓</span>
+    <span>the FIRST request actually succeeded server-side ⚠</span>
+    <span>POST isn't idempotent — retrying it isn't "safe" ⚠</span>
+  </div>
+  <p class="hf-foot">status: 0 tells you the response never arrived. It tells you nothing about
+  whether the request did.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Only auto-retry what's provably safe to run twice</div>
+  <div class="hf-ladder">
+    <b>Retry GET freely — reading the same thing twice changes nothing</b>
+    <i>↓ idempotent by nature; a lost response just means "ask again"</i>
+    <b>Never blind-retry a POST on status 0 — surface it, or send a client-generated idempotency key the server can dedupe on</b>
+    <i>↓ a retried POST either does nothing extra (server recognizes the key) or the user decides, not the interceptor</i>
+    <b>PUT/DELETE sit in between — safe IF your API genuinely implements them as idempotent, so verify, don't assume</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A network error only tells you the response got lost — never whether the request did.</b> That
+  single fact is why blanket retry-on-any-error is dangerous for anything that changes data.
+  HTTP methods split into ones safe to repeat (GET, and PUT/DELETE if built correctly) and ones that
+  aren't automatically safe (POST, unless the server itself guards against duplicates).
+  <code>status === 0</code> makes this worse, because it's the one error that looks identical
+  whether the request succeeded server-side or never left the browser.
+</div>
+
+<div class="hf-note">Think of status: 0 like a phone call that drops mid-sentence — right after you
+asked your bank to transfer money, right before they said "done." You genuinely don't know if the
+transfer happened. Calling back and asking again is fine if you're checking your balance (a GET).
+<b>It is not fine if "asking again" means "making the transfer again"</b> (a POST) — you need to ask
+"did that already go through?" first, not just repeat yourself.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>status is 0. That obviously means it failed, right? Just retry it.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The interceptor</span>
+    <p>I only know the response never arrived. That's it. I have no way to see whether Spring
+    finished processing before the connection dropped — "created the user and lost the response"
+    and "never received the request" produce the exact same status: 0 from here.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Spring</span>
+    <p>And from my side, I did my job. I committed the transaction. Whatever happened to the
+    response after that is a networking problem that isn't mine to solve — I have no idea anyone's
+    about to send me the same POST again.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The interceptor</span>
+    <p>So I genuinely can't tell these apart on my own. Give me an idempotency key and I can hand it
+    to Spring, and Spring can say "already did that one" instead of creating a second user. Without
+    one, the honest move is to surface the failure, not guess.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One dropped connection, two completely different truths hiding behind the same status code.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Angular sends POST /api/users. The request leaves the browser and travels toward Spring</span><span class="tag">this part always happens the same way</span></li>
+    <li class="open"><span>Somewhere in the middle — before Spring receives it, OR after Spring finishes and starts sending the response back — the connection can drop</span><span class="tag">two different failure points, same eventual symptom</span></li>
+    <li><span>Spring may have already run the full handler: validated, inserted the row, committed. That work doesn't undo itself just because the response never made it back</span><span class="tag">the server doesn't know the client is unhappy</span></li>
+    <li class="open"><span>Angular's HttpClient sees no response at all — not a 4xx, not a 5xx, nothing to parse — and reports HttpErrorResponse with status: 0</span><span class="tag">a client-side observation, not a server-side one</span></li>
+    <li><span>A naive retry-on-status-0 interceptor sends the identical POST again, with no way to know a previous attempt may have already succeeded</span><span class="tag">where the duplicate user comes from</span></li>
+    <li class="open"><span>An idempotency key changes this: Spring checks "have I seen this key before" and returns the ORIGINAL result instead of creating a second row, even though the client genuinely sent the request twice</span><span class="tag">the only fix that works without guessing</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the one to sit with. The failure the <i>client</i> sees (status: 0)
+  and the outcome on the <i>server</i> (did it run or not) are two separate facts that don't have to
+  agree, and nothing in the response can tell you which case you're in after the fact. That's
+  exactly why the fix has to live on the server — an idempotency key it can check — not in a
+  smarter retry condition on the client.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A <code>GET /api/users/42</code> request fails with <code>status: 0</code>. Is it
+  safe for your interceptor to automatically retry it?</p>
+  <button type="button">No — status: 0 could mean the server already started processing it, so retrying risks a duplicate read</button>
+  <button type="button">Only if you add an idempotency key first, the same as you would for a POST</button>
+  <button type="button">Yes — GET doesn't change any data, so running the exact same request again, whether or not the first one "landed," produces no side effect either way</button>
+  <p class="why" data-for="0">GET doesn't have a meaningful "processing" step that changes data —
+  reading a user record twice isn't a duplicate the way creating one twice is. There's no state on
+  the server a second GET could corrupt or duplicate, so this concern, real for POST, doesn't
+  transfer here.</p>
+  <p class="why" data-for="1">Idempotency keys exist to let a server detect and dedupe a
+  <i>repeated write</i>. A GET was never going to write anything in the first place, so there's
+  nothing for a key to deduplicate — it solves a problem this request doesn't have.</p>
+  <p class="why" data-for="2">Right — this is exactly the distinction the mechanism above turns on.
+  GET is safe to retry blindly because running it twice and running it once produce the identical
+  outcome: the current state of <code>/api/users/42</code>, read and discarded. The status: 0
+  danger is specific to methods that change something, not to network failures in general.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Every system that can lose a response after doing the work solves this the same way.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Stripe's Idempotency-Key header — the textbook version</h4>
+    <p>Stripe's payments API is the reference implementation of this exact fix: every charge
+    request can carry an <code>Idempotency-Key</code> header, and if the same key shows up twice,
+    Stripe returns the original charge's result instead of charging the card again. It exists
+    because "the response got lost, should I retry the POST" is a problem every payment API has to
+    solve — not an Angular-specific one.</p>
+    <div class="hf-scatter"><span>Idempotency-Key: same problem, bigger stakes</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>TCP's own retransmission, one layer down</h4>
+    <p>TCP faces this exact ambiguity below HTTP: if an ACK is lost, TCP can't tell "my data never
+    arrived" from "it arrived but the ACK got lost," so it retransmits — which is exactly why
+    higher-level protocols that care about duplicates (an HTTP API handling POST) can't just trust
+    the transport layer to sort it out for them. The ambiguity is fundamental to networking, not a
+    framework bug.</p>
+    <div class="hf-scatter"><span>lost ACK ≈ lost HTTP response</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>MFA enrollment, for real</h4>
+    <p>An MFA-enrollment POST that registers a new authenticator with Ping or Entra is a bad place
+    to get this wrong — a naive retry on a dropped connection can register the SAME device twice,
+    and a user ends up with two enrolled authenticators where they expected one, discovered only
+    when they try to remove "the" authenticator and find there are two. This exact status-0 trap is
+    why that endpoint needs a client-generated request ID the identity provider can dedupe on.</p>
+    <div class="hf-scatter"><span>a duplicate authenticator, discovered later</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Isn't a 5xx also worth retrying automatically?</p>
+  <p class="a">Sometimes — but the same GET-vs-POST split still applies. A 503 on a GET is almost
+  always safe to retry with backoff, since the server is telling you it's overloaded right now, not
+  that anything went wrong with your specific request. A 500 on a POST is murkier: it usually means
+  the handler threw partway through, which for most well-written endpoints means the transaction
+  rolled back and nothing was saved — but "usually" isn't "always," and unless you've verified that
+  specific endpoint's failure behavior, don't auto-retry a POST on a 5xx any more than you would on
+  a 0.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Where does the status === 0 trap actually get decided — Angular or the browser?</p>
+  <p class="a">The browser. By the time Angular's HttpClient sees anything, the browser has already
+  given up trying to get a response — because the network dropped, DNS failed, or (very commonly,
+  and easy to mistake for this) a CORS preflight failed. Angular can't distinguish those causes from
+  the status code alone; they all surface as the identical <code>status: 0</code> with
+  <code>error instanceof ProgressEvent</code>. If you need to tell them apart, check the browser's
+  network tab, not the caught error — the client code genuinely can't see the difference.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Is retrying automatically ever fully safe, even for POST?</p>
+  <p class="a">Yes, when the server makes it safe, not when the client guesses it is. An idempotency
+  key is the general answer: the client generates one (a UUID is fine) per logical action, sends it
+  with every attempt of that action, and the server persists "I've handled key X" alongside the
+  result so a repeat is recognized and short-circuited to the original response. That moves the
+  safety guarantee to where the actual state lives, instead of the client hoping its retry condition
+  is conservative enough.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  A <code>PUT /api/users/42</code> request (a full replacement of the user record) gets
+  <code>status: 0</code>. The interceptor retries it automatically. The first PUT actually did reach
+  Spring and succeeded before the connection dropped. Does the retry cause the same kind of problem
+  the POST example did — a duplicate, corrupted data — or does it do nothing extra?
+</div>
+
   <!-- ── EXTREME-VIZ HERO: Error Handling Flow ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -593,6 +779,7 @@ renderErrs(); renderSteps();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

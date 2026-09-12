@@ -153,6 +153,213 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> <code>PATCH /api/users/42</code>: filter sets correlationId → Security validates the Bearer JWT into the <code>SecurityContext</code> → DispatcherServlet routes to <code>updateUser</code> → <code>@PreAuthorize("hasRole('USER_MANAGER')")</code> via the AOP proxy → <code>@Transactional</code> service updates + commits → Jackson serializes <code>UserResponse</code> → an <code>@AfterReturning</code> aspect audits the change → 200. The order tells you the audit log belongs in the service/aspect — not the filter (no controller info) or controller (no DB confirmation).</div>
   </div>
 
+<p class="hf-deck">or, an @PreAuthorize check isn't a property of the method — it's a property of how you called it</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The annotation is right there on the method. The security check never ran anyway.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">promoteToAdmin() is locked down — bulkPromote() walks right past the lock</div>
+  <p>This page's own CIAM callout shows <code>@PreAuthorize("hasRole('USER_MANAGER')")</code> guarding a
+  user-management endpoint, enforced "via the AOP proxy." Now picture the natural next feature request: a
+  bulk version, so an admin can promote fifty users in one call instead of fifty round-trips. The obvious
+  way to write it lives on the same <code>@Service</code> class, right next to the method it calls:</p>
+  <p><code>public List&lt;UserDto&gt; bulkPromote(List&lt;Long&gt; ids) { return ids.stream().map(this::promoteToAdmin).toList(); }</code></p>
+  <p>It compiles clean. Code review has nothing to flag — <code>promoteToAdmin</code> is still annotated,
+  right there, completely unmodified. Call it one id at a time through the controller and a non-manager
+  still gets a 403, exactly like before. But call <code>bulkPromote</code> instead, and every id in the
+  list gets promoted — no exception, no log line, regardless of who's calling it.</p>
+  <div class="hf-scatter">
+    <span>POST /users/7/promote (single) → 403 for a non-manager ✓</span>
+    <span>@PreAuthorize("hasRole('USER_MANAGER')") still sitting on the method ✓</span>
+    <span>bulkPromote() reaches it via this::promoteToAdmin ⚠</span>
+    <span>POST /users/bulk-promote → 200, all promoted, any caller ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption underneath: that <code>@PreAuthorize</code> is a property of the
+  method, checked no matter how you arrive at it — like a Java access modifier. It's actually a property
+  of the call path.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make every call to an annotated method leave the object and come back through Spring</div>
+  <div class="hf-ladder">
+    <b>First move: never write this.promoteToAdmin(id) — or a bare method reference to it — from inside the same class; call it through an injected reference to a DIFFERENT bean instead</b>
+    <i>↓ a call between two beans is forced through the container, which means through the proxy</i>
+    <b>Better: move bulkPromote() onto a separate UserAdminService that depends on UserService, so the loop can only ever reach promoteToAdmin() from outside</b>
+    <i>↓ the class boundary makes the correct call path the only call path — nobody has to remember the rule</i>
+    <b>The result: every promotion, single or bulk, is checked by the exact same guard</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>An annotation on a method is a promise the proxy keeps — not the method.</b> <code>@PreAuthorize</code>,
+  <code>@Transactional</code>, and <code>@Cacheable</code> all work the identical way: Spring wraps the
+  bean in a proxy, and only the proxy carries the check. That's exactly why this page's own diagram
+  routes <code>@PreAuthorize</code> "via the AOP proxy" as a distinct hop instead of folding it into the
+  method itself, and exactly why <code>@Transactional</code> has to "start in the service, not the
+  controller" — both only run at all because the call arrived from outside, through Spring's front door.
+</div>
+
+<div class="hf-note">Think of the proxy as <b>a receptionist who checks ID badges at the lobby door</b> of
+a secure office. Everyone who walks in through that door gets carded — that's the
+<code>@PreAuthorize</code> check. But if you already work in the building and duck through an internal
+connecting door straight into the next office, you never pass the lobby at all. The receptionist isn't
+malfunctioning, and the policy posted at the front desk was never wrong — you simply didn't use the door
+it's watching.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I put <code>@PreAuthorize("hasRole('USER_MANAGER')")</code> directly on
+    <code>promoteToAdmin()</code>. How did a caller with zero admin permissions promote fifty users
+    through <code>bulkPromote()</code>?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Spring's proxy</span>
+    <p>They never called MY <code>promoteToAdmin()</code>. I only exist wrapped around the bean the
+    container hands out through <code>@Autowired</code>. The instant <code>bulkPromote()</code> reaches
+    <code>promoteToAdmin</code> through the bare <code>this</code> reference, that call goes straight to
+    the real object I'm wrapped around — it never reaches me, so I never get a chance to check anything.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The real UserService object, underneath</span>
+    <p>And from in here, I don't even know a proxy exists. <code>this</code> has meant "me, directly"
+    since the day Java was designed — nothing about an ordinary method call inside my own class was ever
+    going to detour through some object wrapped around me.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Your security review</span>
+    <p>Which is exactly why this one is so easy to miss: the annotation is real, the code compiles clean,
+    and a review reading top-to-bottom sees a properly-guarded method. The missing piece isn't in the code
+    you're looking at — it's in which door the call used to get there.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One word decides whether the check even gets a chance to run: <code>this</code>.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>At startup, Spring sees <code>@PreAuthorize</code> (or <code>@Transactional</code>,
+    <code>@Cacheable</code>) on a bean method and builds a dynamic proxy around that bean</span>
+    <span class="tag">a CGLIB subclass, typically, in a Spring Boot app</span></li>
+    <li class="open"><span>Every external caller — the controller, another <code>@Service</code>, a test
+    running the real context — receives that PROXY, not the raw object, whenever it
+    <code>@Autowired</code>s the bean</span><span class="tag">the only object the container ever hands out</span></li>
+    <li><span>A call arriving through the proxy passes the interceptor chain first:
+    <code>@PreAuthorize</code> evaluates, then — only if it passes — the real method runs</span>
+    <span class="tag">the advice runs before the body sees the call</span></li>
+    <li class="open"><span>A call written as <code>this.promoteToAdmin(id)</code> — or
+    <code>this::promoteToAdmin</code> — from inside the bean's own code reaches the bare, unwrapped
+    instance the proxy is privately wrapping, with nothing in between</span><span class="tag">the lesson</span></li>
+    <li><span>The real method body executes identically either way — from inside itself, it has no way to
+    tell which path the call took</span><span class="tag">same bytecode, either way</span></li>
+    <li class="open"><span>Nothing throws, nothing logs, nothing fails to compile — the annotation simply
+    never gets consulted for that particular call</span><span class="tag">silent by construction</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the lesson. Steps 1, 3, and 5 describe a proxy and a bean doing exactly what
+  they were built to do — there's no bug in Spring here. The only thing that decided whether
+  <code>@PreAuthorize</code> ran was which reference the call was made against: the proxy Spring built at
+  startup, or the plain object sitting behind it that every method inside that same class already holds
+  as <code>this</code>.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <p class="note">bulkPromote() reaches this.promoteToAdmin(id) right here — already inside, before this ring even begins ↴</p>
+    <div class="ring"><span class="lbl">Spring's dynamic proxy — @PreAuthorize("hasRole('USER_MANAGER')") is checked here, on the way in</span>
+      <div class="core">UserService, the real bean<small>promoteToAdmin()'s actual body — identical code, whichever path reached it</small></div>
+    </div>
+  </div>
+  <p class="hf-annot">The ring isn't a step the call can choose to skip — it's the only place the check
+  exists at all. A call from the controller has to cross the ring to reach the core, so
+  <code>@PreAuthorize</code> runs. A call written as <code>this.promoteToAdmin(id)</code> inside
+  <code>bulkPromote()</code> is already standing in the core the moment it happens — there was never a
+  ring around it to cross.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q"><code>UserService</code> has <code>promoteToAdmin(Long id)</code> annotated
+  <code>@PreAuthorize("hasRole('USER_MANAGER')")</code>, and a second method,
+  <code>bulkPromote(List&lt;Long&gt; ids)</code>, implemented as
+  <code>ids.stream().map(this::promoteToAdmin).toList()</code> — with no annotation of its own. A user
+  with no roles at all calls the bulk-promote endpoint with a list of 50 ids. What happens?</p>
+  <button type="button">Every id in the list gets promoted, with no exception at all — @PreAuthorize never fires because the call to promoteToAdmin never passes back through the proxy</button>
+  <button type="button">Spring throws AccessDeniedException on the very first id — @PreAuthorize runs before the body of any annotated method executes, no matter how that method is reached</button>
+  <button type="button">It throws a runtime exception, because @PreAuthorize can't be enforced on a method invoked through a method reference (::) — only a direct userService.promoteToAdmin(id) call is proxied</button>
+  <p class="why" data-for="0">Right — and the dangerous part is exactly how quiet it is. <code>this::promoteToAdmin</code> resolves to the bare, unproxied object sitting inside the wrapper Spring built at startup. The security interceptor lives on the proxy, not inside the compiled method body, so a call that never reaches the proxy never reaches the check either — every promotion in the list goes through.</p>
+  <p class="why" data-for="1">This is exactly how a Java access modifier like <code>private</code> behaves — enforced no matter how you get there — so it's a completely reasonable guess. <code>@PreAuthorize</code> doesn't work that way: it's enforced by a proxy sitting in front of the object, not a check compiled into the method itself. A call that never passes through that proxy never triggers the check, which is exactly what a self-invoked call is.</p>
+  <p class="why" data-for="2">Method references aren't special-cased here — <code>ids.stream().map(this::promoteToAdmin)</code> behaves exactly like writing <code>for (Long id : ids) this.promoteToAdmin(id)</code> in a loop. Either way the call is made against the bare <code>this</code> reference to the same instance, so either way it bypasses the proxy. The bug isn't the <code>::</code> syntax — it's that the call never leaves the object to come back in through Spring's front door.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">A guard that only watches one door — and every framework built on proxies has exactly one door.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>The same bulk-endpoint refactor, in a real CIAM admin panel</h4>
+    <p>Session revocation, forced MFA re-enrollment, role changes pushed down from Ping or Entra — these
+    are exactly the <code>@PreAuthorize</code>-guarded, one-user-at-a-time endpoints that get a "bulk"
+    sibling the moment support asks to fix ten accounts at once. Writing that sibling as a loop that calls
+    the single-item service method through <code>this</code> reproduces this exact bug on the
+    highest-stakes endpoints in the app — the ones a pentest report finds first.</p>
+    <div class="hf-scatter"><span>admin bulk-actions are where this bug is most expensive</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>ASP.NET Core's EF Core lazy-loading proxies</h4>
+    <p>EF Core's lazy-loading proxies are a dynamically generated subclass wrapped around your entity —
+    the same shape as CGLIB. They only intercept a <code>virtual</code> navigation property read through
+    the proxy reference from outside; code inside the entity's own method that touches the backing field
+    directly never triggers the proxy, and the "lazily loaded" data silently isn't there.</p>
+    <div class="hf-scatter"><span>same shape: a subclass proxy, only watching external calls</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Redux/NgRx middleware that never sees a direct function call</h4>
+    <p>Logging middleware, auth-gating middleware, and analytics middleware all sit between
+    <code>store.dispatch()</code> and the reducer — they only run when an action is actually dispatched.
+    Call a reducer or an action-creator's inner function directly instead of dispatching it, and the
+    entire middleware chain is skipped, silently, exactly like skipping Spring's proxy.</p>
+    <div class="hf-scatter"><span>the interceptor only watches its one designated front door</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Does this affect @Transactional too, or is @PreAuthorize special?</p>
+  <p class="a">Identically — <code>@Transactional</code> is implemented the same way, as advice on the
+  same kind of proxy. A self-invoked call to a <code>@Transactional</code> method runs inside whatever
+  transaction (or lack of one) was already active in the calling method, silently, instead of opening its
+  own. Same mechanism, same blind spot, different symptom — a data-consistency bug instead of a security
+  bypass.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why doesn't Spring just detect this and refuse to start, or make it work?</p>
+  <p class="a">There's a real fix — AspectJ compile-time or load-time weaving bakes the advice directly
+  into the method's bytecode instead of wrapping the bean in a proxy, so a self-invoked call runs the
+  advice too. Spring Boot doesn't default to it because weaving is heavier to set up and harder to debug
+  than a proxy. Automatic detection is hard for the same reason a compiler can't flag it:
+  <code>this.promoteToAdmin(id)</code> is completely ordinary, valid Java — the missing check is a
+  runtime fact about which object answered the call, not a syntax error.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">How do I actually catch this before it ships?</p>
+  <p class="a">Grep for any call to a method in the same class that carries <code>@Transactional</code>,
+  <code>@PreAuthorize</code>, <code>@Cacheable</code>, or <code>@Async</code> — a bare call or a
+  <code>this::</code> reference to one of those from inside the class is the smell. More reliably, write
+  an integration test that goes through the real Spring context and calls the PUBLIC entry point with a
+  principal that should be denied, then asserts a 403. A unit test that mocks the security context and
+  calls the method directly will pass either way — it never puts the proxy in the loop at all.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  Someone "fixes" this by moving <code>bulkPromote()</code> out of <code>UserService</code> entirely,
+  onto a new <code>UserAdminService</code> that has <code>UserService</code> injected as a field and
+  calls <code>userService.promoteToAdmin(id)</code> in the loop instead of
+  <code>this.promoteToAdmin(id)</code>. Does that actually close the hole this time?
+</div>
+
   <!-- ── Big picture ── -->
   <section>
     <h2>1. The journey at a glance</h2>
@@ -567,5 +774,6 @@ renderNodes(); resetStage();
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

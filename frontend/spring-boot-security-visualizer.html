@@ -117,6 +117,219 @@
     <div class="intro-ciam"><span class="tag">CIAM security chain:</span> Your Angular app gets a JWT from Entra ID / Ping after OIDC login. The Spring API validates that JWT's signature against the IDM's JWKS endpoint, extracts the <code>roles</code> claim, and uses <code>@PreAuthorize</code> on each endpoint to enforce who can do what — configured once.</div>
   </div>
 
+<p class="hf-deck">or, Spring Security doesn't rank your rules — it stops at the first one that fits</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You added one line for a health check. You didn't touch the admin rule. The admin rule died anyway.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">curl with no Authorization header returns 200 from /api/admin/reports</div>
+  <p>A teammate needed the load balancer's health probe to reach <code>/api/**</code> without a token,
+  so they added <code>.requestMatchers("/api/**").permitAll()</code> near the top of
+  <code>authorizeHttpRequests(...)</code> — right above the existing
+  <code>.requestMatchers("/api/admin/**").hasRole("ADMIN")</code> line, because that's where the other
+  <code>permitAll()</code> rules already lived. It shipped. The health probe worked. Three weeks later
+  a pen-test report says every <code>/api/admin/**</code> endpoint is reachable with zero
+  authentication. Nobody touched the admin rule — <code>git blame</code> shows it hasn't changed in
+  months.</p>
+  <div class="hf-scatter">
+    <span>health probe passes ✓</span>
+    <span>the ADMIN rule, unchanged, still in the file ✓</span>
+    <span>/api/** also matches /api/admin/reports ⚠</span>
+    <span>authorizeHttpRequests stops at the first match ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that Spring re-reads the whole list and applies whichever
+  rule is "most specific." It applies whichever rule is first.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Put the narrow rule above the broad one — every time</div>
+  <div class="hf-ladder">
+    <b>Move .requestMatchers("/api/admin/**").hasRole("ADMIN") above the new permitAll() line</b>
+    <i>↓ now the narrower pattern gets the first look, so it's the one that decides</i>
+    <b>Better: don't reuse /api/** for the health probe — write .requestMatchers("/api/health").permitAll()</b>
+    <i>↓ a narrow permitAll() can't swallow a route someone else adds under /api/** next month</i>
+    <b>The admin rule is reachable no matter what gets added above it later</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>authorizeHttpRequests doesn't rank your rules — it stops at the first one that matches.</b> That
+  one sentence is the whole reason declaration order is load-bearing, why <code>.anyRequest()</code>
+  always has to be the last line in the list, why a rule can be perfectly correct and permanently
+  unreachable at the same time, and why two developers can each write a technically correct line and
+  still produce a security hole together.
+</div>
+
+<div class="hf-note">Think of the rule list as a bouncer holding a stack of index cards, not a judge
+weighing arguments. He reads the top card, and if this request's path matches what's written on it,
+that card's ruling is final — he stamps it and moves on. He never reads the rest of the stack, even if
+card six describes the request far more precisely than card one did. A real bouncer might notice a
+better-fitting card exists further down. The filter never looks.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I have a hasRole('ADMIN') rule right there in the config. Why did an anonymous request reach that endpoint with a 200?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">AuthorizationFilter</span>
+    <p>I don't grade your rules for fit — I walk your list top to bottom and stop at the first pattern
+    that matches this URL. Your <code>/api/**</code> <code>permitAll()</code> matched two lines
+    earlier. I never got to line 3.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The hasRole('ADMIN') rule</span>
+    <p>I'm still sitting right here, spelled correctly, doing exactly what I was told. Nobody can call
+    me broken, because nobody ever calls me at all.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">.anyRequest().authenticated()</span>
+    <p>Don't come looking at me either. I'm written last on purpose — if I ran before the specific
+    rules, I'd catch every request that reached me and nothing more specific below me would ever fire.
+    Same bug, opposite direction.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six rules on the list. The request only ever meets one of them.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The request already carries whatever <code>Authentication</code> earlier filters built —
+    a real principal, or the anonymous one if no token was offered</span><span class="tag">authentication already decided</span></li>
+    <li class="open"><span><code>AuthorizationFilter</code> walks your <code>authorizeHttpRequests(...)</code>
+    entries <b>in the exact order you wrote them</b></span><span class="tag">not sorted, not weighted</span></li>
+    <li><span>For each entry, it tests the request's path against that entry's matcher pattern</span><span class="tag">Ant-style paths, e.g. /api/admin/**</span></li>
+    <li class="open"><span>The <b>first</b> pattern that matches wins. Evaluation stops there — pass or
+    fail</span><span class="tag">this is the whole bug</span></li>
+    <li><span>That one rule's check runs: <code>permitAll()</code> always passes,
+    <code>hasRole</code>/<code>hasAuthority</code> checks the authorities on the Authentication</span><span class="tag">pass → controller, fail → AccessDeniedException</span></li>
+    <li class="open"><span>Every entry below the matching one is never evaluated for this request —
+    including one that names the path far more precisely</span><span class="tag">dead code that still compiles</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the lesson, and the other five are bookkeeping around it. There is no
+  ranking pass, no "most specific wins" tiebreaker, no second look — the moment a pattern matches,
+  Spring stops reading. Everything else in this block, the health-check bug included, is a consequence
+  of that one sentence.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">GET /api/admin/reports<small>no Authorization header</small></div>
+    <div class="arrow">↓ matched top to bottom</div>
+    <div class="opts">
+      <span>/api/public/** → permitAll()</span>
+      <span class="on">/api/** → permitAll()  ← matches first, decides the request</span>
+      <span>/api/admin/** → hasRole('ADMIN')  — never reached</span>
+      <span>anyRequest() → authenticated()  — never reached</span>
+    </div>
+  </div>
+  <p class="hf-annot">The picture prose can't make this obvious: the ADMIN rule and the catch-all are
+  still in the list, correctly written, structurally identical to working code. They're just sitting
+  after the line that already claimed this URL. Move the ADMIN rule one line up and the highlighted
+  box moves with it — nothing else about the file has to change.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your chain has, in this exact order: <code>.requestMatchers("/api/**").permitAll()</code>,
+  then <code>.requestMatchers("/api/reports/**").hasAuthority("SCOPE_reports.read")</code>, then
+  <code>.anyRequest().authenticated()</code>. A request with no <code>Authorization</code> header hits
+  <code>GET /api/reports/quarterly</code>. What comes back?</p>
+  <button type="button">403 Forbidden — /api/reports/** is the more specific rule, and a request with no scope fails it</button>
+  <button type="button">200 OK — /api/** already matches /api/reports/quarterly and permitAll() wins before the reports rule is ever consulted</button>
+  <button type="button">401 Unauthorized — every path under /api/** still requires some minimal authentication by default</button>
+  <p class="why" data-for="0">A completely reasonable guess — "the more specific rule wins" is how CSS
+  selectors, Java overload resolution, and plenty of other systems actually behave. But
+  <code>authorizeHttpRequests</code> has no concept of "more specific." It never compares your two
+  patterns against each other; it just asks each one, in order, "does this match?" — and
+  <code>/api/**</code> already said yes three lines earlier. The reports rule never runs, so it can't
+  produce a 403.</p>
+  <p class="why" data-for="1">Right — and this isn't Spring being lenient, it's the documented
+  contract: matchers evaluate in declaration order and the first match wins, full stop. That's why
+  <code>git blame</code> on the reports rule usually comes back clean — the rule was never wrong, it's
+  just unreachable from where it sits.</p>
+  <p class="why" data-for="2">There's no such floor. <code>permitAll()</code> means exactly what it
+  says — zero authentication required, not "authentication optional." If unauthenticated traffic
+  should still be rejected for some other reason, that has to be written as its own rule; as written,
+  this one guarantees the controller runs.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Ordered rule lists show up everywhere security gets enforced. They all share this exact trap.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Firewall rules — the original "first match wins"</h4>
+    <p>An <code>iptables</code> chain or an AWS security group's rule list works on the identical
+    principle: rules are walked top to bottom, and the first one that matches the packet decides its
+    fate. A wide-open ACCEPT rule placed above a narrow DENY rule doesn't get overruled by the more
+    specific rule underneath it — the DENY rule just never runs. Same bug, thirty years older.</p>
+    <div class="hf-scatter"><span>first match wins, not best match</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>CSS taught you the opposite instinct — that's why this one bites</h4>
+    <p>A CSS engine ranks selectors by <i>specificity</i> first and only falls back to source order to
+    break a tie between equally specific rules — so <code>.admin-badge</code> beats a plain
+    <code>div</code> selector even if the <code>div</code> rule is written last. Years of that habit is
+    exactly what makes <code>authorizeHttpRequests</code> feel broken the first time it bites: there is
+    no specificity ranking here at all, only position.</p>
+    <div class="hf-scatter"><span>specificity vs. position — different rulebooks entirely</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>In CIAM: the gateway sitting in front of this exact service</h4>
+    <p>A real CIAM deployment usually puts a gateway in front of a Spring resource server like this
+    one — Spring Cloud Gateway, an API management layer, an ALB's listener rules. Every one of them
+    matches incoming routes in a defined order and stops at the first predicate that fits, for the same
+    reason <code>authorizeHttpRequests</code> does. Add a broad new route to send more traffic through
+    a new pipeline, and it can quietly swallow a narrower route that used to handle that traffic — with
+    no error at the gateway, the app, or the deploy pipeline.</p>
+    <div class="hf-scatter"><span>the bug moves up a layer, the rule stays identical</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">If order matters this much, why doesn't Spring just sort my rules from most specific to least specific automatically?</p>
+  <p class="a">Because it would have to understand your intent to do that safely, and Ant-style path
+  patterns don't carry enough information for that. Is <code>/api/admin/**</code> "more specific" than
+  <code>/api/*/reports</code>? For some URLs yes, for others no — there's no total ordering that works
+  for every pair of patterns. Rather than guess, Spring makes you the one who decides, and the price of
+  that control is that the order you write is the order that runs.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why did a request with no Authorization header at all come back 401, when it failed a hasRole check — isn't that supposed to be a 403?</p>
+  <p class="a">This is the one exception to "AccessDeniedException means 403." By default Spring still
+  builds an <code>Authentication</code> for a request with no token — an anonymous one, via
+  <code>AnonymousAuthenticationFilter</code> — so <code>hasRole('ADMIN')</code> fails it the normal
+  way. But <code>ExceptionTranslationFilter</code> checks whether the failing Authentication is
+  anonymous, and if it is, it doesn't hand back 403 — it invokes the same
+  <code>AuthenticationEntryPoint</code> a flat-out authentication failure uses. The logic: you were
+  never given a chance to prove who you are, so "forbidden" is the wrong message — "authenticate
+  first" is the honest one. Send a real but insufficiently-privileged token instead and you get an
+  actual 403, no translation involved.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does @PreAuthorize have the same ordering problem?</p>
+  <p class="a">No ordering problem — there's no list to order, just one SpEL expression evaluated for
+  that one method call. But it has a sharper trap of its own: it only runs when the call arrives
+  through Spring's proxy. Call the annotated method from another method on the same bean
+  (<code>this.deleteUser(id)</code>) instead of going through an injected dependency, and the proxy is
+  never in the path — the annotation is silently skipped. No exception, no log line, the code just runs
+  as if <code>@PreAuthorize</code> weren't there.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  The demo above has a "wrong role → 403" button and a "no token → 401" button — so an authorization
+  failure isn't always a 403 after all. An <code>/api/admin/**</code> rule requires
+  <code>hasRole('ADMIN')</code>. One request arrives with a <b>valid JWT for a real, logged-in
+  customer</b> who simply isn't an admin. A second request arrives with <b>no Authorization header at
+  all</b>. Both fail the exact same <code>hasRole('ADMIN')</code> check. Do they get the same status
+  code back — and if not, which is which?
+</div>
+
   <!-- ── HERO: animated security filter-chain walk · request chip + live who-decided inspector ── -->
   <div class="card" style="border:1px solid #a78bfa;margin-bottom:18px">
     <h2 id="hero-viz" style="margin-top:0;color:#a78bfa">▶ Send a request through the filter chain — who says 200, 401, or 403?</h2>
@@ -550,6 +763,7 @@ lifecycle page). 403 would be the wrong code.`},
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -109,6 +109,220 @@
     </div>
   </div>
 
+<p class="hf-deck">or, patchState isn't a formality — it's the only thing that tells a signal something changed</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You pushed the item into the array. The cart's total didn't move.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The array really does have 4 items in it now. The screen still says 3.</div>
+  <p>A teammate refactoring <code>withMethods</code> writes a "fast path":
+  <code>addQuick(p: Product) { store.items().push(toItem(p)); }</code> — no <code>patchState</code>,
+  just grab the current array and push, since it's the same object anyway. It compiles. Calling it
+  from the console shows <code>store.items()</code> returning an array with the new item sitting
+  right there at the end. But the template's <code>@for</code> never adds a row, and the
+  <code>withComputed</code> total never recalculates. Nothing threw. The data is correct if you go
+  looking for it directly — which is exactly why nobody thinks to look at
+  <code>store.items()</code> itself as the problem.</p>
+  <div class="hf-scatter">
+    <span>store.items() really does contain the new item ✓</span>
+    <span>no error, no warning, the method returns normally ✓</span>
+    <span>the signal's own version counter never moved ⚠</span>
+    <span>every computed() and template depending on it has no idea anything happened ⚠</span>
+  </div>
+  <p class="hf-foot">A signal doesn't watch the object it holds for changes. It only knows
+  something changed when you hand it a new value through <code>set</code>, <code>update</code>, or
+  <code>patchState</code> — mutating what it's already holding is invisible to it, by design.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Give the signal a new array, not a mutated old one</div>
+  <div class="hf-ladder">
+    <b>store.items().push(toItem(p)) → patchState(store, { items: [...store.items(), toItem(p)] })</b>
+    <i>↓ a new array reference is what actually flips the signal's internal version — the push alone never did</i>
+    <b>Or hand patchState an updater for anything that reads old state: patchState(store, s =&gt; ({ items: [...s.items, toItem(p)] }))</b>
+    <i>↓ same guarantee, safer when two patches could otherwise race against stale state</i>
+    <b>Either way: through patchState, every time — no direct writes to what a signal is holding</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A signal changes when you call its setter — never when you edit what it's already
+  holding.</b> <code>set</code>, <code>update</code>, and <code>patchState</code> all do the same
+  one thing underneath: hand the signal a brand-new value and bump its internal version so anything
+  reading it knows to recheck. Mutate the old value in place and none of that happens — not because
+  Angular missed it, but because there was no setter call for it to notice in the first place.
+  That's the whole reason <code>patchState</code> exists as the <i>one</i> sanctioned way to write
+  to a SignalStore instead of exposing <code>.items.set(...)</code> on every field.
+</div>
+
+<div class="hf-note">Think of a signal as a locker with a numbered receipt, not a box you can just
+reach into. Handing the locker a whole new box (<code>set</code>/<code>patchState</code>) bumps the
+receipt number, and anyone holding an old receipt knows to come back and check. Reaching past the
+attendant and rearranging what's already inside the box changes the box's contents without
+touching the receipt at all — so every receipt in circulation is now silently wrong. The analogy
+holds exactly as long as you resist doing your own rearranging.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>store.items() shows 4 items in the console. Why does nothing else on the page know that?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The items signal</span>
+    <p>Because nobody called my setter. I don't inspect the array I'm holding — I don't even know
+    it's an array. I just hold a reference and a version number, and I only bump that number when
+    something calls <code>set</code>, <code>update</code>, or the <code>patchState</code> that
+    wraps them. Your teammate's <code>push()</code> reached past me and edited the object directly.
+    As far as my version number is concerned, nothing happened.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">A computed() reading it</span>
+    <p>And I take that version number on faith. I don't re-run "just in case" — I only re-run when
+    a signal I depend on reports a new version. If <code>items</code> never reported one, I have no
+    reason to touch my cached total again, so I don't.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One line changes — push() becomes a spread — and the exact same array becomes visible to everything watching it.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>withMethods</code> defines <code>addQuick(p)</code>, calling <code>store.items().push(toItem(p))</code> directly on the array the signal currently holds</span><span class="tag">reads the signal, mutates the result</span></li>
+    <li class="open"><span><code>.push()</code> returns the array's new length, mutates the array in place, and never touches the signal — no <code>patchState</code>, <code>set</code>, or <code>update</code> anywhere in this call</span><span class="tag">the signal was never even asked</span></li>
+    <li><span>The signal's internal version number — the thing every <code>computed()</code> and every OnPush template binding actually checks — stays exactly what it was before the call</span><span class="tag">version unchanged = "no update happened," as far as anyone downstream can tell</span></li>
+    <li class="open"><span>Compare <code>addItem(p)</code>: <code>patchState(store, { items: [...store.items(), toItem(p)] })</code> builds a brand-new array and hands it to the signal's setter, which stores the new reference and bumps the version</span><span class="tag">this is the only step that actually notifies anyone</span></li>
+    <li><span>Every <code>computed()</code> that reads <code>items</code> — the cart total, the item count — is marked stale and recomputes the next time it's read</span><span class="tag">this cascade only starts from step 4</span></li>
+    <li class="open"><span>The template, bound to <code>store.total()</code> under OnPush, rerenders because the computed signal it reads reported a new value. Skip step 4 and every one of these downstream steps simply never fires — with the "wrong" data sitting, fully present, one property access away</span><span class="tag">correct data, silent template</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the lesson. <code>addQuick</code>'s array mutation isn't undone or
+  ignored — it fully happened, the array genuinely has the new item. What didn't happen is the one
+  thing every other piece of this system is actually watching: the signal's version bump.
+  <code>store.items()</code> and "the state anyone else can see" quietly became two different
+  things the moment <code>patchState</code> got skipped.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">patchState(store, { items: [...] })<small>one call — a new array, a bumped version</small></div>
+    <div class="fan">the signal's new version ↓ notifies every reader that asked</div>
+    <div class="obs">
+      <span>total — withComputed(), recalculates</span>
+      <span>itemCount — withComputed(), recalculates</span>
+      <span class="new">the @for template — rerenders the new row</span>
+      <span>a logging effect() watching items — reruns, logs the change</span>
+    </div>
+  </div>
+  <p class="hf-annot">Every one of those exists because it read <code>items()</code> at some point
+  and got registered as a dependent. <code>store.items().push(...)</code> never reaches any of
+  them — not because they're broken, but because nothing told the signal a new version even
+  existed for them to notice.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A <code>withMethods</code> function does
+  <code>addBroken(p: Product) { store.items().push(toItem(p)); }</code> — no
+  <code>patchState</code> call anywhere in the method. After calling <code>addBroken(p)</code>,
+  what does <code>store.items()</code> return, and does the cart's <code>withComputed</code> total
+  update?</p>
+  <button type="button">store.items() returns the array without the new item — the push() call is silently discarded because it never went through patchState</button>
+  <button type="button">Both update immediately — withComputed tracks its dependencies by comparing array contents on every read, not just by reference</button>
+  <button type="button">store.items() does include the new item — push() genuinely mutated the array in place — but the total doesn't update, because nothing signaled the store that anything changed</button>
+  <p class="why" data-for="0">A reasonable guess if you assume "not going through the proper
+  channel" means the write itself somehow fails — but <code>push()</code> is a completely ordinary
+  JavaScript array mutation. It has no idea it's "supposed" to go through <code>patchState</code>,
+  and nothing stops it from succeeding.</p>
+  <p class="why" data-for="1">There's no content-diffing here — a computed signal decides whether
+  to notify further downstream using simple reference equality on the value it produces, the same
+  rule the page states outright for <code>patchState</code>: "signals compare by reference, just
+  like OnPush." Nothing in this system inspects what's inside the array.</p>
+  <p class="why" data-for="2">Right, and this is the uncomfortable part: the mutation isn't
+  rejected or lost, it's just invisible to everything downstream. <code>store.items()</code> and
+  "what the rest of the app can see" are the same thing only when a change reaches consumers
+  through <code>patchState</code>, <code>set</code>, or <code>update</code> — direct mutation
+  breaks that link without breaking the mutation itself.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three stacks, one rule: identity travels by replacement, never by editing in place.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>OnPush's @Input reference check — the same rule, from underneath instead of above</h4>
+    <p>The exact rule that governs OnPush's <code>@Input</code> check governs this too, just from
+    the other direction: OnPush skips re-checking a binding whose incoming reference didn't
+    change; a signal skips notifying its dependents for the identical reason. <code>array.push()</code>
+    breaks both the same way, because both systems decide "did this change" by comparing a
+    reference, never by looking inside the thing it points to.</p>
+    <div class="hf-scatter"><span>OnPush's reference check ≈ a signal's version bump</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Git's content-addressed objects — nothing "changes," a new object gets written</h4>
+    <p>Git never mutates a commit — editing a file and committing again writes an entirely new
+    blob and a new commit object; the old ones stay exactly as they were, unreachable but intact
+    until garbage collected. <code>patchState</code> works the same way conceptually: it doesn't
+    edit the array in place, it writes a new one and points the signal at it. Anything still
+    holding the old array keeps looking at exactly what it always saw — which is a feature, not a
+    bug, in both systems.</p>
+    <div class="hf-scatter"><span>new object + repoint, never edit-in-place</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A CIAM permissions cache, invalidated by writing a new object</h4>
+    <p>A token-claims cache — decoded scopes and roles keyed by session — has to follow the
+    identical rule once it's wrapped in a signal: <code>patchState(claimsStore, { scopes: [...current, 'admin:write'] })</code>,
+    never <code>claimsStore.scopes().push('admin:write')</code>. Get it backwards in an
+    authorization check and a permission genuinely lands in memory (the array has it) while every
+    guard and UI element reading <code>scopes()</code> keeps evaluating against a version that, as
+    far as it's concerned, never changed — a stale-permissions bug that's exactly as silent as a
+    stale-cart-total bug, and considerably higher stakes.</p>
+    <div class="hf-scatter"><span>same mutation bug, now gating access instead of a shopping cart</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Is store.items().push(x) always wrong, or are there cases where mutating in place is fine?</p>
+  <p class="a">Inside a SignalStore, treat it as always wrong — even in the rare case where you're
+  about to immediately call <code>patchState</code> with something that happens to produce an
+  equivalent result, you've now got a window where the signal and the "real" state disagree, and
+  the next person reading that method has no way to know the mutation was supposedly harmless. The
+  entire value of a signal-based store is that "read the signal" and "know the current truth" are
+  the same operation; a direct mutation, even a careful one, breaks that guarantee for anyone who
+  isn't looking at that exact line of code.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does patchState do a deep clone, or just a shallow merge — does that matter here?</p>
+  <p class="a">Shallow merge, and it matters a lot. <code>patchState(store, { items: newArray })</code>
+  replaces the <code>items</code> key with whatever reference you hand it and leaves every other
+  key's reference untouched — it does not recursively clone <code>newArray</code>'s contents or
+  anything else in the state. That's exactly why you have to build the new array yourself
+  (<code>[...store.items(), x]</code>) before handing it to <code>patchState</code>: the shallow
+  merge will happily install a mutated array as the "new" value and call it a day, because nothing
+  about a shallow merge inspects whether what you handed it is actually new.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">If I want to mutate items() directly for performance, is there a real API for that?</p>
+  <p class="a">Not inside a SignalStore, and the performance worry is usually misplaced — building
+  <code>[...store.items(), x]</code> for a UI-sized list (dozens to low thousands of rows) costs
+  microseconds, nowhere near what a wasted render or a missed update costs you in debugging time.
+  If a list is genuinely large enough that copying it on every write is a measured problem, reach
+  for <code>withEntities</code> and its <code>addEntity</code>/<code>updateEntity</code>/<code>removeEntity</code>
+  helpers — they're written to update the normalized id-map efficiently while still going through
+  <code>patchState</code> correctly, which gets you both the performance and the notification.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  <code>withMethods</code> has <code>addItem(p) { patchState(store, { items: [...store.items(), toItem(p)] }); }</code>
+  and a broken sibling <code>addItemBroken(p) { store.items().push(toItem(p)); }</code>. You call
+  <code>addItemBroken(p1)</code>, then immediately call <code>addItem(p2)</code>. After both calls,
+  how many items does <code>store.items()</code> actually contain, and does the
+  <code>withComputed</code> total reflect all of them? Now call them in the opposite order —
+  <code>addItem(p2)</code> first, then <code>addItemBroken(p1)</code> — does either answer change?
+</div>
+
   <!-- ── EXTREME-VIZ HERO: Signal Store Patterns ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -529,5 +743,6 @@ render();
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

@@ -105,6 +105,225 @@
     </div>
   </div>
 
+<p class="hf-deck">or, a rotating refresh token only trusts the first person who shows up with it</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">One flaky wifi moment. Six parallel API calls. The user gets logged out of everything — including the tab that "won."</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The interceptor did exactly what section 3's code shows — and it torched the session</div>
+  <p>A dashboard fires six parallel calls on load: orders, invoices, profile, notifications,
+  settings, team. The access token expired forty seconds ago, so all six land a <code>401</code>
+  within milliseconds of each other. Each interceptor instance independently does what the code
+  block above says to do — catches its own 401, calls <code>auth.refresh()</code> — because
+  nothing is coordinating between them. All six POST to <code>/token</code> almost
+  simultaneously. The IdP processes the first arrival, rotates the refresh token, and hands back a
+  new access token. The second arrival — already in flight before the rotated cookie even existed
+  — presents the refresh token that was just spent. Rotation's reuse-detection can't tell "my own
+  app racing itself" from "an attacker replaying a stolen token," so it revokes the <b>entire
+  token family</b>. The tab that "won" the race gets logged out too, on its very next call, mid
+  keystroke, with an unsaved form.</p>
+  <div class="hf-scatter">
+    <span>access token expired right on schedule ✓</span>
+    <span>refresh rotation configured correctly ✓</span>
+    <span>6 requests raced the same expired token ⚠</span>
+    <span>IdP saw a reused refresh token → revoked the whole family ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption underneath: that "on 401, refresh and retry" is safe to
+  write inside every interceptor invocation independently — when a rotating refresh token is a
+  single-use ticket, and "single" includes your own other requests.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make every 401 wait for one refresh, instead of starting its own</div>
+  <div class="hf-ladder">
+    <b>First move: auth.refresh() gets called fresh from every 401 handler, unmodified</b>
+    <i>↓ N concurrent 401s make N concurrent refresh calls, and rotation only forgives the first one</i>
+    <b>Better: share one in-flight refresh with shareReplay(1) (or exhaustMap)</b>
+    <i>↓ five of the six 401s now just wait for the one real call to resolve, then retry with its result</i>
+    <b>The result: exactly one rotation per expiry, no matter how many requests noticed at once</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A rotating refresh token is a single-use ticket — and "single" includes your own other
+  requests.</b> The token endpoint has no way to know that two 401s calling refresh() a
+  millisecond apart both came from your app in good faith off the same expired access token; from
+  where it sits, that is indistinguishable from an attacker replaying a stolen one, so it makes the
+  only safe call available — revoke first, ask never. Coordinating refresh into one shared call
+  isn't an optimization. It's the only way to stop your own concurrency from looking like an
+  attack.
+</div>
+
+<div class="hf-note">Think of a rotating refresh token as a <b>train ticket that's punched and
+voided the instant it's used</b>, with a fresh one issued in its place. If you and your own travel
+companion each hand the <i>same</i> ticket to two different conductors on two different cars,
+seconds apart, the second conductor doesn't know you're together — they just see a ticket that was
+already punched a moment ago, three cars down. Both of you get put off at the next stop. The
+ticket didn't fail. Nobody told the two conductors to check with each other first.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I only made one page load's worth of API calls — well, six, but they're all part of loading
+    one dashboard. Why did the whole session die?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The token endpoint</span>
+    <p>I don't see "one dashboard." I see six separate <code>POST /token</code> calls, forty
+    milliseconds apart, and the second one handed me a refresh token I'd already retired thirty
+    milliseconds earlier. That's not a timing coincidence from where I sit — that's the textbook
+    shape of a stolen token being replayed.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Refresh-token rotation</span>
+    <p>I only have one job: the moment a refresh token is redeemed, it dies and a new one is born.
+    I don't ask who used it, or why twice. Reuse is reuse.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Your interceptor</span>
+    <p>And I was supposed to be the thing preventing this — by making sure only one of those six
+    401s ever actually called refresh. I just wasn't written that way yet.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six requests notice the same expired token. Only one of them is allowed to matter.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Six components each hold a subscription that fires on page load; the access token expired 40ms ago, so all six get a <code>401</code></span><span class="tag">the setup, not the bug yet</span></li>
+    <li class="open"><span>Each interceptor instance independently catches its own <code>401</code> and calls <code>auth.refresh()</code> — nothing is shared between them</span><span class="tag">this line is the whole problem</span></li>
+    <li><span>All six POST to <code>/token</code> with <code>grant_type=refresh_token</code> within milliseconds of each other</span><span class="tag">a stampede, not a queue</span></li>
+    <li class="open"><span>The IdP processes the first arrival: rotates the refresh token, issues a new access token, and marks the old refresh token spent</span><span class="tag">exactly one legitimate winner</span></li>
+    <li><span>The second arrival presents the now-spent refresh token — not stale by choice, just by timing, since the browser hadn't received the rotated one yet when it was sent</span><span class="tag">a race, not a mistake</span></li>
+    <li class="open"><span>The IdP can't tell "my own app racing itself" from "an attacker replaying a stolen token," so reuse-detection revokes the <b>entire token family</b> — winner included</span><span class="tag">the whole session dies to stop a theft that never happened</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is the lesson. Nothing from step 3 onward is a bug — that's rotation and
+  reuse-detection doing exactly their job, correctly treating a reused refresh token as a threat.
+  The only broken line in the whole sequence is step 2, where five refresh calls get made that
+  never needed to exist. Fix step 2 — coordinate every 401 onto one shared refresh — and steps 3
+  through 6 simply never happen the bad way, because there is only ever one request at the token
+  endpoint per expiry.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>GET /api/orders → 401</span>
+      <span>GET /api/invoices → 401</span>
+      <span>GET /api/profile → 401</span>
+      <span>GET /api/notifications → 401</span>
+      <span>GET /api/settings → 401</span>
+      <span>GET /api/team → 401</span>
+    </div>
+    <div class="funnel">shareReplay(1) collapses all six ↓</div>
+    <div class="instance">ONE POST /token<small>every 401 above awaits this same in-flight call and retries with its result — the IdP only ever sees one rotation</small></div>
+  </div>
+  <p class="hf-annot">This is the fixed shape: six 401s, one refresh. Without shareReplay(1) (or an
+  equivalent "is a refresh already in flight" check), this diagram doesn't exist — each caller
+  draws its own arrow straight to <code>/token</code>, six separate POSTs land within
+  milliseconds, and rotation's reuse-detection reads that as an attack instead of a coincidence.
+  The fix isn't smarter reuse-detection on the IdP's side — it's right to be suspicious. The fix is
+  never giving it a reason to be.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Tab A and Tab B are the same app in the same browser, sharing one httpOnly
+  refresh-token cookie. Both tabs' access tokens expire within the same second. Tab A's refresh
+  request reaches the IdP first and wins — RT#1 rotates to RT#2. Forty milliseconds later, Tab B's
+  refresh request — dispatched before it ever saw the new cookie — arrives presenting RT#1, which
+  the IdP now considers reused. What happens to Tab A?</p>
+  <button type="button">Nothing — Tab A already has the valid new access token and RT#2; Tab B's mistake is Tab B's problem</button>
+  <button type="button">Tab A stays logged in but silently loses the ability to refresh again until the user logs in fresh — a soft failure, not a full logout</button>
+  <button type="button">Tab A gets logged out too — reuse detection revokes the whole token family, RT#2 included, so Tab A's next refresh attempt fails exactly like Tab B's did</button>
+  <p class="why" data-for="0">This is the intuitive read — Tab A did everything right and "won."
+  But reuse detection doesn't score a race; it tracks a lineage. The IdP saw RT#1 used twice, and
+  RT#2 is a child of that same lineage, so revoking "the token that got reused" necessarily means
+  revoking everything descended from it too — including Tab A's brand-new one.</p>
+  <p class="why" data-for="1">There's no soft-failure middle state here. Refresh token rotation
+  with reuse detection is designed to fail loudly and completely the instant reuse is seen,
+  because the threat model is a real attacker replaying a stolen token — and a real attacker
+  doesn't get a grace period. It revokes the family outright rather than quietly degrading.</p>
+  <p class="why" data-for="2">Right, and it's the counterintuitive part: "winning" the race doesn't
+  protect you, because the IdP isn't scoring a race — it's watching for one refresh token ever
+  being redeemed twice, and RT#1 was. Once that lineage is flagged, RT#2 goes down with it,
+  whether or not the tab holding it did anything wrong. The only real fix is preventing two
+  refreshes off the same token from ever being sent in the first place.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">"Second writer loses, unconditionally" shows up everywhere state gets versioned.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>This exact ticket, in your own Entra ID / Ping tenant</h4>
+    <p>Both Entra ID and PingFederate support — and for SPAs, expect — refresh token rotation with
+    reuse detection exactly like this. The failure mode isn't theoretical: it's the standard reason
+    a support ticket reads "the app randomly logged me out of everything" right after a flaky
+    network moment triggered several parallel retries. The fix lives entirely in your Angular
+    interceptor, not in the IdP config — the server-side behavior here is correct and
+    non-negotiable.</p>
+    <div class="hf-scatter"><span>fix the client, not the IdP</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Hibernate's @Version column — the same "second writer loses" rule</h4>
+    <p>Optimistic locking works identically: a row carries a version number, an UPDATE only
+    succeeds if the version you read still matches, and the loser doesn't get a merge — they get
+    an <code>OptimisticLockException</code> and have to start over. A rotating refresh token is a
+    version column with exactly one allowed writer: the first successful use bumps it, and anyone
+    still holding the old value is unconditionally wrong, not partially wrong.</p>
+    <div class="hf-scatter"><span>stale version ≈ reused refresh token</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Why "sign out everywhere" exists as a button at all</h4>
+    <p>Mass session revocation after a password change runs on the same instinct: once there's any
+    signal that something in a session's lineage might be compromised, the safe response is to
+    revoke the whole lineage, not just the device that looked suspicious. A replayed refresh token
+    and a stolen password get the same answer — kill the family, make everyone log in fresh, and
+    let the legitimate owner take the ten-second hit.</p>
+    <div class="hf-scatter"><span>when in doubt, revoke the whole lineage</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Why does the IdP punish the winner too? That feels unfair.</p>
+  <p class="a">Because from the IdP's side there's no way to know which of the two requests was
+  "the real one" and which was the replay — both presented a technically valid, correctly-issued
+  refresh token. Punishing only "the second one to arrive" would mean an attacker who's simply
+  faster than the legitimate client gets to keep the session while the real user gets logged out —
+  exactly backwards. Revoking the whole lineage is the only response that doesn't require guessing
+  who the attacker is.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Should we just turn off refresh token rotation to avoid the false positive?</p>
+  <p class="a">No — that trades a survivable annoyance for an unsurvivable one. Rotation with reuse
+  detection is what makes a <i>stolen</i> refresh token worthless after its first replay; without
+  it, a leaked refresh token stays valid for its entire lifetime — hours or days — with nobody able
+  to tell it was ever stolen. The false-positive rate for legitimate concurrent refreshes is a
+  client-side coordination bug you can actually fix with <code>shareReplay(1)</code>; a silently
+  valid stolen token for days is not fixable after the fact.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Our app doesn't fire six requests on load. Are we safe?</p>
+  <p class="a">Check two other places before assuming that. Multiple browser tabs of the same app
+  share one httpOnly cookie — a completely normal thing users do — and a slow network can trigger
+  an automatic client-level retry while the original request is still technically in flight.
+  Either one reproduces the exact same race with a single logical request, not six. "We only make
+  one API call" doesn't mean "we only ever have one refresh in flight."</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  Your fix ships: every 401 inside a tab now funnels through one shared <code>shareReplay(1)</code>
+  refresh call. Two tabs of the same app are open, sharing the same httpOnly refresh cookie, and
+  both access tokens expire around the same moment. Does the shared-refresh fix inside one tab's
+  JavaScript prevent the race between Tab A and Tab B — and if not, what does a fix actually need
+  to coordinate across, to stop it?
+</div>
+
   <!-- ── EXTREME-VIZ HERO: Token Lifecycle ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -494,5 +713,6 @@ render();
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

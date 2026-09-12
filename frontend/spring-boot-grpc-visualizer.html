@@ -59,6 +59,204 @@
     </div>
   </div>
 
+<p class="hf-deck">or, protobuf remembers your field's NUMBER forever — never its name, and never its old meaning</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Nothing failed. protoc compiled clean, every test passed, and a completely different number now quietly means something else to half your fleet.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Reusing a "freed-up" field number</div>
+  <p><code>OrderItem</code> originally declares <code>int32 quantity = 2;</code>. Months later the
+  field is deleted — nobody's using it anymore, so it just gets removed from the <code>.proto</code>
+  file. Later still, someone adds <code>int32 discountPercent = 2;</code>, reusing the number because
+  it looked free. <code>protoc</code> compiles the new file without a single warning — nothing in a
+  <code>.proto</code> file's syntax records what a number used to mean. But an <code>OrderItem</code>
+  serialized months ago (sitting in a Kafka topic, a database blob column, or held by a client pod
+  that hasn't redeployed yet) still carries a real value under wire tag 2. The new code deserializes
+  it straight into <code>discountPercent</code> — same bit pattern, opposite meaning: an order that
+  had 5 units now silently looks like it carries a 5% discount.</p>
+  <div class="hf-scatter">
+    <span>protoc compiles clean, zero warnings ✓</span>
+    <span>int32 discountPercent = 2; is perfectly valid syntax ✓</span>
+    <span>old serialized data still has a value stored under wire tag 2 ⚠</span>
+    <span>protobuf never records what a number USED to mean, only what it means now ⚠</span>
+  </div>
+  <p class="hf-foot">protobuf's whole safety story is "the compiler enforces the contract." It only
+  ever enforces the CURRENT .proto file — it has no memory of the file's own history.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Retire the number, don't recycle it</div>
+  <div class="hf-ladder">
+    <b>Never reuse a field number, even after deleting the field</b>
+    <i>↓ mark it reserved instead: reserved 2; reserved "quantity";</i>
+    <b>protoc itself now refuses to compile if anyone reuses that number or name by accident</b>
+    <i>↓ the ONE piece of memory you can give the compiler about the file's own history</i>
+    <b>Always give a new field a brand-new number — old and new messages can then coexist safely</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>protobuf's wire format identifies every field by NUMBER, never by name, and has no concept of
+  what a number meant in a previous version of the file.</b> Deleting a field doesn't free its
+  number — the moment old serialized data (a queued message, a stored blob, an un-redeployed client)
+  still exists anywhere, that number is permanently spoken for. <code>reserved</code> isn't a
+  formality; it's the only thing standing between "field 2 used to mean quantity" and "field 2 now
+  silently means whatever the newest .proto says it means."
+</div>
+
+<div class="hf-note">Think of a protobuf field number like <b>a locker number issued to a hundred
+people who checked in over the last year, none of whom ever checked out</b>. Locker 12 looks empty
+right now, but reassigning it to a brand-new guest doesn't erase the fact that six people from last
+spring still believe locker 12 has their coat in it. The building's rulebook — protoc — has no idea
+any of those six people exist. It only knows what's true for whoever's checking in today.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>protoc compiled the new .proto with zero complaints. How is discountPercent coming back wrong?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">protoc</span>
+    <p>I only ever look at the ONE .proto file you hand me, right now. I have no idea a field
+    numbered 2 ever meant quantity in some earlier version — that file doesn't exist as far as I'm
+    concerned. I checked that YOUR file is internally consistent, and it is.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The old serialized message</span>
+    <p>And I'm not lying either — I really do have a value stored under wire tag 2. Nothing about my
+    bytes changed. It's just that "tag 2" used to have one agreed meaning, and somewhere along the
+    way, without me knowing, that agreement changed underneath me.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">gRPC's whole pitch is "the compiler enforces the contract." That was only ever a promise about one snapshot in time.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>OrderItem</code> originally declares <code>int32 quantity = 2;</code> and ships —
+    real orders get serialized with real values under wire tag 2</span><span class="tag">the original contract</span></li>
+    <li><span>The <code>quantity</code> field is removed from a later .proto revision — just deleting
+    text from a file</span><span class="tag">looks harmless</span></li>
+    <li class="open"><span>A new field, <code>int32 discountPercent = 2;</code>, is added later — the
+    number 2 looked unused, so it got reused</span><span class="tag">protoc has no way to know this number has history</span></li>
+    <li class="open"><span>protoc compiles the new file cleanly — it only validates the CURRENT file,
+    never a prior version of it</span><span class="tag">compile-time safety only covers "right now"</span></li>
+    <li class="open"><span>An old serialized OrderItem — queued in Kafka, stored in a database blob,
+    or held by a client pod mid-rollout — still carries a real value under wire tag 2</span><span class="tag">old data outlives the code that wrote it</span></li>
+    <li><span>The new code deserializes that value straight into discountPercent — same wire type
+    (varint), zero errors, completely different meaning</span><span class="tag">silently, confidently wrong</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the trap: gRPC's pitch is "the compiler enforces the contract" — true,
+  for one snapshot of the .proto file in time. It was never a promise that the compiler remembers the
+  file's past. That memory has to be encoded explicitly, with <code>reserved</code>, or it doesn't
+  exist at all.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">Wire tag 2, stored inside an OrderItem<small>the raw bytes never change</small></div>
+    <div class="fan">read by whichever .proto version happens to deserialize it ↓</div>
+    <div class="obs">
+      <span>Old .proto (last spring) declares tag 2 as quantity</span>
+      <span>Serialized months ago: raw value = 5</span>
+      <span>New .proto (today) declares the SAME tag 2 as discountPercent</span>
+      <span class="new">Deserialized today: discountPercent = 5 — a 5% discount that used to mean 5 units</span>
+    </div>
+  </div>
+  <p class="hf-annot">The wire never carried a field NAME, only the number 2 and a raw value. Which
+  meaning applies depends entirely on which .proto file happens to be doing the reading — nothing
+  about the bytes themselves can tell you that changed.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q"><code>OrderItem</code> has <code>int32 quantity = 2;</code>. That field is deleted in
+  a later revision, and a new field <code>int32 discountPercent = 2;</code> is added, reusing the
+  number. An OrderItem serialized months ago (with quantity = 5) is still sitting in a Kafka topic.
+  The new service consumes it. What actually happens?</p>
+  <button type="button">It deserializes successfully with no error at all — discountPercent comes back as 5, because both fields were int32 (same wire type) and protobuf tracks only numbers on the wire, never names or old meanings</button>
+  <button type="button">protoc refuses to compile the new .proto file — reusing a field number that was previously assigned a different meaning is exactly the kind of contract violation the compiler is supposed to catch</button>
+  <button type="button">It throws a deserialization exception at runtime, because the old bytes were tagged with a type that no longer matches the field's new declared meaning</button>
+  <p class="why" data-for="0">Exactly — protobuf's wire format has no concept of "what this number used
+  to mean." It sees tag 2, wire type varint, value 5, and hands it straight to whatever field the
+  CURRENT .proto says owns tag 2. Same wire type in, same wire type out, zero errors, completely
+  different meaning.</p>
+  <p class="why" data-for="1">A very reasonable guess, given that gRPC's whole selling point earlier
+  on this page is a compiler-enforced contract — but protoc only ever validates ONE file, the one in
+  front of it right now. It has no memory of a previous revision that used tag 2 differently, so
+  there's nothing for it to compare against.</p>
+  <p class="why" data-for="2">Protobuf's wire format doesn't encode "meaning," only a field number and
+  a wire type (varint, length-delimited, etc). quantity and discountPercent are both int32 — both
+  varint on the wire — so nothing about the bytes looks wrong. The exception you're imagining would
+  need protobuf to remember semantics it never stored in the first place.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three systems, one root cause: a recycled numeric identity, disconnected from its own history.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's enum.ordinal() used for persistence</h4>
+    <p><em>Effective Java</em> warns against this by name: serializing <code>someEnum.ordinal()</code>
+    instead of its name means reordering or removing a constant silently shifts every later
+    constant's number. Old stored ordinals deserialize into the WRONG enum value with no exception —
+    the identical "the number outlived its old meaning" bug, one language feature over.</p>
+    <div class="hf-scatter"><span>enum ordinal ≈ protobuf field number</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Apache Thrift's field IDs</h4>
+    <p>Thrift's IDL uses the exact same design as protobuf — every field is numbered on the wire, and
+    Thrift's own style guide carries the identical warning: never reuse a field ID, ever, for
+    exactly this reason. Two competing binary RPC formats, one shared rule, because the underlying
+    risk is identical.</p>
+    <div class="hf-scatter"><span>Thrift field ID ≈ protobuf field tag</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your CIAM's recycled group ID</h4>
+    <p>Delete group 42 ("Managers") in your IdP and, months later, let a new group ("Contractors")
+    recycle ID 42. Any stale cache or downstream system that stored authorization decisions keyed by
+    that numeric ID now silently grants Contractors whatever Managers used to have — same "the number
+    forgot its own history" bug, now an authorization hole instead of a wrong discount.</p>
+    <div class="hf-scatter"><span>recycled group ID ≈ recycled field number</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Does reserved actually stop this at compile time?</p>
+  <p class="a">Yes — protoc treats <code>reserved 2;</code> (or <code>reserved "quantity";</code>) as
+  a hard compile error if anyone later tries to reuse that number or name in the same message. It's
+  the one piece of memory you can give the compiler about a file's own history — but only if someone
+  remembers to add it the moment a field is deleted.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Is this only a risk when deleting and reusing? What about just renaming a field?</p>
+  <p class="a">Renaming alone is completely safe — <code>string sku = 1;</code> becoming
+  <code>string productSku = 1;</code> doesn't touch the wire at all, since the number is what's
+  serialized, never the name. The danger is exclusively about the NUMBER: change or reuse it, and
+  every already-serialized message effectively changes meaning.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Would a schema registry, like Kafka's, have caught this?</p>
+  <p class="a">A registry enforcing protobuf compatibility checks (BACKWARD/FORWARD mode) catches a lot
+  of breaking changes automatically — but whether a same-wire-type renumbering like this one
+  specifically trips its rules depends on the registry and the mode chosen. It's a real safety net
+  worth having; it's not a substitute for never reusing a number in the first place.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  Section 3's <code>UploadChunks(stream Chunk) returns (UploadResult);</code> implies a
+  <code>Chunk</code> message with its own numbered fields. Suppose a later revision deletes an unused
+  <code>bytes checksum = 3;</code> field, and six months on someone adds
+  <code>string uploaderId = 3;</code> to record who uploaded each chunk. A batch of chunks queued
+  during a slow upload was serialized by an OLD client before the redeploy. What does the NEW
+  server's <code>uploaderId</code> field end up holding for those queued chunks — and would protoc
+  have stopped any of it?
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -331,6 +529,7 @@ DevHubCodeWalk.mount('#cw-grpc-mount', {
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

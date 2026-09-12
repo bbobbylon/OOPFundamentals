@@ -161,6 +161,209 @@
     </div>
   </div>
 
+<p class="hf-deck">or, marking one component dirty is pointless unless you also mark every road that leads to it</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The leaf component is genuinely dirty. The tick walked right past it anyway.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">You detached one chart to save cycles. Two unrelated components inside it stopped updating completely.</div>
+  <p>A dashboard's live revenue chart is expensive to redraw, so — following exactly the advice
+  this page already gives — a developer calls <code>this.cdr.detach()</code> on the chart's
+  wrapper and manually calls <code>detectChanges()</code> on it every 200ms. The chart updates
+  beautifully. But the wrapper also happens to hold a "last updated" label bound to an unrelated
+  <code>@Input</code>, and a small filter dropdown — and both freeze solid. Nothing throws. The
+  dropdown's own click handler still fires every time (a log line proves it). The label's
+  <code>@Input</code> still receives fresh values from its own parent (proven the same way).
+  Neither of those two components did anything wrong, and neither one is OnPush, mutated, or
+  missing a <code>markForCheck()</code> — every usual suspect on this page's field guide comes up
+  clean.</p>
+  <div class="hf-scatter">
+    <span>chart redraws perfectly every 200ms ✓</span>
+    <span>dropdown's click handler fires every time ✓</span>
+    <span>label's @Input receives fresh values ✓</span>
+    <span>the WRAPPER holding all three is detached from tick() ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that <code>detach()</code> only affects the component
+  you called it on. It severs the one path <code>tick()</code> would have used to reach everything
+  below it — including two components that were never the problem.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Detach the expensive leaf, not the shared wrapper it happens to sit in</div>
+  <div class="hf-ladder">
+    <b>Move the chart into its own dedicated component and detach THAT one specifically</b>
+    <i>↓ the detached subtree is now exactly one component wide — nothing innocent shares its fate</i>
+    <b>Need the normal walk back for that branch? cdr.reattach()</b>
+    <i>↓ detach isn't permanent — it's a standing instruction to tick(), and you can hand the road back</i>
+    <b>The label and the dropdown return to being checked on every ordinary tick, as if nothing had happened to them</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>detach() doesn't mute one component — it deletes a road tick() was using to reach everything
+  past it.</b> It's the same "mark the whole path, not just the node" mechanism from the dirty walk
+  above, run in reverse: marking a path lets the walker through a clean OnPush ancestor; detaching
+  removes the walker's ability to get through at all, for that node and everything structurally
+  beneath it — no matter how correctly those descendants track their own dirtiness.
+</div>
+
+<div class="hf-note">Think of <code>detach()</code> as <b>closing one road out of a whole
+neighborhood, not switching off one house's power</b>. Every house past that junction still has
+working wiring and still flips its own switches correctly — the outage is that nobody can drive in
+to read the meter anymore. A manually called <code>detectChanges()</code> is the one delivery truck
+that still knows the back way in — but only to the exact spot you send it, not to every house on
+the street.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>The dropdown's click handler definitely fires. Why doesn't its own state update on screen?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">tick()</span>
+    <p>Because I never get there. My walk is top-down, and the wrapper holding the dropdown is
+    detached — as far as my traversal is concerned, that branch doesn't exist. I don't skip it for
+    being clean; I skip it because there is no path through it at all.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The dropdown's own dirty flag</span>
+    <p>And I really am marked. My click handler ran, the ancestors-to-root marking happened
+    exactly like the table above says it should. The mark is real — it's just marking a path that
+    dead-ends one hop above me.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The manual detectChanges() call</span>
+    <p>I'm the only route left, and I only go where you point me. Point me at the wrapper and I'll
+    walk its whole subtree — chart, label and dropdown together — which is actually the fix hiding
+    in plain sight, if reaching for it hadn't already cost you the automatic path.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One detach(). Three components downstream. Only the one you drive by hand still moves.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>DashboardPanelComponent (the wrapper) calls <code>this.cdr.detach()</code> once, in <code>ngOnInit</code></span><span class="tag">a one-time instruction, not a per-tick choice</span></li>
+    <li class="open"><span>Angular removes that component's view from the list <code>tick()</code> walks — permanently, until something calls <code>reattach()</code></span><span class="tag">not paused — removed</span></li>
+    <li><span>A Zone-triggered tick fires — a click, a timer, an HTTP response, anywhere in the app</span><span class="tag">the normal trigger, working exactly as documented</span></li>
+    <li class="open"><span>tick() starts at the root and walks down — and simply never enters the detached wrapper's branch, because it isn't in the list of views to visit</span><span class="tag">not pruned like a clean OnPush node — absent from the walk entirely</span></li>
+    <li><span>Everything inside that wrapper — chart, label, dropdown — is unreachable by the normal walk, no matter which of them is genuinely dirty</span><span class="tag">dirty doesn't matter if nothing is walking past you</span></li>
+    <li class="open"><span>The only thing that still reaches inside is the manual <code>this.cdr.detectChanges()</code> call — which checks the wrapper's whole subtree, correctly redrawing the chart and, as a side effect, everything else in there too</span><span class="tag">the fix was already running — just not often enough for the other two</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the lesson, and it's a different failure from everything else on
+  this page. OnPush pruning skips a branch because the walker chose not to descend into a clean
+  one — it could, but didn't need to. <code>detach()</code> means the branch isn't even in the
+  walker's list to consider. That's why "genuinely dirty" stops mattering the moment you detach an
+  ancestor: dirty-marking only works as an instruction to a walker that still visits you.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">DashboardPanelComponent<small>cdr.detach() called here</small></div>
+    <div class="fan">tick() ↓ this branch is no longer in the list to visit at all</div>
+    <div class="obs">
+      <span class="new">RevenueChart — the one you meant to control</span>
+      <span>LastUpdatedLabel — collateral, its @Input still arrives, nobody looks</span>
+      <span>FilterDropdown — collateral, its click still fires, nobody looks</span>
+    </div>
+  </div>
+  <p class="hf-annot">All three go dark to the automatic walk together, and only one of them did
+  anything to deserve it. RevenueChart is the sole component anybody meant to take off the normal
+  path — the other two just happened to be renting space in the same subtree when the road
+  closed.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A component's near ancestor is OnPush and currently clean (pruned this tick). One
+  level further up, a different ancestor has had <code>cdr.detach()</code> called on it. A click
+  inside the component correctly marks it and its OnPush ancestor dirty via the normal
+  path-marking rule. On the <i>next</i> tick, does the component get checked?</p>
+  <button type="button">No — the detached ancestor further up was never in tick()'s list to begin with, so marking a path that ends at it accomplishes nothing; only a manual detectChanges() on that branch reaches the component now</button>
+  <button type="button">Yes — marking the OnPush ancestor dirty un-prunes it, and dirty-marking always reaches all the way to the root from there</button>
+  <button type="button">No — once any ancestor in the chain is OnPush, a detach() anywhere above it is irrelevant, because OnPush already controls the whole subtree</button>
+  <p class="why" data-for="0">Right. Dirty-marking only helps as an instruction to a walker that
+  will actually visit the marked path — and the detached ancestor removed its whole branch from
+  that walk. The nearer OnPush ancestor gets successfully un-pruned; it just doesn't matter,
+  because <code>tick()</code> never gets into this branch from the root in the first place. The
+  detached node is the gate, and it's shut.</p>
+  <p class="why" data-for="1">True for ordinary OnPush pruning alone — marking the path does
+  un-prune a clean OnPush ancestor. This answer quietly assumes every kind of "skip" behaves the
+  same way. <code>detach()</code> isn't a prune that dirty-marking can reverse; it's a removal
+  from the list <code>tick()</code> consults before any pruning decision even starts.</p>
+  <p class="why" data-for="2">Backwards — <code>detach()</code> is the more absolute of the two.
+  OnPush pruning is a per-tick decision the walker makes while visiting a branch; <code>detach()</code>
+  means the walker doesn't visit the branch to make any decision at all. The detached ancestor
+  overrides everything beneath it, OnPush included.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">A container that opts out always takes its contents with it, however correctly they behave alone.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>display: none on a container</h4>
+    <p>Set <code>display: none</code> on a wrapper <code>&lt;div&gt;</code> and every descendant
+    drops out of layout and paint together, however perfectly valid each one's own CSS is. It
+    doesn't matter that a child's <code>opacity</code> and <code>color</code> are exactly right —
+    the container removed the whole subtree from consideration before any of that could matter.</p>
+    <div class="hf-scatter"><span>display: none ≈ detach()</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An excluded module in a build graph</h4>
+    <p>Gradle, Bazel, Nx and friends all cache per-module: mark a whole module excluded or disabled
+    and every file inside it stops being inspected for changes at all, no matter how genuinely
+    edited those files are, until the module re-enters the build graph. Same shape: exclusion at
+    the container level always dominates dirty-tracking within it.</p>
+    <div class="hf-scatter"><span>excluded module ≈ detached subtree</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your CIAM session countdown, orphaned by a perf fix</h4>
+    <p>A rarely-visited "Reports" tab is expensive to keep live, so its shell gets
+    <code>detach()</code>'d while the user is elsewhere in the app. That shell also happens to host
+    an always-mounted session-countdown widget, kept alive across tabs on purpose. Detaching the
+    shell to freeze the expensive report also freezes the countdown — so a session that has
+    genuinely expired server-side keeps showing "5:00 remaining" until the user clicks back into
+    that tab. Same fix as above: detach the report specifically, never the shell it shares a
+    subtree with.</p>
+    <div class="hf-scatter"><span>a frozen countdown is a security UX bug</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Is detach() ever actually the wrong tool, or just easy to point at the wrong component?</p>
+  <p class="a">It's the right tool almost exactly as often as this page's field guide already says
+  — high-frequency widgets you want to redraw on your own schedule. The mistake is never the
+  technique, it's calling it on whatever component happens to hold a convenient
+  <code>ChangeDetectorRef</code>, rather than on a component that contains ONLY the thing you
+  actually meant to take off the automatic path.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">How would I catch this kind of bug before shipping it?</p>
+  <p class="a">Treat every <code>detach()</code> call as a prompt to go check what else lives in
+  that component's template. If the answer is "anything besides the expensive widget," that's the
+  bug — whether or not it's caused a visible symptom yet. A sibling that doesn't change often can
+  hide this for weeks before anyone notices it's frozen.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does OnPush have any equally all-or-nothing move, or is detach() unique?</p>
+  <p class="a">OnPush's skip is always reversible on the very next tick by any of the four normal
+  triggers — it's a per-tick opinion, not a standing decision. <code>detach()</code> is unique in
+  being sticky: it holds until something explicitly calls <code>reattach()</code>, which is exactly
+  why it deserves more suspicion in code review than an OnPush annotation ever does.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  A component tree: Root → Shell (OnPush, currently clean) → Panel (has had
+  <code>cdr.detach()</code> called on it) → Widget (OnPush). Widget's own click handler fires,
+  marking Widget and its ancestors dirty via the normal path-marking rule from above. On the next
+  tick, does Shell get checked? Does Widget?
+</div>
+
   <!-- 1 ───────────────────────────────────────────── -->
   <section>
     <h2>1. The 30-second mental model</h2>
@@ -757,6 +960,7 @@ renderNodes(); resetStage();
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>

@@ -145,6 +145,204 @@
     </div>
   </div>
 
+<p class="hf-deck">or, an interceptor only ever sees one request — but 401s don't arrive one at a time</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Five requests got 401 within the same 40ms. Five refresh calls went out.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Every single 401 was handled correctly. That's what caused it</div>
+  <p>Your dashboard fires off users, roles, settings, notifications, and audit-log requests in
+  parallel on load — completely normal. The access token happens to expire right as the page opens,
+  so all five come back 401 almost simultaneously. Your interceptor does exactly what it's supposed
+  to: catch the 401, refresh, retry — except it does that independently, once per failed request.
+  Five interceptor instances, each unaware of the other four, each convinced it's the only one
+  refreshing. The identity provider sees five refresh calls in one moment, using the same refresh
+  token. If your provider rotates refresh tokens on use, the second one to land can invalidate the
+  token the first one just received — and now a request that already succeeded is holding a
+  refresh token that no longer works.</p>
+  <div class="hf-scatter">
+    <span>each 401 individually handled correctly ✓</span>
+    <span>each refresh call, alone, correct ✓</span>
+    <span>5 requests → 5 independent refresh attempts ⚠</span>
+    <span>refresh-token rotation races itself ⚠</span>
+  </div>
+  <p class="hf-foot">Nothing about any single interceptor call is wrong. The bug only exists at the
+  scale of "more than one request failing at once" — which is exactly the scale a real page runs
+  at.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Let the first 401 refresh; make the rest wait for it</div>
+  <div class="hf-ladder">
+    <b>A shared isRefreshing flag (or Subject) on the auth service — not local to any one interceptor call</b>
+    <i>↓ the first 401 to arrive flips it and starts the one real refresh call</i>
+    <b>Every 401 that arrives while isRefreshing is true subscribes to that SAME in-flight refresh instead of starting a new one</b>
+    <i>↓ exhaustMap (or an equivalent guarded Subject) collapses N calls into 1</i>
+    <b>And every waiting request retries automatically once that one refresh completes</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>An interceptor sees one request at a time — but 401s don't arrive one at a time.</b> Everything
+  you write inside <code>intercept()</code> is correct in isolation, which is exactly what makes
+  this bug invisible in testing: you rarely test five simultaneous 401s by hand. The fix isn't in
+  how you handle a single 401 — it's in making concurrent 401s share one outcome instead of racing
+  to create five.
+</div>
+
+<div class="hf-note">Think of the refresh token like the last badge-office visit five employees all
+need at once, because their badges stopped working at the exact same moment. If each one walks over
+independently, whoever arrives second finds the first one already got a new badge — and now has to
+explain why <i>their</i> new badge doesn't work either. Somebody has to say "wait here, I'm already
+getting us all sorted" — that's what a shared isRefreshing flag does.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I handle 401 in my interceptor. Isn't that enough?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Your interceptor</span>
+    <p>For one request, completely. But I don't know about the other four instances of myself
+    running for the other four requests. Each of us independently thinks we're the one handling
+    this.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The identity provider</span>
+    <p>And I just see five refresh calls with the same refresh token, milliseconds apart. Some
+    providers rotate — issue a new refresh token and kill the old one on every use. I'm not
+    colluding with you to prevent that; I'm just answering each call as it arrives.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">A shared isRefreshing flag</span>
+    <p>Which is why the fix isn't inside any one interceptor call — I live OUTSIDE all of them, so
+    request two can find out request one is already handling this before it ever calls the
+    provider.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One flag turns five races into one call and four waiters.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Request A gets a 401. The interceptor checks a shared <code>isRefreshing</code> flag on the auth service — false — sets it true, and starts the real refresh call</span><span class="tag">the only real network call to the IdP</span></li>
+    <li class="open"><span>Requests B, C, D land 401 within the same window and check the SAME flag — now true — so each subscribes to a shared Subject that will emit the new token instead of starting its own refresh</span><span class="tag">this is the entire fix</span></li>
+    <li><span>The refresh call resolves. The interceptor stores the new token, flips isRefreshing back to false, and emits it on the shared Subject</span><span class="tag">one emission, many listeners</span></li>
+    <li class="open"><span>A retries with the new token via next(req.clone(...)). B, C and D — still waiting on the Subject — do the exact same clone-and-retry the instant it emits</span><span class="tag">they were paused, not failed</span></li>
+    <li><span>If the refresh call itself fails (refresh token expired too), the interceptor propagates that error to every waiting request, typically forcing a full logout</span><span class="tag">there's no lower fallback than this</span></li>
+    <li class="open"><span>exhaustMap on the refresh trigger is the RxJS idiom for exactly this: it ignores every new refresh request that arrives while one is already in flight, rather than queuing or racing them</span><span class="tag">the operator most people reach for by name</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is the fix in one sentence: don't ask "how do I handle a 401," ask "how
+  do four more 401s find out one is already being handled." Every real interceptor bug in this
+  pattern traces back to skipping that shared flag and letting each request act like it's the only
+  one that exists.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>GET /users → 401</span><span>GET /roles → 401</span><span>GET /settings → 401</span><span>GET /notifications → 401</span><span>GET /audit-log → 401</span>
+    </div>
+    <div class="funnel">isRefreshing check ↓ only the first one proceeds</div>
+    <div class="instance">POST /oauth/token (refresh)<small>the one real call to the identity provider</small></div>
+  </div>
+  <p class="hf-annot">Five callers, one instance — the same converge shape as any singleton, except
+  the "instance" here is a single in-flight HTTP call instead of an object. The other four aren't
+  blocked; they're subscribed, waiting for the one call's result to arrive.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your auth interceptor adds a Bearer token to every request unless
+  <code>HttpContextToken SKIP_AUTH</code> is set. The login call is written as
+  <code>http.post('/api/login', creds)</code> — no context option passed at all. What happens?</p>
+  <button type="button">The interceptor throws, because SKIP_AUTH has no explicit value for this call</button>
+  <button type="button">The interceptor adds a Bearer token anyway — an HttpContextToken not explicitly set falls back to the default value it was created with, not to "skipped"</button>
+  <button type="button">Angular infers this is the login endpoint from the URL and skips auth automatically, no context needed</button>
+  <p class="why" data-for="0">HttpContextToken never throws for being unset — that's the opposite
+  of its purpose. It exists so a request that says nothing about a token still behaves
+  predictably, via a default, instead of erroring.</p>
+  <p class="why" data-for="1">Exactly — an HttpContextToken is created with something like
+  <code>new HttpContextToken(() =&gt; false)</code>, and any call that doesn't explicitly set it
+  gets that default. Since SKIP_AUTH defaults to false, this login call gets a Bearer token attached
+  too — probably not what you wanted, and easy to miss because nothing about the call looks wrong
+  on its own.</p>
+  <p class="why" data-for="2">Angular has no idea what a "login endpoint" is — it doesn't parse
+  URLs for meaning. HttpContextToken exists precisely because there's no automatic way to signal
+  "this call is different"; every request has to opt in explicitly with
+  <code>{ context: new HttpContext().set(SKIP_AUTH, true) }</code>, or it gets the default like any
+  other request.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">The same collapse-many-into-one shape, three more places.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Debounced search — the mirror-image operator</h4>
+    <p><code>switchMap</code> on a search box cancels the <i>previous</i> in-flight call when a new
+    one starts; <code>exhaustMap</code> on a refresh does the opposite — it ignores new calls while
+    one is already running. Different operator, same family: RxJS gives you a specific tool for
+    "don't let N of these run at once" depending on which one should win.</p>
+    <div class="hf-scatter"><span>switchMap cancels new; exhaustMap ignores new</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>The cache-stampede problem, same shape</h4>
+    <p>The identical failure appears whenever a cache entry expires under load: a hundred requests
+    miss the cache at once and all hammer the database to regenerate the same value simultaneously.
+    The fix has the same shape too — one request regenerates it while the other 99 wait on that one
+    result instead of triggering 99 regenerations.</p>
+    <div class="hf-scatter"><span>a cache stampede, same fix</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Ping Federate / Entra token refresh, literally this</h4>
+    <p>This is the actual production pattern for a CIAM app talking to Ping or Entra: a shared
+    <code>isRefreshing$</code> (or a <code>BehaviorSubject</code> holding the in-flight refresh
+    Observable) on the token service, checked by every interceptor instance before it calls the
+    token endpoint. Skipping it doesn't just waste a network call — some identity providers flag
+    rapid repeated refresh-token use as suspicious activity.</p>
+    <div class="hf-scatter"><span>rapid re-use can look like token theft</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Why not just retry with a fresh token on every 401, without a shared flag?</p>
+  <p class="a">Because "fresh" isn't free — every uncoordinated retry is a full round trip to the
+  identity provider, and if five requests each do it, that's five round trips for what should be
+  one. Worse than the extra latency: if the provider rotates refresh tokens (issues a new one and
+  invalidates the old one on every use), the second concurrent refresh call is handed a refresh
+  token that's already been superseded by the first, and fails outright — turning a solvable
+  expired-access-token moment into a hard logout.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does HttpContextToken data survive a retried request?</p>
+  <p class="a">Only if you carry it forward yourself. <code>req.clone({...})</code> copies the
+  context by default unless you explicitly override it, so a retry built from the original failed
+  request keeps whatever context it started with — including SKIP_AUTH. That's usually what you
+  want; the gotcha is cloning from a <i>different</i> request object partway through a chain and
+  losing context you were relying on without noticing, since there's no error for a missing context
+  value, only a silent fallback to its default.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">If my logging interceptor is registered before my auth interceptor, does it log requests without the Authorization header?</p>
+  <p class="a">Yes, and that's usually backwards from what you want. Interceptors run in
+  registration order on the way down, so a logging interceptor registered first sees the request
+  <i>before</i> auth has cloned in the Authorization header — its logged headers won't include it.
+  Put auth first, or at least before anything that inspects headers for logging or debugging, so
+  everything after it sees the request in its final, fully-formed state.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  Two tabs of the same CIAM app are open. Tab A's token expires and its interceptor starts a
+  refresh. Before that finishes, Tab B also makes a request and also gets a 401. Does Tab B's
+  <code>isRefreshing</code> flag know Tab A is already refreshing — and what does "shared" actually
+  mean once there are two separate JavaScript runtimes involved?
+</div>
+
   <!-- ===== 1. CLASS VS FUNCTIONAL ===== -->
   <h2>1. Class-Based vs Functional Interceptors</h2>
   <div class="panel">
@@ -642,6 +840,7 @@ renderNodes(); resetStage();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

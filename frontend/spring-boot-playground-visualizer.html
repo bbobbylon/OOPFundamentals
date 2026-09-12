@@ -134,6 +134,198 @@
     </div>
   </div>
 
+<p class="hf-deck">or, four gatekeepers can all say yes and the fifth one can still say no</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Your token is valid. The URL matched an allowed pattern. Postman still shows a 403, and you're out of ideas.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Everything you know how to check says this request should work</div>
+  <p>You configured <code>authorizeHttpRequests</code> so <code>/api/**</code> requires authentication, and
+  it does — the token's signature checks out, it isn't expired, and the path matches. So you assume
+  authorization is done and move on to debugging something else. It isn't done. There's a second,
+  independent gate sitting on the controller method itself, and it's asking a completely different
+  question than the one you just answered.</p>
+  <div class="hf-scatter">
+    <span>JWT signature valid ✓</span>
+    <span>path matches /api/** ✓</span>
+    <span>filter chain lets it through ✓</span>
+    <span>@PreAuthorize on the method itself ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that "the URL rule allowed it" and "this caller is authorized" are the same fact.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Read the status code before you touch the security config</div>
+  <div class="hf-ladder">
+    <b>See 403, not 401</b>
+    <i>↓ 403 means you got PAST authentication — the token itself was never the problem</i>
+    <b>Go read the failing method's @PreAuthorize expression, not the requestMatchers block</b>
+    <i>↓ that annotation is the actual rule that fired — the URL pattern was never the full story</i>
+    <b>Stop treating "the path is allowed" as proof of anything beyond route-level access</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Every checkpoint has to say yes; any single one saying no is enough to stop the request.</b> That's
+  why this page walks a request through four separate gates instead of one boolean "authorized?" — the
+  filter chain, URL authorization, the dispatcher, and <code>@PreAuthorize</code> each know a different,
+  narrower slice of the answer. The status code tells you which one fired: 401 means the filter chain
+  never let the caller in the door; 403 means they got in and a later gate, almost always
+  <code>@PreAuthorize</code>, said no anyway; 404 means nobody even asked, because the route doesn't exist.
+</div>
+
+<div class="hf-note">Think of it like an office building. The badge reader at the front door is the
+filter chain — it only confirms you're a real employee. The floor directory is URL authorization — it
+says "this floor is Sales," a broad, path-shaped rule. The lock on one specific office door is
+<code>@PreAuthorize</code> — having a working badge and standing on the right floor still doesn't mean
+you have a key to <i>that</i> door. It stops being a perfect analogy at the front desk: a real security
+guard checks your badge once, but Spring re-checks a version of "who are you" at more than one layer on
+purpose, because each layer is answering a narrower question than the last.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>My token is valid and the URL matched. Why am I still getting a 403?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The filter chain</span>
+    <p>I only checked that your badge is real and readable. I never asked what you're allowed to do once you're inside.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">URL authorization</span>
+    <p>I only confirmed that <code>/api/**</code> is open to authenticated users in general. I don't know which specific method you're about to call.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">@PreAuthorize</span>
+    <p>I'm the one who actually checked whether you have <code>DELETE:USER</code>. You don't. That's the 403 you're looking at.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Four gates, one request — and the instant one of them says no, nothing downstream even runs.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The raw request arrives, with or without a <code>Bearer</code> token in the <code>Authorization</code> header</span><span class="tag">nothing decoded yet</span></li>
+    <li class="open"><span>The security filter chain validates the JWT's signature and expiry, and builds an <code>Authentication</code></span><span class="tag">fails here → 401, nothing else runs</span></li>
+    <li><span><code>authorizeHttpRequests</code> matches the path against configured rules</span><span class="tag">coarse, path-only — doesn't know which method will run</span></li>
+    <li class="open"><span>DispatcherServlet resolves the path to one specific <code>@RestController</code> method</span><span class="tag">no match → 404, a routing problem, not a security one</span></li>
+    <li class="open"><span><code>@PreAuthorize</code> evaluates its SpEL expression against the now-known caller</span><span class="tag">fails here → 403 — the token was fine, the authority wasn't</span></li>
+    <li><span>The controller method body finally executes</span><span class="tag">everything before this line was a gate, not the work</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the lesson. Steps 2 through 4 only prove you're a legitimate caller allowed
+  somewhere near this general area of the API — none of them know anything about the specific method
+  you're calling. <code>@PreAuthorize</code> is the only checkpoint that reads the expression written for
+  <i>this</i> method, which is why a 403 here is more informative than it feels: every general check
+  passed, and there's exactly one narrow, deliberate rule left to go read.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>anonymous GET</span>
+      <span>authenticated POST</span>
+      <span>admin DELETE</span>
+      <span>malformed token</span>
+    </div>
+    <div class="funnel">same 4 gates, same order →</div>
+    <div class="instance">one fixed pipeline<small>filter chain → URL rule → dispatch → @PreAuthorize</small></div>
+  </div>
+  <p class="hf-annot">It doesn't matter whether the caller is anonymous, a logged-in employee, or an
+  admin — every request enters the identical four-stage pipeline, in the identical order, every single
+  time. What differs is only <i>where</i> a particular caller's request happens to fail, if it fails at
+  all. The pipeline itself never branches by who's asking.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A caller sends a completely valid JWT — good signature, not expired — but the token's
+  authorities don't include the one <code>@PreAuthorize</code> requires. What status code comes back, and
+  did the controller method's body ever run?</p>
+  <button type="button">403, and the controller method's body never ran</button>
+  <button type="button">401, because Spring reports any authorization failure as 401 Unauthorized</button>
+  <button type="button">200, because the token already passed the filter chain, and that's the only security check that matters</button>
+  <p class="why" data-for="0">Right. 403 means "authenticated but forbidden" — the caller proved who
+  they are, and <code>@PreAuthorize</code> still said no. One thing worth noticing: that annotation runs as
+  AOP advice wrapping the call, so the method body never gets a chance to execute even its first line —
+  there's no partial side effect to clean up.</p>
+  <p class="why" data-for="1">A very reasonable read of the word "Unauthorized" — it's genuinely a
+  confusing name, and even the HTTP spec's authors have said it should have been called
+  "Unauthenticated." But Spring reserves 401 specifically for "the filter chain doesn't know who you
+  are" — missing or invalid credentials. A caller who's fully authenticated but simply lacks a
+  permission gets 403, one gate later.</p>
+  <p class="why" data-for="2">This is the exact assumption the page above is built to break: that
+  clearing the filter chain is the whole security story. It isn't — it's one of four independent gates,
+  and <code>@PreAuthorize</code> is a separate, later check that the filter chain has no visibility into
+  at all.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">"Broad rule, then a narrower one layered on top" isn't a Spring idea — it shows up anywhere permissions get checked twice, on purpose.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Kubernetes: RBAC, then admission control</h4>
+    <p>RBAC answers a coarse question first — can this service account delete pods <i>at all</i>,
+    generally? An admission webhook runs after RBAC already said yes, and can still reject the exact
+    same request based on details RBAC never looks at, like what's actually inside the pod spec. Same
+    two-layer shape: broad-and-early, then narrow-and-late.</p>
+    <div class="hf-scatter"><span>RBAC = URL authorization · admission control = @PreAuthorize</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>AWS IAM: identity policy vs. resource policy</h4>
+    <p>Your Lambda's IAM role can grant <code>s3:GetObject</code> broadly, and the call still fails if the
+    S3 bucket's own resource policy independently denies it. Two policies, evaluated at two different
+    layers, and both have to agree — exactly the "every checkpoint has to say yes" principle above,
+    just wearing AWS's vocabulary instead of Spring's.</p>
+    <div class="hf-scatter"><span>two independent policies, both must allow</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Ping / Entra: token scopes vs. your app's own role check</h4>
+    <p>The identity provider only promises the token carries a broad scope like <code>api.read</code> —
+    it has no idea your app has a concept of "can only edit your own profile." That finer rule lives
+    entirely in your Spring app's <code>@PreAuthorize</code> expressions, evaluated well after the IdP's
+    job is already done.</p>
+    <div class="hf-scatter"><span>the IdP hands you a scope, not a decision</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">If URL authorization already lets the request through, isn't checking @PreAuthorize too just redundant?</p>
+  <p class="a">No — they check different things at different granularity, not the same thing twice.
+  URL rules operate on the path <i>before</i> Spring even knows which Java method will run, so they can
+  only express broad ownership: "logged-in users can reach <code>/api/**</code>." <code>@PreAuthorize</code>
+  runs once the specific method — and often specific arguments, like <code>#userId</code> — is known, so
+  it can express things a path pattern structurally cannot, such as "only if this path's id matches
+  your own." They're two different questions, and both are cheap enough that skipping either buys you
+  nothing.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why does this page ever show a 404 instead of a 401 or 403 — doesn't security get checked first?</p>
+  <p class="a">Because 404 isn't a security outcome at all — it's <code>DispatcherServlet</code> failing to
+  find a matching <code>@RequestMapping</code>, which happens after the filter chain and URL
+  authorization have already let the request through (or never had a specific rule to apply in the
+  first place). Hit a genuinely nonexistent endpoint with a perfectly valid token and you still get
+  404, because there was never a method for <code>@PreAuthorize</code> to evaluate in the first place.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Could Spring check @PreAuthorize before URL authorization, if you wanted it to?</p>
+  <p class="a">No, and not for configuration reasons — for structural ones. The filter chain, URL
+  authorization included, is a servlet <code>Filter</code>, which by definition runs before the servlet
+  (<code>DispatcherServlet</code>) that figures out which controller method applies.
+  <code>@PreAuthorize</code> is AOP advice wrapped around that specific method call, so it literally
+  cannot evaluate before Spring knows which method is being invoked. The order isn't a style choice;
+  it's forced by what each mechanism is built on top of.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  Same path, same valid token, same <code>READ:USER</code> authority — but the request that used to be
+  <code>GET</code> is now <code>DELETE</code>. Does the verdict change? If it does, which checkpoint is the one that notices?
+</div>
+
   <div class="tabs">
     <div class="tab on" id="tabSim">🧩 Simulator <span style="font-weight:400;opacity:.8">(no backend)</span></div>
     <div class="tab" id="tabLive">⚡ Live · :8081 <span style="font-weight:400;opacity:.8">(run the hub locally)</span></div>
@@ -771,6 +963,7 @@ document.addEventListener('click', function (e) {
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

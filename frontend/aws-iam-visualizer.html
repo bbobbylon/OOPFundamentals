@@ -98,7 +98,193 @@
     </div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  
+<p class="hf-deck">or, the permission that grants nothing by itself and everything in company</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Nobody gave them admin. They gave them permission to hand admin to something else.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Three reasonable grants, none of them administrative, adding up to the whole account</div>
+  <p>A developer needs to deploy Lambda functions, so they get
+  <code>lambda:CreateFunction</code> and <code>lambda:InvokeFunction</code>. Every Lambda needs an
+  execution role, and handing a role to a service requires <code>iam:PassRole</code> — which nobody
+  can scope properly on day one, because nobody yet knows which roles the team will need. So it
+  ships as <code>"Resource": "*"</code>, with a comment promising to tighten it later.</p>
+  <p>Read the three together. The developer creates a function whose execution role is the
+  account's administrator role — which <code>PassRole: *</code> permits — and whose code makes one
+  API call. Then they invoke it. <b>The Lambda runs as the administrator, because that is what an
+  execution role means</b>, and the developer has just performed an administrative action while
+  holding no administrative permission at all. IAM did not fail: every request was allowed by a
+  policy someone wrote on purpose. <code>iam:PassRole</code> is not a permission to <i>do</i>
+  something. It is a permission to decide <b>what something else is allowed to do</b>, and that is
+  a different kind of power that reads like an ordinary line in a policy document.</p>
+  <div class="hf-scatter">
+    <span>no admin policy attached ✓</span>
+    <span>no role assumed by the user ✓</span>
+    <span>every API call explicitly allowed ✓</span>
+    <span>PassRole scoped to "*" ⚠</span>
+    <span>effectively account admin ⚠</span>
+  </div>
+  <p class="hf-foot">An access review that lists what each person can do will not find this. It is
+  not in what they can do.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Say which roles, and say which service they may be passed to</div>
+  <div class="hf-ladder">
+    <b>Scope <code>iam:PassRole</code> to specific role ARNs — never <code>"*"</code></b>
+    <i>↓ this single change is the difference between "can deploy functions" and "can become anyone in the account"</i>
+    <b>Add the <code>iam:PassedToService</code> condition so the role can only be passed to the service you meant</b>
+    <i>↓ otherwise a role intended for EC2 can be handed to Lambda, CodeBuild or ECS instead, and the blast radius is whatever that role can reach</i>
+    <b>Then audit the trust policies too — a role only becomes usable this way if it already trusts the service assuming it</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Most permissions answer "what may this principal do?". <code>iam:PassRole</code> answers "what
+  may this principal grant?" — and a permission to grant is always at least as powerful as the
+  thing it grants.</b> That is why it does not show up in the mental model people build from
+  reading policies: you are looking for dangerous <i>actions</i>, and this one is dangerous because
+  of the <i>resource</i> it names. The action looks like plumbing. The resource is the privilege.
+</div>
+
+<div class="hf-note"><code>PassRole</code> is <b>the ability to sign someone else's permission
+slip</b>. You are not going anywhere yourself, so nothing on your record changes — you just decide
+where everyone else gets to go.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>They have no admin policy attached. How can they take administrative actions?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">IAM</span>
+    <p>They did not take one. A Lambda function did, and it was running as the role they attached to
+    it. I evaluated both requests correctly: creating a function with that execution role was
+    allowed by their <code>PassRole</code> statement, and the function's API call was allowed by the
+    administrator role. Two correct decisions, made about two different principals.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The execution role</span>
+    <p>And I am not a label — I am the identity the code actually runs as. Whoever chooses which
+    role a function carries is choosing which identity arbitrary code will execute under. That is
+    the whole decision, and it is expressed as one field in a create call.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The trust policy</span>
+    <p>I am the second half of it, and the half that is checkable. I say which principals may assume
+    that role. If I never listed <code>lambda.amazonaws.com</code>, the trick does not work — so
+    when you go looking for exposure, read me alongside every <code>PassRole</code> grant rather
+    than on my own.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps. Every request in the sequence is explicitly allowed.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A developer is granted <code>lambda:CreateFunction</code>, <code>lambda:InvokeFunction</code> and <code>iam:PassRole</code> on <code>*</code></span><span class="tag">a normal deploy policy</span></li>
+    <li class="open"><span>They call <code>CreateFunction</code> with <code>Role</code> set to the account's administrator role ARN</span><span class="tag">allowed by the wildcard</span></li>
+    <li><span>IAM checks the administrator role's trust policy. It permits <code>lambda.amazonaws.com</code>, because most broad roles do</span><span class="tag">the second condition, usually met</span></li>
+    <li class="open"><span>The function is created. Its code is three lines calling any API the developer chooses</span><span class="tag">arbitrary code, chosen identity</span></li>
+    <li><span>They invoke it. Lambda assumes the execution role and the code runs with administrator credentials</span><span class="tag">exactly as designed</span></li>
+    <li class="open"><span>CloudTrail records the action as taken by the <b>role</b>, not by the developer, so even the log does not obviously point at them</span><span class="tag">and the audit trail blurs</span></li>
+  </ol>
+  <p class="hf-annot">Step 6 is the detail that makes this worth internalising beyond AWS. When a
+  principal acts through an intermediary, the audit trail records the intermediary — you can still
+  correlate the <code>CreateFunction</code> call with the later activity, but only if you think to
+  look, and the two events are hours apart in a log with millions of entries. It is the same reason
+  the identity world distinguishes a token used <i>on behalf of</i> a user from one the app uses
+  <i>as itself</i>: <b>delegation is easy to authorise and hard to review</b>, so the control has to
+  be at the moment of granting, not at the moment of use.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span><code>lambda:CreateFunction</code> — obviously needed to deploy</span>
+      <span><code>iam:PassRole</code> on <code>*</code> — "a deploy just needs this"</span>
+      <span><code>lambda:InvokeFunction</code> — needed to test what you deployed</span>
+    </div>
+    <div class="funnel">read separately, each is unremarkable ↓</div>
+    <div class="instance">Effective administrator<small>no admin policy anywhere in the account names this person</small></div>
+  </div>
+  <p class="hf-annot">The reason this survives code review is that policies are read one statement
+  at a time, and each statement here is defensible on its own terms. The question that finds it is
+  not "is this action dangerous?" but <b>"what becomes possible when these are held together?"</b> —
+  and the same question applied to Lambda applies to <code>ec2:RunInstances</code>,
+  <code>ecs:RegisterTaskDefinition</code>, <code>codebuild:CreateProject</code> and every other
+  service that accepts a role. Scoping the resource on that one statement closes all of them at
+  once, which is why it is worth the afternoon of finding out which role ARNs your pipeline
+  genuinely needs.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A developer's policy allows <code>lambda:CreateFunction</code>,
+  <code>lambda:InvokeFunction</code>, and <code>iam:PassRole</code> with
+  <code>"Resource": "*"</code>. No administrative policy is attached to them, and they cannot call
+  <code>sts:AssumeRole</code> on the administrator role. What can they actually do?</p>
+  <button type="button">Only what their own policy allows — passing a role does not grant its permissions to them, and without <code>sts:AssumeRole</code> there is no path to using the administrator role at all</button>
+  <button type="button">Effectively anything the administrator role can do — create a function whose execution role is that role, put arbitrary code in it, and invoke it, so the code runs with those permissions</button>
+  <button type="button">Nothing beyond their own policy until an administrator approves the role assignment, because passing a role a principal does not hold requires an explicit grant on the role itself</button>
+  <p class="why" data-for="0">The first half is true and is exactly why this is hard to spot: the
+  developer never holds the administrator permissions, and they genuinely cannot assume the role.
+  They do not need to. Lambda assumes it on their behalf, which is what an execution role is for —
+  the privilege is exercised by the service, under an identity the developer chose.</p>
+  <p class="why" data-for="1">Correct, and the fix is a single scope change: name the role ARNs your
+  pipeline actually passes, and add <code>iam:PassedToService</code> so each can only be handed to
+  the service you intended. Worth auditing your own account for
+  <code>"Action": "iam:PassRole", "Resource": "*"</code> — it is common, because scoping it
+  requires knowledge nobody has on the first day of a project.</p>
+  <p class="why" data-for="2">There is no approval step; IAM evaluates each request on the policies
+  in force at that moment, and <code>PassRole</code> on <code>*</code> already says yes to every
+  role. The one genuine precondition is the role's <b>trust policy</b> — it has to permit
+  <code>lambda.amazonaws.com</code> — and broad service roles very often do, which is precisely why
+  trust policies belong in the same review as the <code>PassRole</code> grants.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Every permission system eventually grows a permission about permissions.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>GRANT OPTION in SQL</h4>
+    <p><code>GRANT SELECT … WITH GRANT OPTION</code> does not widen what you can read — it lets you
+    widen what <i>others</i> can read, which is strictly more powerful and considerably easier to
+    approve. Same category, forty years earlier, and the reason revoking it cascades.</p>
+    <div class="hf-scatter"><span>the right to grant is the bigger right</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Entra's application permissions and who consents</h4>
+    <p>An app registration granted application permissions acts as itself, with no user's rights to
+    bound it — so whoever can consent to those permissions decides what that app may do to the whole
+    tenant, without ever holding the access personally. Identical shape, different vendor: the
+    dangerous privilege is the one over configuration.</p>
+    <div class="hf-scatter"><span>consent is a permission too</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Write access to CI configuration</h4>
+    <p>Someone who can edit the pipeline can run arbitrary code as the pipeline's identity, which is
+    usually far more privileged than they are. Nobody thinks of "can merge to a YAML file" as a
+    production credential, and it is. <b>Anything that chooses what privileged code runs is itself a
+    privileged permission.</b></p>
+    <div class="hf-scatter"><span>config write = the identity it configures</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> users and roles are both identities, policies are JSON
+  statements of Effect / Action / Resource / Condition, roles are assumed rather than logged into
+  and carry a trust policy saying who may assume them, an explicit Deny beats any Allow, and
+  applications should get credentials from an instance profile rather than a config file. The
+  sentence worth adding: <b><code>iam:PassRole</code> on <code>"*"</code> is administrator access
+  wearing a plumbing permission's name</b> — scope it to specific role ARNs and to the service
+  those roles are for.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -498,6 +684,7 @@ DevHubCodeWalk.mount('#cw-iam',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

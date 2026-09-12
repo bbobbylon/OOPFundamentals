@@ -56,7 +56,111 @@
   </div>
 
   <div style="margin:0 0 28px">
-    <div class="rt-ctlbar">
+    <p class="hf-deck">or, why your middleware's 500 shows up as a 200</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The status code isn't decided when you call WriteHeader. It's decided the instant somebody calls Write.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A handler that "fixes" the status code after it starts writing</div>
+  <p>Your handler streams a JSON body straight away with <code>json.NewEncoder(w).Encode(partial)</code>, then hits a late error and calls <code>w.WriteHeader(http.StatusInternalServerError)</code> to correct the response before returning.</p>
+  <p>The client still gets <code>200 OK</code> with a truncated JSON body. Your server log quietly prints <code>http: superfluous response.WriteHeader call</code> — and nobody reads server logs on a Tuesday afternoon.</p>
+  <div class="hf-scatter">
+    <span>handler compiles ✓</span>
+    <span>json.NewEncoder runs ✓</span>
+    <span>WriteHeader(500) called ⚠ too late</span>
+  </div>
+  <p class="hf-foot">The first byte you write IS the status line. Everything after that is just body.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Decide the status before you write a single byte</div>
+  <div class="hf-ladder">
+    <b>Do all validation and error checks first</b>
+    <i>&#8595; nothing has touched w.Write yet, so the status is still undecided</i>
+    <b>Call w.WriteHeader(code) exactly once, if you need a non-200 code</b>
+    <i>&#8595; this is your one shot — Go commits it right here</i>
+    <b>Then, and only then, write the body</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>ResponseWriter.Write triggers an implicit WriteHeader(200) if you haven't called one yet.</b> That isn't a fallback for when you forget — it's the mechanism. Calling <code>Write</code> IS calling <code>WriteHeader</code>, whether you meant to or not, and Go only lets the first call win.
+</div>
+
+<div class="hf-note">Think of the status code as the address on an envelope you've already dropped in a mailbox. Scribbling a new address on the copy you kept on your desk (<code>w.WriteHeader(500)</code>, called after <code>Write</code>) does <b>not</b> redirect the one already in the truck.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I called w.WriteHeader(500) right there, in plain sight. Why did the client get 200?</p></div>
+  <div class="hf-bub right"><span class="who">http.ResponseWriter</span><p>Because three lines earlier, your JSON encoder called Write() on me. At that instant I already sent "HTTP/1.1 200 OK" down the wire. Your WriteHeader call arrived after the headers were gone.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Couldn't you have just... not sent it yet? Buffered it?</p></div>
+  <div class="hf-bub right"><span class="who">http.ResponseWriter</span><p>And hold an unbounded response in memory for every request, just in case a handler changes its mind? No — I stream. First write, first served.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Two calls, one winner, decided by whichever runs first.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Handler starts building a response body with json.NewEncoder(w).Encode(...)</span><span class="tag">encode</span></li>
+    <li class="open"><span>Encode() calls w.Write(bytes) under the hood — the FIRST write anyone has made</span><span class="tag">first Write</span></li>
+    <li><span>net/http sees no prior WriteHeader call, so it sends "200 OK" right now, before your bytes</span><span class="tag">implicit 200</span></li>
+    <li class="open"><span>The response headers are now flushed to the connection — they cannot be recalled</span><span class="tag">committed</span></li>
+    <li><span>Later, your error branch calls w.WriteHeader(500)</span><span class="tag">too late</span></li>
+    <li class="open"><span>net/http logs "superfluous response.WriteHeader call" and ignores it — the client already has 200</span><span class="tag">no-op</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is the one nobody budgets for: <code>Encode</code>, <code>fmt.Fprintln(w, ...)</code>, and even <code>io.Copy(w, ...)</code> all call <code>Write</code> for you. If any of those runs before your error check, your error check's <code>WriteHeader</code> was already racing a call it couldn't win.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">Middleware calls w.WriteHeader(500) after the handler already encoded a JSON body<small>who actually decided the status code?</small></div>
+    <div class="arrow">what the client receives →</div>
+    <div class="opts">
+      <span>500, because WriteHeader was called explicitly</span>
+      <span class="on">200 — locked in by the first Write; WriteHeader(500) is ignored</span>
+      <span>a connection error, since two statuses conflict</span>
+    </div>
+  </div>
+  <p class="hf-annot">There's no conflict-resolution step in net/http — no error, no override, nothing visible to the client. The first Write silently wins and the second call vanishes into a log line most teams never look at.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A handler does <code>fmt.Fprintln(w, "processing...")</code> for a slow operation, then later discovers the operation failed and calls <code>http.Error(w, "failed", 500)</code> (which itself calls WriteHeader). What does the caller actually see?</p>
+  <button type="button">A 500 status with the body "failed"</button>
+  <button type="button">A 200 status, with "processing..." followed by "failed" in the body</button>
+  <button type="button">Go refuses to compile code that calls WriteHeader twice</button>
+  <p class="why" data-for="0">Tempting — that's what the code seems to say. But <code>Fprintln</code> already wrote a byte, which committed 200 before <code>http.Error</code> ever got the chance to send 500.</p>
+  <p class="why" data-for="1">Right. <code>fmt.Fprintln(w, ...)</code> calls <code>w.Write</code>, which implicitly sends the 200 header the instant it runs. <code>http.Error</code>'s internal <code>WriteHeader(500)</code> arrives after headers are already gone, so it's silently dropped — only the body text it writes still lands, appended right after "processing...".</p>
+  <p class="why" data-for="2">WriteHeader isn't special-cased by the compiler — this is runtime behavior, not a compile-time rule. Calling it twice compiles fine; the second call is simply a logged no-op at runtime.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"First commit wins, and nobody warns the caller" shows up anywhere a response streams instead of buffers.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring's committed response</h4>
+    <p>Servlet's <code>HttpServletResponse</code> has the exact same rule: once the writer has flushed a byte, <code>response.setStatus()</code> is a no-op, and Spring logs a warning if you're lucky enough to be looking for it.</p>
+    <div class="hf-scatter"><span>isCommitted() == true &rarr; too late</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>HTTP/2 header frames</h4>
+    <p>Headers go out in their own frame before the first DATA frame. Once that HEADERS frame is on the wire, there's no protocol-level way to amend it — the same physical constraint Go's implicit-200 rule is modeling.</p>
+    <div class="hf-scatter"><span>HEADERS frame sent &rarr; immutable</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A CIAM token endpoint under load</h4>
+    <p>A streaming token-introspection response that starts writing its JSON body before validation finishes fails the same way: the 200 is already promised before the 401 is discovered.</p>
+    <div class="hf-scatter"><span>stream first, validate later &rarr; wrong status</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> net/http gives you Handler, ServeMux, middleware chaining, and request context — the building blocks of a Go web service. <b>And the very first byte your handler writes silently decides the status code forever, whether you meant to call WriteHeader or not.</b>
+</div>
+
+<div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="ghSeg">
         <button class="on" data-s="route">Routing</button>
@@ -253,6 +357,7 @@ DevHubCodeWalk.mount('#cw-gohttp',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

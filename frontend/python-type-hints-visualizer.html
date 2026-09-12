@@ -102,7 +102,113 @@ print("found:", user if user is not None else "(no user — and the hint TOLD us
   </div>
 
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the one type-hint-shaped expression you can actually run — and the one that blows up in your hands</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You just learned hints do nothing at runtime. So you reach for one at runtime anyway — and this time Python does not shrug, it throws.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A JWT-claims guard that mypy loved and Python refused to run</div>
+  <p>You are sanity-checking a decoded token before you trust it: <code>if not isinstance(claims['scp'], list[str]): reject(claims)</code>. It reads like the modern, type-safe version of <code>isinstance(claims['scp'], list)</code> — same function, just spelled the way <code>def handle(scp: list[str])</code> is spelled in every signature on this page.</p>
+  <p>It never reaches your <code>reject()</code> branch, and it never reaches the "looks fine" branch either. The line itself dies: <code>TypeError: isinstance() argument 2 cannot be a parameterized generic</code>. Nothing about your token was inspected. Python refused to even ask the question.</p>
+  <div class="hf-scatter">
+    <span>isinstance(x, list) ✓</span>
+    <span>def f(x: list[str]) ✓ — as an annotation</span>
+    <span>isinstance(x, list[str]) ⚠ — as a runtime value</span>
+  </div>
+  <p class="hf-foot">The exact same six characters, <code>list[str]</code>, are perfectly legal in one spot and a crash in the other — and nothing before the crash warned you they were different spots.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Check the container yourself — or ask something built to walk the contents</div>
+  <div class="hf-ladder">
+    <b>Drop the subscript: isinstance(x, list)</b>
+    <i>↓ isinstance only ever accepted a class or a tuple of classes — list qualifies, list[str] does not</i>
+    <b>Walk the elements yourself if you need to: all(isinstance(i, str) for i in x)</b>
+    <i>↓ this is the part list[str] was never going to check for you — isinstance was never recursive</i>
+    <b>Or hand the whole claim to Pydantic's TypeAdapter(list[str]).validate_python(x), which walks it for real</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A subscripted generic is a value, not a class.</b> <code>list[str]</code> does not evaluate to "list, but remembering str" — it builds a real <code>types.GenericAlias</code> object, immediately, the moment the line runs. <code>isinstance()</code>'s contract has always been "a class, or a tuple of classes" for its second argument, and a <code>GenericAlias</code> is neither — so it refuses outright rather than quietly checking only the container and lying about the rest.
+</div>
+
+<div class="hf-note">Think of <code>list[str]</code> on a signature as a food label, and <code>isinstance()</code> as a bouncer who only checks shapes at the door. The label <b>"contains: str"</b> is information for a reader — mypy, a human, a printed contract. The bouncer at runtime can only ask "are you shaped like a list?" Asking the bouncer to also read the label is asking a different question than the one <code>isinstance()</code> has ever answered, and Python would rather crash than fake it.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I'm just checking the type. Why does adding <code>[str]</code> break the check?</p></div>
+  <div class="hf-bub right"><span class="who">isinstance()</span><p>I compare an object's type against a class. <code>list[str]</code> is not a class — it is an object <em>about</em> a class. I was never taught to open it and count.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But <code>int | str</code> works fine in isinstance — that's also a type-hint expression!</p></div>
+  <div class="hf-bub right"><span class="who">int | str</span><p>I build a <code>types.UnionType</code>, and CPython special-cased ME to support isinstance — "is it ONE of these classes" doesn't require opening anything nested. <code>list[str]</code> asks a harder question I can't answer without inspecting every element, so nobody special-cased that.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch what Python actually builds before isinstance ever sees it.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Python evaluates <code>list[str]</code> first — before <code>isinstance</code> runs at all</span><span class="tag">eager</span></li>
+    <li class="open"><span>That expression calls <code>list.__class_getitem__("str")</code> and returns a real object</span><span class="tag">types.GenericAlias</span></li>
+    <li><span><code>isinstance(x, list[str])</code> now runs with that object as argument 2</span><span class="tag">the actual call</span></li>
+    <li class="open"><span>isinstance's contract requires a class or a tuple of classes for argument 2</span><span class="tag">the rule</span></li>
+    <li><span>A GenericAlias is neither, so CPython raises immediately</span><span class="tag">TypeError</span></li>
+    <li class="open"><span><code>int | str</code> builds a <code>types.UnionType</code> instead — and that one type got an explicit isinstance exception</span><span class="tag">the one carve-out</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the whole page in one line: <code>isinstance</code> has never been able to inspect contents, only compare an object's type against a class. Everything upstream of it — mypy, pyright, your editor — reads <code>list[str]</code> as "a list of strings." <code>isinstance</code> was never given that reading comprehension, and Python won't pretend otherwise by silently downgrading the check to just "is it a list."</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">isinstance(x, T) — the exact same call<small>only T changes</small></div>
+    <div class="fan">how each shape of T reacts ↓</div>
+    <div class="obs">
+      <span>T = list — passes straight through</span>
+      <span class="new">T = list[str] — TypeError: cannot be a parameterized generic</span>
+      <span>T = int | str — also passes straight through (3.10+)</span>
+    </div>
+  </div>
+  <p class="hf-annot">The odd one out isn't the one you'd guess. <code>int | str</code> looks newer and fancier than plain <code>list</code>, yet it's the one Python bent the rules for. <code>list[str]</code> looks like the same kind of modern syntax and gets none of the same leniency — because checking "is this ONE of two classes" is cheap and unambiguous, and checking "is this a list where EVERY element is a str" is a different, more expensive question isinstance has just never agreed to answer.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A middleware function does exactly this before trusting a decoded token:
+  <code>isinstance(claims['scp'], list[str])</code>. What happens when this line executes?</p>
+  <button type="button">It returns <code>False</code>, since <code>claims['scp']</code> isn't guaranteed to hold only strings</button>
+  <button type="button">It raises <code>TypeError</code> before <code>claims['scp']</code> is even inspected</button>
+  <button type="button">It returns <code>True</code> as long as <code>claims['scp']</code> is a list, ignoring the <code>[str]</code> part</button>
+  <p class="why" data-for="0">That would mean isinstance opened the list and checked every element — it never does that, so it can't fail this way. The crash happens before any element is looked at.</p>
+  <p class="why" data-for="1">Right. <code>list[str]</code> is evaluated first and produces a <code>GenericAlias</code>, which isinstance's second argument has never accepted. The whole call dies with <code>TypeError: isinstance() argument 2 cannot be a parameterized generic</code> — your middleware crashes on a live request instead of cleanly rejecting one bad token.</p>
+  <p class="why" data-for="2">That's what happens if you write plain <code>isinstance(x, list)</code> — the subscript would need to be silently dropped for this to be true, and Python does not drop it. It raises instead.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Generics that vanish at runtime are not a Python problem. It is how every statically-checked language bolts types onto a dynamic or bytecode-level runtime.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's generics, erased at compile time</h4>
+    <p><code>if (obj instanceof List&lt;Integer&gt;)</code> does not even compile — "cannot perform instanceof check against parameterized type." The JVM bytecode only ever sees <code>List</code>; <code>&lt;Integer&gt;</code> existed for the compiler and nowhere else, which is exactly why Java calls this <em>type erasure</em>.</p>
+    <div class="hf-scatter"><span>instanceof List — legal</span><span>instanceof List&lt;Integer&gt; — compile error</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An Angular <code>@Input() items: Product[]</code></h4>
+    <p>By the time that array reaches the browser, TypeScript's compiler is long gone. <code>Array.isArray(items)</code> works at runtime; asking "is this an array of <em>Products</em>" isn't a runtime question at all unless you hand-write a type guard that checks every element yourself.</p>
+    <div class="hf-scatter"><span>Array.isArray() ✓</span><span>"array of Product" — not a runtime concept ⚠</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A JDBC <code>ResultSet.getArray()</code> call</h4>
+    <p>Read a Postgres <code>text[]</code> column back through JDBC and you get a plain <code>Object[]</code> — the column's declared element type didn't survive the round trip through the driver. You cast, and you trust the schema, because nothing at runtime will confirm it for you.</p>
+    <div class="hf-scatter"><span>text[] column ⚠ → Object[] at runtime</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> type hints are erased before your code ever runs, so mypy/pyright check them once, statically, and Python never looks at them again.
+  <b>The one new sentence this block adds:</b> that erasure isn't just passive silence — reach for a subscripted generic like <code>list[str]</code> as a runtime value instead of an annotation, and <code>isinstance()</code> throws rather than quietly checking half of what you asked.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="ptSeg">
@@ -350,6 +456,7 @@ DevHubCodeWalk.mount('#cw-pyth',{
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

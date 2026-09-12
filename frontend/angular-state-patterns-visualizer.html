@@ -184,6 +184,217 @@
     </div>
   </div>
 
+<p class="hf-deck">or, providedIn: 'root' is a request, not a guarantee — the nearest provider always wins</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The store updated. The console proved it. The header just never heard about it.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Two components, one @Injectable, and somehow two different objects</div>
+  <p>A todo app uses Pattern 2 — a signal-based <code>TodoStore</code> marked
+  <code>@Injectable({ providedIn: 'root' })</code>. A list component and a header counter both
+  inject it. You add a todo and the header's count never moves. You check the obvious things:
+  <code>addTodo()</code> definitely runs and updates the signal (a log line inside it proves it),
+  the header's template correctly reads <code>store.count()</code>, and there is exactly one
+  <code>@Injectable</code> declaration in the whole codebase for this class — grep confirms it.
+  Everything about the pattern says this should just work. What nobody checked is a
+  <code>providers: [TodoStore]</code> entry sitting on an ancestor of the list, pasted in months
+  ago from an unrelated example.</p>
+  <div class="hf-scatter">
+    <span>TodoStore is @Injectable({ providedIn: 'root' }) ✓</span>
+    <span>addTodo() definitely runs and updates the signal ✓</span>
+    <span>a parent component re-declares providers: [TodoStore] ⚠</span>
+    <span>Angular resolves from the nearest injector, not the root you wrote ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption underneath it: that <code>providedIn: 'root'</code>
+  means "there is exactly one of these, always." It means "if nothing closer claims it first."</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Let one injector own the singleton — or split the state on purpose</div>
+  <div class="hf-ladder">
+    <b>grep the app for "providers: [TodoStore]" outside the root/route config</b>
+    <i>↓ any component-level or route-level entry creates a separate instance for that subtree, no matter what the class's own decorator says</i>
+    <b>Delete the accidental one — or if per-route state genuinely was the goal, name it that way</b>
+    <i>↓ "shared everywhere" and "fresh per section" are both legitimate designs; the bug was having one by accident while believing you had the other</i>
+    <b>One instance, one signal graph, and the header hears every update</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Angular's DI resolves from the nearest injector, and providedIn: 'root' only wins if nothing
+  closer objects.</b> That's what makes every one of this page's five patterns actually deliver
+  ONE shared source of truth in the first place — and it's the one stray line of code that can
+  silently split any of them into disconnected copies. Doesn't matter whether the pattern
+  underneath is a <code>BehaviorSubject</code>, a signal, or a full NgRx store: the sharing was
+  never coming from the pattern. It was coming from the injector.
+</div>
+
+<div class="hf-note">Think of a root-provided service as <b>a single mail room serving the whole
+building</b>. Everyone sends mail there and everyone picks up from there — one room, one set of
+pigeonholes. A <code>providers: [...]</code> entry on one floor's component is that floor quietly
+building its own mail room, with identical-looking pigeonholes. Mail addressed correctly still
+arrives — just at the wrong room, for anyone standing on that floor.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I only wrote one @Injectable. Why do I have two of them at runtime?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Angular's injector</span>
+    <p>Because I don't look at your class decorator to decide how many instances to make — I look
+    at where the request for <code>TodoStore</code> comes from, and hand it to whichever provider
+    is closest going up the tree. <code>providedIn: 'root'</code> is just the provider you
+    registered at the very top, in case nothing closer beats it.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The list component's providers array</span>
+    <p>And I do beat it. I never meant to be "closer" — I was pasted in from an old example that
+    provided its own service locally, on purpose, for a totally different component. Nobody
+    removed me when this component started injecting the shared store instead.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The header's TodoStore</span>
+    <p>Which is why I never saw the update. I'm not broken, and neither is the list's copy — we're
+    just two different objects, both correctly doing exactly what a <code>TodoStore</code> does,
+    for two audiences nobody meant to split apart.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One class. One decorator. As many live instances as there are injectors willing to claim it.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A component asks for <code>TodoStore</code> — via constructor injection or <code>inject()</code></span><span class="tag">the request</span></li>
+    <li class="open"><span>Angular starts at THIS component's own injector and checks: does its <code>providers: []</code> array have a TodoStore entry?</span><span class="tag">the search always starts local</span></li>
+    <li><span>If yes, stop right here — build or reuse an instance scoped to this component and its children</span><span class="tag">providedIn: 'root' is never even consulted</span></li>
+    <li class="open"><span>If no, walk up to the parent component's injector and ask the same question, then its parent, and so on</span><span class="tag">this is "the tree," literally</span></li>
+    <li><span>Eventually reach the root injector, where <code>@Injectable({ providedIn: 'root' })</code> registered exactly one shared instance</span><span class="tag">the fallback everyone assumes is the only option</span></li>
+    <li class="open"><span>Two components asking through two different paths can land on two different steps — one stops at step 3, the other falls through to step 5</span><span class="tag">this is how "one service" becomes two objects</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is the lesson: the search for a provider always starts at the nearest
+  injector and stops at the first match, full stop. <code>providedIn: 'root'</code> describes
+  where a fallback provider was registered — it says nothing about whether some other injector,
+  closer to a particular component, claims the request first. Two components can each get a
+  perfectly correct, perfectly working <code>TodoStore</code>, and still not be looking at the
+  same one.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring">
+      <span class="lbl">Root injector — providedIn: 'root' registers ONE TodoStore here</span>
+      <div class="core">
+        The list component's own injector
+        <small>providers: [TodoStore] — claims the request before it ever reaches the ring around it</small>
+      </div>
+    </div>
+    <p class="note">the header lives outside this box — its request skips straight to the ring</p>
+  </div>
+  <p class="hf-annot">Nesting is the whole story: the component injector sits inside the app's
+  injector tree, but a provider declared there intercepts the request before it ever has a chance
+  to reach the outer ring. Nothing has to be broken for this to happen — just one component,
+  somewhere, standing slightly closer than the root.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q"><code>TodoStore</code> is <code>@Injectable({ providedIn: 'root' })</code>.
+  AppComponent has no providers array. Its child PageComponent has
+  <code>providers: [TodoStore]</code>. PageComponent's child ListComponent injects TodoStore with
+  no providers array of its own. A sibling, HeaderComponent, sits directly under AppComponent
+  (outside PageComponent) and also injects TodoStore. Do ListComponent and HeaderComponent get the
+  same instance?</p>
+  <button type="button">No — each of the two components gets its own separate instance, and neither one is the root instance</button>
+  <button type="button">Yes — both ultimately resolve to the single providedIn: 'root' instance</button>
+  <button type="button">No — ListComponent gets PageComponent's local instance; HeaderComponent gets the root instance, since Header's path up the tree never passes through PageComponent</button>
+  <p class="why" data-for="0">This overcorrects. HeaderComponent's path to the root injector never
+  passes through PageComponent at all — nothing between Header and root declares its own
+  TodoStore, so Header's request sails all the way up and lands on the exact same
+  <code>providedIn: 'root'</code> instance the class declared. Only the subtree under
+  PageComponent is actually affected.</p>
+  <p class="why" data-for="1">True for HeaderComponent, not for ListComponent. ListComponent's
+  lookup starts at ListComponent, finds nothing, then checks its parent — PageComponent — which
+  DOES have its own provider. The search stops right there and never reaches root at all.</p>
+  <p class="why" data-for="2">Right, and tracing the actual path is the only reliable way to get
+  this: List's chain is List → Page (match, stop) → never reaches root. Header's chain is Header →
+  App (no match) → root (match). Same class, same providedIn declaration, two different resolved
+  objects — because DI resolution cares about the ASKER's position in the tree, not the class's
+  own metadata.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">"One shared instance" is always a claim about a tree, not about a class.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring's parent/child ApplicationContext</h4>
+    <p>Classic Spring MVC splits a root <code>ApplicationContext</code> from a servlet-level child
+    context. A <code>@Bean</code> defined in the child shadows one of the same type from the
+    parent for anything resolved inside that child — so two parts of the "same" Spring app can
+    genuinely hold two different instances of what looks like a single singleton bean. Same
+    hierarchy, same nearest-wins rule, different framework.</p>
+    <div class="hf-scatter"><span>child context bean ≈ component providers[]</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>CSS custom properties, shadowed by nesting</h4>
+    <p><code>--accent</code> declared on <code>:root</code> is the "shared" value — until some
+    nested element declares its own <code>--accent</code>, which shadows it for that element and
+    everything inside it, with no error and no warning. Anyone reading a value further down the
+    tree gets whichever declaration is nearest, exactly like an injector lookup.</p>
+    <div class="hf-scatter"><span>nested --accent ≈ nested provider</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your CIAM AuthStore, forked by a route</h4>
+    <p>An admin feature route adds <code>providers: [AuthStore]</code> to its route config to
+    isolate an unrelated admin setting — and now the admin section's <code>isAuthenticated()</code>
+    signal is a completely different object from the shell's. Sign out from the main shell and its
+    copy flips to false; the still-open admin tab's copy never hears about it, because it was never
+    subscribed to the shell's store to begin with. Same fix: stop re-providing AuthStore anywhere
+    except the root.</p>
+    <div class="hf-scatter"><span>a forked AuthStore is a silent logout bug</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">If nested providers are this dangerous, why does Angular allow them at all?</p>
+  <p class="a">Because component- and route-scoped services are a real, useful feature —
+  deliberately choosing a new instance per route or per component is exactly right for state that
+  genuinely shouldn't be shared, like a wizard's in-progress form or a modal's local UI state. The
+  danger isn't the feature, it's using it by accident on a service whose entire job was to BE the
+  one shared source of truth. The fix is naming intent, not avoiding <code>providers: []</code>
+  entirely.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">How would I actually check whether a service got duplicated like this?</p>
+  <p class="a">Angular DevTools' injector-tree view shows exactly which injector owns which
+  instance — it will visibly show two separate <code>TodoStore</code> nodes if this has happened.
+  Without DevTools, the fast check is grepping the codebase for
+  <code>providers: [ServiceName]</code> anywhere outside the file that declares
+  <code>providedIn: 'root'</code>, and treating every hit as suspicious until proven
+  intentional.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does the same rule apply to lazy-loaded feature modules and routes, not just components?</p>
+  <p class="a">Yes, and that's actually the more common place to hit it — a lazy-loaded route's own
+  <code>providers</code> array creates a new injector for that entire loaded section, same as a
+  component would. A service re-provided at the route level is shared across every component
+  inside that route, but still cut off from everything outside it, which is exactly the shape of
+  the AuthStore example above.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  <code>TodoStore</code> is <code>providedIn: 'root'</code>. Component A has no providers array
+  and injects TodoStore. Its child, Component B, has <code>providers: [TodoStore]</code> and also
+  injects TodoStore. Component B's own child, Component C, injects TodoStore with no providers
+  array of its own. Which of A, B, and C end up sharing the same instance — and which one is
+  alone?
+</div>
+
   <!-- ── HERO: same update, four architectures · update chip + live state-path inspector ── -->
   <div class="panel" style="border:1px solid #22d3ee">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:#22d3ee">▶ One update, four architectures — watch <code>toggleTodo(2)</code> travel each path</h2>
@@ -960,6 +1171,7 @@ of the boilerplate. the best of both.`},
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

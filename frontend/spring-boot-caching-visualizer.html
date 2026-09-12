@@ -115,6 +115,202 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> <code>@Cacheable(value="user-roles", key="#userId")</code> on Redis across all pods; an admin role change fires <code>@CacheEvict(value="user-roles", key="#userId")</code> so every pod refetches. <code>@Cacheable(value="jwks", key="'global'")</code> with a 10-min TTL auto-picks-up Ping key rotation. Never cache the token-validation result — that would keep a deprovisioned user "authorized".</div>
   </div>
 
+<p class="hf-deck">or, @Cacheable doesn't clone your object for you — every caller gets the exact same instance</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Two unrelated requests. One of them saw the other's price change, and the database never moved.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Nothing in the request path was shared — except the one thing that mattered</div>
+  <p><code>@Cacheable(value="products", key="#id")</code> returns a <code>Product</code> straight
+  from the cache. Somewhere downstream, a price-preview helper runs
+  <code>product.setPrice(BigDecimal.ZERO)</code> on the result to build a temporary display value —
+  no save call, no update method, it looks like a harmless local variable holding whatever the
+  cache handed back. Except that "local variable" <i>is</i> the cached object, not a copy of it. The
+  very next unrelated request for the same product ID gets that same zeroed-out price, the database
+  still says the real number, and nobody ever wrote to it.</p>
+  <div class="hf-scatter">
+    <span>the database was never touched ✓</span>
+    <span>the @Cacheable method looks completely correct ✓</span>
+    <span>cache.get() returns the SAME object reference every time ⚠</span>
+    <span>one caller's mutation is now every caller's cached value ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that reading from a cache behaves like reading from a
+  database — a fresh copy every time. It's a shared, mutable, in-memory object with nobody's name on
+  it.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Return something nobody can mutate out from under everyone else</div>
+  <div class="hf-ladder">
+    <b>Quick fix: defensively copy before handing it to code that might mutate it</b>
+    <i>↓ the cache's own copy stays clean no matter what the caller does with theirs</i>
+    <b>Better: return immutable types in the first place — a Java record, or <code>List.copyOf(...)</code></b>
+    <i>↓ now there's no mutating method to accidentally call — the compiler backs you up</i>
+    <b>Best: never cache entities at all — cache DTOs, which nobody has a reason to treat as shared state</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A cache hit doesn't hand you a copy — it hands you the exact object every other caller is
+  holding.</b> That one fact explains why a "harmless" local mutation leaks into completely
+  unrelated requests, why records and DTOs are safer things to cache than live entities, and why
+  "the database is the source of truth" stops being reassuring the moment your own code treats a
+  cached object as disposable.
+</div>
+
+<div class="hf-note">Think of a cache entry like a library's <b>reference copy</b> of a book — the
+one that never leaves the building, kept at the desk for anyone to consult. Every visitor who asks
+for it gets handed the <i>same physical book</i>, not a photocopy. Scribble a note in the margin
+"just to keep track of something" and the next visitor reads your note too — the book never knew
+you thought it was your own copy. A cache without defensive copies is a reference desk, not a
+lending library.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I just set a field on the object the cache gave me. I never called a save method — how did that change anything?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">@Cacheable</span>
+    <p>I never promised you a copy. My whole job is skipping repeated work, and the cheapest way to
+    do that is handing back the exact object I stored last time — no cloning, no serialization
+    round-trip, unless the cache provider forces one on me.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The cache store</span>
+    <p>And I'm not a database. I don't have rows, columns, or isolation levels — I'm a Map.
+    Whatever object reference you handed me, that's the object every <code>get()</code> returns, to
+    every caller, until something evicts it.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Your "local" variable</span>
+    <p>I was never local. I was just a second name for the object the cache already had a name
+    for.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One put(). Every get() after it returns the identical object — not a copy, the object.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>First call misses. The real method runs and returns a <code>Product</code> built fresh from the database</span><span class="tag">a genuinely new object — this once</span></li>
+    <li class="open"><span>The proxy calls <code>cache.put(key, thatExactObject)</code> — the store now holds a reference to it, not a snapshot of its fields</span><span class="tag">reference, not value</span></li>
+    <li><span>Every later <code>get(key)</code> for that key returns that same reference</span><span class="tag">the entire point of caching — skip the rebuild</span></li>
+    <li class="open"><span>Any code that receives it and calls a mutating method — a setter, <code>.add()</code> — is mutating the ONE object every caller shares</span><span class="tag">the cache never signed up to protect you from this</span></li>
+    <li><span>The next unrelated <code>get(key)</code> — a different request, a different user, maybe a different thread — returns that mutated state</span><span class="tag">this is how it "spreads"</span></li>
+    <li class="open"><span>Only <code>@CacheEvict</code>, a fresh <code>@CachePut</code>, or a TTL expiry ever replaces the reference — until then, the mutation is permanent from every caller's point of view</span><span class="tag">no self-healing</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is the lesson. <code>put()</code> stores a reference, and every other
+  piece of this bug — the shared mutation, why records help, why entities are riskier to cache than
+  DTOs — falls straight out of that one fact. A cache was never going to protect you from mutation;
+  it isn't in the business of copying, only of skipping repeated work.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">cache.put(42, product)<small>one Product object, stored once</small></div>
+    <div class="fan">↓ every get(42) after this returns THAT object</div>
+    <div class="obs">
+      <span>request A reads it</span>
+      <span>request B reads it</span>
+      <span>a price-preview helper reads it</span>
+      <span>a background report job reads it</span>
+      <span class="new">the one caller that called setPrice() on it</span>
+    </div>
+  </div>
+  <p class="hf-annot">Every caller after the mutation gets the same box the mutator touched — there
+  is no separate "clean" copy sitting anywhere, waiting to be handed out next. If this were
+  <code>@Cacheable</code>-fetched DTOs built with <code>List.copyOf(...)</code> or a record, the
+  mutating call above wouldn't even compile. That's the whole argument for caching immutable shapes
+  instead of live entities.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Using the default <code>ConcurrentHashMap</code>-backed cache from Section 5,
+  <code>@Cacheable(value="products", key="#id")</code> returns a mutable <code>Product</code>. Two
+  unrelated requests call <code>getProduct(42)</code> back to back. The first request runs
+  <code>product.setPrice(BigDecimal.ZERO)</code> on the result for a local price-preview
+  calculation — no save call anywhere. What does the second request's <code>getProduct(42)</code>
+  return?</p>
+  <button type="button">The correct, unmodified price from the database — @Cacheable only caches what the database returned, so a mutation the caller makes afterward can't reach it</button>
+  <button type="button">price = 0 — both requests received the exact same cached Product instance, so the first request's mutation is visible to the second</button>
+  <button type="button">A ConcurrentModificationException, because two requests touched the same cached object without synchronizing</button>
+  <p class="why" data-for="0">That's how a database read behaves — a fresh copy, isolated from whatever the last reader did to theirs. A cache read from the default ConcurrentHashMap-backed store doesn't work that way: there's no "fresh copy" step, so this describes a database, not this cache.</p>
+  <p class="why" data-for="1">Right, and this is the dangerous part — nothing threw, nothing logged, the database was never touched. <code>cache.put()</code> stored a reference to one Product object; every <code>get()</code> since has handed back that exact object, so the first request's mutation is now the second request's reality too.</p>
+  <p class="why" data-for="2">A tempting exception name — it's real, and Java-flavored, which is exactly why it's a good guess. But it's thrown by an iterator that detects a collection changed mid-loop; nothing here is iterating anything. Setting a field on a shared object just works, silently — which is worse than an exception would be.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three systems, one shared-object footgun.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A naive JavaScript <code>memoize()</code></h4>
+    <p>A hand-rolled memoizer has the identical property: it hands back the SAME cached array or
+    object on every call for a given key, and a caller that mutates the return value corrupts every
+    future call's result too — unless the memoizer clones before returning, which most homemade
+    ones don't.</p>
+    <div class="hf-scatter"><span>memoize() ≈ @Cacheable</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Python's mutable default argument</h4>
+    <p><code>def f(x, cache=[])</code> is a famous footgun for the exact same underlying reason: one
+    shared mutable object, handed to every caller who didn't pass their own, that nobody expected to
+    be shared across calls.</p>
+    <div class="hf-scatter"><span>one object, every caller</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>CIAM: a shared role list mutated inside a permission check</h4>
+    <p><code>@Cacheable(value="user-roles", key="#userId")</code> returns a <code>List&lt;Role&gt;</code>
+    that a permission helper passes into <code>roles.addAll(inheritedRoles)</code> to build what it
+    thinks is a temporary "effective roles" list. Every later request for that user now sees the
+    inherited roles as directly assigned — not staleness, silent corruption of an authorization
+    decision, until the entry evicts.</p>
+    <div class="hf-scatter"><span>this is worse than a stale read</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Does @CachePut have the same mutable-reference risk?</p>
+  <p class="a">Yes — and it's an easy place to introduce the bug on the write side.
+  <code>@CachePut</code> stores whatever the method returns, so if that method builds its response
+  by mutating and returning a shared or reused object (a static builder, a cached template), the
+  same "everyone shares one reference" problem shows up on the write path instead of the read path.
+  The annotation doesn't check whether the object is safe to hand out — it just stores what you
+  gave it.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">If I switch to Redis, does this whole problem go away?</p>
+  <p class="a">Mostly, as a side effect rather than a fix. Redis stores a serialized copy (JSON,
+  typically, via <code>GenericJackson2JsonRedisSerializer</code>), so every <code>get()</code>
+  deserializes a brand-new Java object, and mutating it can't reach anyone else's copy. But don't
+  reach for Redis as the fix for THIS specific bug — you still want immutable DTOs, because the
+  in-memory backends (the default, and Caffeine) are common enough in local dev and tests that the
+  bug resurfaces the moment someone runs without Redis configured.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">The gotcha table also lists "caching null results" — is that the same category of bug?</p>
+  <p class="a">Different mechanism, same root cause: trusting the cache to behave like a database.
+  <code>@Cacheable</code> caches <code>null</code> by default, so a method that returns null because
+  the data doesn't exist <i>yet</i> keeps returning null forever, even after the data shows up,
+  because nothing ever re-checks. <code>unless="#result == null"</code> — or
+  <code>cache-null-values: false</code> for Redis — stops it from being stored in the first place,
+  but it's a separate fix from anything about mutation or defensive copies.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  <code>@Cacheable(value="products")</code> with no <code>key</code> attribute uses Spring's
+  default key generator, which combines all method arguments. <code>findDiscounted(Long id,
+  boolean vipOnly)</code> gets called as <code>findDiscounted(42, true)</code> and then
+  <code>findDiscounted(42, false)</code>. Same product ID both times — do these two calls share one
+  cache entry, or land in two separate ones?
+</div>
+
   <!-- ── HERO: animated @Cacheable lifecycle · live per-step inspector ── -->
   <div class="panel" style="border:1px solid var(--accent)">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch the cache AOP proxy decide: miss → DB, hit → skip</h2>
@@ -691,5 +887,6 @@ CacheManager.getCache("products").put(42, updated)
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

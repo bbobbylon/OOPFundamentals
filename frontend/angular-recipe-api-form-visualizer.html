@@ -56,6 +56,204 @@
     <div class="intro-ciam"><span class="tag">In your CIAM app:</span> this is the profile-edit and registration screen. Pre-fill the form from <code>/api/profile</code>, let the user edit, and PUT it back — mapping server-side rules (email already registered, weak password, claim constraints) onto the form so the message lands on the right field. Never trust the client validators alone: they are there so the user gets instant feedback, but the Spring <code>@Valid</code> layer (and the IdP) is what actually enforces the rules. Pair this with the <code>angular-auth-forms-deep</code> (login/registration forms) and the password-complexity recipe.</div>
   </div>
 
+<p class="hf-deck">or, patchValue's leniency is exactly why a typo can hide from you for weeks</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You renamed a field on the backend DTO. Nothing broke. Neither did the bug it created — for three sprints.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Every save quietly blanked out a real phone number</div>
+  <p>A backend refactor renames <code>phoneNumber</code> to <code>phone</code> on the response DTO.
+  Nobody updates the Angular form, which still has a control literally named
+  <code>phoneNumber</code>. The GET still succeeds. <code>form.patchValue(user)</code> still runs
+  with no error — patchValue only ever fills the keys that match, so a key it doesn't recognize is
+  simply not its problem. The <code>phoneNumber</code> control just keeps its default: empty. The
+  user opens their profile, sees a blank phone field (which looks like "never filled one in,"
+  not "the app is broken"), doesn't touch it, hits Save — and <code>form.value</code> still
+  includes <code>phoneNumber: ''</code>, which gets PUT straight back over the real one.</p>
+  <div class="hf-scatter">
+    <span>form.patchValue(user) ran, no error ✓</span>
+    <span>Save button worked, PUT succeeded ✓</span>
+    <span>API's "phone" key never matched the "phoneNumber" control ⚠</span>
+    <span>every save silently blanks the real phone number server-side ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: no error thrown means the data landed where you
+  expected. patchValue's entire design is to not throw on a mismatch — which also means it will
+  never warn you one happened.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Be strict while the shape is moving, lenient once it's settled</div>
+  <div class="hf-ladder">
+    <b>While refactoring a DTO's shape, use setValue (or diff the keys) instead of patchValue</b>
+    <i>↓ setValue checks every control's name against the object's keys and throws on any mismatch — the exact signal patchValue is built to suppress</i>
+    <b>Once the shape is stable again, switch back to patchValue for production</b>
+    <i>↓ real API responses legitimately carry optional or extra fields you don't want crashing the form</i>
+    <b>Strict while you're changing the contract, forgiving once you're living with it — not the same choice for both</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>patchValue not throwing is not the same thing as your data arriving correctly.</b> That's why
+  a renamed backend field can vanish from a form with zero errors anywhere, why patchValue is
+  still the right default in production (real responses really do vary), and why setValue exists
+  at all — it's the strict tool for exactly the moment you want a shape mismatch to be loud
+  instead of silent.
+</div>
+
+<div class="hf-note">Think of patchValue as a mail carrier who only delivers letters addressed
+correctly and quietly leaves the rest at the depot — no complaint, no returned-to-sender notice.
+That's great when a few pieces of junk mail show up you never needed. It's a problem when a
+letter you were actually waiting for got addressed to your old apartment number, and the carrier
+just didn't deliver it — and never told you why your mailbox looks exactly like it did
+yesterday.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I renamed a field on the backend. Why didn't anything break?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">patchValue</span>
+    <p>Because nothing about what you did is technically invalid to me. I only ever fill in the
+    keys that match one of my controls. A key that doesn't match isn't an error from where I
+    stand — it's just a key I have nothing to do with.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">setValue</span>
+    <p>I would have told you immediately. I require every control's name to have a matching key in
+    the object you hand me, or I throw. I'm the strict sibling you reach for on purpose, not by
+    default.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The phoneNumber control</span>
+    <p>And I just sat there holding whatever I had before — empty, on a fresh load. Nobody told me
+    my data source moved. I don't know that I'm stale. I only know I was never updated.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One API response. One patchValue call. Watch which keys actually make the trip.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>http.get&lt;User&gt;(url)</code> resolves with a plain JS object — whatever shape the server actually sent, not necessarily the shape the form expects</span><span class="tag">no contract enforced here, just JSON</span></li>
+    <li><span><code>.subscribe(user =&gt; this.form.patchValue(user))</code> hands that object to the FormGroup</span><span class="tag">the handoff</span></li>
+    <li class="open"><span>patchValue walks its <b>own</b> control names — name, email, phoneNumber — and for each one, checks whether the incoming object has a matching key</span><span class="tag">the form asks; the object doesn't offer</span></li>
+    <li><span>Match found → that control's value is set, and its validators re-run against the new value</span><span class="tag">the happy path, most keys</span></li>
+    <li class="open"><span>No match (renamed or missing key) → that control is left exactly as it was — no error, no console warning, nothing</span><span class="tag">the silent branch, and it's the default one</span></li>
+    <li class="open"><span>An extra key on the object with no matching control (an audit field, a nested object) is ignored the exact same way — which is the whole reason patchValue exists over setValue</span><span class="tag">the feature and the footgun are the same behavior</span></li>
+  </ol>
+  <p class="hf-annot">Steps 5 and 6 are the same mechanism pointed in two directions, and that's
+  worth sitting with. The exact leniency that makes patchValue safe against a response carrying a
+  few extra fields is identical to the leniency that lets a renamed or dropped field disappear
+  without a trace. You cannot ask patchValue to be forgiving about extras and strict about missing
+  keys — it's one policy, not two.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">FormGroup { name, email, phoneNumber }<small>the form's fixed control names, set once when you built it</small></div>
+    <div class="arrow">patchValue(response) →</div>
+    <div class="opts">
+      <span class="on">{ name, email, phoneNumber } — every key matches, every control updates</span>
+      <span>{ name, email, phone } — "phone" has no matching control; phoneNumber never updates, silently</span>
+      <span>{ name, email, phoneNumber, createdAt } — createdAt is simply ignored, no harm done</span>
+    </div>
+  </div>
+  <p class="hf-annot">Same call, same form, three different response shapes — and patchValue
+  treats a genuinely-missing field and a harmlessly-extra one with the identical shrug. The middle
+  option is the one worth staring at: it looks exactly as clean in the console as the first one.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A FormGroup has controls <code>{ name, email, phoneNumber }</code>. The API response
+  is <code>{ name: 'Alex', email: 'a@b.com' }</code> — no <code>phoneNumber</code> key at all. You
+  call <code>form.setValue(response)</code> instead of <code>patchValue(response)</code>. What
+  happens?</p>
+  <button type="button">It works fine — setValue just leaves phoneNumber at its default, the same way patchValue would</button>
+  <button type="button">It throws — setValue requires every control's name to appear as a key in the object you pass it</button>
+  <button type="button">It silently sets phoneNumber to null, since setValue always writes every control even when a key is missing</button>
+  <p class="why" data-for="0">That's patchValue's behavior, not setValue's — and mixing the two up
+  is an easy, common mistake precisely because they look almost identical to call. setValue's
+  entire reason to exist is refusing to do what you just described: it will not quietly leave a
+  control untouched.</p>
+  <p class="why" data-for="1">Right — and the error even names the missing control, which is
+  exactly the loud signal patchValue was designed to swallow. That's the whole trade: setValue
+  costs you a crash on any shape drift, and buys you the fact that drift can never hide.</p>
+  <p class="why" data-for="2">setValue doesn't substitute a default for a missing key — it checks
+  the object's shape against the form's shape first, and throws before writing anything if they
+  don't match. Nothing gets set to null; nothing gets set at all.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">TypeScript already drew this exact line, contract testing exists because of this exact bug, and your own OIDC claims are optional by spec.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>TypeScript's <code>Partial&lt;T&gt;</code> draws the same line at compile time</h4>
+    <p>A function accepting <code>Partial&lt;User&gt;</code> can't assume every field is there; one
+    accepting <code>User</code> can. patchValue is <code>Partial&lt;T&gt;</code> enforced leniently
+    at runtime; setValue is the full type, enforced strictly, by throwing. Neither one gives you a
+    compiler catching the mismatch before you ship — that part is still on you.</p>
+    <div class="hf-scatter"><span>patchValue ≈ Partial&lt;T&gt;, setValue ≈ T</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Consumer-driven contract testing exists because of this exact failure</h4>
+    <p>A backend team renames or drops a JSON field, and every one of their existing tests still
+    passes — nothing on the producer's side checks what a consumer actually reads. Tools like Pact
+    flip that: the consumer publishes what fields it needs, and the producer's CI fails the moment
+    a change would break something silently, instead of a support ticket finding out first.</p>
+    <div class="hf-scatter"><span>same bug, caught in CI instead of production</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An OIDC /userinfo response is optional-shaped by design</h4>
+    <p>Standard OIDC claims like <code>phone_number</code> or <code>address</code> only appear in a
+    <code>/userinfo</code> response when the user has them and has consented to that scope — an
+    absent key there isn't a bug, it's the spec working as intended. That's exactly why a profile
+    form built on <code>/userinfo</code> should use patchValue, not setValue: a strict match would
+    throw for any user who simply hasn't verified a phone number. The cost is the one this whole
+    page is about — you can't visually tell "legitimately absent" apart from "silently dropped by a
+    renamed claim" just by watching the form behave normally.</p>
+    <div class="hf-scatter"><span>optional claims + patchValue = correct, and unverifiable by eye</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Should I always reach for patchValue and basically never use setValue in real code?</p>
+  <p class="a">Almost always patchValue for anything backed by a real API response, since real
+  responses legitimately vary. Reach for setValue in the rarer case where you're constructing the
+  form's value entirely yourself and want a guarantee you didn't forget a field — resetting a form
+  to a fully-known default object is a reasonable place for it. Treat setValue as closer to a
+  development-time assertion than a production pattern.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">If patchValue doesn't error on a mismatch, how would I even catch this bug before it ships?</p>
+  <p class="a">Type the response. <code>http.get&lt;UserDto&gt;(url)</code> with a
+  <code>UserDto</code> interface that matches the form's controls means a renamed backend field
+  shows up as a TypeScript compile error the moment you reference the old name anywhere typed.
+  TypeScript won't save you from a field that's genuinely absent on one particular response at
+  runtime — but it will catch you renaming the interface and forgetting to update the form
+  builder, which is exactly how the bug in this lesson starts.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does the form's control order, or the response object's key order, matter to patchValue?</p>
+  <p class="a">No — patchValue matches purely by key name, not position, so reordering either side
+  changes nothing. That's worth knowing specifically because it rules out "reorder the fields" as
+  a fix for anything in this lesson: if a control isn't updating, the bug is always a name mismatch
+  (or a genuinely absent key), never an ordering issue.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  A form has controls <code>{ name, email, phoneNumber }</code>. You call
+  <code>form.patchValue({ name: 'Alex', email: 'a@b.com' })</code> — no <code>phoneNumber</code>
+  key at all. Does patchValue throw — and would your answer flip if you called
+  <code>form.setValue</code> with that same two-key object instead?
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
@@ -267,6 +465,7 @@ DevHubCodeWalk.mount('#cw-af',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

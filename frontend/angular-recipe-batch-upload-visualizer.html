@@ -57,6 +57,213 @@
     <div class="intro-ciam"><span class="tag">In your CIAM app:</span> identity-verification document upload (KYC: ID front/back, proof of address), avatars, or bulk user import. Validate type/size on the client for fast feedback, but the server must independently enforce limits, allowlist content types, and ideally scan uploads — never trust the browser. Keep the access token in the <code>Authorization</code> header of the upload request (the interceptor adds it), cap the size both client- and server-side to blunt DoS, and store files outside the web root / in object storage. Pair with the API-form recipes for the surrounding form.</div>
   </div>
 
+<p class="hf-deck">or, the one header you always set is the one header this request needs you to leave alone</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You set Content-Type "properly." The server couldn't parse a single file out of the request.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">You set the header correctly, and that's exactly what broke it</div>
+  <p>Every other POST in your app sets <code>Content-Type: application/json</code>, so setting the
+  header explicitly feels like the responsible habit — for a file upload, that instinct becomes
+  <code>headers: { 'Content-Type': 'multipart/form-data' }</code>. It compiles. It even names the
+  right format. Then every upload fails server-side with something like "no multipart boundary
+  found." Nothing about the <code>FormData</code> itself is wrong. The problem is that
+  <code>multipart/form-data</code> on its own is an incomplete value — it needs a
+  <code>boundary=…</code> parameter naming the exact separator string used between files and
+  fields in the body, and that string has to be generated fresh, from the real bytes, specifically
+  so it can never collide with anything inside your actual files. Set the header yourself and
+  you've told the browser "I've got this" — so it doesn't add the boundary either, and the body
+  becomes unparseable.</p>
+  <div class="hf-scatter">
+    <span>FormData built correctly ✓</span>
+    <span>files attached under the right field name ✓</span>
+    <span>Content-Type set to 'multipart/form-data' ⚠</span>
+    <span>no boundary parameter anywhere in that header ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: setting the header yourself is being thorough. Here
+  it's the one thing standing between the browser and the one piece of information — the
+  boundary — only the browser can safely generate.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Let the one party who can compute the boundary write the header</div>
+  <div class="hf-ladder">
+    <b>Don't set Content-Type on a FormData request at all — omit the headers option for this call</b>
+    <i>↓ FormData already tells HttpClient exactly what it's sending; the browser computes the boundary and writes the full header itself</i>
+    <b>If a global interceptor force-sets Content-Type on every request, special-case it: skip when the body is a FormData instance</b>
+    <i>↓ a one-line "is this a FormData?" check saves this exact bug from recurring app-wide</i>
+    <b>The browser owns the one header it's uniquely positioned to get right</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The browser knows something about this request that you don't: the boundary.</b> It's a
+  string generated at send time, from the real body, chosen specifically so it can't collide with
+  anything inside your files. That's why a FormData upload is the one case in this whole app where
+  <i>not</i> setting a header is the more correct, more deliberate choice than setting it yourself.
+</div>
+
+<div class="hf-note">Think of the multipart boundary like a courier sealing several packages into
+one crate with a sticker that reads "use the phrase XQ7-PRT9 to know where one package ends and
+the next begins" — a phrase picked fresh, at packing time, specifically because it's guaranteed
+not to already appear inside anyone's box. Pre-print your own sticker before packing and you have
+no way to know whether that phrase happens to show up inside someone's contents already — and
+whoever unpacks the crate has no reliable way to find the seams.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I set Content-Type to multipart/form-data. Why is the server rejecting every upload?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The browser</span>
+    <p>Because you told me you'd handle that header, so I didn't. "multipart/form-data" alone is
+    an incomplete instruction — it needs a boundary= value naming the exact separator, generated
+    at send time from the real body so it can't collide with anything inside it. I generate that.
+    You just told me not to.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Spring's multipart parser</span>
+    <p>And without a boundary parameter, I have no way to know where one file ends and the next
+    field begins. I'm not being picky — there is genuinely no way to split this body correctly
+    without it.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">FormData</span>
+    <p>Which is exactly why I exist as my own type instead of you building a plain object. Hand me
+    to HttpClient without touching Content-Type, and the browser recognizes me and writes the
+    entire header — type, boundary, and all — correctly, every time.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One POST. Several events. Watch what subscribe actually receives, over time.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>http.post(url, formData, { reportProgress: true, observe: 'events' })</code> returns an Observable of <code>HttpEvent</code>, not a single response</span><span class="tag">one call, a stream — not a value</span></li>
+    <li class="open"><span>The browser builds the real request headers itself, computing a fresh boundary and writing the full Content-Type — because you didn't</span><span class="tag">the payoff of leaving the header alone</span></li>
+    <li><span>The first event to arrive is typically <code>HttpEventType.Sent</code> — confirms the request left, nothing about the response yet</span><span class="tag">step zero of the stream</span></li>
+    <li class="open"><span>As bytes actually leave the network interface, repeated <code>UploadProgress</code> events arrive, each carrying <code>loaded</code>/<code>total</code> — divide them for the percentage your bar reads</span><span class="tag">the whole reason observe:'events' exists</span></li>
+    <li><span>The server finishes and returns its result, delivered as one final <code>HttpResponse</code> event carrying the per-file outcome array</span><span class="tag">the payload you actually wanted, arriving last</span></li>
+    <li class="open"><span>Your subscribe handler has to branch on <code>event.type</code> for every one of these, because "the response" is really the <b>last</b> of several different event shapes sharing one stream</span><span class="tag">the shape-switch every upload handler needs</span></li>
+  </ol>
+  <p class="hf-annot">Step 1 is the one to remember, because everything after it follows from that
+  single choice. <code>observe:'events'</code> trades a normal single-value Observable for a
+  stream of several <i>different</i> event shapes across the life of one request. A plain
+  <code>http.post()</code> call only ever hands you the last of these. Ask for events and you get
+  to watch the request happen instead of only learning how it ended — the entire point when what
+  you're building is a progress bar.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">one http.post() call<small>{ reportProgress: true, observe: 'events' }</small></div>
+    <div class="fan">one Observable, several emissions over time ↓</div>
+    <div class="obs">
+      <span>Sent</span>
+      <span>UploadProgress — loaded: 1.2MB</span>
+      <span>UploadProgress — loaded: 3.8MB</span>
+      <span class="new">HttpResponse — per-file results, arriving last</span>
+    </div>
+  </div>
+  <p class="hf-annot">A normal http.post() throws away everything except the box marked "new"
+  here — it only ever gives you the final response. Asking for events turns the same request into
+  a stream you can watch happen, which is the only way a progress bar has anything to draw before
+  the upload finishes.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your batch upload sends 3 files in one request. The server successfully processes
+  all 3 but rejects file #2 (it failed a virus scan). What should the HTTP response look like, and
+  how does your Angular code find out which file was rejected?</p>
+  <button type="button">A 4xx status — since one of the files failed validation, the overall request should be marked a client error</button>
+  <button type="button">A 200 (or similar success) status with a per-file result array in the body; your code reads that array to find the rejected file, since the status code alone can't say</button>
+  <button type="button">The server sends a separate HTTP response per file, since observe:'events' already streams multiple values</button>
+  <p class="why" data-for="0">A completely fair instinct — something did go wrong, so a 4xx feels
+  right. But the request itself — three files, correctly formed, correctly authenticated — was
+  valid and was fully processed; the server understood it perfectly and made a per-file decision.
+  A 4xx on the whole batch would incorrectly tell files #1 and #3 they failed too, when they
+  didn't.</p>
+  <p class="why" data-for="1">Right — this is the "partial success" shape this recipe's own
+  section 4 is built around. The HTTP status describes whether the server could process the
+  request; the per-file result array in the body is the only place a per-item outcome can live,
+  because HTTP has no status code that means "mostly worked."</p>
+  <p class="why" data-for="2">That mixes up two different streams. <code>observe:'events'</code>
+  gives you UploadProgress events while bytes are still going <i>out</i> over the wire — that's
+  about the upload, not the server's verdict. However many files ride in one FormData, the server
+  still sends back exactly one final HttpResponse for the whole POST; a per-file breakdown has to
+  live inside that single response body, not as additional HTTP responses.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">GraphQL formalized this exact shape, AWS's own batch APIs live by it, and a KYC pipeline can't stop at the header this recipe already checks.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>GraphQL's "200 OK with an errors array" is the same idea, standardized</h4>
+    <p>GraphQL treats "the request was processed" and "every field resolved successfully" as two
+    separate facts from the spec up: a response can be 200 OK and still carry a top-level
+    <code>errors</code> array alongside partial data. This upload endpoint's per-file result array
+    is a smaller, ad hoc version of the identical idea.</p>
+    <div class="hf-scatter"><span>200 + errors[] ≈ 200 + perFileResults[]</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>AWS's SQS <code>SendMessageBatch</code> does this at much larger scale</h4>
+    <p>Send 10 messages in one call, get one 200 response back — and the body separates a
+    <code>Successful</code> array from a <code>Failed</code> array by message ID. A batch API
+    succeeding as a <i>request</i> and every item inside it succeeding are treated as two separate
+    questions industry-wide, not just in this one Angular recipe.</p>
+    <div class="hf-scatter"><span>SendMessageBatch: one 200, two arrays</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A KYC document upload can't stop at "is the Content-Type image/jpeg"</h4>
+    <p>An identity-verification upload (driver's license front/back) is exactly where "the server
+    re-validates type" has to mean something stricter than trusting the multipart part's declared
+    Content-Type — that value is still just a client-supplied string, trivially set to
+    <code>image/jpeg</code> on a file that isn't one. A real verification pipeline sniffs the
+    actual file's magic bytes server-side (or hands it to a vendor that does) before it's ever
+    stored or forwarded for identity matching, because a spoofed file type is the one thing this
+    particular upload can least afford to let through.</p>
+    <div class="hf-scatter"><span>declared type is client input, not proof</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Why not just base64-encode the files and JSON.stringify the whole thing, like every other POST?</p>
+  <p class="a">You could, but you'd pay for it twice: base64 inflates binary data by roughly a
+  third, and the payload becomes one giant string you can't get meaningful upload-progress events
+  for, since HttpClient's progress tracking follows raw bytes leaving the wire, not a JSON parser's
+  position inside a string. FormData plus multipart is the format HTTP was actually built to carry
+  binary payloads in — it isn't legacy ceremony, it's the option with fewer tradeoffs.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Can I show progress for each file individually, or only for the whole batch?</p>
+  <p class="a">Only the whole batch, if every file rides in one FormData and one request —
+  <code>reportProgress</code> gives you <code>loaded</code>/<code>total</code> for the entire
+  request body, with no visibility into which file's bytes are crossing the wire at any moment.
+  True per-file bars mean one HTTP request per file, each with its own Observable and its own
+  progress stream — at the cost of managing several concurrent requests instead of one.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does reportProgress slow the upload down?</p>
+  <p class="a">Negligibly — it tells HttpClient to surface progress events it can already see from
+  the underlying request, not to add network round trips or re-read the file. The real cost is on
+  your end: firing a change-detection cycle or a signal update on every UploadProgress event,
+  which can arrive quite often for a large file. Throttle how frequently you actually update the
+  visible percentage if a huge upload feels janky, rather than blaming reportProgress itself.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  Your batch upload's <code>UploadProgress</code> event reports <code>loaded === total</code> —
+  100% of the bytes are on the wire. Has the server finished processing the files at that moment?
+  Would a much larger file change your answer?
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
@@ -256,6 +463,7 @@ DevHubCodeWalk.mount('#cw-bu',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

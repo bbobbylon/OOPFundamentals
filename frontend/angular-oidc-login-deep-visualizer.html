@@ -103,6 +103,231 @@
     </div>
   </div>
 
+<p class="hf-deck">or, the authorization code was never the secret — proving you asked for it is</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Every login works. QA signs off. A security review flags one field nobody ever looks at.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Nothing about the login is broken — until someone reads the URL</div>
+  <p>A partner's OIDC endpoint your app integrated with last quarter is registered with
+  <code>code_challenge_method=plain</code>. Nobody set out to weaken anything — RFC 7636 leaves
+  <code>plain</code> legal for a server to keep accepting, mostly for clients too old to hash.
+  Every login through that endpoint still works: users authenticate, the code comes back, the
+  token exchange succeeds every single time. QA can't find anything wrong, because for a
+  legitimate user on a clean connection there isn't anything wrong. What nobody checked is what
+  <code>plain</code> actually broadcasts: with S256 the <code>/authorize</code> URL carries a
+  SHA-256 hash of your verifier; with <code>plain</code>, it carries the verifier itself,
+  unhashed, sitting in the exact request a proxy, a corporate filter, or the browser's own
+  history will happily retain.</p>
+  <div class="hf-scatter">
+    <span>login succeeds every time ✓</span>
+    <span>token exchange returns 200 ✓</span>
+    <span>code_challenge_method: plain ⚠</span>
+    <span>code_challenge IS the verifier, unhashed, in a URL ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption underneath: that requesting PKCE and getting real PKCE
+  are the same sentence — when the method field is the entire difference between a cryptographic
+  proof and a value copied into two places.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Pin the method client-side, then make weak impossible server-side</div>
+  <div class="hf-ladder">
+    <b>Set code_challenge_method: 'S256' explicitly in every OIDC client config</b>
+    <i>↓ the only thing that ever crosses the front channel is now a one-way hash</i>
+    <b>Better: on any authorization server you administer, disable plain entirely</b>
+    <i>↓ a client config default is one bad copy-paste from reverting; a server-side policy fails the login instead of silently downgrading it</i>
+    <b>The result: a captured code_challenge — in a log, a history entry, a screen recording — proves nothing and unlocks nothing</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>PKCE only protects you if the value sent up front and the value redeemed later are
+  mathematically different.</b> That is the entire point of hashing the verifier before it ever
+  leaves the browser and never sending the real verifier until the one back-channel call that
+  redeems it — and it is exactly what <code>code_challenge_method=plain</code> throws away. "PKCE
+  is configured" and "PKCE is protecting you" are two different sentences, and the method field is
+  where they split.
+</div>
+
+<div class="hf-note">Think of the S256 challenge as a <b>wax seal impression, not a photocopy</b>.
+You press your one physical seal into wax and hand out the impression — anyone can see its shape,
+but nobody can press a new seal from a picture of an impression. Later you show up with the actual
+seal, press it again, and it matches. <code>plain</code> mode is what happens if you hand out
+photocopies of the seal itself instead of an impression: it still "matches" perfectly, and now
+anyone holding a photocopy can press it themselves.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p><code>code_challenge</code> and <code>code_challenge_method</code> are both right there in
+    my <code>/authorize</code> request. PKCE is protecting this login, right?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The IdP</span>
+    <p>I only enforce whatever the method field tells me to. Method S256: I hash whatever verifier
+    you show me at token time and compare it to your challenge. Method plain: I compare your
+    verifier straight to the challenge I already have on file — which is a plaintext copy of your
+    only secret.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Your screen-recording tool</span>
+    <p>Not my problem — I just record whatever's in the address bar, for support QA. Today that
+    included your <code>/authorize</code> URL, and forty seconds later, your callback URL with the
+    still-live code. Both, same recording.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">RFC 7636</span>
+    <p>I only made S256 mandatory for servers to <i>support</i>. I never said clients have to use
+    it, and I never said plain was safe to leave switched on. That part was always yours to
+    decide.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Two channels carry this flow. Only one of them was ever supposed to see your secret.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The SPA generates a random <code>code_verifier</code> (43–128 chars) and, in the same breath, hashes it into <code>code_challenge</code></span><span class="tag">the only moment both values exist side by side</span></li>
+    <li class="open"><span>The browser is redirected to <code>/authorize</code> with only the <b>challenge</b> in the querystring — the <b>front channel</b>: visible in the address bar, browser history, and every proxy between here and the IdP</span><span class="tag">public by design, on purpose</span></li>
+    <li><span>The user authenticates directly with the IdP; the SPA's only reward is a one-time <code>code</code>, delivered the same way — back through the front channel</span><span class="tag">still nothing secret in transit</span></li>
+    <li class="open"><span>The SPA POSTs <code>code</code> plus the <b>real</b> <code>code_verifier</code> to <code>/token</code> — the <b>back channel</b>, and the first and only appearance of the actual secret</span><span class="tag">PKCE's entire job happens on this one line</span></li>
+    <li><span>The IdP re-hashes the verifier it just received and checks it against the challenge it stored at step 1</span><span class="tag">match required, not optional</span></li>
+    <li class="open"><span><code>code_challenge_method=plain</code> skips the hashing on both ends, so the "secret" revealed at step 4 is <i>identical</i> to the public value already broadcast at step 1</span><span class="tag">the line that turns two channels into one</span></li>
+  </ol>
+  <p class="hf-annot">Step 1 is the lesson. It's the only place <code>code_verifier</code> and
+  <code>code_challenge</code> are ever supposed to exist in the same breath — everything after it
+  is engineered to keep them apart until the one authorized moment they're allowed to meet again,
+  at step 4, over a channel the front-channel observers never see. S256 enforces that separation
+  with real math: a hash you cannot run backwards. Plain doesn't enforce it at all — it just
+  asserts the two values are equal, which means step 6 doesn't weaken the gap between steps 1 and
+  4, it deletes it.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>Browser history</span>
+      <span>Corporate proxy log</span>
+      <span>Screen-recording / QA capture</span>
+      <span>Load balancer access log</span>
+    </div>
+    <div class="funnel">all four record the exact same string: code_challenge ↓</div>
+    <div class="instance">Just a SHA-256 hash<small>worthless without code_verifier, which none of these four ever see — true only when code_challenge_method=S256</small></div>
+  </div>
+  <p class="hf-annot">Every one of those four is doing its actual job — logging, recording,
+  auditing — none of them is the vulnerability. The vulnerability, if it exists, was decided once,
+  in a config field, before any of these four ever ran. Flip <code>code_challenge_method</code> to
+  <code>plain</code> and not one box in this diagram changes: the same four places capture the
+  same value. What changes is what that value <i>is</i> — a hash nobody can reverse becomes a
+  password everybody just read.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your OIDC client is misconfigured with <code>code_challenge_method=plain</code>. A
+  support engineer's screen-recording tool captures a customer's address bar during a screen-share
+  login call — both the <code>/authorize</code> redirect (carrying <code>code_challenge</code>)
+  and the <code>/auth/callback?code=…</code> redirect, forty seconds apart, well inside the code's
+  ~60-second lifetime. What can that recording be used for?</p>
+  <button type="button">Nothing exploitable — code_challenge is a one-way hash, so the recording doesn't expose anything an attacker could use to redeem the code</button>
+  <button type="button">Everything needed to redeem the code before it expires — under plain, code_challenge is the code_verifier in the clear, and the recording now has both it and the still-valid code</button>
+  <button type="button">Only the code_verifier — the authorization code itself is issued server-to-server and never appears in a URL the browser would show</button>
+  <p class="why" data-for="0">That's exactly right — for S256. Which is precisely why this bug
+  hides so well: everyone on the team has correctly internalized "code_challenge is just a hash"
+  as an absolute rule, when it's only true for one specific value of a field most people never
+  look at. Check what <code>code_challenge_method</code> your client actually sends before trusting
+  this answer.</p>
+  <p class="why" data-for="1">Right — and forty seconds is generous, not tight, against a
+  ~60-second window. The recording now holds a matched pair: the "secret" from step 1 of the flow
+  and the one-time code from step 3, both still valid. The fix isn't "stop recording support
+  calls" — regulated CIAM shops need those recordings — it's making <code>plain</code> impossible
+  to configure in the first place.</p>
+  <p class="why" data-for="2">The code_verifier is the one value designed to never appear in a URL
+  at all — that's the entire point of PKCE. What does ride in the visible callback URL is the
+  authorization code: <code>/auth/callback?code=…</code> is literally how a browser-based public
+  client receives it, since there's no server-to-server channel to a SPA. Short-lived and
+  single-use exist precisely because this hand-off has to happen somewhere a screen can see it.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Send a proof derived from a secret, never the secret — three technologies, one rule.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Your own tenant's actual floor: Entra ID</h4>
+    <p>Microsoft's identity platform doesn't leave this to your client config at all — its own
+    authorize and token endpoints accept S256 only, full stop. Register a SPA against Entra ID and
+    there's no dial that gets you <code>plain</code>. That's not true of every authorization
+    server you'll ever integrate with, which is exactly why this is worth checking rather than
+    assuming.</p>
+    <div class="hf-scatter"><span>Entra ID: S256-only, no config path to plain</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>HTTP Digest Auth invented this trick in 1999 — and had the same downgrade hole</h4>
+    <p>Digest Authentication has the client hash its password together with a server-issued nonce
+    and send only the hash — the password itself never crosses the wire, the same "send a derived
+    proof, not the secret" idea PKCE runs on two decades later. And it fails the same way: a server
+    or proxy that still accepts a fallback to plain HTTP Basic auth lets an attacker skip the whole
+    hashed-proof dance and just ask for the password directly.</p>
+    <div class="hf-scatter"><span>hashed proof ⚠ vs. a weaker fallback still accepted</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>WebAuthn's challenge-response — same idea, no downgrade possible</h4>
+    <p>A security key does this too: the server sends a random challenge, the key signs it with a
+    private key that has never once left the hardware, and the server verifies with the matching
+    public key. There's no <code>plain</code> mode to accidentally select, because there's no
+    shared secret to fall back to sending — asymmetric signing has no weaker setting the way a
+    hash comparison does.</p>
+    <div class="hf-scatter"><span>no downgrade path exists</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">If plain is this dangerous, why does RFC 7636 allow it at all?</p>
+  <p class="a">Backward compatibility for clients that genuinely can't compute a SHA-256 hash —
+  think constrained devices, or the pre-Web-Crypto-API era. <code>crypto.subtle</code>, the browser
+  API S256 depends on, only exists in a secure context (HTTPS or localhost), so plain existed as an
+  escape hatch for clients that couldn't reach it. OAuth 2.1, the tidied-up successor spec, removes
+  plain entirely — enough of the ecosystem has SHA-256 available now that the escape hatch does
+  more harm than good. If you're starting something new, there's no reason to leave the door
+  open.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does using a library like MSAL or angular-oauth2-oidc protect me from this
+  automatically?</p>
+  <p class="a">Almost always — both default to S256 and don't expose a friendly toggle to weaken
+  it, which is exactly why you're more likely to inherit this from a raw fetch-based integration,
+  an older hand-rolled OIDC client, or a partner's server that decides the method on its own end.
+  The place to actually verify this isn't your Angular code — it's a HAR capture or the network
+  tab, on the real <code>/authorize</code> request, checking the literal value of
+  <code>code_challenge_method</code>. Trusting "we used a real library" without ever looking at the
+  wire is how this survives a code review.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Do nonce and state become redundant once S256 is doing its job?</p>
+  <p class="a">No — they close different doors. PKCE's job ends the moment the token exchange
+  succeeds: it proves whoever is redeeming the code is whoever requested it. <code>state</code> is
+  checked earlier, on the callback itself, as a CSRF guard tying that redirect back to a login this
+  browser actually started. <code>nonce</code> is checked later, inside the returned
+  <code>id_token</code>, as a replay guard proving this specific token was minted for this specific
+  login round-trip and not lifted from a previous one. Three parameters, three separate reuse
+  attacks — dropping any one of them isn't covered by the other two.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  MSAL can run this flow two ways: <code>loginRedirect()</code> navigates your SPA's own tab away
+  to the IdP and back; <code>loginPopup()</code> opens a second window and leaves your SPA's tab
+  exactly where it was. A junior dev "simplifies" the PKCE code by holding <code>code_verifier</code>
+  in a plain JS variable instead of <code>sessionStorage</code>, reasoning that it's only needed
+  for a few seconds anyway. Under which of the two does that variable actually survive to the
+  token exchange — and which one silently breaks?
+</div>
+
   <!-- ── EXTREME-VIZ HERO: OIDC Auth Code + PKCE ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -475,5 +700,6 @@ renderIdm(); renderSteps();
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

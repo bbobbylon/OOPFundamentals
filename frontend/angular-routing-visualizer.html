@@ -199,6 +199,222 @@
       </div>
     </div>
 
+<p class="hf-deck">or, canActivate blocks the door — it doesn't stop the truck that already delivered the code</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You put a guard on the admin route. The admin bundle showed up in the network tab anyway.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The redirect worked. The chunk had already arrived.</div>
+  <p>You lazy-load the admin module with <code>loadChildren</code> and gate it with
+  <code>canActivate: [authGuard]</code>, same as every other protected route in the app. A
+  logged-out user clicks a stray <code>/admin</code> link and gets bounced to <code>/login</code>
+  exactly like you'd expect — the guard clearly did its job. Weeks later, a security review opens
+  the Network tab during that exact click and finds <code>admin-routes.chunk.js</code> sitting
+  there, fully downloaded, before the redirect ever happens. Nothing in your test caught it,
+  because your test checked "did I end up on the login page" — and you did.</p>
+  <div class="hf-scatter">
+    <span>logged-out user lands on /login ✓</span>
+    <span>AdminComponent never renders ✓</span>
+    <span>admin-routes chunk downloads anyway ⚠</span>
+    <span>its top-level module code has already executed ⚠</span>
+  </div>
+  <p class="hf-foot"><code>canActivate</code> answers "should this route activate" — a question
+  the router can only ask after it has already fetched and loaded the code for the route it's
+  asking about.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Put the gate before the download, not after it</div>
+  <div class="hf-ladder">
+    <b>canActivate: [authGuard] → canMatch: [authGuard], on the lazy route itself</b>
+    <i>↓ canMatch runs during route matching, before the router decides this route is even eligible to load — an ineligible route's loadChildren never executes</i>
+    <b>Keep canActivate too, on the routes inside the loaded module</b>
+    <i>↓ canMatch stops a network request; canActivate is still what protects a route someone reaches by a different path once the module IS loaded</i>
+    <b>Now "unauthorized" means the code never arrives, not just that it never renders</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A guard can only gate what the router asks it about — and canActivate is asked after the code
+  is already loaded.</b> That's why <code>canMatch</code> exists as a separate hook instead of
+  <code>canActivate</code> just being "good enough": lazy loading's whole promise is not shipping
+  code a user shouldn't have yet, and the only guard positioned early enough in the pipeline to
+  honor that promise is the one that runs before <code>loadChildren</code> is ever invoked.
+</div>
+
+<div class="hf-note">Think of <b>canActivate</b> as a bouncer checking IDs at the door of a room,
+and <b>canMatch</b> as the one deciding whether to even build the room in the first place. The
+bouncer does a real job — nobody uninvited gets inside — but by the time he's standing there, the
+room, the furniture and the sound system have already been delivered and set up on the truck
+outside. If the thing you're protecting is "nobody should know this room exists," you needed the
+second one, not the first. The analogy stops mattering once the module is already loaded once —
+after that, either guard genuinely gates the same door, because there's no more delivery left to
+stop.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>My guard is on the route. Why did the admin code still download for a logged-out user?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The Router</span>
+    <p>Because by the time I run <code>canActivate</code>, I've already recognized your route and
+    resolved what to load for it — that resolution step is what triggers the
+    <code>import()</code> for your lazy chunk. <code>canActivate</code> is one of the last things I
+    check, not one of the first.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">canMatch</span>
+    <p>I'm the one who runs early enough to matter here. I get asked "is this route even a
+    candidate" before the router commits to loading anything for it — say no, and
+    <code>loadChildren</code> never fires, so there's no <code>import()</code>, no network request,
+    no chunk.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">canActivate</span>
+    <p>Which leaves me doing the job I was actually built for — gating activation of routes that
+    already loaded, for users who reached them a different way, or where there was never anything
+    sensitive in the bundle to hide in the first place.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One extra letter of hook name, and the fetch either happens or it doesn't.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A logged-out user clicks a link to <code>/admin</code>. The router begins recognizing the URL against the route table</span><span class="tag">navigation starts</span></li>
+    <li class="open"><span>If the <code>/admin</code> route entry has a <code>canMatch</code> guard, the router runs it right now, before treating <code>/admin</code> as a real candidate match</span><span class="tag">the earliest checkpoint that exists</span></li>
+    <li><span><code>canMatch</code> returns false (or a redirecting <code>UrlTree</code>) → the router discards this route entirely. <code>loadChildren</code> for the admin routes is never called</span><span class="tag">no call, no chunk, no download</span></li>
+    <li class="open"><span>If instead the route only has <code>canActivate</code>, matching succeeds immediately, and resolving that match triggers <code>loadChildren</code>'s <code>import('./admin/admin.routes')</code> — a real network request, dispatched right now</span><span class="tag">the download already happened</span></li>
+    <li><span>Only after the chunk is loaded does the router run <code>canActivate</code>. It returns a redirecting <code>UrlTree</code>, the admin route never activates, and <code>AdminComponent</code> never renders</span><span class="tag">this part is genuinely gated</span></li>
+    <li class="open"><span>The user was correctly denied the page. They were not denied the download — DevTools' Network tab shows the request, and any code that runs at module-evaluation time has already run</span><span class="tag">the gap between "didn't see it" and "never received it"</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the lesson. It's easy to read <code>canActivate: [authGuard]</code>
+  on a lazy route and assume the guard is what's standing between an unauthorized user and the
+  bundle — but activation is a later stage than loading. The guard that actually stands in front
+  of <code>loadChildren</code> is <code>canMatch</code>, and it's the only one of the two that was
+  designed with "don't fetch it at all" as its job, not "don't render it once you have."</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">The lazy /admin route entry<small>which hook decides whether a logged-out user ever sees this code?</small></div>
+    <div class="arrow">guard = ?</div>
+    <div class="opts">
+      <span class="on">canMatch — runs during matching, before loadChildren fires: fail it and the chunk is never requested</span>
+      <span>canActivate only — matching succeeds, loadChildren fires and the chunk downloads, then the guard blocks activation and redirects</span>
+      <span>no guard at all — matches, loads, and activates without ever asking the question</span>
+    </div>
+  </div>
+  <p class="hf-annot">Same route entry, same lazy module, in all three rows — the only thing that
+  changes is which hook is wired up, and that one choice decides whether "unauthorized" means "the
+  bytes never arrived" or just "the bytes never got to render." Reach for <code>canMatch</code>
+  specifically because it's the only row where the network tab stays empty.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q"><code>/admin</code> is configured with
+  <code>loadChildren: () =&gt; import('./admin/admin.routes')</code> and
+  <code>canActivate: [authGuard]</code> — no <code>canMatch</code>. A logged-out user's
+  <code>authGuard</code> returns a <code>UrlTree</code> redirecting to <code>/login</code>. Which
+  is true?</p>
+  <button type="button">authGuard runs before the admin chunk is requested, so the redirect happens with no network request for admin code at all</button>
+  <button type="button">The redirect happens, but only after Angular has already retried loading the chunk three times, since canActivate guards trigger the router's default retry policy on lazy routes</button>
+  <button type="button">The admin chunk is requested and downloaded first; authGuard runs afterward and redirects before AdminComponent renders, but the code has already arrived in the browser</button>
+  <p class="why" data-for="0">The natural read of "the guard blocked it" — and it's true for the
+  activation half of that sentence, just not the loading half. <code>canActivate</code> is checked
+  after the router has already resolved what to load for a matched route, so on a
+  canActivate-only lazy route, resolving the match is exactly what triggers the
+  <code>import()</code> — before the guard ever runs.</p>
+  <p class="why" data-for="1">There's no such retry policy, and <code>canActivate</code> doesn't
+  interact with module loading at all — it has no visibility into whether a chunk succeeded,
+  failed, or was ever requested. It only ever answers one question, "can this already-resolved
+  route activate," after the loading step is long finished.</p>
+  <p class="why" data-for="2">Right — and this is exactly why <code>canMatch</code> exists as a
+  separate hook rather than Angular just calling <code>canActivate</code> earlier. Activation and
+  loading are different stages of the same navigation, and only one hook is positioned before
+  both.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">"Don't even let the code reach the door" is a rule bigger than Angular's router.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A firewall rule vs. an app-level permission check</h4>
+    <p>A firewall dropping a packet before it reaches your server is <code>canMatch</code> — the
+    request never arrives, there's nothing to log, nothing to exploit at the app layer. An
+    app-level <code>if (!user.isAdmin) throw 403</code> is <code>canActivate</code> — the request
+    landed, ran real code, and got rejected afterward. Both "work," but only one of them means the
+    sensitive endpoint's existence and behavior were never exposed to something that shouldn't
+    have reached it.</p>
+    <div class="hf-scatter"><span>drop before the door ≠ reject after opening it</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Code-splitting bundles by feature, then gating the split</h4>
+    <p>This problem only exists because lazy loading works — <code>loadChildren</code> is
+    Angular's wrapper around a dynamic <code>import()</code>, which the build turns into a
+    genuinely separate chunk file fetched on demand. Any framework doing route-based
+    code-splitting inherits the identical two-stage question: does the gate run before the chunk
+    request, or after the chunk already arrived. React Router's lazily-loaded routes with a
+    data-loader guard hit the same fork.</p>
+    <div class="hf-scatter"><span>lazy loading + gating = the same two-stage question everywhere</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Role-gating a CIAM admin console built as its own lazy chunk</h4>
+    <p>An internal console splits <code>/admin/**</code> into its own bundle behind
+    <code>canMatch: [rolesGuard]</code> reading the decoded JWT's roles — not just
+    <code>canActivate</code>, specifically because that bundle imports things worth not exposing to
+    every authenticated user: internal role names, feature flags for unreleased tooling, API paths
+    for endpoints that shouldn't be discoverable from a webpack chunk. <code>canActivate</code>
+    alone would still keep those strings sitting in a downloaded file for anyone who opened
+    DevTools.</p>
+    <div class="hf-scatter"><span>canMatch keeps the admin bundle's contents un-downloaded, not just unrendered</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">If canMatch is strictly earlier, is there ever a reason to use canActivate instead?</p>
+  <p class="a">Constantly — most guards aren't protecting a lazy chunk at all. A route like
+  <code>/settings</code> that's part of the main bundle has nothing to "not download"; there's no
+  chunk to save, so <code>canActivate</code>'s job (block activation, redirect) is the entire job.
+  <code>canMatch</code> specifically earns its keep on lazy routes where the thing worth protecting
+  is the bytes themselves, not just the rendered page — outside that case it's just an earlier
+  hook doing the same conceptual check, with no download to prevent.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Can canMatch redirect the same way canActivate can, with a UrlTree?</p>
+  <p class="a">Yes — both hooks accept the same return shape: <code>true</code>, <code>false</code>,
+  or a <code>UrlTree</code> the router treats as "redirect here instead." The difference is timing,
+  not capability. A <code>canMatch</code> returning a <code>UrlTree</code> means the router picks a
+  different route before ever attempting to match <code>/admin</code>, which is also why
+  <code>canMatch</code> is the right hook for role-based route splitting — same URL, different
+  bundle loaded, decided before any loading happens.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">What actually happens to the top-level code in a chunk that downloaded but never activated?</p>
+  <p class="a">It already ran. A dynamic <code>import()</code> executes the module's top-level
+  statements — imports, constant initialization, anything outside a component's lifecycle — the
+  moment the module evaluates, which happens as part of loading it, independent of whether the
+  router ever activates a component from it. Rendering is gated; module evaluation isn't. That's
+  the sharp edge underneath this whole page: "the guard blocked it" is true of the component tree
+  and not necessarily true of every line of code that shipped alongside it.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  <code>/admin</code> has both <code>canMatch: [rolesGuard]</code> and
+  <code>canActivate: [authGuard]</code> configured. <code>rolesGuard</code> passes (the user has
+  the admin role) but <code>authGuard</code> fails (their session token just expired) and
+  redirects to <code>/login</code>. Was the admin chunk downloaded before the redirect happened?
+  Now flip it: <code>rolesGuard</code> fails and <code>authGuard</code> would have passed — is the
+  chunk downloaded this time?
+</div>
+
     <h2>Live demo — a fake mini SPA</h2>
     <div class="panel">
       <div class="controls">
@@ -919,5 +1135,6 @@ its code shipped only now → smaller initial bundle`},
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

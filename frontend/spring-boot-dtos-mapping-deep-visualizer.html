@@ -113,6 +113,212 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> <code>UserResponse { Long id; String email; List&lt;String&gt; roleNames; UserStatus status; LocalDateTime createdAt; String createdBy; }</code> — no <code>passwordHash</code>, no FK IDs. <code>CreateUserRequest { @Email String email; @NotBlank String displayName; List&lt;UUID&gt; roleIds; }</code>. The DTO layer also exposes computed fields like <code>boolean locked = lockoutUntil != null &amp;&amp; lockoutUntil.isAfter(now())</code> — two entity fields presented to Angular as one boolean.</div>
   </div>
 
+<p class="hf-deck">or, MapStruct's build-time safety net catches missing fields — never wrong ones</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The build succeeded. The mapper was generated cleanly. The response still leaks an internal-only value.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">UserResponse.status comes back looking suspiciously like an internal enum name</div>
+  <p><code>User.status</code> holds internal lifecycle codes —
+  <code>ACTIVE</code>, <code>LOCKED_FRAUD</code>, <code>PENDING_DELETION</code> — never meant to
+  leave the server. Independently, someone adds a field to <code>UserResponse</code> also called
+  <code>status</code>, intending it to mean something simple and client-safe.
+  <code>@Mapper(componentModel = "spring") interface UserMapper { UserResponse toDto(User u); }</code>
+  builds clean — no <code>@Mapping</code> lines needed, zero warnings, the exact
+  "unmapped field caught at build time" safety story this page just told you. Ship it, and
+  <code>GET /users/42</code> for a locked account returns <code>"status": "LOCKED_FRAUD"</code>
+  straight to the client.</p>
+  <div class="hf-scatter">
+    <span>build passed, zero MapStruct warnings ✓</span>
+    <span>@Mapper generated cleanly ✓</span>
+    <span>both sides happen to be named "status" ⚠</span>
+    <span>one means internal lifecycle, the other was meant to mean something else entirely ⚠</span>
+  </div>
+  <p class="hf-foot">MapStruct's build-time check answers "did every target field get SOMETHING."
+  It never asks whether it got the RIGHT thing.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make the coincidence impossible to miss</div>
+  <div class="hf-ladder">
+    <b>Rename the DTO field so it can't accidentally name-match: clientStatus</b>
+    <i>↓ MapStruct now reports BOTH status and clientStatus unmapped — forcing a real decision</i>
+    <b>Or keep the name and add an explicit @Mapping with a real transform</b>
+    <i>↓ the mapping becomes a visible, reviewable line instead of an invisible coincidence</i>
+    <b>Either way: a matching name is not the same thing as a correct mapping</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>MapStruct proves completeness, not correctness.</b> Its build-time policy answers exactly one
+  question: does every target property have a source property with the same name? It has no idea
+  what either field <i>means</i>. Two fields can share a name by pure coincidence — one entity's
+  internal lifecycle code, one DTO's intended public status — and MapStruct wires them together
+  exactly as confidently as it wires two fields that were always meant to travel together.
+</div>
+
+<div class="hf-note">Think of MapStruct's name matching as <b>a mail-sorting robot that reads only
+the label on the front of the envelope</b>. Two departments both label outgoing mail "STATUS
+UPDATE" — one means building maintenance, the other means a personnel file — and the robot
+cheerfully delivers each to whichever inbox is ALSO labeled "STATUS UPDATE," with total confidence,
+because the labels matched perfectly. The robot never once opened either envelope to check what was
+inside.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>MapStruct built clean, zero warnings, every field matched. How is anything still leaking?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">MapStruct</span>
+    <p>Because "matched" is all I ever promised. I compare property NAMES between your source and
+    your target — status to status, email to email — and I generate real code for every pair I can
+    line up. I flag the ones I can't line up. I never once asked what either <code>status</code>
+    actually holds.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The status field</span>
+    <p>And I'm not exactly lying to either side — I really am called <code>status</code> on the
+    entity, and I really am called <code>status</code> on the DTO. Nobody ever decided those two
+    names should mean the same thing. They just do, by coincidence, and that turned out to be
+    enough.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">MapStruct's whole safety story is "nothing gets left unmapped." It says nothing about whether what got mapped should have been.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>User.status</code> holds an internal lifecycle code — values include
+    <code>LOCKED_FRAUD</code>, never meant to leave the server</span><span class="tag">an entity-only concept</span></li>
+    <li><span>A <code>UserResponse</code> record independently gains a field also named
+    <code>status</code>, meant to mean something client-safe</span><span class="tag">same name, different job</span></li>
+    <li class="open"><span>MapStruct's annotation processor matches target properties to source
+    properties <b>by name</b> — <code>status</code> to <code>status</code></span><span class="tag">the entire matching algorithm</span></li>
+    <li class="open"><span>Both names resolve, so it silently generates
+    <code>userResponse.setStatus(user.getStatus())</code> — no <code>@Mapping</code> line, no
+    warning</span><span class="tag">a SUCCESS from MapStruct's point of view</span></li>
+    <li class="open"><span>The unmapped-property check — the safety net the page above relies on —
+    never fires, because nothing is unmapped</span><span class="tag">the safety net can't see this failure case</span></li>
+    <li><span><code>GET /users/42</code> returns <code>"status": "LOCKED_FRAUD"</code> straight to
+    the client, in a totally green build</span><span class="tag">the leak the compiler was never asked to catch</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the lesson. MapStruct's matching algorithm has exactly one signal
+  available to it: the property name. It has no way to know that two classes meant two completely
+  different things by <code>status</code> — that knowledge exists only in a human's head, and it
+  only becomes real the moment someone writes an explicit <code>@Mapping</code> (or renames one of
+  the two fields) to say so out loud.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>User.status — internal lifecycle code</span><span>the client-safe status nobody actually wrote</span>
+    </div>
+    <div class="funnel">MapStruct matches by name only ↓</div>
+    <div class="instance">UserResponse.status<small>whatever User.status happens to hold, verbatim</small></div>
+  </div>
+  <p class="hf-annot">Two different ideas collapse onto one output field, and the mapper has no way
+  to notice — it was never comparing meaning, only spelling. The "client-safe status" on the left
+  was never actually implemented by anyone; the shared name alone was enough to convince MapStruct
+  it didn't need to be.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">User entity has a <code>status</code> field holding internal lifecycle codes
+  (<code>ACTIVE</code>, <code>LOCKED_FRAUD</code>, <code>PENDING_DELETION</code>). A
+  <code>UserResponse</code> record independently gains a field also named <code>status</code>,
+  intended to mean something simpler for clients. The <code>@Mapper</code> interface has no
+  <code>@Mapping</code> lines added by anyone. Does the Maven build succeed, and what does
+  <code>GET /users/42</code> return for a locked-for-fraud user?</p>
+  <button type="button">Build fails — MapStruct's unmappedTargetPolicy flags status as ambiguous, since it appears on both classes with different intended meanings</button>
+  <button type="button">Build succeeds, but MapStruct leaves status null on the DTO because it can't verify the two fields mean the same thing, so it declines to guess</button>
+  <button type="button">Build succeeds with zero warnings, and the response includes "status": "LOCKED_FRAUD" — MapStruct matched the fields by name and copied the value straight across</button>
+  <p class="why" data-for="0">A very reasonable guess given what you just read above — MapStruct
+  really does flag unmapped fields at build time. But "unmapped" and "ambiguous" aren't the same
+  check. MapStruct never asks whether two same-named fields MEAN the same thing; it only asks
+  whether a name exists on both sides. Here it does, on both, so there's nothing for the build to
+  flag.</p>
+  <p class="why" data-for="1">MapStruct isn't that cautious. It has no concept of "these might mean
+  different things, so I'll play it safe" — that would require understanding intent, which is
+  exactly what name-matching can't do. It maps whatever it finds a name for, unconditionally, every
+  time.</p>
+  <p class="why" data-for="2">Exactly — matched by name, copied verbatim, zero warnings, because
+  from MapStruct's point of view this is a complete success: every target property got a value. The
+  internal-only status code goes out over the wire exactly as stored, invisible to a reviewer
+  scanning for a missing <code>@Mapping</code> annotation, because there isn't one missing.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three systems, one trap: matching by name isn't the same as matching by meaning.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>.NET's AutoMapper — the same convention, the same blind spot</h4>
+    <p>AutoMapper's default convention wires two classes' properties together by name, exactly like
+    MapStruct, and its <code>AssertConfigurationIsValid()</code> catches unmapped members at
+    startup — exactly the same completeness check. It has the identical gap: two same-named
+    properties with different intended meanings pass that validation with total confidence, because
+    validation never inspects meaning, only presence.</p>
+    <div class="hf-scatter"><span>AssertConfigurationIsValid() ≈ unmappedTargetPolicy</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>ETL pipelines matching CSV headers</h4>
+    <p>A data pipeline importing a partner's CSV maps columns by header name — their
+    <code>amount</code> column means cents, yours means dollars. Matched, loaded, off by 100x,
+    silently, because the loader's whole job was "does a column named <code>amount</code> exist,"
+    never "does it mean what we mean." Same coincidence, no code generation anywhere in sight.</p>
+    <div class="hf-scatter"><span>header-name matching ≈ property-name matching</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your CIAM SCIM provisioning sync</h4>
+    <p>An identity provider's SCIM payload has an <code>active</code> boolean meaning "enabled in the
+    IdP." Your own <code>User.active</code> was quietly repurposed months ago to mean "has completed
+    onboarding." A sync mapper wired by field name flips onboarding status every time the IdP toggles
+    a completely unrelated concept — the exact same collision, now silently corrupting account
+    state instead of leaking a string.</p>
+    <div class="hf-scatter"><span>SCIM active ≠ your active, same name</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Can I configure MapStruct to actually catch this?</p>
+  <p class="a">Not the semantic mismatch itself — no tool can know what you meant by a name. What you
+  can do is shrink the coincidence surface: keep a naming convention that makes internal-only entity
+  fields visually distinct, and treat any newly-added same-named field pair as something a code
+  reviewer explicitly confirms rather than assumes. <code>unmappedTargetPolicy = ERROR</code> still
+  earns its keep for the OTHER failure mode — it just isn't this one.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Would a manual static from() factory have caught this instead?</p>
+  <p class="a">Only as well as the person writing it. A hand-written mapper has no build-time
+  unmapped-field check at all — but it also lacks this specific blind spot, because whoever writes
+  <code>new UserResponse(u.getId(), transform(u.getStatus()), …)</code> has to look at
+  <code>u.getStatus()</code> at least once and consciously decide what to do with it, even if they
+  decide wrong. You trade completeness (MapStruct) for forced attention (manual) — nothing here
+  gives you both for free.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does an explicit @Mapping with ignore=true plus a manual setter fix this properly?</p>
+  <p class="a">Yes — that's exactly the right shape. Telling MapStruct "don't auto-wire this one,"
+  then setting the client-safe value yourself (directly or via an <code>@AfterMapping</code> method),
+  turns an invisible coincidence into a visible, intentional line inside the mapper interface. The
+  fix was never smarter tooling — it's making the decision visible to the next person who reads the
+  mapper.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  The team renames the entity field from <code>status</code> to <code>lifecycleStatus</code>, but
+  forgets to update the DTO — its field stays named <code>status</code>. Does
+  <code>GET /users/42</code> still leak the internal lifecycle code after the rename — and does the
+  Maven build tell them anything different this time?
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -560,6 +766,7 @@ renderSrc(); setMode('entity');
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

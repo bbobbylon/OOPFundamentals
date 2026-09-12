@@ -183,6 +183,218 @@
       </div>
     </div>
 
+<p class="hf-deck">or, a pipe is only as pure as the arguments you hand it, every single time</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You replaced a method call with a pure pipe for the performance win. The profiler says nothing got faster.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Pure. Cached, in theory. Running exactly as often as the method it replaced.</div>
+  <p>A 500-row product grid shows a badge: <code>{{ product | stockBadge:{ threshold: 5, showIcon: true } }}</code>.
+  <code>StockBadgePipe</code> is pure — the default, never touched. You profile the page and find
+  <code>transform()</code> firing on every single change-detection cycle, for every row, even
+  while just scrolling or typing in an unrelated search box. You check the obvious things:
+  <code>pure: false</code> is nowhere in the code, <code>threshold</code> and <code>showIcon</code>
+  never change, and the <code>products</code> array is replaced immutably elsewhere (verified —
+  no in-place mutation). Everything the page already taught you about pure pipes says this
+  shouldn't be happening. The one thing nobody checked is what <code>{ threshold: 5, showIcon:
+  true }</code> actually <i>is</i>, freshly, on every single check.</p>
+  <div class="hf-scatter">
+    <span>pipe is declared pure (the default) ✓</span>
+    <span>threshold and showIcon never change ✓</span>
+    <span>{ ... } is a brand new object every check ⚠</span>
+    <span>the pure-pipe cache compares by reference and always misses ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that "pure" means the pipe decides when to rerun. It
+  doesn't — Angular decides, by comparing references, and a literal written straight in the
+  template can never pass that comparison twice.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Give the pipe a stable reference to compare against, not a fresh one</div>
+  <div class="hf-ladder">
+    <b>Hoist it out: badgeOpts = { threshold: 5, showIcon: true } as a class field</b>
+    <i>↓ the same object instance is passed every check, so the reference comparison finally succeeds and the cache holds</i>
+    <b>Better for anything computed: a signal or a memoized getter that only allocates when the real inputs change</b>
+    <i>↓ "pure" was never the guarantee — a stable reference was, and now you're actually providing one</i>
+    <b>Same pipe, same pure: true, and now it runs about as often as the intro promised</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A pure pipe isn't cheap because it's pure — it's cheap only when every argument it receives
+  is reference-stable.</b> That explains why mutating the main input silently breaks a pipe (the
+  bug this page already teaches), and it explains the mirror-image bug just as well: an object,
+  array, or <code>new Date()</code> built fresh inside the template defeats the exact same cache
+  from the opposite direction. Both bugs have one fix — give Angular something it can compare with
+  <code>===</code> and actually trust the answer.
+</div>
+
+<div class="hf-note">Think of the pure-pipe cache as <b>a bouncer checking ID cards, not
+faces</b>. Two identical twins holding different ID cards get stopped and re-checked every time,
+no matter how alike they look. Two totally different people sharing the same card sail through
+without a second glance. <code>{ threshold: 5 }</code> written fresh in the template is a new ID
+printed on the spot every time you walk up — it doesn't matter that it says the same thing as the
+one from a moment ago.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>It's a pure pipe. Why is it running on every keystroke happening somewhere else on the page?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The pipe cache</span>
+    <p>Because "pure" only tells Angular to check whether it's already seen this exact input
+    before rerunning. I compare with <code>===</code>, argument by argument. One of your
+    arguments is a new object every single time I'm asked — so as far as I can tell, I've never
+    seen this input before. Every time.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">{ threshold: 5, showIcon: true }</span>
+    <p>And I really am new every time. I'm not a variable — I'm an expression. The template
+    rebuilds me from scratch on every check, whether or not anything about me actually changed.
+    Comparing me to my own twin from last check was never going to work; we're just not the same
+    object.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">A hoisted field</span>
+    <p>I'm boring by comparison — I exist once, I sit there, and every check finds the exact same
+    me. That's the whole trick. The cache was never against you; it was just never given anything
+    that could pass.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">500 rows. One badge object rebuilt fresh, every row, every tick.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Change detection runs — for any reason, anywhere in the app</span><span class="tag">the usual trigger</span></li>
+    <li class="open"><span>Angular reaches this row's <code>stockBadge</code> expression and evaluates every argument fresh, left to right</span><span class="tag">yes, even the object literal</span></li>
+    <li><span>It compares this run's arguments to the ones it cached last time, one by one, using <code>===</code></span><span class="tag">this is the entire job of "pure"</span></li>
+    <li class="open"><span><code>product</code> hasn't changed — same reference, passes. But <code>{ threshold: 5, showIcon: true }</code> is a new object this run — fails</span><span class="tag">one failing argument invalidates the whole entry</span></li>
+    <li><span>Because one comparison failed, Angular discards the cached output and calls <code>transform()</code> again, in full</span><span class="tag">"pure" means "skip only if EVERY argument still ===," not "skip if nothing important changed"</span></li>
+    <li class="open"><span>Repeat for all 500 rows, every tick, for the lifetime of the page</span><span class="tag">the actual cost hiding behind pure: true</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the lesson: pure-pipe caching has no concept of "this object's
+  contents happen to match last time's." It only has <code>===</code>, applied to every argument
+  independently. One unstable argument — one literal, one inline <code>new Date()</code>, one
+  array built with <code>.filter()</code> right there in the template — is enough to make the
+  entire pipe rerun on every check, no matter how many other arguments are perfectly stable.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt">
+      <span class="nm">CHECK ARGS</span>
+      <span class="go">compare every argument to last run's, one by one, with <em>===</em></span>
+    </div>
+    <div class="arrow">↓ product's reference is unchanged, but { threshold: 5, showIcon: true } is a fresh object</div>
+    <div class="stt on">
+      <span class="nm">CACHE MISS</span>
+      <span class="go">one failing argument is enough — Angular discards the cached output entirely</span>
+    </div>
+    <div class="arrow">↓ transform() runs again, in full, for this row</div>
+    <div class="stt">
+      <span class="nm">RESULT CACHED</span>
+      <span class="go">stored against this run's arguments — including the object literal that will not exist next tick</span>
+    </div>
+    <div class="arrow">↻ next change-detection tick, a brand new object literal arrives, and the cycle restarts at CHECK ARGS</div>
+  </div>
+  <p class="hf-annot">Notice the loop never settles. A cache only helps if the thing you compare
+  against can survive between two ticks — and an object literal in the template can't, by
+  construction. It's rebuilt fresh right before every comparison, so this cycle is permanently
+  stuck at CACHE MISS until the argument itself becomes a stable reference.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">The 500-row binding above shows <code>transform()</code> running on every check no
+  matter what. A teammate suggests marking the pipe <code>pure: false</code> "to match what's
+  actually happening." What changes about how often <code>transform()</code> runs?</p>
+  <button type="button">It runs less often — impure pipes get batched and checked only once per render pass</button>
+  <button type="button">Nothing changes — it was already running on every check because of the unstable object literal; pure: false just stops Angular from attempting a comparison that was already failing</button>
+  <button type="button">It runs more often — impure pipes are invoked twice per cycle, once before and once after the DOM updates</button>
+  <p class="why" data-for="0">There's no such batching. "Impure" doesn't add an optimization — it
+  removes the one optimization pure pipes have (the reference-equality skip). Declaring it impure
+  is a strict downgrade in Angular's ability to ever skip the call, never an improvement.</p>
+  <p class="why" data-for="1">Exactly — this pipe's real call frequency doesn't change at all,
+  because it was already at its ceiling: once per check, every check, thanks to the fresh object
+  literal. Marking it <code>pure: false</code> is honest bookkeeping — it stops implying a caching
+  benefit that was never actually happening — but it changes zero runtime behavior. The actual fix
+  is still giving the pipe a stable reference to compare against.</p>
+  <p class="why" data-for="2">Impure pipes aren't called twice per cycle — once per check, exactly
+  like a pure pipe whose cache just missed. The only difference is the skip path pure pipes can
+  take when the comparison passes, and that path was never available here to begin with.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">A shallow comparison only ever helps you if you stop handing it fresh objects.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>React's inline object props</h4>
+    <p>React exposes the identical trap: <code>&lt;Child options={{ threshold: 5 }} /&gt;</code>
+    allocates a brand-new <code>options</code> object on every parent render, which defeats
+    <code>React.memo</code> on <code>Child</code> for exactly the same reason — a shallow
+    reference comparison that a fresh literal can never pass twice.</p>
+    <div class="hf-scatter"><span>inline prop object ≈ inline pipe argument</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Java HashMap with the default equals()</h4>
+    <p>Look up a <code>HashMap</code> key with a freshly-constructed object whose class never
+    overrode <code>equals()</code>/<code>hashCode()</code>, and the lookup misses even though
+    every field matches — <code>Object</code>'s default is reference equality, the exact same rule
+    the pure-pipe cache runs on. Same value, different object, same failed match.</p>
+    <div class="hf-scatter"><span>default equals() ≈ pipe's ===</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your CIAM nav-permission pipe</h4>
+    <p>A custom <code>hasPermission</code> pipe gates 40 nav items: <code>{{ 'orders' |
+    hasPermission:{ role: currentRole, scopes: ['read','write'] } }}</code>. That options object is
+    rebuilt fresh for every item on every check, so a pipe that looks like a cheap, cached
+    permission lookup is quietly re-evaluating role logic across the whole nav bar on every
+    keystroke anywhere in the app. Hoisting each item's options to a field — or precomputing the
+    permission list once — turns it back into what it was supposed to be.</p>
+    <div class="hf-scatter"><span>40 items × every tick = not actually cached</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">How would I even notice this in code review — it looks like completely normal template syntax?</p>
+  <p class="a">The tell is any <code>{ ... }</code>, <code>[ ... ]</code>, or method call written
+  directly inside a pipe's arguments — <code>| myPipe:{opt:true}</code>,
+  <code>| myPipe:[1,2,3]</code>, <code>| myPipe:getOptions()</code>. All three allocate something
+  new on every check. See one of those next to a pipe you assumed was cheap, and it's worth a
+  second look before the profiler surprises you.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does this affect built-in pipes like date or currency the same way?</p>
+  <p class="a">Yes, identically — <code>{{ x | date:'short':getTimezone() }}</code> has the exact
+  same problem if <code>getTimezone()</code> returns a fresh non-primitive each call. But
+  <code>{{ x | currency:'USD':'symbol':digitsInfo }}</code> is usually fine, specifically because
+  those arguments are ordinarily string or number literals — and primitives compare equal by
+  <i>value</i>, not by reference, so they're naturally stable in a way object and array literals
+  never are.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Is this a reason to avoid pipe arguments entirely and just precompute everything in the component?</p>
+  <p class="a">Only when the argument is genuinely an object or array. A string, number, or boolean
+  literal in a pipe argument is completely safe — <code>| currency:'USD'</code> never has this
+  problem no matter how many times it's evaluated. The rule is specifically about non-primitive
+  arguments: the moment you see curly braces, square brackets, or a function call inside a pipe
+  expression, that's the one to hoist.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  A pure pipe is bound as <code>{{ items | sortBy:'name' }}</code>. To support descending order
+  too, someone changes it to <code>{{ items | sortBy:{ field: 'name', dir: 'asc' } }}</code> —
+  nothing else about the binding changes. Does the pipe now run more often per change-detection
+  cycle than it did before? If so, what did adding one small feature actually break?
+</div>
+
     <h2>▶ Watch a value flow through the pipes — animated</h2>
     <div class="panel">
       <p style="color: var(--muted); font-size: 13px; line-height: 1.7; margin: 0 0 12px;">
@@ -973,6 +1185,7 @@ sortByName([Bob, Ada, Zoe]) = [Ada, Bob, Zoe]`},
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

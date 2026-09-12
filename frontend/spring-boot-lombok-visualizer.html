@@ -58,6 +58,208 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> Response DTO as <code>@Builder @Jacksonized record UserResponse(Long id, String email, …)</code>; request DTO as <code>@Data @Builder @AllArgsConstructor @NoArgsConstructor class CreateUserRequest</code>; entity as <code>@Getter @Setter @NoArgsConstructor @Entity class User</code> (never <code>@Data</code>); services use <code>@Slf4j</code> for <code>log.info("Creating user: {}", email)</code>.</div>
   </div>
 
+<p class="hf-deck">or, @Data's hashCode changes the moment JPA assigns an id — and a HashSet never finds out</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The entity went into the Set. save() ran fine. The Set now insists it has never seen it.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A saved entity that its own HashSet can't find</div>
+  <p><code>@Data @Entity class Tag { @Id @GeneratedValue Long id; String name; }</code>. Then:
+  <code>Tag t = new Tag(); t.setName("URGENT"); Set&lt;Tag&gt; tags = new HashSet&lt;&gt;();
+  tags.add(t); tagRepository.save(t);</code> — <code>save()</code> assigns <code>t.id = 501</code>
+  in place, mutating the very same object. <code>@Data</code> generated a <code>hashCode()</code>
+  from every field, <code>id</code> included. At <code>tags.add(t)</code>, <code>id</code> was still
+  null, so the HashSet computed a hash from <code>(id=null, name="URGENT")</code> and dropped
+  <code>t</code> into the bucket that hash pointed to. <code>save()</code> then changes
+  <code>id</code> to 501 on that same object — and <code>t</code>'s hashCode, computed fresh, is now
+  a completely different number. <code>tags.contains(t)</code> comes back <code>false</code>.</p>
+  <div class="hf-scatter">
+    <span>@Data on the entity ✓</span>
+    <span>tags.add(t) succeeds ✓</span>
+    <span>tagRepository.save(t) succeeds, id assigned ✓</span>
+    <span>t's hashCode is now a different value than when it was inserted ⚠</span>
+    <span>tags.contains(t) — false ⚠</span>
+  </div>
+  <p class="hf-foot">A HashSet doesn't store objects by identity. It stores them by whatever
+  hashCode() answered at insertion time — and never asks again.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Never hash a field that's designed to change</div>
+  <div class="hf-ladder">
+    <b>Never let a JPA-generated @Id drive equals()/hashCode()</b>
+    <i>↓ @EqualsAndHashCode(onlyExplicitlyIncluded = true) + @EqualsAndHashCode.Include on a stable business key — or none at all</i>
+    <b>Or base identity on a natural key set once, at construction, that never changes afterward</b>
+    <i>↓ a value that's stable from insertion to lookup is the only thing hashCode() can safely depend on</i>
+    <b>With no natural key: fall back to comparing ids only when both are non-null — never let @Data auto-include a mutable, initially-null field</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A HashSet computes an object's bucket ONCE, at insertion, using whatever hashCode() returns at
+  that moment.</b> If any field hashCode() depends on can change afterward — and a JPA
+  <code>@GeneratedValue</code> id changes from null to a real value the instant it's persisted — the
+  object's bucket and its hashCode silently disagree forever after. <code>@Data</code> doesn't know
+  which of your fields are stable and which aren't; it includes all of them, unconditionally.
+</div>
+
+<div class="hf-note">Think of a HashSet's bucket like <b>a coat-check ticket written from "what the
+coat looks like right now."</b> You hand over a coat with no buttons yet — the ticket says "plain
+wool coat, bucket 14." While it's hanging there, someone sews buttons onto your actual coat (your id
+gets assigned). Come back and ask "do you have my coat with buttons?" — the attendant checks bucket
+12, the one "coat with buttons" tickets go to, finds nothing, and says no. Your coat never moved.
+It's still hanging in bucket 14, buttons and all. The ticket just stopped matching the coat the
+moment the coat changed.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I added it to the Set before save(), and contains() says it's not there. But I can see it
+    right there if I iterate the Set with a for loop!</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">HashSet</span>
+    <p>Because iterating doesn't ask me to compute anything — I just walk every bucket and hand you
+    whatever's inside. <code>contains()</code> is the one that trusts <code>hashCode()</code> to tell
+    it WHICH bucket to even look in. I asked your object for its hash the moment you called
+    <code>add()</code> — I never asked again.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The Tag entity</span>
+    <p>And I answered honestly both times — I really did have a different hashCode after save() gave
+    me an id. Nobody told me a Set was relying on my FIRST answer staying true forever. @Data just
+    told me to always describe myself completely, including whatever id happens to be right now.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Every step behaves exactly as documented. The bug lives entirely in the combination.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>new Tag()</code> is created — id is null, since @GeneratedValue only fires on
+    insert</span><span class="tag">id = null right now</span></li>
+    <li><span><code>tags.add(t)</code> — HashSet calls t.hashCode(), computed from
+    (id=null, name="URGENT"), and stores t in the bucket that hash maps to</span><span class="tag">the bucket is chosen ONCE, right here</span></li>
+    <li class="open"><span><code>tagRepository.save(t)</code> flushes an INSERT — Hibernate mutates
+    the SAME object's id field in place, from null to 501</span><span class="tag">same reference, new field value</span></li>
+    <li class="open"><span>t.hashCode(), if called now, returns a completely different value —
+    because id is now part of the computation and it changed</span><span class="tag">the object's own hash just moved</span></li>
+    <li class="open"><span>tags.contains(t) calls t.hashCode() again, gets the NEW value, and looks
+    in the bucket THAT hash maps to</span><span class="tag">the wrong bucket for where t actually lives</span></li>
+    <li><span>That bucket doesn't have t in it — t is still sitting in the bucket chosen back in step
+    2. contains() returns false</span><span class="tag">lost, but not gone</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the moment the trap is set, but step 2 is the actual design flaw:
+  hashCode() was computed and trusted to stay valid for as long as the object lives in that Set — and
+  @Data built a hashCode() out of a field, id, that's specifically designed to change exactly once,
+  right after insertion.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">The Tag entity t — one single object in memory<small>never replaced, never copied</small></div>
+    <div class="fan">asked for its hashCode at two different moments ↓</div>
+    <div class="obs">
+      <span>Moment 1 (tags.add(t)): hashCode from id=null → HashSet stores t in bucket(H1)</span>
+      <span>save() assigns id=501 — nothing about the Set's internal buckets moves</span>
+      <span>Moment 2 (tags.contains(t)): hashCode from id=501 → a different bucket entirely</span>
+      <span class="new">bucket(H2) is empty — contains() reports false, even though t still sits safely in bucket(H1)</span>
+    </div>
+  </div>
+  <p class="hf-annot">Same object, same reference, two different hashCode answers a few milliseconds
+  apart — and a HashSet has no mechanism for reconciling the two.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q"><code>@Data @Entity class Tag { @Id @GeneratedValue Long id; String name; }</code>.
+  <code>Tag t = new Tag(); t.setName("URGENT"); Set&lt;Tag&gt; tags = new HashSet&lt;&gt;();
+  tags.add(t); tagRepository.save(t);</code> — save() assigns <code>t.id = 501</code> in place, on
+  the same object. What does <code>tags.contains(t)</code> return right after that, and why?</p>
+  <button type="button">true — HashSet re-hashes every element automatically the moment any of its fields change, so it always reflects each object's current state</button>
+  <button type="button">true, but only because save() runs inside a transaction — contains() falls back to a database-level equality check when a HashSet holds managed JPA entities</button>
+  <button type="button">false — contains() computes t's CURRENT hashCode() (which now includes id=501), looks in the bucket that hash maps to, and finds nothing there; t is still sitting, unreachable, in the bucket its ORIGINAL hashCode (id=null) mapped to</button>
+  <p class="why" data-for="0">HashSet never re-hashes anything automatically — it has no way to know a
+  field changed, and no mechanism that runs on mutation. It computed a bucket once, at add(), and has
+  trusted that answer ever since.</p>
+  <p class="why" data-for="1">Hibernate's persistence-context identity map does guarantee the SAME row
+  loaded twice returns the SAME Java object reference — but that's a completely separate mechanism
+  from java.util.HashSet, which has no idea a JPA transaction or session even exists. There's no
+  fallback like this.</p>
+  <p class="why" data-for="2">Exactly — t never moved. contains() just went looking in the wrong
+  bucket, because it trusts whatever hashCode() answers RIGHT NOW, and that answer changed the
+  instant id was assigned. The object is still in the set; it's simply unreachable through the one
+  method that's supposed to find it quickly.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three languages, one contract: a hash value has to survive as long as the object sits in the collection.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>C#'s GetHashCode() contract</h4>
+    <p>.NET's own documentation states it almost verbatim: "the hash code itself should not change
+    for the lifetime of the object." A mutable field feeding <code>GetHashCode()</code> breaks
+    <code>Dictionary&lt;TKey,TValue&gt;</code> and <code>HashSet&lt;T&gt;</code> lookups the exact
+    same way — Lombok's generated <code>hashCode()</code> has no way to know the JPA id field
+    violates that same contract.</p>
+    <div class="hf-scatter"><span>GetHashCode() contract ≈ Object.hashCode() contract</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Python's hashable-immutability convention</h4>
+    <p>Python refuses to hash its own mutable built-ins outright — <code>list</code>,
+    <code>dict</code>, and <code>set</code> aren't even hashable, precisely to prevent this bug at the
+    language level. Java has no such guardrail: a <code>Long id</code> is happily hashable both
+    before and after it changes, so the language lets you write the exact mistake Python's type
+    system refuses to allow.</p>
+    <div class="hf-scatter"><span>unhashable mutables ≈ the guardrail Java doesn't have</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your CIAM's session cache keyed by a live claim</h4>
+    <p>Cache an authenticated session in a HashMap keyed by a hash derived from the caller's roles
+    claim, before a delayed role-refresh mutates that same claim in place. The cache entry becomes
+    unreachable by lookup the instant the claim it was hashed from changes — the session is still
+    sitting in memory, exactly as unreachable as Tag t sitting in bucket(H1).</p>
+    <div class="hf-scatter"><span>mutated claim ≈ mutated id</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Doesn't @EqualsAndHashCode.Include let me just leave id out entirely?</p>
+  <p class="a">Yes — that's exactly the fix for entities with no natural key: base equality on nothing
+  but the class itself (or a truly immutable business key set at construction) until the entity has
+  an id, then compare by id only once it's assigned and never mutated again. It's more code than
+  @Data's one-liner — which is exactly why @Data is the wrong tool for an entity in the first place.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">If I only ever call save() before adding anything to a Set, does this go away?</p>
+  <p class="a">Yes, in this specific case, because id would already be assigned before hashCode() ever
+  gets computed for the add(). But that just relocates the landmine — the same bug reappears the
+  moment ANY code path adds a transient, unsaved entity to a Set or Map key before persisting it, and
+  nothing in the type system stops that from happening somewhere else in a large codebase.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Is this a Lombok bug, a JPA bug, or a HashSet bug?</p>
+  <p class="a">None of them, individually — each behaves exactly as documented. Lombok does exactly
+  what @Data promises (include every field). JPA does exactly what @GeneratedValue promises (assign
+  the id on insert, mutating the same object). HashSet does exactly what its contract promises (trust
+  hashCode() at insertion, never recompute). The bug lives entirely in the combination — none of the
+  three components was ever told about the other two's assumptions.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  This page's own CIAM guidance already avoids @Data on the User entity — @Getter @Setter
+  @NoArgsConstructor @Entity, never @Data — for the LazyInitializationException and constructor
+  reasons from section 1. Suppose a teammate "fixes" those two problems while keeping @Data
+  everywhere else: <code>@Data @EqualsAndHashCode(exclude = "roles") @Entity class User { @Id
+  @GeneratedValue Long id; … }</code>. Does excluding just the lazy roles collection also fix the
+  Set-membership bug from this lesson — or is id still quietly part of the equation?
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -236,6 +438,7 @@
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -99,6 +99,215 @@
     </div>
   </div>
 
+<p class="hf-deck">or, a mock doesn't forget what happened in the last test — you have to tell it to</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The test passed alone. It failed the moment you ran the whole file.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">toHaveBeenCalledTimes(1) was true — an hour ago, in a different test</div>
+  <p>You write <code>it('tracks a purchase', () =&gt; { checkout(); expect(track).toHaveBeenCalledTimes(1); })</code>
+  against a <code>vi.mock('./analytics')</code> spy, run just that one test with a name filter,
+  and it's green. You run the whole spec file and it fails: <code>Expected 1, received 3</code>.
+  Nothing about your assertion changed and <code>checkout()</code> genuinely only calls
+  <code>track()</code> once. You add a log line, and it shows exactly one call — from this test.
+  So the count from this test is right and the assertion is honest, which leaves only one place
+  left to look: the count didn't reset when the last test ended.</p>
+  <div class="hf-scatter">
+    <span>checkout() calls track() exactly once, every time ✓</span>
+    <span>the assertion in this test is written correctly ✓</span>
+    <span>the same mock instance carried calls from earlier tests ⚠</span>
+    <span>nothing reset its call history between tests ⚠</span>
+  </div>
+  <p class="hf-foot"><code>vi.fn()</code> isn't reborn for every <code>it()</code> block — the same
+  fake function, and its whole call history, survives for as long as the module stays loaded,
+  unless something explicitly clears it.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make "start clean" the default, not a habit you remember</div>
+  <div class="hf-ladder">
+    <b>Add clearMocks: true to vitest.config.ts</b>
+    <i>↓ Vitest clears every mock's call history before each test runs — automatically, no per-file boilerplate</i>
+    <b>Or, file by file: vi.clearAllMocks() in an afterEach</b>
+    <i>↓ same effect, opted into deliberately where a global setting would be too blunt</i>
+    <b>Either way, "this test's count" stops meaning "every count since the file started"</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A mock remembers everything until something tells it to forget.</b> <code>vi.fn()</code>
+  isn't scoped to the <code>it()</code> block it's called in — it's a plain object living as long
+  as the module that created it, quietly accumulating <code>.mock.calls</code> across every test
+  that touches it, which is exactly why <code>toHaveBeenCalledTimes</code> is the assertion most
+  likely to lie to you the moment a suite grows past one test.
+</div>
+
+<div class="hf-note">Think of <b>vi.fn()</b> as a notebook you hand a coworker to log every time
+someone knocks on their door. If you never tell them to start a fresh page, "how many knocks
+today" and "how many knocks since I gave you this notebook" quietly become the same question — and
+the second one is almost never the one your test meant to ask. <code>clearMocks: true</code> is
+telling them to tear out the page before every single visitor.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>My test only calls track() once. Why does the assertion say 3?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The mock</span>
+    <p>Because I don't know what "this test" means — I'm not aware <code>it()</code> blocks even
+    exist. I'm just a function object with an array on it, <code>.mock.calls</code>, and every
+    time anyone calls me, I push onto it. Nobody emptied that array between your last three tests,
+    so by the time you asked, it had three entries on it, not one.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Vitest</span>
+    <p>And to be fair to the mock, I don't clear it for you either — not unless you ask.
+    <code>clearMocks</code> is a config flag that defaults to <code>false</code>, precisely
+    because sometimes a suite wants to assert something across multiple <code>it()</code> blocks
+    on purpose, and I can't tell your intentional case apart from your accidental one without you
+    saying which this is.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Three tests, one un-cleared spy, and the count just keeps climbing.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>vi.mock('./analytics')</code> runs once, hoisted above the imports, and creates one <code>track</code> spy shared by the whole file</span><span class="tag">one object, not one per test</span></li>
+    <li class="open"><span>Test 1 calls <code>checkout()</code>, which calls <code>track('purchase')</code>. <code>track.mock.calls</code> now holds one entry</span><span class="tag">this is the array actually growing</span></li>
+    <li><span>Test 1's <code>expect(track).toHaveBeenCalledTimes(1)</code> reads that array's length: 1. Correct, and it passes</span><span class="tag">true, for now</span></li>
+    <li class="open"><span>Test 2 begins. Nothing ran between tests to reset <code>track</code>, so its <code>.mock.calls</code> array still holds test 1's entry</span><span class="tag">the array didn't know a new test started</span></li>
+    <li><span>Test 2 also calls <code>checkout()</code>, pushing a second entry. Its own <code>toHaveBeenCalledTimes(1)</code> now reads a length of 2 and fails — for an assertion that, read on its own, looks completely correct</span><span class="tag">the bug shows up in the wrong test</span></li>
+    <li class="open"><span><code>clearMocks: true</code> inserts a call equivalent to <code>vi.clearAllMocks()</code> before every single test in the run, resetting <code>.mock.calls</code> to empty right before test 2 (and every test after it) even starts</span><span class="tag">the fix runs before the failure ever has a chance to happen</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the lesson. The failure surfaces in test 2, which makes test 2 look
+  broken — but test 2's code and assertion are both fine in isolation; the missing piece is
+  something that should have happened between test 1 ending and test 2 starting, and didn't.
+  That's the tell for this entire category of bug: when a test only fails as part of a suite, and
+  only in a particular run order, look for state living somewhere the test itself never
+  touches.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">track.mock.calls = [] — file just loaded</span><span class="go"><em>test 1 runs checkout()</em><span class="arrow">→</span>one call recorded</span></div>
+    <div class="stt"><span class="nm">track.mock.calls.length === 1 — test 1's expect passes</span><span class="go"><em>test 1 ends — nothing clears the spy</em><span class="arrow">→</span>the array survives into test 2</span></div>
+    <div class="stt"><span class="nm">test 2 runs checkout() against the same spy</span><span class="go"><em>a second call pushes onto the same array</em><span class="arrow">→</span>length is now 2</span></div>
+    <div class="stt"><span class="nm">track.mock.calls.length === 2 — test 2's expect(…toHaveBeenCalledTimes(1)) fails</span><span class="go"><em>add clearMocks: true</em><span class="arrow">→</span>back to the top, array emptied before every test</span></div>
+  </div>
+  <p class="hf-annot">The loop only closes with <code>clearMocks</code>. Without it, every test
+  after the first one inherits a call count that has nothing to do with what that test actually
+  did — which is why this bug reads as flaky or order-dependent instead of what it actually is:
+  one shared object, never reset, quietly counting since the file started.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A spec file has <code>vi.mock('./analytics')</code> at the top and no
+  <code>clearMocks</code> setting anywhere. Test A calls <code>checkout()</code> once and asserts
+  <code>toHaveBeenCalledTimes(1)</code> — it passes. Test B never calls <code>checkout()</code> at
+  all, but still asserts <code>expect(track).toHaveBeenCalledTimes(0)</code>. If test A runs
+  before test B, what happens to test B's assertion?</p>
+  <button type="button">It passes — toHaveBeenCalledTimes(0) only counts calls made within test B's own function body, not calls from earlier tests</button>
+  <button type="button">It fails — track.mock.calls still holds test A's call, so the count is 1, not 0, even though test B never invoked checkout() itself</button>
+  <button type="button">It passes, but only because Vitest automatically isolates each test's module registry, giving test B a fresh vi.mock() instance</button>
+  <p class="why" data-for="0">This is the assumption that feels obviously true — of course a test
+  only counts what happens inside it — and it's exactly backwards for an un-cleared mock.
+  <code>toHaveBeenCalledTimes</code> doesn't know which test it's running in; it just reads the
+  length of an array that's been accumulating since the file loaded.</p>
+  <p class="why" data-for="1">Right, and this is the uncomfortable version of the bug: a test with
+  correct code and a correct assertion fails because of something an entirely different test did.
+  Nothing here is wrong with test B — the missing piece is a reset that was supposed to happen
+  between the two tests and didn't.</p>
+  <p class="why" data-for="2">There's no such per-test isolation for a mock's call history —
+  <code>vi.mock('./analytics')</code> sets up the fake once, hoisted above the imports, and every
+  test in the file shares that same spy unless something explicitly clears it. Module-level
+  isolation is not the same thing as call-history isolation.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Shared mutable state outliving the thing that's supposed to own it — you've debugged this exact shape before.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A static field in a JUnit test class</h4>
+    <p>The same bug, same fix, one stack down: a <code>static List&lt;String&gt; calls</code>
+    field on a JUnit test class persists across every <code>@Test</code> method unless a
+    <code>@BeforeEach</code> resets it — and exactly like <code>clearMocks</code>, most teams don't
+    discover the leak until test order changes (a new CI runner, alphabetical vs. declaration
+    order) and a previously-green suite starts failing for no code reason at all.</p>
+    <div class="hf-scatter"><span>static test state ⇒ the exact same leak, different language</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An in-memory rate limiter that forgets to reset between test requests</h4>
+    <p>A rate-limiting middleware backed by an in-memory map behaves perfectly in production (one
+    process, real time passing) and lies in a test suite that fires ten requests back-to-back
+    without resetting the map — request 6 gets throttled not because the limiter is wrong, but
+    because nine earlier tests already "used up" their share of a counter nobody cleared.</p>
+    <div class="hf-scatter"><span>same failure: shared counter, no reset between runs</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A CIAM token-refresh interceptor suite sharing one mocked HttpClient</h4>
+    <p>Testing a CIAM app's refresh-token interceptor often mocks <code>HttpClient</code> once at
+    the top of the file and fires several requests across several <code>it()</code> blocks to
+    check retry behavior. Skip <code>clearMocks</code> here and a later test's "was the refresh
+    endpoint called exactly once" assertion silently counts refresh calls from an earlier test's
+    expired-token scenario too — a false failure that looks like a broken interceptor and is
+    actually just an uncleared spy, on the one kind of test where a wrong answer is easiest to
+    believe.</p>
+    <div class="hf-scatter"><span>auth-flow tests are exactly where an uncleared mock hides best</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">If clearMocks: true is basically free, is there ever a reason not to set it globally?</p>
+  <p class="a">Rarely, and it's worth setting as the default in almost every new project — but it's
+  not entirely free. <code>clearMocks</code> resets call history and instances; it does not
+  restore an implementation you overrode with <code>mockImplementation</code>, and it won't undo a
+  <code>vi.spyOn</code> back to the original method (that needs <code>restoreMocks: true</code>
+  instead). If a suite relies on a mock keeping its custom return value across tests in the same
+  file — rare, and usually itself a design smell — turning on <code>clearMocks</code> globally
+  will surface that dependency as new failures, which is normally a good thing to find.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">What's the actual difference between clearMocks, resetMocks, and restoreMocks?</p>
+  <p class="a">Each one undoes progressively more. <code>clearMocks</code> wipes
+  <code>.mock.calls</code>/<code>.mock.results</code> — just the history — and leaves any
+  <code>mockReturnValue</code>/<code>mockImplementation</code> in place. <code>resetMocks</code>
+  does that and also removes any configured implementation, so a <code>vi.fn()</code> goes back to
+  returning <code>undefined</code>. <code>restoreMocks</code> goes furthest: for a
+  <code>vi.spyOn()</code> specifically, it puts the original, real method back, undoing the spy
+  entirely. Reach for <code>clearMocks</code> for the call-count bug on this page; reach for
+  <code>restoreMocks</code> when a spy on a real method needs to stop being a spy between
+  tests.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does this same bug exist for TestBed-based component tests, or only for vi.mock()?</p>
+  <p class="a">The same root cause — a fake object whose state outlives a single test — can show
+  up there too, if a provider fake (<code>{ provide: UserApi, useValue: api }</code>) is built once
+  outside a <code>beforeEach</code> and reused across tests instead of rebuilt fresh inside one.
+  The usual convention of calling <code>TestBed.configureTestingModule()</code> inside
+  <code>beforeEach</code> mostly protects you by rebuilding the whole testing module — and any
+  <code>vi.fn()</code> you construct fresh inside it — for every single test, which is the same
+  fix as <code>clearMocks</code>, just achieved by rebuilding the object instead of resetting
+  it.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  A spec file has <code>clearMocks: true</code> set, and <code>vi.mock('./analytics')</code> at
+  the top. Test 1 calls <code>checkout()</code> twice and asserts
+  <code>toHaveBeenCalledTimes(2)</code>. Test 2 runs immediately after, calls
+  <code>checkout()</code> zero times, and asserts <code>toHaveBeenCalledTimes(0)</code>. Do both
+  pass? Now suppose <code>clearMocks</code> is changed to <code>resetMocks</code> instead — does
+  either test's outcome change, and does anything else about <code>track</code> change that these
+  two assertions wouldn't catch?
+</div>
+
   <!-- ── HERO: animated Vitest run · live per-step inspector ── -->
   <div class="panel" style="border:1px solid var(--vite)">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--vite)">▶ Watch Vitest run — collect → transform → execute → report</h2>
@@ -552,5 +761,6 @@ vi.<span class="fn">mock</span>(<span class="st">'./analytics'</span>, () =&gt; 
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

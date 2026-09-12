@@ -591,7 +591,7 @@ resolved.
 
 | command | what it catches | runtime |
 |---|---|---|
-| `node tmp_vcheck.mjs` | encoding, registry both directions, required shared scripts, internal links, duplicate registrations, inline-`<script>` parse errors, `.hf-check` wiring, CSS theme-selector shape | ~0.4s, all 537 pages |
+| `node tmp_vcheck.mjs` | encoding, registry both directions, required shared scripts, internal links, duplicate registrations, inline-`<script>` parse errors, `.hf-check` wiring, CSS theme-selector shape, and the backend's `app.progress.total-topics` matching the registered-page count | ~0.4s, all 537 pages |
 | `node tmp_smoke.mjs` | uncaught JS errors and horizontal overflow, in a real browser at **320px** (not 390 — 320 is where a rigid grid track actually breaks). Network-only failures are reported separately, because a sandbox with no CDN fails every CDN load | a few minutes |
 | `node tmp_assetcheck.mjs <ref>` | any **loss** of a teaching asset (Try It Live, CodeWalk, `rt-stage`, quiz, flashcards) versus a git ref — run it after any bulk edit that splices markup | seconds |
 | `node tmp_contrast.mjs --theme=cream` | text under a 2.2:1 contrast floor, grouped by selector so you fix causes not instances. `--inject=candidate.css` tries a fix without editing the site | a few minutes |
@@ -599,6 +599,7 @@ resolved.
 | `node tmp_examtell_audit.mjs` | position and length tells in the exam banks — run after any bank edit | ~1s |
 | `node tmp_codecheck.mjs` | **code on the page that does not compile.** Extracts every `<pre>` and CodeWalk `code:` array and runs the TypeScript and Java through a real compiler. Reports from an allow list — only errors a missing fragment context cannot explain — and a ❌ excuses one LINE, not the block | ~4 min (javac spawns) |
 | `node tmp_cwlines.mjs` | CodeWalk `line:`/`lines:` values that point outside the code array, at a blank line, or carry the 1-based signature. The indices are **ZERO-based** while the gutter renders `idx+1` | ~1s |
+| `node tmp_cropshot.mjs <page> <selector> [name]` | not a gate — screenshots ONE element to `tmp_shots/`. `tmp_shot.mjs --full` on a long lesson page produces a ~15 MB image 30,000px tall that no reviewer (or model) can read; this crops to a single `.hf-check` or diagram at 2x | seconds |
 | `node tmp_coachcheck.mjs` | **a "Code With Me" coach entry that is wrong.** Every other gate stays green when a `coach:` regex misfires — the page parses, the code compiles, and the learner is told their correct solution is wrong. Replays the engine's real matcher against a should-fire and a must-not-fire sample per entry; reports NUDGE separately for entries that knowingly fire on correct code | ~1s |
 
 Two caveats worth knowing before you act on output:
@@ -616,6 +617,12 @@ Two caveats worth knowing before you act on output:
   never a verdict, and a high score means "has the parts", never "is good". Its
   `explain` dimension in particular divides by `<pre>` count, so a page of
   one-line snippets scores as though they were unexplained programs.
+- **Nothing here can check an `.hf-check`'s `data-answer`.** vcheck proves the
+  engine is wired, hfaudit proves the markup exists, smoke proves it renders —
+  and a check whose `data-answer` points at the wrong button passes all three
+  while confidently teaching a learner the wrong answer. The indices are
+  **0-based**. The only verification is reading the question against its own
+  options.
 
 ## Part 3 — Deploy the frontend (GitHub Pages)
 

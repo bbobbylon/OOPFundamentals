@@ -117,6 +117,189 @@
     <div class="intro-ciam"><span class="tag">In CIAM / Your Job:</span> App Registration is where CIAM integration most often breaks. Common mistakes: (1) wrong platform type — registering Angular as "Web" not "SPA" makes Entra demand a client_secret SPAs can't store; (2) a missing redirect URI (<code>localhost:4200/callback</code>) fails every local token; (3) wrong scope format — request <code>api://spring-clientid/read:users</code>, not bare <code>read:users</code>; (4) no admin consent for application permissions → your daemon gets a 403 on <code>User.Read.All</code>. Check Enterprise Applications → Permissions to see what's actually consented.</div>
   </div>
 
+
+<p class="hf-deck">or, why the admin consented and it still returned 403</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You were granted <code>User.ReadWrite.All</code>. You still cannot write to that user.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">"Granted for Contoso ✅" is sitting right there in the portal. The call returns 403 anyway.</div>
+  <p>The SPA registration requests the <b>delegated</b> permission
+  <code>User.ReadWrite.All</code>. A Global Administrator clicks <i>Grant admin consent</i>. The
+  portal shows the reassuring green tick. Every piece of setup on this page is done correctly.</p>
+  <p>Then a signed-in user — an ordinary employee, no directory role — uses your app to reset a
+  colleague's password, and Graph returns <b>403 Forbidden</b>. Nobody misconfigured anything.
+  The 403 is not about your app at all: <b>a delegated permission does not give your app a
+  power. It gives your app permission to borrow a power the signed-in user already has.</b> That
+  user never had it, so there was nothing to borrow.</p>
+  <div class="hf-scatter">
+    <span>app permission: User.ReadWrite.All ✓</span>
+    <span>admin consent: granted ✓</span>
+    <span>token has the scope ✓</span>
+    <span>signed-in user: plain member ⚠</span>
+    <span>effective permission: the smaller one ⚠</span>
+  </div>
+  <p class="hf-foot">Admin consent removed the <i>consent prompt</i>. It never removed the user's
+  own ceiling — and that is the distinction the whole permission model is built on.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Pick the one that matches who is really acting</div>
+  <div class="hf-ladder">
+    <b>A user is at the keyboard and the action is theirs → delegated, and accept the ceiling</b>
+    <i>↓ the app can never do more than the human could have done by hand, which is usually exactly what you want</i>
+    <b>Nobody is at the keyboard — a nightly sync, a webhook, a daemon → application permission</b>
+    <i>↓ no user, therefore no ceiling, therefore admin consent is mandatory and the credential is now a crown jewel</i>
+    <b>And if a user IS present but needs more than they have, the answer is a directory role for the user — not an application permission for the app</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A delegated permission is a ceiling. An application permission is a grant with no ceiling.</b>
+  Delegated says "this app may act on behalf of whoever is signed in, limited to what that person
+  could already do" — the effective permission is the <i>intersection</i> of two sets, and it
+  shrinks when a less-privileged person signs in. Application says "this app acts as itself,"
+  and there is no second set to intersect with. That single asymmetry explains why one needs
+  admin consent and the other often does not.
+</div>
+
+<div class="hf-note">Delegated permission is a <b>power of attorney</b>: you may sign on someone's
+behalf, and you can never sign away more than they owned. An application permission is <b>your
+own set of keys to the building</b> — which is exactly why somebody senior has to sign for those,
+and why a service principal quietly ends up more powerful than any human in the tenant.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>An admin consented to <code>User.ReadWrite.All</code>. How is that not permission?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Entra</span>
+    <p>It is permission — for the <i>app</i>. Consent answers "may this application ask to act on
+    a user's behalf for this capability, without prompting each person?" It does not answer "what
+    may this particular person do?" Those are different questions with different owners, and I
+    evaluate both.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Microsoft Graph</span>
+    <p>So on a delegated call I look at two things: the scope in the token, and the signed-in
+    user's own effective privileges. You get the <b>lesser</b> of the two. A Global Admin using
+    your app really can reset that password; a plain member using the same app, the same
+    registration, the same scope, cannot. Same token shape, different answer.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Your nightly sync job</span>
+    <p>And I have nobody to be lesser than. There is no signed-in user in a client-credentials
+    flow, so there is no second set to intersect — I get the permission in full, against every
+    object in the tenant. That is why an admin has to sign for me, and why my client secret is
+    worth more than anybody's password.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Two registrations, two consent models, one question: who is actually acting?</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The <b>API</b> registration exposes a scope — <code>api://&lt;api-client-id&gt;/read:users</code>. This is the resource declaring what it offers</span><span class="tag">the Spring side</span></li>
+    <li class="open"><span>The <b>SPA</b> registration adds that scope under API permissions, as <b>delegated</b>. This is the client declaring what it wants to borrow</span><span class="tag">the Angular side</span></li>
+    <li><span>Consent is recorded — per user, or tenant-wide if an admin grants it. Either way it only unlocks <i>asking</i></span><span class="tag">consent ≠ capability</span></li>
+    <li class="open"><span>A user signs in. Entra mints a token whose <code>scp</code> carries the delegated scopes and whose <code>sub</code>/<code>oid</code> identifies <b>that specific person</b></span><span class="tag">both halves travel together</span></li>
+    <li><span>Spring validates the token and checks <code>scp</code> — that is the app's half. It is <b>not</b> the user's half</span><span class="tag">your code sees only the ceiling</span></li>
+    <li class="open"><span>Where the real action happens against the directory, Entra intersects the scope with the user's own privileges and returns the lesser. A client-credentials token skips this step entirely — there is no user</span><span class="tag">the asymmetry, in one line</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is where teams get caught, because it is the only step your own code
+  can see. A scope in <code>scp</code> tells you the app was <i>allowed to ask</i> — treat it as
+  authorization and you have built a system whose real answer depends on who signed in, without
+  ever modelling that fact. It is also why <code>roles</code> and <code>scp</code> should never
+  be read interchangeably: <code>scp</code> appears on delegated tokens and describes the app's
+  ceiling, <code>roles</code> appears on app-only tokens and describes a grant with none.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>app was granted User.ReadWrite.All (delegated)</span>
+      <span>admin consent: granted tenant-wide</span>
+      <span>signed-in user: plain member, no directory role</span>
+    </div>
+    <div class="funnel">delegated = the intersection, never the union ↓</div>
+    <div class="instance">read your own profile, and little else<small>swap the signed-in user for a User Administrator and the same token shape suddenly can reset passwords</small></div>
+  </div>
+  <p class="hf-annot">Nothing on the left is wrong or missing — that is what makes this hard to
+  debug from the portal, where all three look green. The effective permission is not a property
+  of the registration at all; it is recomputed per signed-in user, per call. Which means the same
+  app, the same scope and the same code legitimately return 200 for one employee and 403 for the
+  next, and neither result is a bug.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your Angular SPA's registration holds the <b>delegated</b> permission
+  <code>User.ReadWrite.All</code>, and a Global Administrator has granted admin consent
+  tenant-wide. A signed-in employee — an ordinary member with no directory role — uses the app to
+  reset a different user's password. What does Microsoft Graph do?</p>
+  <button type="button">It succeeds — admin consent was granted tenant-wide, so every user of the app inherits the consented permission</button>
+  <button type="button">It fails with 403 — a delegated permission is capped by the signed-in user's own privileges, and a plain member cannot reset another user's password</button>
+  <button type="button">It fails, and Entra returns a consent prompt so the employee can approve the permission for themselves</button>
+  <p class="why" data-for="0">Admin consent is about <i>who has to click "allow"</i>, not about
+  what anyone can do. Granting it tenant-wide means no individual is ever prompted — a UX and
+  governance decision. If it also elevated every user to the permission's full reach, then
+  consenting to one delegated Graph permission would hand every employee in the tenant the
+  ability to rewrite any user, which is precisely the outcome the intersection rule exists to
+  prevent.</p>
+  <p class="why" data-for="1">Right. The effective permission on a delegated call is the lesser of
+  the app's granted scope and the signed-in user's own privileges, so the ceiling here is set by
+  the employee, not by the registration. Give that same employee the User Administrator role and
+  the identical app, token and code start succeeding — which is the tell that the permission was
+  never really the app's to begin with.</p>
+  <p class="why" data-for="2">There is nothing left to consent to: an admin already consented on
+  the whole tenant's behalf, so the prompt is gone by design. And even if the employee were
+  prompted and clicked yes, consent cannot grant a privilege the consenting party does not hold —
+  you cannot authorise someone to act on your behalf beyond your own reach. The block here is
+  privilege, not consent.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Every system that lets one thing act for another ends up with this rule.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Unix <code>sudo</code> vs setuid — the same two models, forty years earlier</h4>
+    <p><code>sudo</code> checks who you are before deciding what you may run: the human is in the
+    loop and the policy is per-user, exactly like a delegated permission. A setuid binary runs as
+    its owner no matter who launched it — no ceiling, which is why setuid root binaries get
+    audited like crown jewels. An application permission is a setuid service principal.</p>
+    <div class="hf-scatter"><span>acts-as-you vs acts-as-itself</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>OAuth scopes on any API you have ever integrated</h4>
+    <p>Granting a third-party app the <code>repo</code> scope on your GitHub account does not give
+    it every repository on GitHub — it gives it <i>your</i> repositories. The scope names a
+    capability; your account bounds it. Everyone already has the right intuition here, and then
+    loses it the moment the portal shows a tenant-wide green tick.</p>
+    <div class="hf-scatter"><span>the scope names it, the account bounds it</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Spring's own <code>@PreAuthorize</code>, two pages from here</h4>
+    <p>Checking <code>hasAuthority('SCOPE_read:users')</code> asks only the app's half of the
+    question. For anything user-specific you end up writing
+    <code>@PreAuthorize("hasAuthority('SCOPE_read:users') and #id == authentication.name")</code>
+    — and that second clause is you re-implementing the intersection rule by hand, because the
+    scope alone was never the whole answer.</p>
+    <div class="hf-scatter"><span>scope + subject, never scope alone</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> two registrations — the SPA is the client, the Spring API is
+  the resource that exposes scopes; exact redirect URIs, PKCE instead of a secret for the SPA, and
+  the client requests the API's scope by its full <code>api://</code> name. The sentence to carry
+  out: <b>delegated means the app borrows the signed-in user's power and can never exceed it;
+  application means the app has its own, bounded by nothing</b> — so pick by asking who is really
+  acting, and guard the app-only credential accordingly.
+</div>
+
   <!-- ── HERO: animated app-registration walk · setting chip + live config inspector ── -->
   <div class="panel" style="border:1px solid #22d3ee">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:#22d3ee">▶ Register an app — every setting, and why it matters for security</h2>
@@ -667,6 +850,7 @@ keep it short-lived, and rotate it.
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

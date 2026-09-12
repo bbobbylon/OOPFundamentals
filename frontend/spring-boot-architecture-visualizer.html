@@ -123,6 +123,202 @@
     <div class="intro-ciam"><span class="tag">CIAM backend:</span> Your API boots with Tomcat (or Netty), Spring Security auto-configured, a JPA datasource on your database, and your <code>@RestController</code> endpoints registered. The Angular frontend calls them with Bearer tokens that Spring Security validates.</div>
   </div>
 
+<p class="hf-deck">or, a class sitting right there on your classpath is invisible to Spring until one annotation says otherwise</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The class compiles. It's on the classpath. Spring insists it doesn't exist.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">UnsatisfiedDependencyException, for a class you can see with your own eyes</div>
+  <p><code>OrderService</code> takes an <code>EmailService emailService</code> constructor
+  parameter, and <code>EmailServiceImpl implements EmailService</code> sits right there in the
+  same package, fully written, compiling cleanly. Startup still fails: <code>Parameter 0 of
+  constructor in OrderService required a bean of type 'EmailService' that could not be found</code>.
+  You open <code>EmailServiceImpl</code> sure there's a typo somewhere — there isn't. What's
+  actually missing is one word above the class declaration: <code>@Service</code>.</p>
+  <div class="hf-scatter">
+    <span>class compiles ✓</span>
+    <span>implements the right interface ✓</span>
+    <span>no @Service/@Component annotation ⚠</span>
+    <span>component scan never registered it ⚠</span>
+  </div>
+  <p class="hf-foot">"On the classpath" and "known to Spring" are not the same claim. Component
+  scanning only finds classes wearing a stereotype annotation — everything else is a .class file
+  Spring never looks at twice.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">A class becomes a bean by declaring itself, not by existing</div>
+  <div class="hf-ladder">
+    <b>Add @Service (or @Component / @Repository / @Controller — whichever fits its role)</b>
+    <i>↓ this is the only thing that puts a class in front of component scanning at all</i>
+    <b>Confirm it lives under the main class's package, or a sub-package of it</b>
+    <i>↓ @ComponentScan defaults to scanning from wherever @SpringBootApplication sits, downward only</i>
+    <b>Startup now succeeds — there's finally a bean where one was required</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Spring never goes looking for classes — it only ever finds the ones that raised a hand.</b>
+  Component scanning isn't "search everything and figure out what looks useful"; it's "check
+  every class for one of a handful of specific annotations." A perfectly good class with no
+  annotation on it is, to Spring, indistinguishable from a class that doesn't exist.
+</div>
+
+<div class="hf-note">Think of component scanning like a school taking attendance by roll call, not
+a headcount. A student sitting quietly in the back who never says "here" is marked absent — not
+because the teacher can't see them, but because attendance is taken by who <i>answers</i>, not by
+who's physically present. <code>@Service</code> is your class raising its hand.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>EmailServiceImpl is right there. Why does Spring say no bean of that type exists?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Component scanning</span>
+    <p>I don't inspect every <code>.class</code> file on your classpath for "does this look
+    useful." I look specifically for <code>@Component</code> and the annotations built on top of
+    it — <code>@Service</code>, <code>@Repository</code>, <code>@Controller</code>. No annotation,
+    no candidate. I walked right past that file and had no reason to stop.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The ApplicationContext</span>
+    <p>And I only know what component scanning hands me. By the time
+    <code>OrderService</code> asks for an <code>EmailService</code>, I'm not searching your source
+    folders — I'm searching a bean registry that was already finalized. Not in the registry means
+    it doesn't exist, as far as I'm concerned, compiled class or not.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Five steps, and only one of them decides whether your class ever gets a vote.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The JVM loads <code>OopFundamentalsApplication</code> and every class it can reach — plain Java classloading, nothing Spring-specific yet</span><span class="tag">compiling and loading aren't "registered"</span></li>
+    <li class="open"><span><code>SpringApplication.run()</code> starts, and <code>@ComponentScan</code> (bundled inside <code>@SpringBootApplication</code>) walks the main class's package and every sub-package</span><span class="tag">a directory walk, not a classpath-wide search</span></li>
+    <li class="open"><span>For each class found, it checks for <code>@Component</code> or any annotation itself meta-annotated with it — <code>@Service</code>, <code>@Repository</code>, <code>@Controller</code>, <code>@Configuration</code></span><span class="tag">the actual filter</span></li>
+    <li><span>Matching classes become <code>BeanDefinition</code>s — metadata describing how to construct them, not yet actual objects</span><span class="tag">a blueprint, not an instance</span></li>
+    <li class="open"><span><code>@EnableAutoConfiguration</code> separately adds its own conditional BeanDefinitions based on what's on the classpath — a <code>DataSource</code> bean only if a JDBC driver is present, say</span><span class="tag">a parallel source of beans, same registry</span></li>
+    <li><span>The ApplicationContext resolves the whole dependency graph, instantiating beans in order — a constructor asking for a type with zero matching BeanDefinitions fails right here, before Tomcat ever starts</span><span class="tag">this is where "no bean of type X" gets thrown</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the lesson. Everything upstream — the JVM loading your class, the
+  file compiling cleanly — is necessary but nowhere near sufficient. A class only enters Spring's
+  world the moment component scanning recognizes one specific kind of annotation on it. Skip that
+  annotation and every later step proceeds as if the file were simply absent.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">@ComponentScan walks com.bob.oopfundamentals<small>one sweep, at startup, once</small></div>
+    <div class="fan">checked for @Component / @Service / @Repository / @Controller ↓</div>
+    <div class="obs">
+      <span>OrderController — @RestController</span>
+      <span>OrderService — @Service</span>
+      <span>OrderRepository — @Repository</span>
+      <span>EmailServiceImpl — no annotation</span>
+      <span class="new">skipped — never becomes a bean</span>
+    </div>
+  </div>
+  <p class="hf-annot">Four classes, one sweep, one skipped — and the skip is silent. Component
+  scanning never warns "I found a class that looks like it should probably be a bean." It simply
+  doesn't register it, and the first sign of trouble is a constructor somewhere else failing to
+  find what it asked for.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q"><code>EmailServiceImpl</code> lives in
+  <code>com.bob.oopfundamentals.integrations.email</code> and is correctly annotated
+  <code>@Service</code>. The main class, <code>OopFundamentalsApplication</code>, lives in
+  <code>com.bob.oopfundamentals.app</code> — a <i>sibling</i> package, not a parent of
+  <code>integrations.email</code>. Startup still fails with "no bean of type EmailService found."
+  What's actually wrong?</p>
+  <button type="button">The @Service annotation must be misspelled or mis-imported — that's the usual cause of this exact error</button>
+  <button type="button">@ComponentScan only walks downward from the main class's own package — a sibling package is never reached at all</button>
+  <button type="button">EmailServiceImpl itself needs its own @ComponentScan(basePackages=...) to opt into being found</button>
+  <p class="why" data-for="0">A reasonable first guess, since a missing or misspelled @Service is the single most common cause of this message — but the scenario already states the annotation is present and correct. The same error message can have more than one cause, and "check the annotation again" stops being useful once you've actually checked it.</p>
+  <p class="why" data-for="1">Right — @ComponentScan (bundled into @SpringBootApplication) defaults to scanning the main class's package and everything beneath it, never upward and never sideways. A sibling package sits completely outside that tree, so the class stays invisible no matter how correctly it's annotated. The fix is moving the main class to the shared top-level package, or adding an explicit @ComponentScan(basePackages="com.bob.oopfundamentals") to widen the search.</p>
+  <p class="why" data-for="2">@ComponentScan is configured on the class doing the scanning — your @SpringBootApplication main class — to say where to look. It's never placed on the class being found, which has no say in whether it gets scanned. This answer has the direction of control backwards.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">"On the classpath" has never meant "known to the framework" — you've hit this exact shape before.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Angular's @Injectable() — the identical two-step requirement</h4>
+    <p>Angular's dependency injection has almost the exact same rule: a class needs
+    <code>@Injectable()</code> (or to be registered as a provider some other way) before Angular's
+    injector will construct and inject it. A plain, correctly written TypeScript class sitting in
+    the same folder, undecorated, is exactly as invisible to Angular's injector as an unannotated
+    POJO is to Spring's component scan — both throw a "no provider found" error that points at the
+    missing decorator, not at anything wrong with the class itself.</p>
+    <div class="hf-scatter"><span>@Injectable() ≈ @Service</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Flask/FastAPI routes that are never registered</h4>
+    <p>A route function decorated correctly but never passed to
+    <code>app.include_router(...)</code> (or an un-registered Flask blueprint) is dead code, no
+    matter how correctly it's written — the framework only knows about routes explicitly handed to
+    it. Different mechanism from annotation-driven scanning, but the same underlying lesson:
+    "written correctly" and "known to the framework" are separate facts, and the second one is
+    never assumed for free.</p>
+    <div class="hf-scatter"><span>registered explicitly, or it's dead code</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Add spring-boot-starter-security and everything locks, on purpose</h4>
+    <p>The first time most people add the security starter to a CIAM project, every endpoint
+    suddenly demands a login — including ones nobody secured yet — because Spring Security's
+    auto-configuration default posture is "require authentication for everything" the moment it
+    detects itself on the classpath, until you supply your own <code>SecurityFilterChain</code>.
+    It's the same "presence changes behavior automatically" theme as component scanning, aimed at
+    the opposite failure mode: too much locked down by default, instead of too little discovered.</p>
+    <div class="hf-scatter"><span>add the starter, everything locks by default</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Why does Spring even need @Service/@Component — why not scan every class and guess which ones look like services?</p>
+  <p class="a">Because "looks like a service" isn't decidable in general — plenty of classes are
+  plain data holders, static-method utility classes, or DTOs that should never be instantiated by
+  a DI container. An explicit annotation is a contract: "yes, construct me, manage my lifecycle,
+  wire my dependencies." Guessing would mean Spring occasionally deciding to manage a class you
+  never intended as a bean — a far stranger failure mode than "I forgot one annotation."</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does component scanning slow down startup on a big codebase?</p>
+  <p class="a">A little, but it's a one-time cost paid once at boot, and it's rarely the actual
+  bottleneck people assume — the classpath walk itself is fast compared to instantiating beans,
+  running auto-configuration's conditionals, and opening a database connection pool. If startup
+  time genuinely matters (serverless cold starts, for instance), the bigger lever is usually lazy
+  initialization (<code>spring.main.lazy-initialization=true</code>) or AOT/native compilation,
+  not narrowing the scan.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">What's the actual difference between @Component, @Service, and @Repository, if they all register the same way?</p>
+  <p class="a">Functionally, almost nothing for basic wiring — all three ARE
+  <code>@Component</code> underneath, and component scan treats them identically. The difference
+  is meaning plus one real behavior: <code>@Repository</code> additionally enables Spring's
+  exception translation, turning a driver-specific <code>SQLException</code> into a consistent
+  <code>DataAccessException</code>. <code>@Service</code> and <code>@Controller</code> exist
+  mainly to document intent — business logic versus web layer. Using the specific one over the
+  generic one costs nothing and tells the next reader exactly what the class is for.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  A class <code>UserAuditListener</code> is annotated <code>@Component</code> and sits inside
+  <code>com.bob.oopfundamentals.app</code> — the same package as the main class, correctly
+  scanned. It has a method annotated <code>@EventListener</code> that should react to a
+  <code>UserCreatedEvent</code>. Nothing throws at startup. No error, anywhere. The method just
+  never runs when a user is created. Given everything you now know about how component scanning
+  decides what becomes a bean — is this the same bug as <code>EmailServiceImpl</code>, or a
+  genuinely different one?
+</div>
+
   <!-- ── HERO: animated Spring Boot startup · live per-step inspector ── -->
   <div class="panel" style="border:1px solid var(--accent)">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch Spring Boot start — scan → auto-config → context → server</h2>
@@ -487,6 +683,7 @@ renderNodes(cur);
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -107,6 +107,217 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> <code>@PreAuthorize("hasAnyRole('SYSTEM_ADMIN','USER_MANAGER')")</code> on <code>searchUsers()</code>; <code>@PreAuthorize("hasRole('SYSTEM_ADMIN') or #userId == authentication.name")</code> on <code>getUser(userId)</code> (admins see all, users see themselves); <code>@PreAuthorize("@ciamPermissions.canAssignRole(#roleId, authentication)")</code> on <code>assignRole(...)</code> for an IdM policy check. Angular guards are UX — this is the real gate.</div>
   </div>
 
+<p class="hf-deck">or, a method's own @PreAuthorize doesn't add to the class's rule — it replaces it</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You added a stricter-looking rule to one method. You made that method less protected.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The tenant check is still sitting right there at the top of the file — and it never runs on this method</div>
+  <p><code>TenantUserService</code> carries <code>@PreAuthorize("hasRole('TENANT_MEMBER')")</code> at
+  the class level — the whole point was "nobody touches this service unless they belong to some
+  tenant," a baseline every method should get for free. Later, someone hardens
+  <code>getOwnProfile(userId)</code> further, adding
+  <code>@PreAuthorize("#userId == authentication.name")</code> right on the method, so a caller can
+  only fetch their own profile. Code review approves it — it reads like an extra layer on top of the
+  class rule. Then a user who was just removed from the tenant, whose JWT no longer carries
+  <code>TENANT_MEMBER</code> at all, calls <code>getOwnProfile</code> with their own <code>userId</code>
+  and gets <code>200</code> back. The tenant check they were "still" protected by never actually ran.</p>
+  <div class="hf-scatter">
+    <span>class-level hasRole('TENANT_MEMBER') still in the file ✓</span>
+    <span>code review approved the stricter-looking method rule ✓</span>
+    <span>a method's own @PreAuthorize replaces the class rule, not adds to it ⚠</span>
+    <span>the tenant condition is not evaluated for this method at all ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that a method-level @PreAuthorize layers on top of the
+  class-level one. It substitutes for it, completely.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Say the whole condition where the method can see it</div>
+  <div class="hf-ladder">
+    <b>@PreAuthorize("hasRole('TENANT_MEMBER') and #userId == authentication.name")</b>
+    <i>↓ both conditions are now actually evaluated for this call — spelled out, not implied</i>
+    <b>Or centralize it: @PreAuthorize("@tenantSecurity.isSelf(#userId, authentication)")</b>
+    <i>↓ one bean owns the tenant rule, so every method that calls it stays correct if the rule changes</i>
+    <b>Either way, the class-level annotation stops being false comfort</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A method's own @PreAuthorize doesn't extend the class's rule — it replaces it.</b> Spring builds
+  exactly one authorization check per method, from the annotation closest to that method; if the
+  method has one, the class-level annotation is never consulted for that call. That single fact is why
+  "locking a method down further" can silently loosen it, why defense-in-depth across a class-level and
+  a method-level annotation is an illusion unless each method restates every condition it needs, and
+  why this is the same proxy machinery as self-invocation — it only ever does exactly what's written at
+  the one expression it's holding.
+</div>
+
+<div class="hf-note">Think of the class-level annotation as a guard posted at the building's front
+door, and a method-level one as a sign on a single office inside. You'd assume anyone reaching that
+office already cleared the front door <i>and</i> satisfies the office's own sign. Spring doesn't run it
+that way — for any office with its own sign, it pulls the front-door guard off duty and checks only
+that sign. It stops matching a real building exactly at the point where a real building would still
+make you badge in at the entrance no matter which office you were headed to.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I just added a stricter-looking rule to getOwnProfile(). Why did that make the tenant check disappear?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The method's own @PreAuthorize</span>
+    <p>Because nobody told me the class has an opinion too. I'm one SpEL expression, evaluated on my
+    own — as far as I'm concerned, I <i>am</i> the entire authorization policy for this method.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The class-level @PreAuthorize</span>
+    <p>And I don't get consulted once a method speaks for itself. I only cover the methods that didn't
+    bother writing their own rule.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">AuthorizationManagerBeforeMethodInterceptor</span>
+    <p>From where I sit it's simple. One method, one expression, one decision. Nobody wired me to merge
+    two annotations, so I never do.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Two rules on the same method would be a compile error. Spring only ever runs one — the question is which.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>At startup, Spring's method-security infrastructure inspects each bean method for
+    <code>@PreAuthorize</code>/<code>@PostAuthorize</code>/<code>@Secured</code>/<code>@PreFilter</code>/<code>@PostFilter</code></span><span class="tag">reflection, once, at boot</span></li>
+    <li class="open"><span>For each method, it checks the <b>method itself</b> for an annotation
+    first</span><span class="tag">most specific wins</span></li>
+    <li><span>If the method has one, that expression becomes the <b>entire</b> authorization rule
+    woven around it</span><span class="tag">the class-level one is not consulted at all</span></li>
+    <li class="open"><span>If the method has none, Spring falls back to the class-level
+    annotation instead</span><span class="tag">a fallback, not a floor</span></li>
+    <li><span>Exactly one <code>AuthorizationManager</code> gets attached per method — never two,
+    never a merge</span><span class="tag">one expression per method, period</span></li>
+    <li class="open"><span>At call time that single expression is what the proxy evaluates —
+    everything else in the file is irrelevant to this call</span><span class="tag">where the tenant check went</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the lesson. There is no pass where Spring collects every applicable
+  annotation on a method and ANDs them together — it picks the single most specific one and stops
+  looking. Every other step in this list exists only to explain how that one decision gets made and
+  what happens once it has been.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">getOwnProfile(userId)<small>which rule actually protects this call?</small></div>
+    <div class="arrow">↓ does the method have its own annotation?</div>
+    <div class="opts">
+      <span>class-level: hasRole('TENANT_MEMBER')  — the fallback, not consulted here</span>
+      <span class="on">method-level: #userId == authentication.name  ← the ENTIRE rule for this call</span>
+    </div>
+  </div>
+  <p class="hf-annot">Prose can say "the method-level rule wins"; the picture shows what that actually
+  costs — the other box isn't dimmed because it's redundant, it's dimmed because it never runs.
+  Nothing highlights that difference in the source file itself; both annotations look equally "in
+  effect" sitting in the same class.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q"><code>TenantUserService</code> has <code>@PreAuthorize("hasRole('TENANT_MEMBER')")</code>
+  at the class level. <code>getOwnProfile(Long userId)</code> additionally carries
+  <code>@PreAuthorize("#userId == authentication.name")</code>. Bob's tenant membership was just
+  revoked — his JWT no longer has <code>TENANT_MEMBER</code> — but he's still a valid, authenticated
+  user. He calls <code>getOwnProfile(bobsOwnId)</code>. What happens?</p>
+  <button type="button">200 — getOwnProfile's own @PreAuthorize replaces the class-level rule entirely; #userId == authentication.name is the only check that runs, and it passes regardless of his roles</button>
+  <button type="button">403 — he lost TENANT_MEMBER, and Spring still enforces the class-level rule as a baseline underneath every method</button>
+  <button type="button">403 — Spring evaluates the class-level and method-level expressions together as an AND, and he fails the TENANT_MEMBER half</button>
+  <p class="why" data-for="0">Right — and this is exactly the trap: a reviewer sees
+  <code>hasRole('TENANT_MEMBER')</code> at the top of the file and assumes it's still doing work
+  everywhere below it. It isn't, on this method. <code>#userId == authentication.name</code> is the
+  entire policy Spring evaluates here, and it says nothing about tenant membership at all — Bob is
+  fetching his own profile, so it passes.</p>
+  <p class="why" data-for="1">This is the natural reading if you think of it like a Java base class —
+  fields and behavior on a superclass normally stay in effect unless a subclass explicitly overrides
+  them, so a "baseline" annotation feels like it should persist too. Method security doesn't inherit
+  that way: the moment a method declares its own <code>@PreAuthorize</code>, Spring stops consulting
+  the class-level one for that method, full stop.</p>
+  <p class="why" data-for="2">A very defensible design to <i>want</i> — annotations composing like
+  stacked middleware. But Spring's method-security interceptor attaches exactly one
+  <code>AuthorizationManager</code> per method, built from exactly one expression. There is no merge
+  step where a second expression gets ANDed in, no matter how reasonable that would be.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">"The most specific declaration wins outright" is not new — you already trust it in two other places.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java method overriding taught you this rule already</h4>
+    <p>A subclass method that overrides a parent's <i>replaces</i> that parent's behavior — it doesn't
+    run both unless the override explicitly calls <code>super.method()</code>. Nobody expects a
+    <code>@Override</code>d method to somehow also run the parent's version automatically. Method
+    security follows the identical instinct: the closer declaration wins outright, and combining is
+    something you have to ask for by hand.</p>
+    <div class="hf-scatter"><span>override replaces, super() is opt-in</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Angular's hierarchical DI runs on the same override rule</h4>
+    <p>Provide a token at the component level and it <i>shadows</i> a module- or root-level provider
+    for that token entirely — inject it and you get one instance, the nearest one in the injector tree,
+    never both merged into something. Nobody expects Angular to somehow combine two providers for the
+    same token; the closest one wins and the other is simply never consulted.</p>
+    <div class="hf-scatter"><span>nearest provider wins, not "all providers merge"</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>In your CIAM service: the exact same rule governs @Transactional two lines away</h4>
+    <p><code>@Transactional</code> on the same Spring bean follows the identical shape — declare it at
+    the class level for a default propagation/isolation, then override it on one method, and that
+    method's settings replace the class default rather than combining with it. It's the same AOP
+    proxy, the same "most specific annotation wins outright" contract, just enforcing transactions
+    instead of authorization. If you've ever debugged a method running in the wrong isolation level,
+    you've already met this exact rule under a different name.</p>
+    <div class="hf-scatter"><span>same interceptor architecture, different annotation</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Can I make the class-level rule apply to every method, even the ones with their own annotation?</p>
+  <p class="a">Not by combining annotations — the framework has no merge step to opt into. You either
+  repeat the shared condition inside every method-level expression, or centralize it in one bean method
+  (<code>@ciamPermissions.xyz(...)</code>) that every method-level expression calls, so there's a
+  single source of truth even though each method still spells out the full rule. If you genuinely want
+  a check that runs no matter what any method annotation says, that has to live at the HTTP filter-chain
+  layer instead — a different interceptor, running before method security ever gets a say.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does this same override-not-merge behavior apply to @Secured and @RolesAllowed too?</p>
+  <p class="a">Yes — every method-security annotation family shares the same "one interceptor, one
+  expression per method" architecture. Whichever annotation is closest to the method — method-level
+  beating class-level — is the one Spring builds its <code>AuthorizationManager</code> from. Mixing
+  families changes nothing about that: <code>@Secured</code> at the class level and
+  <code>@PreAuthorize</code> on one method still means the method-level one wins outright.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">How would I even catch this in code review — the method-level annotation genuinely looks stricter?</p>
+  <p class="a">Read every <code>@PreAuthorize</code> as if it were the <i>entire</i> security policy
+  for that method, because it is. Don't credit a class-level annotation with "still applying
+  underneath" once a method has its own. If a shared condition needs to hold everywhere, it has to be
+  visibly present in every method-level expression — or behind one bean method every one of them
+  calls — not merely written somewhere else in the same file.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  Same <code>TenantUserService</code>, class-level <code>hasRole('TENANT_MEMBER')</code>.
+  <code>listUsers()</code> carries <b>no method-level annotation at all</b>. Bob just lost
+  <code>TENANT_MEMBER</code> and calls <code>listUsers()</code> — is he blocked? Now suppose a teammate
+  "fixes" <code>getOwnProfile</code> by changing its annotation to
+  <code>@PreAuthorize("hasRole('TENANT_MEMBER') and #userId == authentication.name")</code>. Does the
+  original bug from this page still exist on that method?
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -528,6 +739,7 @@ renderClaims();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

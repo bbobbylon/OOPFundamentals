@@ -114,6 +114,210 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> <code>GET /api/users?status=ACTIVE&amp;role=ADMIN&amp;email=contoso</code> → the controller binds the params into a filter record, builds <code>Specification.where(hasStatus(...)).and(hasRole(...)).and(emailContains(...))</code>, and returns <code>Page&lt;UserSummary&gt;</code>. Every <code>User</code> carries <code>@CreatedBy</code>/<code>@LastModifiedBy</code> — who provisioned and last changed each user, exactly what compliance needs.</div>
   </div>
 
+<p class="hf-deck">or, the same null-guard that makes AND safe makes OR match every row in the table</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You copied the exact "skip when null" trick this page just taught you. This time it isn't AND — and now it matches everything.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Filtering by department alone quietly returns the entire user table</div>
+  <p>You need "role X OR department Y," so you write <code>hasRole(role)</code> and
+  <code>hasDepartment(dept)</code> using the exact null-guard idiom above:
+  <code>role == null ? cb.conjunction() : cb.equal(...)</code>. Then you compose them with
+  <code>Specification.where(hasRole(role)).or(hasDepartment(dept))</code> instead of
+  <code>.and()</code>, because this search really is an OR. The caller leaves <code>role</code>
+  blank and passes <code>department="Sales"</code>, expecting Sales employees only. Every user in
+  the table comes back — including engineering, finance, everyone. The department predicate is
+  sitting right there in the generated SQL. It just isn't doing anything.</p>
+  <div class="hf-scatter">
+    <span>hasDepartment("Sales") correctly built ✓</span>
+    <span>role left blank, hasRole(null) called ✓</span>
+    <span>hasRole(null) returns cb.conjunction() — "always true" ⚠</span>
+    <span>TRUE OR anything is always TRUE ⚠</span>
+  </div>
+  <p class="hf-foot">The null-guard isn't wrong. It's wrong for OR — the same line of code means
+  "skip me" under AND and "match everything" under OR.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Match the identity element to the operator, not just to "null means skip"</div>
+  <div class="hf-ladder">
+    <b>Under AND: missing filter → cb.conjunction() (TRUE)</b>
+    <i>↓ TRUE AND x always equals x — the missing filter genuinely drops out</i>
+    <b>Under OR: missing filter → cb.disjunction() (FALSE)</b>
+    <i>↓ FALSE OR x always equals x — here, FALSE is the one that actually drops out</i>
+    <b>Same helper method family, opposite identity element</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>cb.conjunction() means "true," not "skip this."</b> Under AND, true is harmless — it looks
+  exactly like an ignored filter, because <code>TRUE AND x</code> is <code>x</code>. Under OR, true
+  is catastrophic — <code>TRUE OR x</code> is always true, so it silently swallows every other
+  condition in the chain. The bug was never in the null check itself; it was in reusing an
+  AND-shaped idiom inside an OR-shaped composition without asking which identity element that
+  operator actually needs.
+</div>
+
+<div class="hf-note">Think of cb.conjunction() as <b>a blank ballot that always counts as "yes."</b>
+In a vote where EVERY ballot has to say yes to pass (AND), a blank-counts-as-yes abstention is
+harmless — it just steps out of the way and lets the real ballots decide. In a vote where a SINGLE
+yes is enough to pass (OR), that exact same blank ballot passes the motion all by itself, no matter
+what anyone else voted. The rule for the abstention never changed. The voting system around it
+did.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>hasRole(null) returns cb.conjunction() — that's the exact pattern taught above for skipping a
+    filter. Why did OR-ing it in return every single row?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">CriteriaBuilder</span>
+    <p>Because conjunction() isn't a "skip me" signal — I don't have one of those. It's a predicate
+    that evaluates to TRUE, full stop. Hand me <code>cb.or(TRUE, anything)</code> and I have no way
+    to know you meant "ignore my left side." As far as I'm concerned, you asked for
+    <i>TRUE OR anything</i>, and that's always TRUE.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">cb.disjunction()</span>
+    <p>I'm the one you actually wanted here. I'm FALSE, full stop — the mirror image of
+    conjunction(). OR me in with a real predicate and I vanish the same way conjunction() vanishes
+    under AND, because <code>FALSE OR x</code> really does just equal <code>x</code>.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">AND's blank vote is TRUE. OR's blank vote is FALSE. Reach for the wrong one and the search stops filtering — silently.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The caller submits <code>role=null, department="Sales"</code> to a search built
+    around <code>.or()</code> — "match role OR department"</span><span class="tag">an OR-shaped search</span></li>
+    <li><span><code>hasRole(null)</code> runs its null guard — copied straight from this page's AND
+    example — and returns <code>cb.conjunction()</code></span><span class="tag">TRUE, not "skip"</span></li>
+    <li class="open"><span><code>hasDepartment("Sales")</code> returns a real predicate:
+    <code>department = 'Sales'</code></span><span class="tag">the one honest condition in the chain</span></li>
+    <li class="open"><span>The composition evaluates
+    <code>cb.or(conjunction(), departmentPredicate)</code></span><span class="tag">TRUE OR anything</span></li>
+    <li class="open"><span>By the rules of boolean OR, the result is unconditionally TRUE — the
+    department check is still IN the SQL, it's just logically irrelevant now</span><span class="tag">the WHERE clause is real; its effect isn't</span></li>
+    <li><span>Every row in the table satisfies TRUE, so every user comes back, regardless of
+    department</span><span class="tag">the filter UI looks like it worked — the query didn't</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the lesson. The instant a TRUE predicate enters an OR chain, every
+  predicate after it becomes provably irrelevant, no matter how correct it is.
+  <code>department = 'Sales'</code> is a perfectly valid SQL fragment sitting right there in the
+  query — it just no longer affects which rows match, because ORing anything with TRUE was always
+  going to be TRUE.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">cb.or(?, department = 'Sales')<small>the OR chain needs a neutral left side</small></div>
+    <div class="arrow">null role plugs in →</div>
+    <div class="opts">
+      <span>cb.conjunction() — TRUE, swallows the whole OR</span>
+      <span class="on">cb.disjunction() — FALSE, the actual neutral value for OR</span>
+    </div>
+  </div>
+  <p class="hf-annot">The slot is identical in both cases — "what do I return when the filter is
+  absent" — but which value is safe to plug into it depends entirely on the operator waiting on the
+  other side. Swap the composition back to <code>.and()</code> and the correct option flips again:
+  conjunction() becomes safe, and disjunction() would be the one quietly breaking everything.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q"><code>hasRole(null)</code> returns <code>cb.conjunction()</code> — the exact
+  null-guard pattern taught above for AND. A search screen chains it with
+  <code>.or(hasDepartment(dept))</code> instead, because the query should mean "role X OR department
+  Y." The caller leaves role blank and passes <code>department="Sales"</code>. What comes back?</p>
+  <button type="button">Zero users — Hibernate can't evaluate a null-guarded predicate inside an OR, so the query fails closed and returns nothing</button>
+  <button type="button">Every user in the table — cb.conjunction() is TRUE, and TRUE OR anything is always TRUE, so the department condition stops mattering</button>
+  <button type="button">Only users in the Sales department — conjunction() means "skip this predicate," the same as it does under AND</button>
+  <p class="why" data-for="0">A reasonable instinct — plenty of Spring Data's own null-handling really
+  does fail safe by quietly dropping out. But <code>cb.conjunction()</code> isn't a null and isn't a
+  skip signal; it's a fully valid, always-true <code>Predicate</code>, and <code>CriteriaBuilder</code>
+  happily ORs it with anything you hand it. Nothing here throws.</p>
+  <p class="why" data-for="1">Exactly — <code>TRUE OR (department = 'Sales')</code> is TRUE no matter
+  what department equals, by ordinary boolean logic. The department predicate is still sitting right
+  there in the generated SQL; it just has no power left to exclude a row, because the other side of
+  the OR already guarantees a match.</p>
+  <p class="why" data-for="2">This is exactly true under AND — it's the page's own example above —
+  which is precisely why it's so easy to assume it carries over unchanged. TRUE is the identity
+  element for AND (harmless), but it's the <i>absorbing</i> element for OR (it wins outright, every
+  time). Same value, opposite effect, entirely depending on which operator it's plugged into.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three systems, one trap: an always-true clause is only harmless next to AND.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Hand-written SQL's classic WHERE 1=1</h4>
+    <p>Any developer who's built a dynamic <code>WHERE</code> clause by string concatenation knows
+    the <code>WHERE 1=1</code> trick — it lets every real condition start with a clean
+    <code>AND</code> instead of special-casing the first one. Accidentally concatenate an
+    <code>OR</code> condition onto that same string instead of an <code>AND</code>, and
+    <code>1=1</code> silently swallows the entire clause — the exact same failure, with zero ORM
+    anywhere in sight. <code>cb.conjunction()</code> is <code>1=1</code> wearing a Criteria API
+    costume.</p>
+    <div class="hf-scatter"><span>WHERE 1=1 OR … ≈ cb.or(conjunction(), …)</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>MongoDB's empty filter inside $or</h4>
+    <p>An empty filter document <code>{}</code> matches every document in MongoDB — it's Mongo's
+    version of "always true." Put one inside <code>$or: [{}, {department: "Sales"}]</code> and the
+    whole query matches every document in the collection, for the identical reason: one branch of an
+    OR that's unconditionally true makes the other branch's condition irrelevant, regardless of query
+    language.</p>
+    <div class="hf-scatter"><span>{} in $or ≈ conjunction() in cb.or()</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your CIAM authorization check</h4>
+    <p>An endpoint gated by <code>hasScope(requiredScope).or(isSuperAdmin())</code>, where a route
+    with no required scope is coded as <code>hasScope(null) → cb.conjunction()</code> "to skip the
+    scope check." The moment scope is optional for that endpoint, every caller becomes a
+    super-admin — not a search bug anymore, but an authorization bypass, from the identical always-true-in-an-OR mistake.</p>
+    <div class="hf-scatter"><span>same bug, now it's a CVE instead of a wrong search result</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Does Specification.where(null) have this same problem?</p>
+  <p class="a">No — that one's genuinely safe, for a different reason. It's the seed of an
+  <code>.and()</code> chain, always paired with more real <code>.and()</code> calls layered on top,
+  and each filter you add narrows the result exactly like you'd expect. The trap above is about
+  plugging an always-true predicate into <code>.or()</code>, not about
+  <code>Specification.where(null)</code> itself — the danger lives in the operator on the other
+  side, not in the null-guard convention by itself.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Why doesn't Spring Data just skip null filters automatically instead of making me guard them?</p>
+  <p class="a">Because it can't know what your <code>null</code> means. It might mean "no filter
+  requested," or it might mean "search for rows where this column IS NULL" — an unassigned
+  department, say. Spring Data can't guess which one you intend, so your own spec has to decide, and
+  it only looks uniform because most search screens happen to mean the first one.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Is there a way to make this mistake structurally impossible, not just something to remember?</p>
+  <p class="a">Yes — stop seeding an identity element at all. Collect only the non-null predicates
+  into a plain <code>List&lt;Predicate&gt;</code>, and if that list ends up empty, decide explicitly
+  what "no filters supplied" should mean for this endpoint — everything, nothing, or a required
+  400. It's more code than <code>cb.conjunction()</code>, but it forces you to name the decision
+  instead of burying it inside an algebraic identity trick that only one operator agrees with.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  You rewrite <code>hasRole(null)</code> to return <code>cb.disjunction()</code> instead of
+  <code>cb.conjunction()</code> — but you also switch the composition from
+  <code>.or(hasDepartment(dept))</code> to <code>.and(hasDepartment(dept))</code>. The caller again
+  leaves role blank and passes <code>department="Sales"</code>. How many rows come back now?
+</div>
+
   <!-- ── HERO: animated JPA Specification query · live per-step inspector ── -->
   <div class="panel" style="border:1px solid var(--accent)">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch a Specification build a query — predicate → criteria → SQL</h2>
@@ -734,6 +938,7 @@ renderNodes(cur);
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

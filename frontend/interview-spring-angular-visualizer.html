@@ -113,6 +113,185 @@
     </div>
   </div>
 
+
+<p class="hf-deck">or, you answered "prototype means a new instance each time" correctly, and the follow-up is where the interview actually starts</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The bean scope list is the easy half. The question after it is the one that separates candidates.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">"New instance each time" — each time <i>what</i>, exactly?</div>
+  <p>You name the scopes, you get singleton and prototype right, and the interviewer nods and asks
+  the real question: <i>"So what happens if I inject a prototype-scoped bean into a singleton
+  service?"</i></p>
+  <p>The honest answer is that <b>the prototype-ness disappears</b>. Dependency injection happens
+  <i>once</i>, when the singleton is created — so the container builds one prototype instance,
+  hands it over, and the singleton holds that same object for the rest of the application's life.
+  "New each time" was always about each time <b>the container is asked</b>, not each time your code
+  uses the field. And there is no error, no warning and no log line: the application starts, the
+  bean works, and every user shares the stateful object you carefully made stateful-per-use. The
+  bug only appears under concurrency, which usually means it appears in production.</p>
+  <div class="hf-scatter">
+    <span>@Scope("prototype") is correct ✓</span>
+    <span>the bean is genuinely prototype-scoped ✓</span>
+    <span>context starts cleanly ✓</span>
+    <span>injected once, held forever ⚠</span>
+    <span>shared state across every request ⚠</span>
+  </div>
+  <p class="hf-foot">The annotation did exactly what it says. The injection point is what decided
+  how often it would be honoured.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Ask the container each time, instead of asking it once</div>
+  <div class="hf-ladder">
+    <b>Inject <code>ObjectProvider&lt;T&gt;</code> and call <code>getObject()</code> where you need an instance</b>
+    <i>↓ the field is now a factory rather than an instance, so "each time" means each time you actually use it — this is the answer interviewers are usually listening for</i>
+    <b>Or use a scoped proxy — <code>@Scope(value = "prototype", proxyMode = ScopedProxyMode.TARGET_CLASS)</code> — and keep the plain field</b>
+    <i>↓ the injected object is a proxy that resolves a fresh target per method call; convenient, and worth saying out loud that it is a proxy so nobody is surprised later</i>
+    <b>And remember Spring does not destroy prototype beans — no <code>@PreDestroy</code>, so anything holding a resource has to be closed by you</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A scope describes how often the container creates a bean, not how often your code receives
+  one.</b> Those two rates are the same only when the consumer is created as often as the
+  dependency — which is exactly what a singleton is not. Whenever a shorter-lived bean is injected
+  into a longer-lived one, something has to bridge the difference: a provider you call, or a proxy
+  that calls for you. Nothing bridges it by default.
+</div>
+
+<div class="hf-note">Injecting a prototype into a singleton is <b>hiring a temp and then never letting
+them leave</b>. The contract genuinely was per-assignment. Nobody ever came back to ask for a new
+one.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>The bean is annotated prototype. Why is everyone sharing one?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The container</span>
+    <p>Because I create instances when somebody asks me for one, and your singleton asked me
+    exactly once — at startup, while I was wiring it. I did give it a brand new instance. Nobody has
+    requested a second since, and I have no way to know that the field is being reused.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The singleton</span>
+    <p>And I hold a reference, not a subscription. Once a field is set, it is set — I do not re-run
+    injection per request, because the whole point of me is that I am constructed once and shared.
+    Everything about my behaviour here is what "singleton" promised.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">A request-scoped bean</span>
+    <p>Worth contrasting with me: do the same thing with my scope and you get a loud failure at
+    startup — "Scope 'request' is not active for the current thread" — because there is no request
+    in progress while the context is building. The mismatch is identical. I just fail where
+    prototype succeeds, which is the only reason prototype is the one that reaches production.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps, and the interesting one is the step that never happens.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Startup: the container reads definitions and sees <code>ReportBuilder</code> marked <code>@Scope("prototype")</code></span><span class="tag">the scope is registered correctly</span></li>
+    <li class="open"><span>It constructs the singleton <code>ReportService</code>, and to satisfy its constructor it asks for one <code>ReportBuilder</code></span><span class="tag">the one and only request</span></li>
+    <li><span>A fresh prototype instance is created, injected, and the singleton stores it in a field</span><span class="tag">correct, and final</span></li>
+    <li class="open"><span>Every subsequent call to <code>reportService.build(...)</code> uses that same field. <b>The container is never asked again</b></span><span class="tag">the step that does not exist</span></li>
+    <li><span>Under one user it looks perfect, because there is nothing to collide with</span><span class="tag">why tests pass</span></li>
+    <li class="open"><span>Under concurrency, two threads mutate the same builder and reports come out with each other's rows</span><span class="tag">intermittent, and blamed on the database</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the whole answer, and it is worth being able to say it in one
+  sentence in an interview: <i>"injection happens once, so a prototype injected into a singleton is
+  effectively a singleton — you need a provider or a scoped proxy."</i> The reason this question is
+  asked so often is that it separates people who memorised a table of scopes from people who know
+  <b>when</b> the container runs. Almost every Spring surprise — this, self-invocation bypassing a
+  proxy, <code>@Transactional</code> not applying to a private method — comes from the same root:
+  the framework acts at specific moments, and those moments are not the ones your code seems to
+  describe.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">what your singleton's field actually holds<small>declared as <code>private final ReportBuilder builder;</code></small></div>
+    <div class="arrow">depending on how you asked for it →</div>
+    <div class="opts">
+      <span class="on">plain injection → one instance, created at startup, shared by every caller forever</span>
+      <span><code>ObjectProvider&lt;ReportBuilder&gt;</code> → a factory; you get a new instance per <code>getObject()</code></span>
+      <span>scoped proxy → a stand-in that fetches a fresh target on every method call</span>
+      <span>request-scoped, no proxy → the context refuses to start at all</span>
+    </div>
+  </div>
+  <p class="hf-annot">Three of these four rows are defensible designs and one is a bug, and they are
+  indistinguishable at the field declaration — which is why reading the class tells you nothing.
+  Note the last row especially: the identical mistake with a different scope is caught immediately,
+  loudly, at startup. <b>The dangerous version of a bug is always the one that has no failure
+  mode</b>, and the useful habit is to ask, of any injected dependency, whether its lifetime is
+  shorter than the thing holding it.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A <code>@Service</code> with default (singleton) scope constructor-injects a bean
+  annotated <code>@Scope("prototype")</code> and stores it in a field. Ten concurrent HTTP requests
+  call a method that uses that field. How many prototype instances exist?</p>
+  <button type="button">Ten — the container intercepts each access to a prototype-scoped field and supplies a fresh instance per calling thread</button>
+  <button type="button">One — it was injected when the singleton was constructed at startup, and nothing asks the container for another, so all ten requests share it</button>
+  <button type="button">Eleven — one created during context startup to satisfy the injection, plus one per request as the scope is re-evaluated on each call</button>
+  <p class="why" data-for="0">There is no interception on a plain field. Spring's proxies wrap
+  <i>beans</i>, not field reads — for a fresh instance per access you have to either ask the
+  container yourself through <code>ObjectProvider</code>, or opt into a scoped proxy so that the
+  thing in the field is a stand-in rather than the object itself.</p>
+  <p class="why" data-for="1">Correct, and it is worth saying the consequence as well as the count:
+  if that bean holds mutable state — a builder, an accumulator, a parser with a position — the ten
+  requests are now sharing it, and the resulting corruption is intermittent and looks like a data
+  problem. Say "provider or scoped proxy" and you have answered the follow-up too.</p>
+  <p class="why" data-for="2">Scope is evaluated when the container is asked for a bean, and it is
+  asked exactly once here — during the singleton's construction. Nothing re-evaluates anything per
+  call. The instinct that a scope is continuously enforced is the precise misunderstanding this
+  question exists to surface.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Every framework has a "when does this actually run?" question, and it is always the one asked in interviews.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Angular's <code>providedIn: 'root'</code> versus a component-level provider</h4>
+    <p>The same lifetime question in the other half of your stack: a service provided on a component
+    is created per component instance, one provided in root is shared by the whole app, and code
+    that assumes per-use state gets a surprise when someone moves the provider. Injection is
+    resolution at a moment in time there too.</p>
+    <div class="hf-scatter"><span>lifetime is decided by the provider, not the class</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>The servlet that stored request state in a field</h4>
+    <p>One servlet instance serves every concurrent request, so an instance field is shared state.
+    It is the original version of this bug, and the reason "stateless service, state in parameters"
+    became the default advice. A singleton holding a prototype is that same mistake, arrived at by a
+    more sophisticated route.</p>
+    <div class="hf-scatter"><span>one instance, many threads</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A connection injected instead of a connection factory</h4>
+    <p>Inject the pool and borrow per call and everything is fine; inject a single connection at
+    startup and you have built a bottleneck that also breaks on reconnect. <b>When the dependency's
+    natural lifetime is shorter than its holder's, inject the factory, not the thing.</b></p>
+    <div class="hf-scatter"><span>inject the factory, not the instance</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Spring wires beans by inversion of control, the dispatcher
+  routes a request through filters and interceptors to your controller, <code>@Transactional</code>
+  works through a proxy (so self-invocation skips it, and checked exceptions do not roll back by
+  default), and on the Angular side change detection, signals and lazy loading are the questions
+  that come up most. The one to add to your answer about scopes: <b>a prototype injected into a
+  singleton is injected once, so it is effectively a singleton</b> — reach for
+  <code>ObjectProvider</code> or a scoped proxy.
+</div>
+
   <div class="panel">
     <h2>Diagnose the Bug <span class="badge">Trace It</span></h2>
     <p class="flow-desc" style="margin-bottom:10px">Pick a full-stack symptom, then watch the trace go: what you SEE &#8594; what it actually means &#8594; the fix &#8594; what the network trace confirms &#8594; resolved or still broken.</p>
@@ -1220,6 +1399,7 @@ DevHubCodeWalk.mount('#cw-springng',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

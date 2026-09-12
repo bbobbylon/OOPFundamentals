@@ -56,7 +56,111 @@
   </div>
 
   <div style="margin:0 0 28px">
-    <div class="rt-ctlbar">
+    <p class="hf-deck">or, the generic function that compiles clean and panics anyway</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say"><code>comparable</code> is a promise Go checks at compile time — about the wrong thing.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Contains[any] compiles. Calling it with the wrong any does not survive.</div>
+  <p>You write <code>func Contains[T comparable](s []T, v T) bool { for _, x := range s { if x == v { return true } }; return false }</code>. Someone calls <code>Contains[any](cache, key)</code>, where <code>cache</code> holds a mix of strings and ints — and, on one code path, a <code>[]string</code> that got stuffed into the same <code>any</code>-typed cache by mistake.</p>
+  <p>It compiles. It runs fine for the strings and the ints. The moment <code>==</code> compares two <code>any</code> values and either side's dynamic type is a slice, map, or func, the program panics: <code>runtime error: comparing uncomparable type []string</code>. Same generic function, same type parameter, same constraint — it blows up only on the one kind of value nobody happened to test.</p>
+  <div class="hf-scatter">
+    <span>Contains[int](nums, 5) ✓</span>
+    <span>Contains[string](names, "bob") ✓</span>
+    <span>Contains[any](cache, aSliceValue) ⚠ panics</span>
+  </div>
+  <p class="hf-foot">comparable didn't lie to the compiler. It just was never asked the question that mattered.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Keep comparable away from a bare any — or check first</div>
+  <div class="hf-ladder">
+    <b>Constrain to the narrowest set of concrete types you actually support</b>
+    <i>&#8595; comparable on int | string | float64 can never hide a slice — there's no interface in the type set</i>
+    <b>If you truly need any, guard with reflect.TypeOf(x).Comparable() first</b>
+    <i>&#8595; turns a panic into a handled false</i>
+    <b>Or skip == entirely — accept an explicit equality function, the way slices.ContainsFunc does</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>comparable, applied to an interface type, is a promise about the static type — not the values that will flow through it at runtime.</b> any has satisfied comparable since Go 1.20, precisely because interface values are always legal to compare with <code>==</code>; the operation itself is allowed. Whether it succeeds without panicking depends on what's inside, and the type system never looks there.
+</div>
+
+<div class="hf-note">It's a bouncer who checks that everyone's ID is shaped like an ID — but never pats anyone down. Two guests both get waved in as "holding a comparable-shaped card" (an <code>any</code>). What they're <b>actually carrying</b> — a slice, a map — is a different question, asked later, by <code>==</code>, at the worst possible time.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>comparable is right there in the constraint. Why didn't the compiler catch this?</p></div>
+  <div class="hf-bub right"><span class="who">The Go compiler</span><p>I checked that T satisfies comparable. any does — trivially, since every interface value supports ==. I have no way to know what concrete type gets stuffed inside it at runtime.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So this used to just be a compile error, before Go 1.20?</p></div>
+  <div class="hf-bub right"><span class="who">The Go compiler</span><p>Correct — pre-1.20 you couldn't even instantiate T=any against a comparable constraint. Go 1.20 relaxed that rule so generic code could accept interface types at all. The relaxation is why this compiles now — and why it can still panic.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One relaxed rule, three call sites, one bomb.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Go 1.20 relaxes the comparable constraint: an interface type now satisfies it, even though its dynamic value might not be comparable</span><span class="tag">the change</span></li>
+    <li class="open"><span>Contains[T comparable] compiles cleanly when instantiated as Contains[any]</span><span class="tag">compiles</span></li>
+    <li><span>Contains[int] and Contains[string] run thousands of times — every == is between two genuinely comparable values</span><span class="tag">safe calls</span></li>
+    <li class="open"><span>Contains[any] runs against a cache holding a stray []string value</span><span class="tag">risky call</span></li>
+    <li><span>x == v executes with x's dynamic type being []string — a type Go has never allowed == on</span><span class="tag">runtime check</span></li>
+    <li class="open"><span>panic: runtime error: comparing uncomparable type []string — the process crashes right there</span><span class="tag">panic</span></li>
+  </ol>
+  <p class="hf-annot">Steps 2 through 4 all look identical from the type checker's point of view — same function, same constraint, same green compile. Only step 5, which the compiler cannot see coming, decides whether you get a boolean or a crash.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">comparable satisfied by any (Go 1.20+)<small>one relaxed rule</small></div>
+    <div class="fan">who reacts when Contains[any] actually runs &darr;</div>
+    <div class="obs">
+      <span>Contains[any](ints, 5) — fine</span>
+      <span class="new">Contains[any](cache, sliceVal) — the surprising reactor: panics</span>
+      <span>Contains[any](names, "x") — fine</span>
+    </div>
+  </div>
+  <p class="hf-annot">Same generic function, same instantiation, three calls. Two are indistinguishable from an ordinary comparison. The third is a value sitting in a cache typed <code>any</code>, waiting for someone to call <code>Contains</code> on it.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">Before Go 1.20, could you even write <code>Contains[any](cache, key)</code> for <code>func Contains[T comparable](...)</code>?</p>
+  <button type="button">No — instantiating a comparable type parameter with an interface type was a compile error</button>
+  <button type="button">Yes, and it worked exactly like it does today, panics included</button>
+  <button type="button">Yes, but only if the interface had at least one method</button>
+  <p class="why" data-for="0">Right. Before Go 1.20, comparable required a strictly comparable type argument, and a plain interface type didn't qualify — this exact call site wouldn't even compile. Go 1.20 relaxed the rule specifically to allow it, accepting the runtime-panic tradeoff.</p>
+  <p class="why" data-for="1">The runtime behavior is new too, not just newly-legal syntax — there's no "exactly like today" to compare it to, because pre-1.20 this line never got past the compiler.</p>
+  <p class="why" data-for="2">The interface's method set is irrelevant to this rule. any (zero methods) and an interface with ten methods are treated the same way by the comparable relaxation — what matters is the dynamic value stored inside at runtime, not the interface's methods.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Types that promise more than they can verify at compile time show up everywhere.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's unchecked generic casts</h4>
+    <p>A <code>List&lt;Object&gt;</code> holding mixed types, cast back with <code>(List&lt;String&gt;)</code>, compiles with an "unchecked" warning and throws <code>ClassCastException</code> later — at the read site, not the write site.</p>
+    <div class="hf-scatter"><span>unchecked warning &rarr; ClassCastException later</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>TypeScript's any</h4>
+    <p>Declaring a variable <code>any</code> turns off the type checker's promises entirely — the crash just moves from compile time to a runtime "x is not a function."</p>
+    <div class="hf-scatter"><span>any &rarr; compiler stops checking</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>SQLite's type affinity</h4>
+    <p>A column declared <code>INTEGER</code> will still happily store a string if you insert one — the schema is a suggestion, not a guarantee, and the failure shows up on the read or compare, not the write.</p>
+    <div class="hf-scatter"><span>type affinity, not type enforcement</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Go generics let you write one function for many types via <code>[T Constraint]</code>, trading copy-paste for type parameters. <b>And comparable's one exception — an interface type satisfies it too — means "this compiles" quietly stopped being the same guarantee as "this cannot panic."</b>
+</div>
+
+<div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="ggSeg">
         <button class="on" data-s="typeparam">Type Parameters</button>
@@ -264,6 +368,7 @@ DevHubCodeWalk.mount('#cw-gogen',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

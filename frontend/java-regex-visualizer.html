@@ -131,7 +131,112 @@
     <div class="intro-ciam"><span class="tag">CIAM / Spring Boot:</span> Username validation uses <code>@Pattern(regexp="^[a-zA-Z0-9._-]{3,50}$")</code> on the request field. A cheap JWT structure pre-check before full parsing uses a <code>static final Pattern JWT_STRUCT</code>, and log masking compiles <code>EMAIL_MASK</code> once to rewrite emails as <code>ab***@</code> before writing.</div>
   </div>
 
-  <!-- ── TRY IT LIVE ── -->
+  <p class="hf-deck">or, the digit class that only speaks one alphabet</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You wrote <code>\d+</code> to mean "one or more digits." Java quietly read it as "one or more of these exact ten characters, and nothing else legally counts."</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The one-time code that Java refuses to believe is a code</div>
+  <p>You validate a 6-digit OTP server-side with <code>Pattern.compile("\\d{6}").matcher(code).matches()</code>. QA types codes on a US keyboard all day — <code>482913</code>, <code>009114</code> — every one passes. It ships.</p>
+  <p>A user on a phone set to a Japanese or Arabic input method pastes their code, and it arrives as full-width digits (<code>４８２９１３</code>) or Arabic-Indic digits (<code>٤٨٢٩١٣</code>). To their eyes — and to <code>Character.isDigit()</code>, which says <code>true</code> for both — that's six digits. <code>\d{6}</code> disagrees, the match fails on the first character, and a correct code gets rejected as malformed input.</p>
+  <div class="hf-scatter">
+    <span>the pattern compiles ✓</span>
+    <span>every US-keyboard test case passes ✓</span>
+    <span>a genuinely correct OTP from a real user gets rejected ⚠</span>
+  </div>
+  <p class="hf-foot"><code>\d</code> in Java never meant "a digit" in the abstract. It has always meant <code>[0-9]</code>, unless you specifically asked for something else.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Say which digits you actually mean</div>
+  <div class="hf-ladder">
+    <b>Ask whether the input is guaranteed ASCII, or genuinely user-typed</b>
+    <i>↓ a UUID or a hex hash is safely ASCII; an OTP, phone number, or PIN a person typed is not</i>
+    <b>Turn on Unicode-aware classes: <code>Pattern.compile("\\d{6}", Pattern.UNICODE_CHARACTER_CLASS)</code>, or inline <code>(?U)\d{6}</code></b>
+    <i>↓ this makes <code>\d</code> follow Unicode's own decimal-digit property instead of the fixed ASCII table</i>
+    <b>And if downstream code needs plain ASCII anyway, normalize first, then validate</b>
+    <i>↓ converting each accepted digit with <code>Character.digit(ch, 10)</code> up front means every later check, log line, and database column can stay ASCII-only on purpose, not by accident</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Java's predefined classes — <code>\d</code>, <code>\w</code>, <code>\s</code>, <code>\b</code> — are defined in plain ASCII by default, and stay that way until you opt in with <code>Pattern.UNICODE_CHARACTER_CLASS</code> (or <code>(?U)</code>), because widening them by default would have silently changed the meaning of every regex ever compiled against the JDK's original behavior.
+</div>
+
+<div class="hf-note"><b>"\d" doesn't mean "digit" — it means "digit, ASCII edition."</b> Every predefined class in Java's regex engine was defined once, in plain <code>[0-9]</code>/<code>[a-zA-Z_0-9]</code> terms, and it has never widened itself since — you have to ask.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p><code>\d+</code> obviously means "give me the digits," right?</p></div>
+  <div class="hf-bub right"><span class="who">The Pattern engine, personified</span><p>Sure — the ten digits <code>0</code> through <code>9</code>. I'm not sure what else you'd mean.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>There's a whole Unicode standard with dozens of scripts that have their own digit characters.</p></div>
+  <div class="hf-bub right"><span class="who">The Pattern engine, personified</span><p>I've heard. Compile me with <code>UNICODE_CHARACTER_CLASS</code> and I'll care. Until then, <code>[0-9]</code> is the entire job description.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Trace what <code>\d{6}</code> actually compiles to, with and without the flag.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>Pattern.compile("\\d{6}")</code> — no flags</span><span class="tag">default behaviour</span></li>
+    <li class="open"><span>internally, <code>\d</code> is compiled once into the literal class <code>[0-9]</code></span><span class="tag">ten fixed code points</span></li>
+    <li><span><code>matcher("４８２９１３").matches()</code> — six full-width digit characters</span><span class="tag">looks like six digits</span></li>
+    <li class="open"><span>each full-width digit is its own code point, U+FF10 through U+FF19</span><span class="tag">outside [0-9]'s range</span></li>
+    <li><span>the match fails at the very first character position</span><span class="tag">rejected</span></li>
+    <li class="open"><span>recompiled with <code>Pattern.UNICODE_CHARACTER_CLASS</code> — the identical string now matches</span><span class="tag">only the flag changed</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is the whole bug, sitting in plain sight. <code>\d</code> isn't a live question Java asks about each character as it scans — it's compiled, once, into the literal character class <code>[0-9]</code>, full stop. <code>Character.isDigit('\uFF11')</code> returns <code>true</code> because that code point belongs to Unicode's DECIMAL_DIGIT_NUMBER category — but <code>[0-9]</code> was never asked that question. It's ten hardcoded code points, and U+FF11 was never going to be one of them.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx"><code>\d</code> needs a definition of "digit"<small>which one does Java give it, by default?</small></div>
+    <div class="arrow">what actually happens →</div>
+    <div class="opts">
+      <span>Unicode's decimal-digit category, same as <code>Character.isDigit()</code></span>
+      <span class="on">the literal ASCII class <code>[0-9]</code>, nothing more</span>
+      <span>whatever digit meaning the JVM's default locale uses</span>
+    </div>
+  </div>
+  <p class="hf-annot">Locale doesn't enter into it at all — that's the second surprise hiding in the first. <code>\d</code> is exactly as ASCII-only on a JVM running in Tokyo as one running in Ohio. There's no regional setting to blame and no configuration file to check: the definition is baked into the compiled pattern the moment <code>Pattern.compile</code> runs, and it never once consults <code>Locale.getDefault()</code>.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A validator using <code>Pattern.compile("^\\w+$")</code> — no flags — checks usernames, and a user named <code>Алекс</code> (Cyrillic) fails, even though every character is a letter in their own alphabet. What's actually going on?</p>
+  <button type="button"><code>\w</code>'s default definition is <code>[a-zA-Z_0-9]</code> — plain ASCII letters, digits, and underscore — so Cyrillic letters fall outside it no matter their case</button>
+  <button type="button"><code>\w</code> only matches lowercase Latin letters by default, so any name containing a capital letter fails validation outright</button>
+  <button type="button">The pattern is missing <code>Pattern.CASE_INSENSITIVE</code>, which is what lets <code>\w</code> recognize letters from non-Latin alphabets</button>
+  <p class="why" data-for="0">Right. <code>\w</code> compiles to <code>[a-zA-Z_0-9]</code> unless you add <code>UNICODE_CHARACTER_CLASS</code> — and Cyrillic letters were never in that set, capitalized or not. The failure has nothing to do with case; it's an alphabet the class never included.</p>
+  <p class="why" data-for="1">Case isn't the issue — <code>\w</code>'s ASCII definition already covers both <code>a-z</code> and <code>A-Z</code>. <code>Алекс</code> fails even though it's capitalized exactly the way Cyrillic expects, because none of those code points are Latin letters at all, upper or lower case.</p>
+  <p class="why" data-for="2"><code>CASE_INSENSITIVE</code> only changes whether <code>[a-zA-Z]</code> also matches the opposite case of the <em>same</em> Latin letters — it never widens which scripts count as a "word character" in the first place. That widening is specifically what <code>UNICODE_CHARACTER_CLASS</code> does.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Which characters count as a digit" turns out to be a design choice, not a law of nature — and different tools chose differently.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Python's <code>re</code> module made the opposite choice</h4>
+    <p>In Python 3, <code>\d</code> and <code>\w</code> are Unicode-aware <em>by default</em> — the exact opposite default from Java — matching any character in the right Unicode category unless you pass the <code>re.ASCII</code> flag to narrow it back down to <code>[0-9]</code>.</p>
+    <div class="hf-scatter"><span>same escape sequence, opposite default</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>POSIX bracket classes follow the shell's locale</h4>
+    <p>Classic tools like <code>grep '[[:alpha:]]'</code> define that class in terms of the current <code>LC_CTYPE</code> locale setting. The identical script can match different characters on two machines with different <code>LANG</code> environment variables — a third answer to the same question, decided by the environment instead of the language.</p>
+    <div class="hf-scatter"><span>the same command, two machines, two answers</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>SQL collations decide what "equal" means</h4>
+    <p>Whether <code>LIKE</code> treats <code>'a'</code> and <code>'A'</code> — or accented and unaccented letters — as the same character depends entirely on the column's collation, not on the query you wrote. Move the same <code>WHERE name LIKE 'jose'</code> to a differently-collated column and it silently stops finding <code>'José'</code>.</p>
+    <div class="hf-scatter"><span>the query didn't change, the column did</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> this page is your field guide to Java's <code>Pattern</code>/<code>Matcher</code> engine — the syntax of classes, quantifiers, groups and lookaround, the performance traps like recompiling a pattern per call or catastrophic backtracking, and how it's put to work parsing tokens in a CIAM stack. <b>The one new sentence this block adds:</b> every predefined class you've been trusting — <code>\d</code>, <code>\w</code>, <code>\s</code> — is quietly ASCII-only by default, so validation that passes every test case your team ever typed can still reject a real user's real input the moment it arrives in a different script.
+</div>
+
+<!-- ── TRY IT LIVE ── -->
   <div class="tryit" data-lang="java"
        data-title="🧪 Try it: capture groups pull the pieces out"
        data-predict="The date pattern has three groups. For &quot;2026-08-29&quot;, what is group(0) vs group(1)?">
@@ -993,6 +1098,7 @@ renderGroupVis(null);
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

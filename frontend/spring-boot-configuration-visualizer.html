@@ -108,6 +108,206 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> <code>@ConfigurationProperties(prefix="oidc") @Validated class OidcConfig</code> with <code>@NotBlank</code> issuer/clientId/clientSecret fails fast if any OIDC value is missing. Dev points at the Ping sandbox, prod at <code>login.contoso.com</code>; a K8s secret <code>OIDC_CLIENT_SECRET</code> auto-binds to <code>oidc.client-secret</code>, and <code>GET /actuator/env</code> shows the effective value with the secret masked as <code>******</code>.</div>
   </div>
 
+<p class="hf-deck">or, your app never reads one config file — it reads a list of places and stops at the first answer</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You changed the YAML. Redeployed. The app kept hitting the wrong environment anyway.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The file was right. The app just never read it.</div>
+  <p>You update <code>ping.issuer-uri</code> in <code>application-dev.yml</code> from the old
+  sandbox URL to a new one, commit, redeploy. The app keeps authenticating against the <i>old</i>
+  sandbox. You diff the file — correct. You confirm it's in the deployed image — it is. Twenty
+  minutes in, someone runs <code>kubectl describe pod</code> and finds a
+  <code>PING_ISSUER_URI</code> environment variable baked into the deployment manifest eight
+  months ago, from a debugging session nobody ever cleaned up.</p>
+  <div class="hf-scatter">
+    <span>the yml file is correct ✓</span>
+    <span>the correct file is in the deployed image ✓</span>
+    <span>an old env var is still set ⚠</span>
+    <span>env vars outrank yml, unconditionally ⚠</span>
+  </div>
+  <p class="hf-foot">You searched everywhere the value could live except the one place that
+  actually outranks the file you were editing.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">When a property fights you, check the whole ladder — not just the file you touched</div>
+  <div class="hf-ladder">
+    <b>GET /actuator/env — Spring will name exactly which source won, and every source that lost</b>
+    <i>↓ Actuator lists every PropertySource in precedence order with the value each one holds</i>
+    <b>Then grep the deployment manifest and CI pipeline for the property's env-var spelling</b>
+    <i>↓ relaxed binding means ping.issuer-uri and PING_ISSUER_URI are the same property in two outfits</i>
+    <b>Delete stale env vars instead of layering a new yml value "over" them — they don't get overridden, they win</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Editing a config file only changes one candidate in a list Spring searches top to bottom.</b>
+  If a higher-priority source already answered the question, your edit is a correct answer nobody
+  asked for. That's why "I changed the config and nothing happened" is almost never a caching
+  problem — it's a precedence problem.
+</div>
+
+<div class="hf-note">Think of Spring's config sources like someone asking five different friends
+the same question and going with whoever answers first. Command-line args are the friend standing
+right next to them — always heard first. <code>application.yml</code> is the friend who mailed a
+letter last week — technically an answer, but never read if someone closer already spoke up.
+Editing the yml file is re-mailing that letter with better handwriting. It doesn't help if the
+loud friend up front already answered.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I changed application-dev.yml. Why is the app still using the old value?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The Environment</span>
+    <p>Because I don't read one source and stop — I check five or six, in a fixed order, and
+    return the <i>first</i> one with an answer. Command-line arguments outrank environment
+    variables outrank your profile file outrank the base file. I never got to your edit, because
+    something ahead of it in line already answered.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>But I never set an environment variable for this.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The Environment</span>
+    <p>Somebody did, eight months ago, in a manifest neither of us has looked at since. I don't
+    know who, and I don't check dates — I just take the first hand that goes up.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Five sources, one winner, decided before your @Service beans even exist.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>SpringApplication.run()</code> creates the <code>Environment</code> abstraction <b>first</b>, before component scanning or any bean creation</span><span class="tag">config resolution predates your whole app</span></li>
+    <li class="open"><span>It registers PropertySources in a fixed priority order: command-line args, then OS/system env vars, then <code>application-{active-profile}.yml</code>, then <code>application.yml</code>, then coded defaults</span><span class="tag">a search order, not a merge</span></li>
+    <li class="open"><span>Each source is checked for the key being resolved — the <b>first</b> source that has it wins outright; lower-priority sources are never even consulted for that key</span><span class="tag">first match, not last-write-wins</span></li>
+    <li><span>Relaxed binding normalizes casing and separators before comparing — <code>PING_CLIENT_SECRET</code>, <code>ping.client-secret</code>, and <code>ping-client-secret</code> are all the same key</span><span class="tag">so an env var really can satisfy a dotted property name</span></li>
+    <li class="open"><span><code>@Value("${...}")</code> and <code>@ConfigurationProperties</code> both ask the <i>same</i> resolved Environment — there's no separate config path for one versus the other</span><span class="tag">the annotation is how you ask, not where the answer comes from</span></li>
+    <li><span>Once resolved, the value is fixed for the life of the context — editing the file after startup does nothing until the app restarts</span><span class="tag">config is read once, not watched</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the lesson, and it's the part "layering" gets wrong as a mental
+  model. Spring isn't merging five files into one combined config the way CSS merges stylesheets —
+  it's asking "does source 1 have an answer? No? Ask source 2," and stopping at the first yes. A
+  value in a lower-priority source isn't overridden or blended with the winner. It's simply never
+  read at all for that key.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">resolving ping.issuer-uri<small>one key, checked in strict priority order</small></div>
+    <div class="fan">checked against every source, in order ↓</div>
+    <div class="obs">
+      <span>command-line args — not set</span>
+      <span>OS env vars — PING_ISSUER_URI is set</span>
+      <span>application-dev.yml — set, never reached</span>
+      <span>application.yml — set, never reached</span>
+      <span class="new">env var wins</span>
+    </div>
+  </div>
+  <p class="hf-annot">Three of these four sources genuinely had an answer for
+  <code>ping.issuer-uri</code>. It didn't matter — the search stops at the first hit, so
+  <code>application-dev.yml</code>'s value was never even compared against the env var's, let
+  alone merged with it. That's why editing the file changed nothing: the file was never consulted
+  this run.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A deployment sets both an OS environment variable <code>PING_CLIENT_SECRET</code>
+  and a value for <code>ping.client-secret</code> in <code>application-prod.yml</code>, with two
+  <i>different</i> values. A teammate insists "Spring merges them, so whichever was edited most
+  recently wins." What actually happens?</p>
+  <button type="button">The environment variable's value is used, in full, regardless of which was set or edited more recently</button>
+  <button type="button">Spring throws a configuration conflict error at startup, refusing to guess between two different values for the same property</button>
+  <button type="button">The yml value wins because it's specific to the "prod" profile, and profile-specific files always outrank generic sources</button>
+  <p class="why" data-for="0">Right. Precedence in Spring Boot is a fixed order of PropertySource types, not a timestamp comparison — "most recently set" has no bearing on it. The env var wins because of <i>what</i> it is, not <i>when</i> it was set.</p>
+  <p class="why" data-for="1">Spring never detects or complains about this kind of "conflict" — from its point of view there is no conflict, only a search that stops at the first match. A silently-shadowed yml value produces no warning and no log line, which is exactly why this class of bug takes so long to track down.</p>
+  <p class="why" data-for="2">A genuinely reasonable mental model — "more specific wins" is how CSS specificity and plenty of other override systems work — and it's the wrong model here. Profile-specific files do outrank the base <code>application.yml</code>, but the entire yml layer, profile-specific or not, sits below OS environment variables in Spring's default order.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">A search that stops at the first match, not a merge — you've debugged this shape before.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>npm's config ladder — CLI flag, env var, .npmrc, in that order</h4>
+    <p>Node tooling resolves config through an almost identical search: a CLI flag, then an
+    <code>npm_config_*</code> environment variable, then a project <code>.npmrc</code>, then a
+    user or global <code>.npmrc</code> — first match wins, exactly like Spring's Environment.
+    Anyone who's debugged an "npm install hit the wrong registry" problem has already debugged
+    this exact shape of bug once.</p>
+    <div class="hf-scatter"><span>first source with an answer wins, everywhere</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>The CSS cascade — the one place this analogy actually breaks</h4>
+    <p>Worth naming precisely because it's instructive: CSS genuinely does layer — a
+    lower-specificity rule can still apply for a property the higher-specificity rule never set.
+    Spring's config doesn't work that way per key: once a source answers
+    <code>ping.issuer-uri</code>, no other source is consulted for <i>that key</i>, full stop.
+    Different keys can come from different sources; one key is never assembled from several.</p>
+    <div class="hf-scatter"><span>config = first match; CSS = layered merge</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Actuator's secret masking is a name pattern, not a security label</h4>
+    <p>Spring Boot's Sanitizer masks any property key that looks sensitive —
+    <code>password</code>, <code>secret</code>, <code>key</code>, <code>token</code>,
+    <code>credentials</code> — by matching the key's <i>name</i>, not by knowing anything about
+    what the value actually is. A harmless <code>api.tokenExpirySeconds</code> gets masked too
+    (a false positive, harmless); a genuinely sensitive value with an unusual name like
+    <code>oidc.hush</code> wouldn't be caught at all. Worth actually checking
+    <code>GET /actuator/env</code> in a real deployment rather than assuming the masking has your back.</p>
+    <div class="hf-scatter"><span>masking is a naming convention, not a scan</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">If env vars always win, why bother with application-prod.yml at all?</p>
+  <p class="a">Because env vars are for the handful of values that genuinely differ per
+  deployment and need infrastructure to inject them — secrets, per-environment hostnames, a
+  feature flag ops wants to flip without a redeploy. <code>application-prod.yml</code> is for
+  everything else that's still environment-specific but doesn't need that: log levels, pool sizes,
+  which beans are active. Put a value in an env var and you need pipeline or manifest access to
+  change it; put it in a committed yml file and any PR can change it, reviewed like code. The
+  right home for a value depends on who should be able to change it and how often — not on the
+  fact that both mechanisms technically work.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">A value works locally but not in the deployed environment, even though both use the same application.yml. First thing to check?</p>
+  <p class="a"><code>GET /actuator/env</code> before anything else — it shows every
+  PropertySource Spring actually saw and which one supplied the active value for any given key.
+  That turns "why is this different" from a guessing game into a five-second lookup. If Actuator
+  isn't exposed in that environment, the fallback is grepping the deployment manifest, Helm
+  values, and CI variables for the property's env-var spelling — remembering that relaxed binding
+  means the env var name won't look identical to the yml key you searched for.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Is @ConfigurationProperties validation actually enforced, or does @NotBlank just sit there decoratively?</p>
+  <p class="a">It's genuinely enforced — but only when the class is annotated
+  <code>@Validated</code> and a JSR-380 validator (pulled in by
+  <code>spring-boot-starter-validation</code>) is on the classpath. Get that wiring right and a
+  missing <code>oidc.client-secret</code> fails the <i>entire</i> application startup with a
+  readable "must not be blank" error pointing at the exact field — instead of a null pointer three
+  services and twenty minutes later, deep inside whichever request happened to touch the missing
+  value first.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  <code>ping.timeout-ms</code> is set to <code>3000</code> in <code>application.yml</code>,
+  <code>5000</code> in <code>application-prod.yml</code>, and there's an OS environment variable
+  <code>PING_TIMEOUT_MS=8000</code> set in the production container. The app starts with
+  <code>SPRING_PROFILES_ACTIVE=prod</code>. What value does the app actually use? And does your
+  answer change if that environment variable were instead spelled <code>ping.timeout-ms</code>
+  exactly, with dots, instead of SCREAMING_SNAKE_CASE?
+</div>
+
   <!-- ── HERO: animated property-resolution walk · property chip + live "where the value came from" inspector ── -->
   <div class="card" style="border:1px solid #a78bfa;margin-bottom:18px">
     <h2 id="hero-viz" style="margin-top:0;color:#a78bfa">▶ Resolve a property — watch the Environment pick the winning value</h2>
@@ -602,6 +802,7 @@ of git; inject them at deploy time.`},
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

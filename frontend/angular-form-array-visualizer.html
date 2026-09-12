@@ -301,6 +301,221 @@
     </div>
   </div>
 
+<p class="hf-deck">or, disabling a row doesn't hide it from the form — it hides it from you</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The admin saw five roles on screen. Spring received four.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The row was visible, filled in, and never flagged by validation — and it still didn't ship</div>
+  <p>Your role-assignment <code>FormArray</code> shows one row per assigned role, and a role
+  granted by Super Admin is rendered <code>disabled</code> so a lower-privileged admin can see it
+  but not edit or remove it. Submit calls <code>this.rolesForm.value</code> and POSTs it as the
+  <code>UserCreateDTO.roles</code> list Spring expects. QA reports users losing a role on every
+  edit that touches this form — but only ever the disabled one, and only when a second role is
+  edited alongside it. You check <code>formArray.valid</code> right before submit: <code>true</code>.
+  You check the row markup: it's there, filled in, exactly as expected.</p>
+  <div class="hf-scatter">
+    <span>the row renders on screen ✓</span>
+    <span>formArray.valid === true right before submit ✓</span>
+    <span>.value silently drops every disabled control ⚠</span>
+    <span>Spring receives one role fewer than the admin saw ⚠</span>
+  </div>
+  <p class="hf-foot">"Valid" and "visible" both lied to you the same way: neither one asks whether
+  a control is disabled — that question only matters to <code>.value</code>.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Decide what "submit" means for a disabled row, on purpose</div>
+  <div class="hf-ladder">
+    <b>this.rolesForm.value → this.rolesForm.getRawValue()</b>
+    <i>↓ getRawValue() walks every control regardless of disabled state — the "system-managed" role rides along in the payload</i>
+    <b>Or, if a disabled role genuinely shouldn't round-trip, stop reading it from the form at all</b>
+    <i>↓ merge it back in server-side from what's already stored, instead of trusting a control that was never allowed to change</i>
+    <b>Either way, the choice is deliberate now — not an accident of which method you happened to call</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A disabled control isn't invisible to your eyes — it's invisible to .value.</b> One sentence,
+  three consequences: <code>formArray.valid</code> skipping a disabled row's validators entirely,
+  <code>.value</code> silently omitting it from the array you submit, and <code>getRawValue()</code>
+  existing at all as the one method on <code>AbstractControl</code> that refuses to forget a
+  control just because it's disabled.
+</div>
+
+<div class="hf-note">Think of a disabled <code>FormControl</code> as an employee on approved leave,
+still on the org chart. Payroll (<code>.valid</code>) doesn't dock them for missing a deadline
+they were never asked to hit. The headcount report (<code>.value</code>) quietly leaves them off
+the list, because it's counting who's actively working, not who exists. HR's full record
+(<code>getRawValue()</code>) still has them, because HR's job is different from payroll's. The
+analogy stops working the moment the control goes back on duty (<code>.enable()</code>) — an
+employee doesn't clock back in by a setter call.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>formArray.valid was true right before I called .value. Why is a role missing from what I sent?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">.value</span>
+    <p>Because nobody asked me about validity — I answer a completely different question: "what
+    does the currently-enabled part of this array look like?" A disabled control isn't invalid to
+    me. It's not present to me. I skip it the same way I'd skip a control that was never added.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">.valid</span>
+    <p>And I have the same blind spot, from the other direction. I never check a disabled
+    control's validators at all — not "it passed," not "I ignored it," just nothing to report. So
+    the row could be gibberish and I'd still say true, as long as every enabled row is clean.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">getRawValue()</span>
+    <p>I'm the one built to disagree with both of them. I walk every control in the array —
+    enabled, disabled, doesn't matter — and hand back what's actually sitting in each one. If you
+    wanted the disabled row in your payload, I was always the method for that.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Same array, same five rows — one method call decides whether a row exists.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>rolesForm</code> is a <code>FormArray</code> of five <code>FormGroup({ roleId, scope })</code> rows; row 2 was built with <code>.disable()</code> called on its group</span><span class="tag">set once, at construction</span></li>
+    <li class="open"><span><code>.disable()</code> doesn't remove the group from <code>array.controls</code> — <code>array.length</code> is still 5, and the row still renders in the <code>@for</code></span><span class="tag">disabled ≠ absent</span></li>
+    <li><span>On submit, <code>array.valid</code> walks the array checking each control's validators — except a disabled control is skipped entirely, contributing neither a pass nor a fail</span><span class="tag">invisible to validation</span></li>
+    <li class="open"><span><code>array.value</code> builds its output by walking the same five controls and reading each one's own <code>.value</code> — and a disabled control's own <code>.value</code> getter returns nothing, so the array's <code>.value</code> comes back with four entries, not five</span><span class="tag">the actual drop happens here</span></li>
+    <li><span>The POST body is built from that four-item array. Nothing in the request looks malformed — Spring deserializes a valid, slightly-shorter <code>List&lt;RoleAssignment&gt;</code> without complaint</span><span class="tag">a short list isn't an invalid one</span></li>
+    <li class="open"><span><code>array.getRawValue()</code> runs the identical walk as step 4, but reads each control's raw stored value regardless of <code>.disabled</code> — five entries, every time</span><span class="tag">the fix was always one call away</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the lesson. The row was never rejected, deleted, or flagged —
+  <code>.value</code>'s own definition of "the array's value" simply doesn't include a disabled
+  control's contents, by design, because <code>.value</code> is answering "what would this form
+  submit if a user interacted with it right now," and a disabled control can't be interacted with.
+  That design is correct for a form where disabled genuinely means "not part of this submission."
+  It's a bug only when disabled meant something else on your screen — "read-only," not
+  "excluded."</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">rolesForm.controls — 5 rows, row 2 disabled<small>the one array every reader below looks at</small></div>
+    <div class="fan">three different questions asked of the same 5 controls ↓</div>
+    <div class="obs">
+      <span>.valid → checks rows 0,1,3,4; skips row 2 entirely</span>
+      <span>.value → returns 4 entries; row 2 excluded</span>
+      <span class="new">.getRawValue() → returns all 5, row 2 included</span>
+    </div>
+  </div>
+  <p class="hf-annot">Every one of those three reads the exact same five controls at the exact
+  same instant. Nothing about the data changed between them — only the question. That's the entire
+  lesson about <code>AbstractControl</code>: "valid," "value," and "raw value" are three different
+  opinions about what a disabled control means, and exactly one of the three was built to never
+  form an opinion about it at all.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A <code>FormArray</code> has 3 <code>FormGroup</code> rows. Row 1 (the middle one)
+  is <code>.disable()</code>d. You call <code>array.removeAt(0)</code> to delete the first row.
+  What does <code>array.at(1)</code> return immediately afterward?</p>
+  <button type="button">The row that used to be at index 2 — removeAt shifts every later index down by one, disabled controls included</button>
+  <button type="button">The disabled row — its position is pinned regardless of removals elsewhere in the array, since disabling freezes its index</button>
+  <button type="button">Undefined — removing an earlier index while a later control is disabled leaves a gap at that position</button>
+  <p class="why" data-for="0">Right. <code>removeAt</code> renumbers by shifting the whole controls
+  array, exactly like <code>Array.prototype.splice</code> — it has no idea, and no reason to care,
+  which of the remaining controls happen to be disabled. Index 1 is just "whatever is second now,"
+  and after deleting the old index 0, that's the control that used to be at index 2.</p>
+  <p class="why" data-for="1">A tempting rule to invent, because <code>.disable()</code> feels like
+  it should "lock" something about the control — and it does lock its editability and its
+  participation in <code>.value</code>. But an index is a property of the array's current order,
+  not of the control. Nothing about being disabled exempts a control from being shifted when
+  something earlier is removed.</p>
+  <p class="why" data-for="2">There's no gap to leave — <code>removeAt</code> physically splices
+  the control out and closes up every index after it, the same as removing an item from any
+  ordinary array. A "disabled" control is still a real object living at a real index; it just
+  skips participation in validity and <code>.value</code>, not in "does the array have a hole
+  here."</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">"Present but excluded" is a rule you already know from two other layers of your stack.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>HTML's own disabled attribute — the browser had this rule first</h4>
+    <p>A plain <code>&lt;input disabled&gt;</code> inside a native <code>&lt;form&gt;</code> has
+    always worked this way — the browser excludes disabled fields from the form's own submission
+    entirely; they don't even appear in a <code>FormData</code> built from that form. Angular's
+    <code>FormControl.disable()</code> isn't a new idea, it's reactive forms deliberately mirroring
+    a rule the platform already had, right down to the same justification: a control the user
+    can't interact with shouldn't pretend to have submitted a value.</p>
+    <div class="hf-scatter"><span>disabled input ⇒ absent from FormData, same as .value here</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A SQL soft-delete flag read by two different queries</h4>
+    <p>A row marked <code>deleted_at IS NOT NULL</code> still physically exists in the table — one
+    query (<code>SELECT * FROM roles</code>) can be written to include it, another
+    (<code>SELECT * FROM roles WHERE deleted_at IS NULL</code>) to exclude it, and both are
+    "correct" for what they're answering. <code>.value</code> and <code>.getRawValue()</code> are
+    that same fork applied to a form control: same underlying row, two queries with different
+    WHERE clauses, and the bug is always calling the wrong one out of habit.</p>
+    <div class="hf-scatter"><span>value = filtered query, getRawValue = SELECT *</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A read-only "granted by SSO" field on a CIAM profile form</h4>
+    <p>A user's profile form shows their department as a disabled field when it's sourced from an
+    Entra SAML assertion rather than typed in — visible so they know why it's not editable,
+    disabled so they can't fight the source of truth. Building that "sync from IdP, freeze in the
+    UI" pattern with reactive forms means confronting this exact <code>.value</code>/<code>getRawValue()</code>
+    fork on day one: submit with <code>.value</code> and the department silently drops off every
+    profile update, even the ones that had nothing to do with it.</p>
+    <div class="hf-scatter"><span>IdP-sourced fields are disabled on purpose — submit with getRawValue()</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Why would Angular design .value to drop data at all — isn't that a footgun by default?</p>
+  <p class="a">It reads as a footgun until you think about what <code>.value</code> is actually
+  modeling: "if the user submitted this form right now, through the UI, what would they be
+  sending?" A disabled control can't be edited through the UI, so from that lens it genuinely
+  isn't part of what "the user" is submitting — it's closer to a caption than an input. The
+  footgun isn't the design, it's that "disabled" gets reused informally to mean "read-only but
+  still mine," which is a different concept the API was never built to express.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does the same value/getRawValue split apply to a plain FormGroup, or is it FormArray-specific?</p>
+  <p class="a">It's inherited from <code>AbstractControl</code>, so it applies identically to
+  <code>FormGroup</code>, <code>FormControl</code>, and <code>FormArray</code> — disable any
+  control anywhere in a form tree and it disappears from the nearest <code>.value</code> above it
+  the same way. <code>FormArray</code> just makes the bug easier to trigger by accident, because
+  rows get added and removed dynamically, and it's easy to disable one row (a "locked" line item,
+  an SSO-sourced entry) without remembering that the same rule now applies three components away,
+  at submit time.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">If I always used getRawValue(), would I ever need .value at all?</p>
+  <p class="a">Yes — anywhere you're deciding what to actually <i>do</i> with the form, not just
+  what to log or send. Gating a submit button, deciding whether to show a validation summary,
+  computing "has anything the user can currently change actually changed" — all of those want
+  <code>.valid</code>/<code>.value</code>'s enabled-only view, because they're questions about the
+  interactive surface of the form. <code>getRawValue()</code> is for the boundary moment where you
+  need the complete picture regardless of who's allowed to touch which field; using it everywhere
+  just relocates the bug instead of fixing it — now a disabled field's stale value can silently
+  overwrite something server-side that should have been left alone.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  A <code>FormArray</code> has 4 rows. Row 3 (the last one) is <code>.disable()</code>d. You call
+  <code>array.push(new FormGroup(...))</code> to add a fifth row. Is the new row's index 4, and
+  does <code>array.getRawValue().length</code> equal <code>array.value.length</code> right after
+  the push? Now answer both questions again assuming row 3 is re-enabled
+  (<code>array.at(3).enable()</code>) immediately before the push instead.
+</div>
+
   <!-- ── HERO: animated FormArray operations walk · op chip + live array-state inspector ── -->
   <div class="panel" style="border-color:#22d3ee">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:#22d3ee">▶ Watch a FormArray mutate — operation by operation</h2>
@@ -1428,5 +1643,6 @@ length = 2   — disabled controls included`},
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

@@ -75,7 +75,7 @@ Or jump straight to any file linked below.
 | 🌐 **Web Fundamentals** | the true zero-starting-point before Angular/React/TypeScript: **HTML** structure/forms/a11y, **CSS** box model/specificity/Flexbox/Grid, plain **JavaScript** (closures, `this`, the DOM & events), **async JS** (Promises/async-await/`fetch`), and **how browsers actually render a page** | [HTML Fundamentals](../frontend/web-html-fundamentals-visualizer.html) |
 | 📊 **Data Science & ML** | **NumPy/pandas**, data cleaning & **EDA**, **visualization**, ML fundamentals (bias-variance), **regression/classification**, model evaluation, **clustering/PCA**, and **neural networks/PyTorch** | [NumPy & Pandas](../frontend/datasci-numpy-pandas-visualizer.html) |
 | 🧠 **AI / LLM Engineering** | **transformers & attention**, how LLMs work (tokenization/sampling), **prompt engineering**, **embeddings & vector DBs**, **RAG**, **tool-calling agents**, wiring an **LLM API** into a real backend, fine-tuning vs RAG vs prompting & **LLMOps**, and **AI safety/guardrails** (prompt injection, jailbreaks, PII) | [Transformers & Attention](../frontend/genai-transformers-attention-visualizer.html) |
-| 🎓 **Exam Prep — Practice Tests** | 19 timed/scored mock exams (560 Q), a **readiness dashboard**, **19 learning paths**, and **spaced-repetition flashcards** (16 decks / 459 cards) | [Readiness Dashboard](../frontend/exam-readiness.html) · [Learning Paths](../frontend/learning-paths.html) · [exams](../frontend/exam-aws-developer.html) |
+| 🎓 **Exam Prep — Practice Tests** | 19 timed/scored mock exams (560 Q), a **readiness dashboard**, **20 learning paths**, and **spaced-repetition flashcards** (16 decks / 459 cards) | [Readiness Dashboard](../frontend/exam-readiness.html) · [Learning Paths](../frontend/learning-paths.html) · [exams](../frontend/exam-aws-developer.html) |
 | 🤖 **AI-Assisted Development** | the landscape of AI coding tools (inline vs chat vs agentic, by context & autonomy), **GitHub Copilot** mode by mode, and **Claude Code**'s explore→edit→verify tool loop, Plan Mode, subagents, and hooks | [AI Coding Assistants — The Landscape](../frontend/ai-assistants-overview-visualizer.html) |
 
 Pages are tagged **beginner → intermediate → advanced → expert**. The deepest
@@ -85,6 +85,12 @@ single hard topic and makes it interactive.
 ---
 
 ## ⭐ Featured path: *How a CIAM app works, end to end*
+
+> **Track it in the app.** Since 2026-09-11 these eleven steps are also a real path inside
+> [Learning Paths](../frontend/learning-paths.html) — **"CIAM App, End to End"** — so each
+> step paints your own ✓ learned / ● visited / ○ untouched state as you work through it,
+> and the list below stays the reference copy. Keep the two in the same order: four of these
+> steps existed in no in-app path at all until that entry was added.
 
 This is the thread the project is built around — a **Customer Identity & Access
 Management** app the way it's done day-to-day: an **Angular** SPA logging users in
@@ -242,6 +248,51 @@ the right `track-*` body class, then register it in the `TRACKS` array in
 pages so a learner can follow a thread — that's what makes the hub feel like a wiki
 rather than a pile of pages.
 
+### The Head First block (how a lesson reaches the teaching bar)
+
+`CLAUDE.md` holds every lesson to a nine-point standard borrowed from *Head First Design
+Patterns*. `node frontend/tmp_hfaudit.mjs` scores each page against it and ranks the
+thinnest first — but it **reads markup, not meaning**, so a low score means "go look" and a
+high score means "has the parts", never "is good".
+
+Pages that already teach well but score low are almost always missing the same two things:
+**active recall** and **memory hooks**. The fix is one authored block, inserted between the
+`.intro` card and the hero visualizer — a placement that is uniform across the site.
+`frontend/angular-change-detection-visualizer.html` is the reference.
+
+The block, in order. Everything in it must be true of *that page's* topic; content that
+could be pasted onto another page has missed the point.
+
+| element | markup | what it does |
+|---|---|---|
+| deck line | `<p class="hf-deck">` | "or, …" — the big idea, restated with a twist |
+| the problem | `.hf-kick` + `.hf-say` + `.hf-card.bad` (`.hf-cardtitle`, `.hf-scatter`, `.hf-foot`) | a concrete failure a working developer hits |
+| the fix | `.hf-card.good` + `.hf-ladder` (alternating `<b>`/`<i>`) | the move, then the better move |
+| the principle | `<div class="principle">` | **the one thing to remember**, one bold sentence |
+| the analogy | `.hf-note` | plain-English, non-technical, including where it breaks down |
+| the dialogue | `.hf-talk` + `.hf-bub`/`.hf-bub.right` + `.who` | personify the machinery — "Zone.js", "Postgres" |
+| the mechanism | `.hf-kick` + `<ol class="hf-steps">` (`<li class="open">`, `.tag`) + `.hf-annot` | name ONE step as the lesson |
+| the diagram | one of `.hf-cast` `.hf-one` `.hf-nest` `.hf-slot` `.hf-cycle` | **by shape, never at random** |
+| the check | `.hf-check[data-answer]` + buttons + `.why[data-for]` | predict-then-reveal, reasoning for *every* option |
+| seen before | `.hf-terms` + `.hf-card.hf-taped` ×3 | same idea in other technologies; one from the CIAM day job |
+| back row | `.hf-ask` (`.q`/`.a`) ×3 | the questions a learner actually asks |
+| napkin | `.hf-napkin` | predict before scrolling — do **not** answer it |
+
+Diagram shapes: `.hf-nest` contains · `.hf-slot` plugs · `.hf-cast` fans out · `.hf-one`
+funnels · `.hf-steps` gates · `.hf-cycle` returns. Copy the child-element structure from
+`devhub-hf.css` or a page already using it — wrong children render as unstyled text.
+
+Two traps, both learned by shipping them:
+
+- **`data-answer` is 0-based, and no gate on this site can check it.** A wrong one teaches
+  something false while scoring a clean 100. Re-read every check against its own options.
+- **Add `<script src="devhub-hf-check.js"></script>` in the same pass as the block.** Without
+  it every explanation renders at once and clicking does nothing — the page *looks* fine.
+  `tmp_vcheck.mjs` check 7 is what catches it.
+
+Prose wraps, code scrolls: escape `&lt;`/`&gt;` inside prose and `<code>` spans, or an
+unescaped tag silently eats the rest of the page.
+
 ### The assessment layer (practice exams)
 
 The DevHub isn't only *exposition* — the **🎓 Exam Prep** track adds **retrieval
@@ -331,12 +382,18 @@ visualizers).
   per-domain breakdown). New exams appear here automatically once they're in the
   manifest.
 - [`frontend/learning-paths.html`](../frontend/learning-paths.html) — **named
-  learning paths** (16 curricula, one per exam). Each cert/goal is an *ordered*
-  curriculum: a `PATHS` array of steps (each `[file, title, tag]`) ending in a
-  capstone exam. Click a step to `dlh-navigate` to that visualizer; the capstone
-  shows your best score (its pass mark lives in `passOf()`, kept in sync with the
-  exam). This is what turns the 473-page library into a *course with a finish
-  line*.
+  learning paths** (20 curricula). Each cert/goal is an *ordered* curriculum: a
+  `PATHS` array of steps (each `[file, title, tag]`) ending in a capstone exam.
+  Click a step to `dlh-navigate` to that visualizer; a step also paints your own
+  ✓/●/○ progress, read once from `dlh_progress_v1`; the capstone shows your best
+  score (its pass mark lives in `passOf()`, kept in sync with the exam). This is
+  what turns the 537-page library into a *course with a finish line*.
+  Not quite one path per exam any more: **Identity & Access** (the protocol) and
+  **CIAM App, End to End** (the application) are separate curricula that share
+  `examId: 'identity-access'`, because the site has one identity exam. If you add
+  a path, either reuse an existing `examId` or ship a bank with the new one —
+  `passOf()` falls back to 70 for an unknown id, so a typo there fails silently
+  rather than loudly.
 - [`frontend/devhub-flashcards.js`](../frontend/devhub-flashcards.js) — the
   **spaced-repetition flashcard engine** (`DevHubFlash.render(rootEl, deck)`). A
   Leitner 5-box system: a card you know moves up a box (seen less); a card you miss

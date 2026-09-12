@@ -148,6 +148,204 @@
     </div>
   </div>
 
+<p class="hf-deck">or, a custom operator that forgets to say goodbye keeps working after everyone's gone</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Every component that used it is gone. The network tab says otherwise.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">takeUntilDestroyed() fired. The polling never noticed.</div>
+  <p>You hand-rolled <code>pollUntil(stop$)</code> the "raw" way:
+  <code>new Observable(subscriber =&gt; { const sub = source$.subscribe({ next: v =&gt; subscriber.next(v), ... }); })</code>
+  — no <code>return</code> statement at the end. A status-polling dialog uses it, wired up with
+  <code>takeUntilDestroyed()</code> like every other subscription in the codebase. The user closes
+  the dialog. The component gets destroyed. <code>takeUntilDestroyed()</code> does exactly what
+  it's supposed to — it unsubscribes the outer subscription. Ten minutes later, on a completely
+  different screen, the network tab still shows <code>GET /api/status</code> firing every three
+  seconds. The call site did everything right. The bug was never at the call site.</p>
+  <div class="hf-scatter">
+    <span>takeUntilDestroyed() wired correctly ✓</span>
+    <span>component removed from the DOM ✓</span>
+    <span>pollUntil's inner subscription: still running ⚠</span>
+    <span>/api/status firing from a page that no longer references it ⚠</span>
+  </div>
+  <p class="hf-foot">The leak isn't in the careful call site. It's inside the operator nobody re-reads once it "works."</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Return the teardown — or don't hand-subscribe at all</div>
+  <div class="hf-ladder">
+    <b>Add: return () =&gt; sub.unsubscribe(); as the last line of the constructor</b>
+    <i>↓ now an outer .unsubscribe() actually has a wire to pull</i>
+    <b>Better: build pollUntil from existing operators — source$.pipe(takeUntil(stop$))</b>
+    <i>↓ takeUntil's own teardown is already correct, so there's nothing left for you to forget</i>
+    <b>Closing the dialog now actually stops the network calls</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>If you subscribe by hand, you own teardown by hand.</b> A custom operator built from
+  <code>new Observable(sub =&gt; source$.subscribe(...))</code> makes a promise to RxJS: when this
+  Observable is unsubscribed, here's what to run. Skip the <code>return</code> and you've made no
+  promise at all — the outer unsubscribe becomes a polite request your operator is free to ignore
+  forever. An operator built by composing existing operators
+  (<code>pipe(debounceTime(...), filter(...))</code>) never has this problem, because it never
+  manually subscribes — the teardown chain is inherited, not authored.
+</div>
+
+<div class="hf-note">Think of a hand-rolled operator as <b>subletting an apartment</b>. When your
+tenant (the outer subscriber) moves out, that doesn't cancel your own lease on the original unit —
+you have to go do that yourself. Composing existing operators is like never signing a sublease at
+all: you just forward everything to the landlord (the built-in operators), so their cancellation
+policy applies automatically, with nothing left for you to remember.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I called unsubscribe() on the outer subscription. Why is the interval still running?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The outer Subscription</span>
+    <p>I did my part — I ran exactly the teardown function your operator handed me. If your
+    operator returned nothing, that's precisely what I called: nothing.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">pollUntil's inner subscription</span>
+    <p>And nobody ever told me to stop. I don't watch the outer subscriber — I only know about the
+    source I was given. Cutting the wire on your end doesn't reach back to me unless somebody built
+    that wire.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">takeUntil(stop$)</span>
+    <p>Which is the entire reason I exist. I subscribe to stop$ myself and run my own teardown the
+    moment it fires. Compose me in instead of writing your own subscribe/unsubscribe pair, and none
+    of this is your problem anymore.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">unsubscribe() only ever runs the function you handed back. Hand back nothing, and nothing runs.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A caller subscribes to your operator's output — the OUTER subscription</span><span class="tag">the visible one</span></li>
+    <li class="open"><span>RxJS calls your constructor function once, passing it the real subscriber object</span><span class="tag">your code runs exactly here</span></li>
+    <li><span>Inside, you call <code>source$.subscribe({...})</code> to start pulling from the real source — a second, INNER subscription that only your operator knows exists</span><span class="tag">the invisible one</span></li>
+    <li class="open"><span>Whatever your constructor function <code>return</code>s becomes the OUTER subscription's teardown — a function, or nothing at all if you didn't write one</span><span class="tag">the only wire between the two</span></li>
+    <li class="open"><span>Later, something calls <code>.unsubscribe()</code> on the outer subscription. RxJS runs exactly the teardown it was handed — no more, no less</span><span class="tag">it can't guess what you meant</span></li>
+    <li><span>If that teardown never called the inner subscription's <code>.unsubscribe()</code>, the inner one is still live, still pulling from the source — forever</span><span class="tag">no error, because nothing failed</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the lesson. The outer and inner subscriptions are two separate
+  objects, and the only thing connecting them is whatever you return. RxJS doesn't scan your
+  closure looking for subscriptions to clean up — it runs the one function you gave it, and if that
+  function is empty, "outer unsubscribed" and "inner should stop" simply never meet.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">piped$ — what the caller subscribes to and unsubscribes from</span>
+      <div class="core">source$.subscribe({ next, error, complete })<small>the inner subscription — reachable only through whatever you return()</small></div>
+    </div>
+  </div>
+  <p class="hf-annot">One thread connects the outer ring to the core: your returned teardown. Skip
+  it, and the ring can be torn down completely while the core keeps running, because nothing you
+  wrote ever reaches back in to stop it.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A hand-rolled operator's constructor does exactly this, with no return statement:
+  <code>const sub = source$.subscribe({ next: v =&gt; { counter.n++; subscriber.next(v); }, error: e =&gt; subscriber.error(e), complete: () =&gt; subscriber.complete() });</code>
+  A component runs <code>interval(1000).pipe(thisOperator(myCounter)).subscribe().unsubscribe()</code>
+  — unsubscribing immediately. Ten seconds later, what is <code>myCounter.n</code>?</p>
+  <button type="button">0 — unsubscribing immediately means the operator's logic never ran at all</button>
+  <button type="button">Still climbing, roughly one per second — the inner interval subscription was never told to stop, so counter.n++ keeps firing on a timer nothing is listening to anymore</button>
+  <button type="button">It throws on the next tick — you can't call subscriber.next() after the outer subscription has been unsubscribed</button>
+  <p class="why" data-for="0">Understandable, but subscribing did happen — that's what created the
+  inner <code>interval</code> subscription in the first place, before <code>.unsubscribe()</code>
+  was ever called. Unsubscribing immediately only runs whatever your operator returned as teardown,
+  which in this version is nothing. The interval was already ticking before that call even landed.</p>
+  <p class="why" data-for="1">Right — this is the leak in its purest form.
+  <code>interval(1000)</code> has no idea anyone unsubscribed from the outer Observable; it keeps
+  ticking, the inner <code>next</code> handler keeps firing, and <code>counter.n++</code> runs on
+  every tick with nothing left to stop it.</p>
+  <p class="why" data-for="2">It doesn't throw — calling <code>subscriber.next()</code> after its
+  consumer has unsubscribed is a silent no-op, not an error, the same protection that keeps a
+  terminated Subject's <code>next()</code> from throwing. That silence is exactly why this bug is so
+  easy to miss: nothing crashes, nothing logs, the counter just quietly climbs in the background.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Manual wiring is manual everywhere — some languages just make forgetting harder.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's try-with-resources — the compiler removes the choice</h4>
+    <p>A resource opened inside <code>try (var conn = ds.getConnection()) { ... }</code> is
+    guaranteed to be closed when the block exits, success or exception, because the language pairs
+    open and close for you. There's no equivalent guarantee inside a hand-rolled RxJS operator —
+    pairing <code>subscribe()</code> with its teardown is a discipline you enforce yourself, every
+    single time, with nothing stopping you from skipping it.</p>
+    <div class="hf-scatter"><span>try-with-resources: can't forget · raw Observable: can</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Node's EventEmitter — the same unpaired .on()</h4>
+    <p>Attaching a listener with <code>.on('data', fn)</code> creates a link that nothing severs
+    automatically; forget the matching <code>.off('data', fn)</code> and the listener — and
+    everything its closure holds onto — outlives whatever it was supposed to be watching. It's the
+    exact same shape: acquiring is one line, releasing is a separate line you have to remember to
+    write.</p>
+    <div class="hf-scatter"><span>.on() without .off() ≈ subscribe() without teardown</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your CIAM token-refresh operator — the leak that costs you rate limit, not memory</h4>
+    <p>A hand-rolled <code>withSilentRefresh()</code> that manually subscribes to a Ping or Entra
+    token endpoint and forgets its teardown doesn't just waste memory — it keeps refreshing tokens
+    against your identity provider forever, for every login screen a user ever navigated away from.
+    That shows up as a mysterious quota or rate-limit line item, not a stack trace, which is what
+    makes it so much harder to trace back to one missing <code>return</code>.</p>
+    <div class="hf-scatter"><span>invisible drip against a real IdP, not just RAM</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Why doesn't RxJS just track every subscription automatically, so I can't forget this?</p>
+  <p class="a"><code>new Observable(subscribe)</code> is deliberately a raw, unopinionated escape
+  hatch — the exact same one every built-in operator is itself built from. RxJS can't see that a
+  local variable named <code>sub</code> holds a Subscription unless you tell it, which is exactly
+  what returning it (or registering it) does. Treat the raw constructor as a last resort: reach for
+  <code>pipe(...)</code>-composed operators first, and handle the manual subscribe/unsubscribe pair
+  with the same care you'd give a manual resource you have to close yourself.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Is there a safer way to write the raw version, other than remembering the return?</p>
+  <p class="a">Yes — call <code>subscriber.add(sub)</code> right after creating the inner
+  subscription, instead of writing a separate <code>return</code>. <code>add()</code> registers
+  <code>sub</code> as a dependent teardown of the outer subscriber directly, so it's torn down
+  automatically whenever the outer one is. It also scales better: with two or three inner
+  subscriptions (a source plus a stop signal, say), you <code>add()</code> each one instead of
+  writing one return function that has to remember all of them.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">What's actually different between error(), complete(), and unsubscribe() for cleanup?</p>
+  <p class="a">Nothing, for teardown — RxJS runs the exact same registered teardown logic no matter
+  which of the three ends the subscription. The difference is only what the downstream consumer is
+  told: <code>complete()</code> says "no more values, this went fine," <code>error()</code> says
+  "no more values, this failed," and an external <code>unsubscribe()</code> tells the consumer
+  nothing at all — it just stops listening. Your cleanup code should never assume which one
+  triggered it.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  Your operator does <code>const sub = source$.subscribe({ ... }); subscriber.add(sub);</code> —
+  no separate <code>return</code> statement. A caller subscribes, then calls
+  <code>.unsubscribe()</code> two seconds later. Does <code>sub</code> get unsubscribed — and does
+  your answer change if that <code>subscriber.add(sub)</code> line is deleted entirely, leaving just
+  the bare <code>const sub = source$.subscribe({ ... });</code>?
+</div>
+
   <!-- ── HERO: animated custom-operator internals · value chip + live wiring inspector ── -->
   <section>
   <div class="card card-cyan" style="border:1px solid var(--accent);border-left:3px solid var(--accent)">
@@ -844,6 +1042,7 @@ would <span class="hl-bad">corrupt each other's window</span>.`},
 <script src="tracks-data.js"></script>
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
 <script src="devhub-transitions.js"></script>

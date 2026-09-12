@@ -149,6 +149,202 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> At scale: <code>AuthService</code> (OIDC, token issuance), <code>UserService</code> (CRUD/search), <code>AuditService</code> (write-heavy, own DB), <code>NotificationService</code> (email/SMS). The gateway validates the JWT once; services call each other with Client Credentials; AuditService subscribes to Kafka topics rather than being called directly. But for a 3-person team, one monolith with <code>auth</code>/<code>users</code>/<code>audit</code> packages is simpler and just as maintainable.</div>
   </div>
 
+<p class="hf-deck">or, "talking to another service" and "acting as the user" are two different questions — microservices make you answer both, every time</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Your OrderService → AuditService call worked in every test. Then a scheduled job tried to log an event, and there was no user around to blame it on.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">It worked for months — right up until nothing HTTP triggered the call</div>
+  <p>OrderService forwards the caller's JWT to AuditService on every write, because that token is
+  already sitting in the request thread and forwarding it is one line:
+  <code>.header("Authorization", incomingAuthHeader)</code>. Every controller-triggered call passes
+  it along, every test goes through an authenticated HTTP request first, so every test is green.
+  Then someone adds a nightly reconciliation job — a plain <code>@Scheduled</code> method, no
+  incoming request, no JWT anywhere to forward — and it also needs to write an audit event.
+  AuditService starts rejecting it with 401s that make no sense, because there genuinely is no
+  token to forward, and nobody ever built a second path.</p>
+  <div class="hf-scatter">
+    <span>every controller-triggered call worked ✓</span>
+    <span>unit tests all green ✓</span>
+    <span>no JWT exists outside a request thread ⚠</span>
+    <span>AuditService has never had to authenticate "the system itself" ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that AuditService's caller is always "a user, via a
+  request." Writing an audit row isn't done on the user's authority — it's the system doing
+  system things.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Ask which authority the call actually needs — before picking a token</div>
+  <div class="hf-ladder">
+    <b>Call is on behalf of the logged-in user's own data → forward or relay their JWT</b>
+    <i>↓ e.g. OrderService asking UserService for the current user's own profile</i>
+    <b>Call is the system acting, regardless of trigger → Client Credentials, a service-level token</b>
+    <i>↓ e.g. an audit write, an IdP sync, a scheduled job with no user in the picture at all</i>
+    <b>Now the scheduled job and the HTTP-triggered call authenticate identically</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Every service call answers two separate questions: who's calling, and on whose authority.</b>
+  Forwarding the user's JWT answers both with "the user" — correct when that's literally true (they
+  asked for their own data), wrong the moment the call is really the system acting, because then
+  there's no user authority to invoke and, eventually, nothing sitting in a thread to forward at all.
+</div>
+
+<div class="hf-note">Think of it like a company mailroom clerk. Ask the clerk to send <b>your</b>
+personal package and they sign for it as you — your name goes on the slip, because you're the one
+who asked. When the company itself needs to ship its routine invoices every night, the clerk signs
+as the <i>company</i>, not as whichever employee happened to be nearby — because no particular
+employee asked for it. Try to ship the nightly invoices under some random employee's name and the
+signature makes no sense to whoever receives it. That's the scheduled job with a forwarded token
+that doesn't exist.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>OrderService already has the user's JWT sitting right there in the request. Why not just pass it along to AuditService?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">OrderService</span>
+    <p>Because I only have that JWT while I'm inside an actual HTTP request. The moment something
+    calls me without one — a scheduled job, a Kafka listener — I have nothing left to forward, and
+    I still owe AuditService that write.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">AuditService</span>
+    <p>And from where I sit, I can't tell "a legitimate system write" from "someone forged a
+    header" unless I know which kind of authority I'm supposed to trust. I need to trust Client
+    Credentials tokens for service-to-service calls as a rule — not just on the days a user
+    happens to be attached.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The Client Credentials grant</span>
+    <p>That's what I'm for. I don't represent a user at all — I represent OrderService itself,
+    with its own client ID and its own scopes. I exist and I'm valid whether a human triggered
+    this request or a cron job did.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One call path for a click. One call path for a cron job. Same authentication code either way.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A request reaches OrderService — either from a user (HTTP, JWT present) or from nothing external at all (a <code>@Scheduled</code> trigger, no JWT)</span><span class="tag">two very different starting points</span></li>
+    <li class="open"><span>OrderService decides which authority the downstream call actually needs — "on behalf of this user," or "the system, regardless of trigger"</span><span class="tag">the real design decision</span></li>
+    <li><span>If it's on behalf of the user: relay the validated JWT, scoped to exactly what that call needs</span><span class="tag">token relay — legitimate, not a shortcut</span></li>
+    <li class="open"><span>If it's the system acting: request a Client Credentials token using OrderService's own client ID and secret against the IdP's token endpoint</span><span class="tag">no user in this token at all</span></li>
+    <li><span>AuditService validates whichever token shows up the same way every time — signature, issuer, audience, scope — never by checking "is a user attached"</span><span class="tag">AuditService doesn't need to know which path it came from</span></li>
+    <li class="open"><span>The scheduled job and the HTTP-triggered call now hit the exact same authenticated endpoint, because both requested the token KIND that actually matched what they were doing</span><span class="tag">the fix that makes the bug impossible, not just handled</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is the lesson. Deciding which authority a given call needs is a design
+  decision made once, up front — not something answered by "whatever token happens to be lying
+  around in the thread." Retrofitting it later usually means finding every place a JWT got
+  casually forwarded and asking, one call at a time, whether it was ever really on the user's
+  authority to begin with.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">OrderService needs to call AuditService<small>same HTTP client, same endpoint, every time</small></div>
+    <div class="arrow">whose authority is this call really on? →</div>
+    <div class="opts">
+      <span>Forward the user's JWT — this call is on behalf of one specific logged-in user</span>
+      <span class="on">Request a Client Credentials token — this call is the system itself, no user involved</span>
+      <span>Trust the call because it came from inside the private network — no token at all</span>
+    </div>
+  </div>
+  <p class="hf-annot">AuditService's endpoint doesn't change based on which of these gets picked —
+  same URL, same verb. What changes is which token lands in the <code>Authorization</code> header,
+  and that's the whole decision: does this specific call carry a user's authority, or the system's?
+  The third option is the one the CodeWalk below calls out as unsafe for anything multi-tenant —
+  "inside the network" isn't an identity, so there's nothing left to check against.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">NotificationService needs to send a password-reset email. The flow starts at a
+  public, unauthenticated <code>POST /api/password-reset</code> on the gateway — there's no
+  logged-in user, so no user JWT exists anywhere in this request. How should the call from
+  AuthService to NotificationService authenticate?</p>
+  <button type="button">Client Credentials — AuthService requests a service-level token for itself and calls NotificationService as the system, since there was never a user authority to invoke</button>
+  <button type="button">Forward the gateway's own service token as if it were a user token — NotificationService can't tell the difference anyway</button>
+  <button type="button">Mint a temporary anonymous-user JWT for the visitor, so this call looks the same as every other AuthService → NotificationService call</button>
+  <p class="why" data-for="0">Right — there's no user to act on behalf of, so don't invent one. Client Credentials represents AuthService itself, which is exactly the authority this call actually has.</p>
+  <p class="why" data-for="1">Tempting because it's the least code — but a service token and a user token mean different things to whatever validates them downstream. If NotificationService, or anything auditing its calls, ever assumes a token in that slot represents a specific human, blending the two breaks that assumption silently instead of failing loudly.</p>
+  <p class="why" data-for="2">This reads like consistency, but it manufactures an identity that never existed. There was no logged-in user in this flow — pretending there was one just to keep the code path uniform makes the audit trail lie about who did what, which is worse than the two paths looking slightly different.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">Three systems, one split: is this the user's authority, or the system's own?</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>AWS IAM instance roles vs. a user's own credentials</h4>
+    <p>An EC2 instance or Lambda function assumes an IAM <i>role</i> to call other AWS services —
+    completely separate from any IAM <i>user's</i> personal credentials, on purpose. The instance's
+    authority exists independent of any person, the same way OrderService's Client Credentials
+    token does.</p>
+    <div class="hf-scatter"><span>instance role ≈ client credentials</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Unix cron job running as its own service account</h4>
+    <p>A 3am cron job doesn't run "as you," even on a box you personally set it up on — it runs as
+    a dedicated service account, precisely so it keeps working (and keeps its blast radius
+    contained) whether or not you're logged in, and doesn't silently exercise your personal
+    permissions.</p>
+    <div class="hf-scatter"><span>service account ≈ client credentials</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>CIAM: the IdP's own logs tell service traffic apart from user traffic</h4>
+    <p>When a service authenticates via Ping's or Entra's <code>client_credentials</code> grant, the
+    client ID that shows up in the IdP's own audit log for that call is the <i>service's</i>
+    registered client — not any user. That's what makes "which service called which, and when"
+    something you can actually query later, independent of whatever user traffic was happening at
+    the same moment.</p>
+    <div class="hf-scatter"><span>separate client ID = separate audit trail</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Doesn't Client Credentials mean OrderService can now call anything, with no restriction at all?</p>
+  <p class="a">No — Client Credentials tokens carry scopes just like user tokens do, just scoped to
+  what that <i>service</i> is registered to do rather than to a person. OrderService's client
+  registration in Ping or Entra should only be granted what it actually needs (say,
+  <code>audit:write</code>), not blanket access. The whole point of giving each service its own
+  client ID is being able to restrict, rotate, or revoke one service's access without touching any
+  other service, or any user.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">If a circuit breaker trips because AuditService is down, does OrderService's request fail too?</p>
+  <p class="a">That depends entirely on whether the <code>fallbackMethod</code> treats the audit
+  write as critical or best-effort. For most systems it shouldn't be critical — the fallback should
+  queue the event (locally, or onto a durable topic) and let OrderService's own response to the
+  customer succeed anyway. Failing someone's checkout because the audit trail is temporarily
+  unreachable is usually the wrong trade-off, and that's a business decision the fallback method
+  encodes — Resilience4j doesn't decide it for you.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does a Saga's compensating transaction need its own authority story too?</p>
+  <p class="a">Yes, and it's easy to miss. A compensating call like
+  <code>inventoryClient.releaseReservation(orderId)</code> is the system undoing its own earlier
+  action — not a user asking for anything — so it authenticates the same way a scheduled job or an
+  audit write does, with the service's own Client Credentials. Never with whatever user token
+  started the original saga, which may well have expired by the time the compensation actually
+  runs.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  Your API Gateway validates the user's JWT once, then relays it unchanged to OrderService, which
+  relays it unchanged again to InventoryService for a stock check. InventoryService's own client
+  registration in the IdP has never been granted the scope that user's JWT carries — only
+  OrderService's registration has it. Does InventoryService's call succeed?
+</div>
+
   <!-- ── HERO: animated microservice communication · live per-step inspector ── -->
   <div class="panel" style="border:1px solid var(--accent)">
     <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:var(--accent)">▶ Watch services talk — sync REST, async events, discovery, gateway</h2>
@@ -875,5 +1071,6 @@ renderNodes(cur);
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-hf-check.js"></script>
 </body>
 </html>

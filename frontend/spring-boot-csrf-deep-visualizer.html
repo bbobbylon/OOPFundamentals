@@ -96,6 +96,215 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> Standard Angular + Bearer: <code>http.csrf(c -&gt; c.disable())</code> is safe. BFF (Angular + httpOnly session cookie): CSRF must stay on — use <code>CookieCsrfTokenRepository.withHttpOnlyFalse()</code> and send requests with <code>withCredentials:true</code> so Angular returns the <code>X-XSRF-TOKEN</code> automatically. The common mistake is disabling CSRF in the BFF because it "feels like a REST API" — then the auto-attached session cookie makes it vulnerable.</div>
   </div>
 
+<p class="hf-deck">or, Spring's CSRF filter doesn't protect your app — it protects four HTTP verbs</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">CSRF was fully enabled. The token wiring worked everywhere it was tested. The account closed anyway.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A clicked link closed an account, and every CSRF setting on the page was correct</div>
+  <p>This BFF has CSRF properly enabled — <code>CookieCsrfTokenRepository</code>, Angular echoing
+  <code>X-XSRF-TOKEN</code>, every <code>POST</code>/<code>PUT</code>/<code>DELETE</code> endpoint
+  tested and confirmed to reject a forged request. A teammate then ships a one-click "close my
+  account" link for a support email, and to keep it a plain clickable URL instead of a form, they
+  route it as <code>GET /account/close?confirm=true</code>. An attacker posts that exact URL in a
+  forum reply — "click here for your refund" — and a logged-in victim clicks it out of curiosity. The
+  browser does an ordinary top-level navigation: a real <code>GET</code>, session cookie attached like
+  always. The account closes. Nobody forged a POST. Nobody needed to.</p>
+  <div class="hf-scatter">
+    <span>CookieCsrfTokenRepository correctly wired ✓</span>
+    <span>every POST/PUT/DELETE in the app requires X-XSRF-TOKEN ✓</span>
+    <span>/account/close is a GET endpoint ⚠</span>
+    <span>Spring's CsrfFilter never checks GET requests ⚠</span>
+  </div>
+  <p class="hf-foot">The wrong assumption: that "CSRF is on" means the app is covered. It means every
+  non-safe-method endpoint is covered.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">State-changing actions get a state-changing verb — no exceptions for convenience</div>
+  <div class="hf-ladder">
+    <b>Route account closure as POST /account/close (or DELETE), never GET</b>
+    <i>↓ now it falls under the four methods CsrfFilter actually inspects</i>
+    <b>For a one-click email link, land on a tiny confirmation page with a real button instead of a bare href</b>
+    <i>↓ still feels like one tap — but it goes out as a real POST, carrying the token</i>
+    <b>GET stays exactly what HTTP promises it is: safe to click, cache, and prefetch</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Spring's CsrfFilter doesn't protect your application — it protects four HTTP methods.</b>
+  Everything except <code>GET</code>, <code>HEAD</code>, <code>OPTIONS</code>, and <code>TRACE</code>
+  gets a token check; those four are waved through by design, because HTTP's own spec calls them
+  "safe" and promises they never change anything. Enabling CSRF is necessary but nowhere near
+  sufficient — the moment one of your endpoints breaks that promise, the filter's coverage of it
+  isn't weakened, it's zero.
+</div>
+
+<div class="hf-note">Think of CsrfFilter as a bouncer posted at a revolving door, checking IDs on
+everyone who spins through it. There's a side door marked EXIT ONLY a few feet away, and he doesn't
+watch it at all — nobody's supposed to enter that way, so why would he? The revolving door is every
+POST/PUT/DELETE in your app. The exit door is GET. It works perfectly until someone quietly wires the
+exit door to also let people into the vault.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>CSRF is on, SameSite is set, the token wiring works everywhere I tested it. How did /account/close get triggered from a link in a forum post?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">CsrfFilter</span>
+    <p>I only ever look at four methods — GET, HEAD, OPTIONS, TRACE — and I wave every one of them
+    straight through without asking for a token. Nobody told me otherwise; HTTP's spec says those
+    methods aren't supposed to change anything, so I take that on faith.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">SameSite=Lax</span>
+    <p>Don't look to me either. I block plenty of cross-site requests, but I was built with one
+    deliberate exception: a real top-level navigation — a clicked link — still gets the cookie.
+    Otherwise every link shared outside your own site would silently log people out.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">GET /account/close?confirm=true</span>
+    <p>I'm the one who shouldn't exist. I take an action with real consequences while wearing the one
+    method every filter and cookie policy on this page has already promised is harmless.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Every request meets the same filter. Only some of them get asked for proof.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>CsrfFilter</code> sits early in the chain and runs on <b>every</b> request, safe
+    method or not</span><span class="tag">nothing skips the filter itself</span></li>
+    <li class="open"><span>It checks the request's HTTP method against its "requires CSRF"
+    matcher</span><span class="tag">the one decision that matters</span></li>
+    <li><span><code>GET</code>, <code>HEAD</code>, <code>OPTIONS</code>, <code>TRACE</code> →
+    matcher says "not required" → the request passes through untouched</span><span class="tag">the "safe methods" HTTP already promised</span></li>
+    <li class="open"><span>Any other method — <code>POST</code>, <code>PUT</code>, <code>PATCH</code>,
+    <code>DELETE</code> → matcher says "required" → the filter looks for a token</span><span class="tag">everything meant to change data</span></li>
+    <li><span>Token present and matching the one tied to the session → request continues to
+    authentication/authorization</span><span class="tag">the happy path</span></li>
+    <li class="open"><span>Token missing or mismatched on a required method → <b>403</b> immediately,
+    before your controller ever runs</span><span class="tag">this is the protection actually firing</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the lesson. CSRF's entire value depends on a promise your own
+  endpoints have to keep — that a GET never changes anything. Break that promise anywhere in the app
+  and step 3 waves the attack straight through, with the filter behaving exactly as designed the whole
+  time. Nothing is misconfigured. The filter did its job; the job just didn't cover this request.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">GET /account/close?confirm=true<small>same session cookie as every other request</small></div>
+    <div class="arrow">↓ CsrfFilter checks the method first</div>
+    <div class="opts">
+      <span class="on">GET / HEAD / OPTIONS / TRACE → "safe" → no token required  ← this request</span>
+      <span>POST / PUT / PATCH / DELETE → "unsafe" → token required, checked here</span>
+    </div>
+  </div>
+  <p class="hf-annot">This isn't a bug in the filter — it's a fork built into it on purpose. Every
+  request lands in exactly one lane, and which lane is decided entirely by the verb sitting at the
+  front of the request line. Nothing else about the request — not the path, not what it actually
+  does to your database — factors into that decision at all.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A BFF has CSRF fully enabled and every mutating endpoint verified to require
+  <code>X-XSRF-TOKEN</code>. A teammate ships a one-click "unsubscribe" feature as a plain
+  <code>GET /notifications/unsubscribe</code> link, meant to be pasted straight into emails. An
+  attacker posts that same URL as a clickable link in a public forum thread. A logged-in victim
+  clicks it out of curiosity. What happens?</p>
+  <button type="button">Nothing — the browser's default SameSite=Lax withholds the session cookie on this cross-site request</button>
+  <button type="button">Nothing — Spring's CsrfFilter rejects the request with 403 because no X-XSRF-TOKEN header was sent</button>
+  <button type="button">The unsubscribe runs — clicking the link is a top-level GET navigation, which SameSite=Lax explicitly allows, and CsrfFilter never required a token for GET in the first place</button>
+  <p class="why" data-for="0">A reasonable guess, because SameSite=Lax does block plenty of cross-site
+  requests. But it carves out exactly one exception: a top-level navigation using a safe method —
+  precisely what a clicked link produces. That carve-out exists so ordinary links, bookmarks, and
+  shares keep working across sites; it also means a clicked GET link still carries the cookie.</p>
+  <p class="why" data-for="1">This is exactly what would happen to a forged POST — which is why "CSRF
+  is on" feels like it should cover this too. But <code>CsrfFilter</code>'s token requirement only
+  applies to unsafe methods. A GET is never asked for a token in the first place, so there's no
+  missing token here for it to catch.</p>
+  <p class="why" data-for="2">Right — two separate, correctly configured defenses, both irrelevant
+  here because the vulnerable action is wearing a GET's clothing. Neither SameSite nor CSRF tokens
+  were ever designed to stop a GET from doing something a GET is promised not to do.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">"GET must be safe" is a promise the whole web relies on — CSRF is just one of the things that breaks when you don't keep it.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Web crawlers have deleted real data this way — no attacker required</h4>
+    <p>A search-engine crawler indexing every link on a page, or a browser prefetching links it
+    predicts you'll click, treats "it's a GET" as "safe to follow automatically." Sites that once
+    exposed a "delete this page" or "log out" action as a plain GET link learned this the hard way —
+    a well-behaved bot walked every link on the site and triggered every one of them. No malice
+    anywhere in the story; the same broken promise is the entire cause.</p>
+    <div class="hf-scatter"><span>"safe to follow" and "safe to forge" are the same promise</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>HTTP caching assumes the identical contract</h4>
+    <p>Browsers, corporate proxies, and CDNs are explicitly permitted by the HTTP spec to cache,
+    retry, and replay GET requests, because GET is supposed to be side-effect free. A mutating GET can
+    get silently re-executed by a completely well-behaved cache retrying a slow response — with no
+    attacker, no forged link, and no CSRF anywhere in the picture.</p>
+    <div class="hf-scatter"><span>infrastructure trusts the verb the same way the filter does</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>In CIAM: OAuth2's state parameter is CSRF protection for your login flow</h4>
+    <p>The exact same attack shape — ride a victim's browser into performing an action they didn't
+    intend — targets the OAuth2 authorization redirect too: without <code>state</code>, an attacker
+    can start their own login, capture the resulting <code>code</code>, and trick the victim's browser
+    into finishing your app's callback with the attacker's code, binding the victim's session to an
+    account the attacker controls. <code>state</code> (and PKCE's <code>code_verifier</code>) proves
+    the callback belongs to the browser that started the flow — CSRF protection, just guarding your
+    login instead of your data.</p>
+    <div class="hf-scatter"><span>same forgery, aimed at the redirect instead of the form</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">Why doesn't Spring just require a CSRF token on every request, GET included, and remove the exception entirely?</p>
+  <p class="a">Because that would break ordinary browsing. A clicked link, a bookmark, an
+  <code>&lt;img&gt;</code> tag pointing at your own site, a search engine indexing your pages — all of
+  those are GET requests with no mechanism to attach a custom header, and the entire read side of the
+  web depends on GET working without extra ceremony. The fix was never "protect GET too" — it's "never
+  let GET do something that needs protecting" in the first place.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does SameSite=Lax help here at all, since this page already recommends it?</p>
+  <p class="a">Only partly, and the edge is sharp: Lax withholds the cookie on cross-site
+  <i>subrequests</i> — an <code>&lt;img&gt;</code>, an iframe, a <code>fetch()</code> call — but
+  deliberately still sends it on a top-level navigation using a safe method, because that's exactly
+  what happens when someone clicks an ordinary link. A forged image tag gets blocked by Lax. A forged
+  link the victim actually clicks does not, and a GET-based mutation is exposed to precisely that
+  second case. <code>Strict</code> closes the gap but breaks normal links into your app from anywhere
+  else — which is why real apps combine Lax, CSRF tokens, <i>and</i> "never mutate on GET," rather than
+  picking just one.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">How would code review even catch this — the endpoint looks exactly like every other read?</p>
+  <p class="a">It doesn't look like a read — that's the actual failure. Review the verb, not the
+  security annotations near it: any <code>@GetMapping</code> (or anything reachable by a bare URL)
+  that writes to a database, sends an email, or changes account state is the bug, regardless of how
+  perfectly CSRF, SameSite, and authentication are configured everywhere else. The fix is never more
+  security configuration — it's moving the action off a method that was never supposed to cover it.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  Same <code>GET /account/close?confirm=true</code>, same <code>SameSite=Lax</code> session cookie —
+  today's browser default. This time the attacker can't get the victim to click anything; they embed
+  <code>&lt;img src="https://yourapp.com/account/close?confirm=true"&gt;</code> on a page the victim
+  merely visits. Does this version of the attack work? Now suppose the cookie were set with
+  <code>SameSite=None</code> instead — does your answer change?
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -565,6 +774,7 @@ diagnose();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -103,6 +103,194 @@
     </div>
   </div>
 
+<p class="hf-deck">or, TypeScript checked the type you generated last month — not the type the server returns today</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The build was green. Code review found nothing. Production disagreed.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A backend change plus a stale generated client compiles clean and breaks at runtime</div>
+  <p>The generated <code>UserDto</code> says <code>phoneNumber: string</code> — accurate, the day
+  someone last ran <code>generate-api</code>. Weeks later the backend team makes phone number
+  optional during a new signup flow, and the OpenAPI spec now marks it nullable. Nobody on frontend
+  reruns the generator. A component still does <code>user.phoneNumber.slice(0, 3)</code> to preview
+  an area code. <code>tsc</code> passes with zero errors — as far as the type checker knows, this is
+  a plain, always-present <code>string</code>, because that's what the file on disk still says. In
+  production, a newly onboarded user has no phone number, the live API genuinely returns
+  <code>null</code>, and <code>.slice</code> on <code>null</code> throws — a line the compiler
+  signed off on, blowing up in front of a real user.</p>
+  <div class="hf-scatter">
+    <span>npm run build passed, zero TS errors ✓</span>
+    <span>code review found nothing wrong ✓</span>
+    <span>the generated .d.ts describes last month's contract ⚠</span>
+    <span>the live API already returns a shape TS never saw ⚠</span>
+  </div>
+  <p class="hf-foot">The type checker didn't lie to you about the file it was given. It just was
+  never told the file was already wrong.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Regenerate on every backend change, and let CI catch the ones you forget</div>
+  <div class="hf-ladder">
+    <b>Run npm run generate-api immediately after pulling a backend change — not "whenever I remember"</b>
+    <i>↓ the generated files are a snapshot of one spec version; they don't self-update</i>
+    <b>Or, commit the generated client and add a CI step that regenerates it and fails on any diff</b>
+    <i>↓ that turns "someone forgot" into a build failure instead of a production surprise</i>
+    <b>Either way: the generated folder is disposable build output — never hand-edit it directly</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A generated client is a snapshot of the contract, not a live connection to it.</b> Every
+  interface in the generated folder describes the OpenAPI spec exactly as it existed the moment
+  someone last ran the generator — nothing about it watches the real backend, notices a change, or
+  invalidates itself. TypeScript's structural typing then trusts that snapshot completely, which is
+  exactly why a build can stay green for weeks after the two sides have quietly drifted apart.
+</div>
+
+<div class="hf-note">It's a printed map. The map was completely accurate the day it was printed —
+a road that closed last week doesn't announce itself on the paper, and you only find out at the
+roadblock, not before. Regenerating the client is reprinting the map, not fixing a map that was
+ever wrong.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>tsc passed. Code review passed. Why did this throw in production?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Generated UserDto</span>
+    <p>Because I told you the truth — about the spec that existed when someone last ran the
+    generator. I don't have a live connection to your backend. I'm a file, not a subscription.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The real API</span>
+    <p>And I don't know you're holding an old copy of me. I just serve whatever the current code
+    says, which already changed weeks ago. Nobody asked me to notify anyone.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Generated UserDto</span>
+    <p>Regenerate me after every backend change, and I'm accurate again — for exactly as long as
+    nothing changes after that.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One command turns a live spec into files TypeScript trusts completely — until the spec moves again.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The backend exposes its OpenAPI document at a URL (springdoc's /v3/api-docs) or a checked-in YAML/JSON file — the one live source of truth</span><span class="tag">the actual contract</span></li>
+    <li class="open"><span>Running the generator (openapi-generator-cli, ng-openapi-gen) reads that document ONCE, at that moment, and writes TypeScript interfaces + Angular services to disk</span><span class="tag">a snapshot, taken once</span></li>
+    <li><span>Every generated service method's return type is one of those interfaces — HttpClient.get&lt;UserDto&gt;(...) under the hood, the same pattern you'd hand-write, just generated for you</span><span class="tag">still just HttpClient</span></li>
+    <li class="open"><span>TypeScript checks your code against the generated interfaces at compile time — it has no way to check the interfaces themselves against the live backend, since that would require a network call during a build</span><span class="tag">checked against the file, not the server</span></li>
+    <li class="open"><span>When the backend's spec changes, the already-generated files on disk do not change — nothing watches the source URL, no file-watcher, no push notification</span><span class="tag">silent by default, not malicious</span></li>
+    <li><span>The gap closes the instant someone reruns the generator — and stays closed only until the next backend change nobody regenerates for</span><span class="tag">a recurring gap, not a one-time fix</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the one to internalize: the silence isn't a bug in the tooling, it's
+  the entire design. A generated client is <i>supposed</i> to be regenerated on demand — treating
+  that as automatic, rather than a step you own, is the actual mistake underneath every "but tsc
+  passed" surprise.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>UserService.getUser()</span><span>AuditService.list()</span><span>RoleService.update()</span>
+    </div>
+    <div class="funnel">every generated call ↓ same HttpClient, same interceptor chain</div>
+    <div class="instance">authInterceptor<small>attaches Authorization: Bearer … automatically — generated code gets it for free, no extra wiring</small></div>
+  </div>
+  <p class="hf-annot">Generated services aren't a separate HTTP stack living outside Angular — every
+  one of them calls the same injected HttpClient your hand-written services use, so the same
+  interceptor chain (auth token, error handling, retry) applies to a generated call exactly as it
+  would to one you typed by hand. Nothing about codegen opts a request out of your pipeline.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">You hand-edit a generated file directly — say, adding a workaround inside
+  <code>user.service.ts</code> for a backend bug — planning to remove it once the backend ships a
+  fix. Two weeks later, someone runs <code>npm run generate-api</code> after an unrelated backend
+  change. What happens to your workaround?</p>
+  <button type="button">Silently overwritten — the generator rebuilds the file from the spec every run, with no awareness a human edited it in the meantime</button>
+  <button type="button">Preserved — ng-openapi-gen diffs manual edits against the prior output and merges them into what it generates next</button>
+  <button type="button">The generate script fails with a merge conflict, and you have to resolve it by hand before the build continues</button>
+  <p class="why" data-for="0">Right — generated files are overwritten wholesale on every run; there's
+  no merge step and no diff-awareness of prior manual edits. This is exactly why the good-card
+  pattern on this page treats the generated folder as disposable output: any edit made directly to
+  it has an expiration date — the next regen — with no warning when that date arrives.</p>
+  <p class="why" data-for="1">That would be a genuinely nice feature, but it isn't how these
+  generators work. There's no tracked history of which lines were machine-written versus
+  hand-edited, so there's nothing for a merge step to diff against — the generator's only input is
+  the spec, and its only output is a fresh file.</p>
+  <p class="why" data-for="2">Generation isn't source-control-aware at all — it doesn't check
+  whether the file already exists or whether a human changed it. It just writes the new file over
+  the old one, silently and successfully, exactly like any other build-output directory would.</p>
+</div>
+
+<div class="hf-kick">Where you've seen this before</div>
+<p class="hf-say">"Snapshot of a contract, not a live connection to it" shows up anywhere code gets generated from a spec.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Compiled protobuf / gRPC stubs</h4>
+    <p>A <code>.proto</code> file changes, but nobody reruns <code>protoc</code> — the generated
+    stub classes keep describing the old message shape, and client code compiles cleanly against a
+    contract the server already abandoned. Same snapshot-versus-live-source gap, different file
+    extension.</p>
+    <div class="hf-scatter"><span>regenerate the stub, or trust a lie</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Any build-output directory, including node_modules</h4>
+    <p>Nobody hand-edits a compiled bundle or a package's dist folder and expects it to survive the
+    next build — everyone already treats that class of file as disposable. A generated OpenAPI
+    client deserves exactly the same instinct, even though it's TypeScript source-looking enough
+    that it's tempting to forget.</p>
+    <div class="hf-scatter"><span>if a tool writes it, a tool can overwrite it</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Ping Federate and Entra's own OpenAPI specs, for real</h4>
+    <p>The exact same discipline applies to the IdP side, not just your own Spring API — when Entra
+    bumps a Graph API version or Ping Federate's admin API adds a field, a generated PingDirectory
+    or Graph client goes stale the same silent way. "Regenerate after any spec change" isn't a rule
+    for your own backend only; it's a rule for every OpenAPI source you generate from.</p>
+    <div class="hf-scatter"><span>the IdP's spec drifts on its own schedule, not yours</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Questions from the back row</div>
+<div class="hf-ask">
+  <p class="q">If the generated client already wraps HttpClient, is there ever a good reason to hand-write a service instead?</p>
+  <p class="a">Yes — a call that isn't REST-shaped, endpoint-specific caching or retry logic the spec
+  can't express, or an endpoint the OpenAPI spec doesn't (yet) describe accurately are all fair
+  reasons to hand-write that one call. The pattern is to hand-write the exception and let codegen own
+  everything else, not to abandon codegen the first time one endpoint doesn't fit it.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">Does regenerating automatically catch it when the backend removes a field my code still uses?</p>
+  <p class="a">Yes, and this is the best reason to regenerate often rather than rarely. A field
+  removed from the spec is removed from the generated interface too, and any code still referencing
+  it fails <code>tsc</code> immediately — converting a silent runtime gap into a loud, fixable
+  compile error, which is the exact opposite of this page's opening scenario.</p>
+</div>
+<div class="hf-ask">
+  <p class="q">What breaks first if the OpenAPI spec itself is wrong — say, a field marked required that the backend sometimes actually omits?</p>
+  <p class="a">Nothing breaks at generate time or compile time. Both the generator and tsc trust the
+  spec as ground truth, so a wrong spec produces a confidently wrong, perfectly clean-compiling
+  client. Codegen doesn't remove the need for runtime response validation on anything
+  security- or correctness-critical — it just moves most of the tedium somewhere else.</p>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  The OpenAPI spec marks <code>email</code> as <code>nullable: true</code>. The generator
+  faithfully produces <code>email: string | null</code>. Your component does
+  <code>user.email.toLowerCase()</code> with no null check anywhere. Does <code>tsc</code> catch
+  this at compile time — or does it slip through to runtime exactly like the <code>phoneNumber</code>
+  bug earlier on this page? What single project setting decides which one happens?
+</div>
+
   <!-- ── EXTREME-VIZ HERO: OpenAPI Client ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -454,6 +642,7 @@ document.getElementById('run').onclick=run;
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

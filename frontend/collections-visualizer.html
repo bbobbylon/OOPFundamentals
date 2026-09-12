@@ -294,7 +294,112 @@
     <div class="intro-ciam"><span class="tag">CIAM / Spring Boot:</span> A shared <code>userCache</code> is a <code>ConcurrentHashMap</code>; search results are an <code>ArrayList&lt;UserDto&gt;</code> (random access, returned to Angular); a role set is a <code>HashSet</code> for O(1) <code>contains("CIAM_ADMIN")</code> permission checks; ordered+deduped audit entries use <code>LinkedHashSet</code>; and injected config lists are wrapped in <code>Collections.unmodifiableList()</code>.</div>
   </div>
 
-  <!-- ── TRY IT LIVE ── -->
+  <p class="hf-deck">or, why sorting a "copy" just rearranged your own array</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You hand your array to a helper method to get it sorted back — and the array still sitting in your own variable changes too, without you touching it again.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The leaderboard that rewrote itself</div>
+  <p>You've got a small helper: <code>List&lt;String&gt; view = Arrays.asList(board); Collections.sort(view);</code> — a one-line way to sort an array without hand-rolling a loop. It compiles, it runs, the returned list prints in perfect alphabetical order. Code review approves it.</p>
+  <p>Three weeks later someone logs <code>board[0]</code> back in the caller — the exact <code>String[]</code> array they built and never reassigned — and it's not <code>"Priya"</code> anymore, the name they inserted first. It's whatever sorted first. Nobody sorted <code>board</code>. Nobody even has a second reference to a "sorted copy." There is no copy.</p>
+  <div class="hf-scatter">
+    <span>the code compiles ✓</span>
+    <span>the returned list prints sorted, correctly ✓</span>
+    <span>the caller's own array silently reordered ⚠</span>
+  </div>
+  <p class="hf-foot"><code>Arrays.asList()</code> never allocated a new array. It handed you a <code>List</code>-shaped window onto the one you already had, and <code>Collections.sort()</code> sorted through the glass.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Copy before you wrap — or know you didn't</div>
+  <div class="hf-ladder">
+    <b>Ask: does anything else still hold a reference to this array?</b>
+    <i>↓ if the array came from a caller, a field, or anywhere you don't fully control, assume yes</i>
+    <b>Wrap it in a real, independent list: <code>new ArrayList&lt;&gt;(Arrays.asList(board))</code></b>
+    <i>↓ <code>ArrayList</code>'s copy constructor walks every element into its OWN backing array — the aliasing ends right there</i>
+    <b>And only reach for bare <code>Arrays.asList(board)</code> when the alias is the point</b>
+    <i>↓ a throwaway literal like <code>Arrays.asList("GET","POST","PUT")</code> has no backing array anyone else can see, so there's nothing to leak into</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> <code>Arrays.asList(arr)</code> is a view, not a copy — every read and every write passes straight through to <code>arr</code>'s own memory. That's not a bug; it's what makes it cheap enough to use as a quick adapter between an array and a method that wants a <code>Collection</code>. The moment <code>arr</code> is something a caller still holds onto, that cheapness is a live wire back into their data.
+</div>
+
+<div class="hf-note">Think of <b>Arrays.asList as a window, not a moving box</b>. A box carries your furniture to a new room — rearrange it there, the old room is untouched. A window just gives you a new way to look at the same room. Rearrange the furniture through the window and the room on the other side changes too, because it was never a different room.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I'll wrap this array as a List so I can call <code>Collections.sort()</code> on it. Quick one-liner, no loop.</p></div>
+  <div class="hf-bub right"><span class="who">Arrays.asList, personified</span><p>Here's your List. I never said anything about making you a new array to go with it.</p></div>
+  <div class="hf-bub"><span class="who">You, returning the sorted list</span><p>Great, sorted. I'll hand this back to the caller as the result.</p></div>
+  <div class="hf-bub right"><span class="who">The original array, still sitting in the caller's variable</span><p>Funny story — I'm sorted now too. Nobody asked me. Nobody told the caller, either.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Here's the exact chain from one innocent <code>Arrays.asList()</code> call to the caller's own array changing shape.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>String[] board = {"Priya","Sam","Ana"};</code></span><span class="tag">your array, 3 slots</span></li>
+    <li class="open"><span><code>List&lt;String&gt; view = Arrays.asList(board);</code></span><span class="tag">constructor stores the exact reference — no copy</span></li>
+    <li><span><code>Collections.sort(view);</code></span><span class="tag">compiles, runs, looks harmless</span></li>
+    <li class="open"><span><code>Collections.sort()</code> just calls <code>view.sort(null)</code></span><span class="tag">the generic path every List takes</span></li>
+    <li><span>but <code>Arrays.asList</code>'s list overrides <code>sort()</code> to call <code>Arrays.sort(a, c)</code> directly</span><span class="tag">the real mechanism</span></li>
+    <li class="open"><span>caller reads <code>board[0]</code> later — different name than they put there</span><span class="tag">the surprise</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the one to sit with. Most lists inherit <code>List</code>'s default <code>sort()</code>, which copies itself to an <code>Object[]</code>, sorts <em>that copy</em>, then writes each element back with <code>set()</code> — a level of indirection that would have protected you here. The private list class behind <code>Arrays.asList()</code> overrides <code>sort(Comparator)</code> to skip all of that and call <code>Arrays.sort(a, c)</code> straight on its field <code>a</code> — and per the constructor in step 2, <code>a</code> was never a copy. It's the exact array object you built. One method call reaches all the way through to <code>board</code>'s own memory, no <code>set()</code> loop in between.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx"><code>Arrays.asList(board)</code> needs somewhere to store its elements<small>where do they actually live?</small></div>
+    <div class="arrow">what actually happens →</div>
+    <div class="opts">
+      <span>a new array, allocated fresh</span>
+      <span class="on"><code>board</code> itself — no copy at all</span>
+      <span>a defensive copy taken at call time</span>
+    </div>
+  </div>
+  <p class="hf-annot">Either of the other two options would make this whole page moot. Java picked the third for a reason: <code>Arrays.asList</code> is documented as a thin adapter — its whole job is letting an array stand in wherever a <code>Collection</code> is expected — and copying on every call would tax the common case (a throwaway literal, a one-off argument) to protect against the rare one (an array someone else still holds). You're not getting a bug. You're getting the fast option, and fast options that skip a copy always come with this string attached.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A teammate writes <code>List&lt;Integer&gt; scores = Arrays.asList(raw); scores.add(100);</code> to tack on a bonus score, and it throws <code>UnsupportedOperationException</code> at runtime. Why?</p>
+  <button type="button">Because <code>Arrays.asList</code> returns a fully immutable list, so no write of any kind is ever allowed</button>
+  <button type="button">Because <code>Arrays.asList</code> returns a fixed-size list — overwriting a slot with <code>set()</code> is fine, but <code>add()</code>/<code>remove()</code> would change the array's length, which isn't possible</button>
+  <button type="button">Because <code>raw</code> was declared <code>final</code>, so none of its elements can ever change</button>
+  <p class="why" data-for="0">Not immutable — <code>scores.set(0, 55)</code> works fine, and it even changes <code>raw[0]</code> along with it. What's blocked is only resizing: <code>add</code>, <code>remove</code>, and <code>clear</code> all throw, because none of them has an array operation underneath that means "make this array one slot bigger."</p>
+  <p class="why" data-for="1">Right. The returned list is a fixed-size window over an actual array. <code>set()</code> just overwrites a slot the array already has, so it sails through. <code>add()</code> would need a slot that doesn't exist yet, <code>Arrays.asList</code> has no way to grow the backing array to make one, and it throws rather than silently doing something else.</p>
+  <p class="why" data-for="2"><code>final</code> only freezes the variable <code>raw</code> itself — it can never be reassigned to point at a different array. It says nothing about the array's contents, and this exact exception fires even without <code>final</code> anywhere in sight, because the restriction lives in the <code>List</code> implementation <code>Arrays.asList</code> returns, not in how the array variable was declared.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Looks like a copy, is actually the same memory" is not a Java-only trap.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>NumPy array slicing</h4>
+    <p>In Python, <code>a[1:4]</code> on a NumPy array doesn't copy — it returns a view sharing the exact same memory buffer as <code>a</code>. Mutate the slice, and <code>a</code> changes at those indices too. You have to call <code>.copy()</code> to actually get your own array.</p>
+    <div class="hf-scatter"><span>slice ≠ copy</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Mutating a shared array in JavaScript/TypeScript</h4>
+    <p>Pass an array into a function and call <code>.sort()</code> or <code>.reverse()</code> on it, and you've reordered the caller's array — arrays are objects, and objects are handed around by reference. It's the same bug that bites an Angular component that sorts an <code>@Input() items: T[]</code> instead of copying it first.</p>
+    <div class="hf-scatter"><span>pass-by-reference bites again</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Unix hard links</h4>
+    <p>Two filenames can point at the same inode. Edit the file through either path and the "other file" changes too — not because the edit propagated anywhere, but because there was only ever one file with two names taped onto it.</p>
+    <div class="hf-scatter"><span>two names, one file</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> this page is a field guide to Java's collection types — which <code>List</code>, <code>Set</code>, <code>Map</code>, or <code>Queue</code> to reach for, and what each one costs you in time and memory when you pick wrong. <b>The one new sentence this block adds:</b> <code>Arrays.asList()</code> isn't a converter that builds you a new collection — it's a fixed-size, live window onto the array you already had, so sorting or editing it can rewrite memory the original caller still thinks nobody touched.
+</div>
+
+<!-- ── TRY IT LIVE ── -->
   <div class="tryit" data-lang="java"
        data-title="🧪 Try it: three Maps, three different orders from identical puts"
        data-predict="All three maps get the same 4 puts. Write down the key order each will print — then run.">
@@ -1514,6 +1619,7 @@ renderHeap(-1, '');
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

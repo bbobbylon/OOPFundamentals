@@ -29,7 +29,120 @@
   <h1>React State Management</h1>
   <p class="sub">useState for local state, useReducer for complex logic, Context for shared state, and Zustand for global app state — picking the right tool for each layer.</p>
 
-  <!-- ── INTRO ── -->
+    <p class="hf-deck">or, why two setState calls after an await only ever paint once</p>
+
+  <div class="hf-kick">The problem</div>
+  <p class="hf-say">You call setState twice, expect two renders, and modern React quietly gives you one.</p>
+
+  <div class="hf-card bad">
+    <div class="hf-cardtitle">The badge that reads stale the instant after you updated it</div>
+    <p>Your CIAM admin console's "Deactivate User" button runs an async handler: <code>await api.deactivate(id)</code>, then <code>setUsers(u =&gt; u.filter(x =&gt; x.id !== id))</code>, then on the very next line <code>setSelectedCount(0)</code>, then a <code>console.log(document.getElementById('selected-badge').textContent)</code> to confirm the badge cleared before firing a toast.</p>
+    <p>The console.log prints the <em>old</em> count. Every time. You didn't forget to call <code>setSelectedCount</code>, you didn't typo the element ID — the DOM genuinely hasn't been touched yet. Both updates are queued, and React doesn't commit either one until your whole handler function finishes running.</p>
+    <div class="hf-scatter">
+      <span>await api.deactivate(id) genuinely finished ✓</span>
+      <span>both setState calls ran, no typos ✓</span>
+      <span>the DOM read one line later shows the old value ⚠</span>
+    </div>
+    <p class="hf-foot">Every pre-2022 tutorial that says "one setState call equals one render" is describing a React that no longer exists.</p>
+  </div>
+
+  <div class="hf-card good">
+    <div class="hf-cardtitle">Ask for the render you need, instead of assuming it already happened</div>
+    <div class="hf-ladder">
+      <b>Recognize this as React 18's automatic batching, not a bug</b>
+      <i>&darr; every update in the same tick groups into one render, no matter where it was triggered from</i>
+      <b>If code right after setState needs the updated DOM, wrap that update in flushSync from react-dom</b>
+      <i>&darr; flushSync forces React to commit before the next line runs — the escape hatch, not the default</i>
+      <b>Otherwise, let the batch happen — one render for several updates is almost always what you actually want</b>
+    </div>
+  </div>
+
+  <div class="principle" style="text-align:left">
+    <b>Since React 18, every state update in the same tick batches into a single render, no matter what triggered it.</b> A promise callback, a setTimeout, a native DOM event listener, and a JSX onClick all behave identically now — previously only the JSX case batched this way. Code that reads the DOM between two setState calls is reading a render that hasn't happened yet, unless you force it with flushSync.
+  </div>
+
+  <div class="hf-note">Picture a waiter who used to sprint to the kitchen after every single item you ordered — appetizer, a trip, entrée, another trip. Modern React is the waiter who waits until you say "that's everything" and makes one trip with the whole order. Faster for the kitchen — but if you were timing your watch against "the appetizer trip specifically," <b>that trip doesn't exist anymore.</b></div>
+
+  <div class="hf-talk">
+    <div class="hf-bub">
+      <span class="who">You</span>
+      <p>I called setSelectedCount(0) and read the badge's text on literally the next line. Why does it still show the old number?</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">Your component's next render</span>
+      <p>Because I haven't happened yet. Your handler function hasn't even finished executing — React is still collecting updates, not applying them.</p>
+    </div>
+    <div class="hf-bub">
+      <span class="who">React 18's batching</span>
+      <p>I wait for your whole callback to return, then apply every queued update from that tick in one pass. That's true whether you called setState from a promise, a timeout, or a plain click — I stopped checking where you called me from.</p>
+    </div>
+    <div class="hf-bub right">
+      <span class="who">flushSync</span>
+      <p>And if you genuinely can't wait, that's what I'm for. Wrap the one update you need on-screen right now in me, and I'll force the render before your next line runs. Everything else can still batch normally.</p>
+    </div>
+  </div>
+
+  <div class="hf-kick">The mechanism</div>
+  <p class="hf-say">Watch what actually happens to two updates queued in the same breath.</p>
+
+  <div class="hf-card">
+    <ol class="hf-steps">
+      <li><span><code>handleDeactivate</code> awaits <code>api.deactivate(id)</code>; the promise resolves and the continuation starts running</span><span class="tag">resolve</span></li>
+      <li class="open"><span><code>setUsers(u =&gt; ...)</code> runs — React does not re-render yet, it just records "there's a pending update for this state"</span><span class="tag">queued #1</span></li>
+      <li><span>The very next line calls <code>setSelectedCount(0)</code> — React records a second pending update, still no render</span><span class="tag">queued #2</span></li>
+      <li class="open"><span>Your <code>console.log</code> runs on the line after that — synchronously, before React has committed anything — so it reads whatever the LAST render already painted</span><span class="tag">stale read</span></li>
+      <li><span>Your handler function finishes executing and returns control to the JavaScript engine</span><span class="tag">callback ends</span></li>
+      <li class="open"><span>Only now does React process the queued updates together, re-render once with both new values applied, and commit a single DOM update</span><span class="tag">one render, one commit</span></li>
+    </ol>
+    <p class="hf-annot">Step 4 is the trap. It isn't that React updated the wrong thing — nothing had been committed yet at all. Your read landed in the gap between "update requested" and "update applied," and that gap is exactly where the old mental model of "setState is basically synchronous" stops being true.</p>
+  </div>
+
+  <div class="hf-card">
+    <div class="hf-one">
+      <div class="callers"><span>a promise .then()</span><span>a setTimeout callback</span><span>a raw addEventListener</span></div>
+      <div class="funnel">React 18 batches all of them identically &darr;</div>
+      <div class="instance">One render, committed after your callback returns<small>React 17 batched only the first kind — the other two got one render per setState call</small></div>
+    </div>
+    <p class="hf-annot">Three call sites that used to behave three different ways under React 17 now funnel into the exact same rule. That uniformity is the actual feature — "automatic" in "automatic batching" means you no longer have to remember which of these three contexts you're calling setState from to predict how many renders you'll get.</p>
+  </div>
+
+  <div class="hf-check" data-answer="2">
+    <p class="q">A CIAM admin's deactivate-user handler is wired with a plain <code>element.addEventListener('click', handler)</code> — not a JSX <code>onClick</code> — and <code>handler</code> is <code>async</code>. After <code>await api.deactivate(id)</code> resolves, it calls <code>setUsers(...)</code> and then, on the next line, <code>setSelectedCount(0)</code>. On React 18 with <code>createRoot</code>, how many times does the component re-render because of these two calls?</p>
+    <button type="button">Twice — once per setState call, since this handler isn't a JSX onClick</button>
+    <button type="button">Zero — React defers both updates to the next idle frame, so no render happens until the user interacts again</button>
+    <button type="button">Once — React 18 batches both calls into a single render, regardless of where the calls originated</button>
+    <p class="why" data-for="0">That's the React 17 rule. Before React 18, only updates inside React's own event handlers were batched; a native <code>addEventListener</code> callback got a separate render per setState call. React 18's <code>createRoot</code> extended batching to promises, timeouts, and native handlers alike, so this handler now behaves exactly like a JSX onClick would.</p>
+    <p class="why" data-for="1">Batching delays the commit, it doesn't cancel it. React still renders — just once — as soon as the current callback finishes running, not on some future idle frame or the next user interaction.</p>
+    <p class="why" data-for="2">Right. Since React 18, <code>createRoot</code> batches every state update from a given tick into one render, no matter whether it came from a JSX event, a promise continuation, a timeout, or a raw DOM listener like this one. That uniformity is the whole point of "automatic batching."</p>
+  </div>
+
+  <div class="hf-kick">Where you have seen this before</div>
+  <p class="hf-say">Batch the visible effect, not just the work — three systems, same instinct.</p>
+
+  <div class="hf-terms">
+    <div class="hf-card hf-taped">
+      <h4>A SQL transaction wrapping three UPDATE statements</h4>
+      <p>Other connections don't see row 1's change, then row 2's, then row 3's, arriving one at a time. They see nothing, then all three at once, the instant COMMIT runs — a consistent snapshot beats three inconsistent ones.</p>
+      <div class="hf-scatter"><span>all-or-nothing beats partial-and-visible</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>Three chained <code>Promise.resolve().then()</code> callbacks</h4>
+      <p>The browser drains the entire microtask queue before it paints a single frame — three chained callbacks that each tweak the DOM still only ever produce one visible paint, never three flickers.</p>
+      <div class="hf-scatter"><span>the queue drains, then the screen updates once</span></div>
+    </div>
+    <div class="hf-card hf-taped">
+      <h4>An identity provider batching SCIM attribute changes into one webhook</h4>
+      <p>A user's title, department, and manager all change in one HR sync. A well-built IDP fires one <code>user.updated</code> event carrying all three new values, not three separate partial-user events a downstream app has to reconcile in order.</p>
+      <div class="hf-scatter"><span>one consistent event beats three half-updated ones</span></div>
+    </div>
+  </div>
+
+  <div class="hf-napkin">
+    <b>The whole page on a napkin:</b> Pick the smallest tool that fits — useState for local state, useReducer for many related transitions, Context for slow-changing subtree state, Zustand for fast-changing global state, TanStack Query for anything that lives on a server. <b>The one new sentence this block adds:</b> however you trigger a state update — a click, a promise, a timeout — React 18 batches everything from that tick into one render, so code that expects the DOM to update between two setState calls needs flushSync, not faith.
+  </div>
+
+
+<!-- ── INTRO ── -->
   <div class="intro">
     <div class="intro-head"><span class="ico">🧱</span> What are the layers of React state management — and which tool belongs at which layer?</div>
     <p class="intro-lead">
@@ -262,6 +375,7 @@ DevHubCodeWalk.mount('#cw-rsm',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

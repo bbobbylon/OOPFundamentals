@@ -101,7 +101,112 @@
     <div class="intro-ciam"><span class="tag">CIAM / Spring Boot:</span> Build a profile page by fetching user, roles, and audit in parallel — three <code>supplyAsync(...)</code> futures joined with <code>allOf(...).join()</code> so total time is the slowest call, not the sum. With <code>@Async CompletableFuture&lt;Void&gt; sendWelcomeEmail(user)</code> the call is fire-and-forget: the pool queues it and the caller returns immediately.</div>
   </div>
 
-  <!-- ── TRY IT LIVE ── -->
+  <p class="hf-deck">or, the exception that never got thrown to anyone</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You submit a background task, it throws, and your logs stay completely silent — not because nothing went wrong, but because something caught the exception perfectly and never told you.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The charge that silently never happened</div>
+  <p>A billing job fires off work with <code>ExecutorService pool = Executors.newFixedThreadPool(8);</code> then, for every due order, <code>pool.submit(() -&gt; chargeCustomer(o));</code> — fire and forget, nobody keeps the returned <code>Future</code>. Seven orders charge fine.</p>
+  <p>The eighth order has a null payment method from an earlier data bug, so <code>chargeCustomer</code> throws a <code>NullPointerException</code>. The worker thread doesn't die. Nothing prints to the console. Nothing lands in the log file. The loop moves on to order nine like nothing happened. Weeks later someone notices that customer was never charged, and there is nothing anywhere that explains why.</p>
+  <div class="hf-scatter">
+    <span>the pool runs correctly ✓</span>
+    <span>seven of eight orders charge fine ✓</span>
+    <span>the eighth order's exception is gone without a trace ⚠</span>
+  </div>
+  <p class="hf-foot"><code>submit()</code> didn't fail to catch that exception. It caught it perfectly — and filed it somewhere you never opened.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Never submit a task you don't plan to inspect</div>
+  <div class="hf-ladder">
+    <b>If you won't call <code>.get()</code>, don't reach for <code>submit()</code> on a task that can throw — use <code>execute()</code> instead</b>
+    <i>↓ <code>execute()</code> lets the exception reach the thread's <code>UncaughtExceptionHandler</code>, which by default prints a stack trace — <code>submit()</code> cannot do that, by design</i>
+    <b>If you do need the <code>Future</code> — for cancellation, chaining, or a result — keep it, and call <code>.get()</code> even just to check for failure</b>
+    <i>↓ <code>.get()</code> rethrows the stored exception wrapped in an <code>ExecutionException</code>; that call is the only door out</i>
+    <b>And if neither fits, override <code>afterExecute</code> and probe the completed task yourself</b>
+    <i>↓ this is the exact pattern the JDK's own Javadoc ships as the fix — catch <code>ExecutionException</code> from <code>((Future&lt;?&gt;) r).get()</code> inside <code>afterExecute</code></i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> <code>submit()</code> wraps your task in a <code>FutureTask</code>, whose <code>run()</code> method catches every <code>Throwable</code> and stores it as the outcome instead of letting it escape — so the only way that exception ever reaches you is a <code>.get()</code> call on the exact <code>Future</code> <code>submit()</code> handed back. <code>execute()</code> makes no such promise, so its exceptions go where uncaught exceptions have always gone: straight to the thread's default handler.
+</div>
+
+<div class="hf-note"><b>A submitted exception isn't gone — it's locked in a box only <code>.get()</code> holds the key to.</b> Throw away the <code>Future</code>, and you've thrown away the only key, not the box.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I submitted a background task. It should've logged something if it failed, right?</p></div>
+  <div class="hf-bub right"><span class="who">The Future, personified</span><p>It didn't fail silently — it threw, I caught it, and I've been holding onto it patiently ever since.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Nobody told me that. There's nothing in the logs.</p></div>
+  <div class="hf-bub right"><span class="who">The Future, personified</span><p>You never called <code>get()</code>. I don't hand this out for free — you have to ask.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Here's the exact fork between <code>execute()</code> and <code>submit()</code>, straight out of <code>ThreadPoolExecutor</code>'s own worker loop.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>a worker thread calls <code>task.run()</code> inside <code>runWorker()</code></span><span class="tag">same call site, either way</span></li>
+    <li class="open"><span>with <code>execute(runnable)</code>, <code>task</code> IS your <code>Runnable</code> — its exception escapes <code>run()</code> directly</span><span class="tag">nothing intercepts it</span></li>
+    <li><span><code>runWorker</code> catches it only long enough to call <code>afterExecute(task, ex)</code>, then rethrows</span><span class="tag">on its way out</span></li>
+    <li class="open"><span>the rethrow reaches the thread's <code>UncaughtExceptionHandler</code> — default: a stack trace to stderr</span><span class="tag">your only "for free" alternative</span></li>
+    <li><span>with <code>submit(runnable)</code>, <code>task</code> is actually a <code>FutureTask</code> wrapping your code</span><span class="tag">a different object entirely</span></li>
+    <li class="open"><span><code>FutureTask.run()</code> catches the <code>Throwable</code> itself and calls <code>setException(ex)</code> — <code>run()</code> then returns normally</span><span class="tag">nothing left to rethrow</span></li>
+  </ol>
+  <p class="hf-annot">Step 6 is the entire trick. <code>task.run()</code> returning normally is what tells <code>runWorker</code> that nothing went wrong — because as far as <code>runWorker</code> can see, nothing did. The exception is real, and it's sitting inside that <code>FutureTask</code> object right now. The only door out is <code>Future.get()</code>, and you can't call it on a <code>Future</code> you didn't keep a reference to.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">your submitted task just threw<small>where does the exception actually go?</small></div>
+    <div class="arrow">what actually happens →</div>
+    <div class="opts">
+      <span>straight to stderr, same as <code>execute()</code></span>
+      <span class="on">held inside the <code>Future</code>, until something calls <code>get()</code></span>
+      <span>discarded the instant the task finishes — gone for good</span>
+    </div>
+  </div>
+  <p class="hf-annot">The middle option is correct, and the third one is the dangerous myth. The exception isn't gone — it's sitting in memory inside the <code>FutureTask</code> the whole time, reachable through whatever variable holds the <code>Future</code>. If your code kept that reference, <code>.get()</code> still works five minutes later. The failure mode was never "Java threw this away" — it's "your code threw away the only reference that could unlock it," which is a much easier mistake to make, and a much easier one to fix.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A method runs <code>Future&lt;Integer&gt; f = pool.submit(() -&gt; 10 / 0);</code> and never calls anything else on <code>f</code>. Which of these is actually true?</p>
+  <button type="button">The pool immediately crashes that worker thread, so the next <code>submit()</code> call on this pool will fail</button>
+  <button type="button">Nothing happens, because the division inside a lambda passed to <code>submit()</code> doesn't actually run until something calls <code>.get()</code></button>
+  <button type="button">Nothing bad happens yet from the outside — the <code>ArithmeticException</code> is sitting inside <code>f</code>, waiting for a <code>.get()</code> call that will re-throw it wrapped in an <code>ExecutionException</code></button>
+  <p class="why" data-for="0">The worker thread survives just fine — that's exactly what makes this trap easy to miss. <code>FutureTask.run()</code> catches the <code>Throwable</code> itself, so nothing propagates out to kill the thread or upset the pool. The next <code>submit()</code> runs on a perfectly healthy worker.</p>
+  <p class="why" data-for="1">The task isn't lazy — the pool runs it as soon as a worker is free, <code>get()</code> or not. The division by zero happens immediately; what waits for <code>get()</code> is only the delivery of the exception it produced, not the computation itself.</p>
+  <p class="why" data-for="2">Right. <code>FutureTask.run()</code> catches the exception and stores it via <code>setException()</code> instead of letting it escape. It's real, it's sitting inside <code>f</code> right now, and calling <code>f.get()</code> is the only thing that ever surfaces it — wrapped in an <code>ExecutionException</code>, with the original <code>ArithmeticException</code> as its cause.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The failure is stored, not reported, until you explicitly ask" is a recurring shape across async models.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>JavaScript's unhandled Promise rejections</h4>
+    <p>A <code>fetch()</code> call that rejects with no <code>.catch()</code> attached doesn't crash your app — the rejection just sits there until something inspects it. Runtimes only started warning about this by default after enough production outages traced back to exactly this silence.</p>
+    <div class="hf-scatter"><span>reject ≈ throw, .catch ≈ .get()</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Kotlin's <code>launch</code> vs. <code>async</code> coroutines</h4>
+    <p>An exception inside a <code>launch {}</code> coroutine propagates immediately and can crash the app. The identical exception inside an <code>async {}</code> coroutine is stored quietly and only rethrown when something calls <code>.await()</code> — the same fork in the road as <code>execute()</code> vs. <code>submit()</code>.</p>
+    <div class="hf-scatter"><span>two builders, two failure timelines</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Go's ignored error returns</h4>
+    <p><code>result, _ := riskyCall()</code> compiles cleanly and discards the error value entirely. Nothing forces you to check it — the failure was never hidden any more than a <code>Future</code>'s exception is, you just never asked to see it.</p>
+    <div class="hf-scatter"><span>the underscore that eats a failure</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> this page is the advanced concurrency toolkit — executor pools, <code>CompletableFuture</code> pipelines, thread-safe collections, atomics, locks, and Java 21's virtual threads — for running work off the main thread without corrupting shared state. <b>The one new sentence this block adds:</b> <code>submit()</code> doesn't fail to report a thrown exception, it succeeds at hiding one — inside the exact <code>Future</code> you have to keep a reference to, and call <code>.get()</code> on, to ever see it again.
+</div>
+
+<!-- ── TRY IT LIVE ── -->
   <div class="tryit" data-lang="java"
        data-title="🧪 Try it: ExecutorService + Future — submit work, collect answers"
        data-predict="Three tasks are submitted together. Does main() block at submit() or at get()? Watch the print order.">
@@ -764,6 +869,7 @@ function submitBatch(){for(let i=0;i<5;i++)setTimeout(submitTask,i*150);}
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>
