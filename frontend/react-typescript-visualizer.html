@@ -58,7 +58,7 @@
     <div class="intro-ciam"><span class="tag">CIAM React app:</span> Share types between Spring Boot and React: a <code>record CreateUserRequest(... @Email String email, @NotNull IdpType idpType)</code> mirrors <code>interface CreateUserDto { ...; idpType: 'PING' | 'ENTRA' }</code> — and <code>openapi-typescript</code> can auto-generate the React types from your <code>springdoc-openapi</code> spec to keep them in sync. TS also catches null crashes: <code>user?.roles.includes('CIAM_ADMIN')</code>, and a Context typed <code>AuthContextType | null</code> forces a null-check before <code>auth.user</code> — the same discipline as Spring's <code>@NonNull</code>.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="txSeg">
@@ -126,6 +126,126 @@
     <h2>3. The React.FC debate</h2>
     <div class="key-insight"><strong>Prefer a plain function with a typed props parameter over <code>React.FC</code>.</strong> <code>React.FC</code> historically forced an implicit <code>children</code> prop (even for components that take none), complicates generics, and adds little. The community-recommended style is <code>function Comp(props: Props) {}</code> or <code>const Comp = (props: Props) =&gt; {}</code> and declare <code>children</code> explicitly when you want it.</div>
   </section>
+<p class="hf-deck">or, the one call TypeScript checks perfectly and still lets you store the wrong thing</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Type the state, type the setter, get a green compile — and store <code>undefined</code> where you meant to store a callback, because React and TypeScript disagree about what a function argument means.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Putting a function <i>in</i> state is the one case <code>useState</code>'s API cannot express</div>
+  <p>A confirm dialog needs to remember what to run when the user says yes, so it keeps the callback in state: <code>const [onConfirm, setOnConfirm] = useState&lt;(() =&gt; void) | null&gt;(null)</code>. The annotation is exactly what the cheat sheet above recommends. Then, when the dialog opens: <code>setOnConfirm(deleteUser)</code>.</p>
+  <p>React's setter has two meanings for its argument. Pass a value and it becomes the new state; pass a <i>function</i> and React treats it as the updater form — it calls your function with the previous state and stores whatever comes back. The only test it performs is <code>typeof action === 'function'</code>. It has no way to know your state is <i>supposed</i> to be a function, because that is a fact about types and types do not exist at runtime.</p>
+  <p>So <code>setOnConfirm(deleteUser)</code> does not store <code>deleteUser</code>. It <b>calls</b> <code>deleteUser</code>, immediately, during the update — deleting the user before anyone clicked confirm — and stores its return value, <code>undefined</code>. And TypeScript signs off, because <code>SetStateAction&lt;S&gt;</code> is <code>S | ((prev: S) =&gt; S)</code>: when <code>S</code> is itself a function type, your argument satisfies the first branch perfectly. The call is well typed and means the opposite of what you wrote.</p>
+  <div class="hf-scatter">
+    <span>state is annotated exactly as recommended ✓</span>
+    <span><code>strict</code> is on, no <code>any</code> anywhere ✓</span>
+    <span>the compiler reports no error ✓</span>
+    <span>React sees a function and calls it ⚠</span>
+    <span>the callback fires now, and state becomes undefined ⚠</span>
+  </div>
+  <p class="hf-foot">Both readings of that argument are valid. React picks one at runtime, TypeScript checks the other at compile time, and neither is wrong on its own terms.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Wrap the function so it arrives as a return value, not as an argument</div>
+  <div class="hf-ladder">
+    <b>Store it with the updater form: <code>setOnConfirm(() =&gt; deleteUser)</code></b>
+    <i>↓ now React calls the outer arrow — which is what it always does — and stores what it returns, which is your callback; the extra <code>() =&gt;</code> is not noise, it is which of the two meanings you intended</i>
+    <b>The identical trap exists on the initial value: <code>useState(deleteUser)</code> runs it as a lazy initialiser</b>
+    <i>↓ same fix, same reason — <code>useState(() =&gt; deleteUser)</code> — and the lazy-initialiser form is genuinely useful, which is exactly why the ambiguity exists</i>
+    <b>Better still, do not put functions in state at all: keep the <i>data</i> and derive the action</b>
+    <i>↓ <code>useState&lt;{ kind: 'delete'; id: string } | null&gt;(null)</code> is serialisable, loggable, comparable and cannot be accidentally invoked — a state shape with no ambiguity to fall into</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A type system can only check the meanings an API distinguishes. When one runtime value has two meanings chosen by <code>typeof</code>, the types inherit the ambiguity rather than resolving it.</b> That is why the compiler's silence here is not a gap in TypeScript — the call genuinely satisfies the declared signature. The lesson generalises past React: any parameter that is "a value, unless it is a function, in which case it is an operation" is a place where types stop protecting you, and the only defence is knowing the convention.
+</div>
+
+<div class="hf-note"><b>React's setter asks one question about your argument: is it a function?</b> It never asks whether your <i>state</i> is supposed to be one. Wrap it in an arrow and you have answered the question you actually meant.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I typed the state as <code>(() =&gt; void) | null</code> and passed a <code>() =&gt; void</code>. The compiler was happy. How is this wrong?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">TypeScript</span>
+    <p>It is not wrong, by my rules. <code>SetStateAction&lt;S&gt;</code> is <code>S | ((prev: S) =&gt; S)</code>, and your argument matches the <code>S</code> branch exactly. I checked the call correctly. I have no way to warn you that the runtime resolves the same union differently than I do.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The React setter</span>
+    <p>And at runtime there are no branches to choose between — there is one value, and I run <code>typeof action === 'function'</code>. Your callback is a function, so I call it with the previous state. That behaviour is what makes <code>setCount(c =&gt; c + 1)</code> possible, which is the feature nobody would give up.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The lazy initialiser</span>
+    <p>Same story on my side, and worth knowing separately: <code>useState(expensiveCalc)</code> calls <code>expensiveCalc</code> once on mount instead of on every render. Genuinely useful — and it means <code>useState(myCallback)</code> has already invoked your callback before the component has even finished rendering.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps, and the destructive one happens before the user clicks anything.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>const [onConfirm, setOnConfirm] = useState&lt;(() =&gt; void) | null&gt;(null)</code> — the state is a nullable callback</span><span class="tag">exactly as annotated</span></li>
+    <li class="open"><span>Opening the dialog runs <code>setOnConfirm(deleteUser)</code>, intending to remember what to do later</span><span class="tag">reads as a store</span></li>
+    <li><span>TypeScript checks it against <code>SetStateAction&lt;(() =&gt; void) | null&gt;</code>, matches the plain-value branch, and reports nothing</span><span class="tag">correctly, by its rules</span></li>
+    <li class="open"><span>React runs <code>typeof action === 'function'</code>, gets <code>true</code>, and calls <code>deleteUser(previousState)</code></span><span class="tag">the user is deleted, here</span></li>
+    <li><span><code>deleteUser</code> returns nothing, so the new state is <code>undefined</code> — not <code>null</code>, and not the callback</span><span class="tag">state silently wrong too</span></li>
+    <li class="open"><span>The user clicks Confirm. <code>onConfirm</code> is <code>undefined</code>, so nothing happens — the action already ran when the dialog opened</span><span class="tag">two bugs, one line</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 deserves a moment on its own: the state ends up <code>undefined</code>, which is <i>outside</i> the type you declared — you annotated <code>(() =&gt; void) | null</code> and the value at runtime is neither. That is worth noticing because it is a reminder of what a type annotation actually is: a claim checked at the boundaries the compiler can see, not an invariant enforced at runtime. <b>Anywhere a value crosses a boundary the compiler does not model — a network response, a <code>JSON.parse</code>, or a library that inspects <code>typeof</code> — the declared type is a hypothesis</b>, and this one was falsified by the library's own setter.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span><code>useState(myCallback)</code> — meant as "the initial value is this callback"</span>
+      <span><code>setValue(myCallback)</code> — meant as "store this callback"</span>
+      <span><code>setCount(c =&gt; c + 1)</code> — meant as "compute from the previous value"</span>
+    </div>
+    <div class="funnel">React's only test is <code>typeof === 'function'</code> ↓</div>
+    <div class="instance">call it, and keep what it returns<small>correct for the third; destructive for the first two</small></div>
+  </div>
+  <p class="hf-annot">Three call sites, three different intentions, one runtime rule — and the rule was designed around the third, which is by far the most common. That is the trade the React team made, and it is a defensible one: the updater form solves stale-closure bugs, and storing a function in state is rare. What the diagram makes visible is that <b>the ambiguity is in the API's shape, not in your code</b>, so no amount of care at the call site removes it; only the wrapping arrow does. It is the same reason <code>useMemo(() =&gt; fn, [])</code> and <code>useCallback(fn, [])</code> exist as separate hooks — one returns what your function produced, the other returns the function itself.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A dialog stores its confirm handler in state: <code>const [onConfirm, setOnConfirm] = useState&lt;(() =&gt; void) | null&gt;(null)</code>. Opening the dialog calls <code>setOnConfirm(deleteUser)</code>, where <code>deleteUser: () =&gt; void</code>. TypeScript reports no error. What happens?</p>
+  <button type="button">It works as written — the declared state type is a function type, so TypeScript resolves <code>SetStateAction</code> to the value branch and React stores the callback unchanged</button>
+  <button type="button"><code>deleteUser</code> runs immediately, because React treats any function argument as the updater form; the stored state becomes its return value, <code>undefined</code>, so clicking Confirm later does nothing</button>
+  <button type="button">A runtime <code>TypeError</code> — React calls the updater with the previous state, and <code>deleteUser</code> declares no parameters, so the call fails on arity before the handler body executes</button>
+  <p class="why" data-for="0">TypeScript really does resolve it that way, which is why there is no error — and that resolution has no effect on the running program, because the types are erased before React ever sees the argument. React's check is <code>typeof action === 'function'</code>, and it has no access to what you declared <code>S</code> to be.</p>
+  <p class="why" data-for="1">Correct, and the fix is one arrow: <code>setOnConfirm(() =&gt; deleteUser)</code>, so React calls the wrapper and stores what it returns. The same trap applies to the initial value — <code>useState(deleteUser)</code> treats it as a lazy initialiser and calls it on mount.</p>
+  <p class="why" data-for="2">JavaScript never throws on extra arguments — a zero-parameter function called with one argument simply ignores it. That is part of why this is so quiet: the call succeeds, the side effect happens, and the only trace is a state value that is not what you expected.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Any API that decides what you meant by inspecting the value's type has a case it cannot see.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4><code>useMemo</code> versus <code>useCallback</code></h4>
+    <p>The same distinction, promoted into two hook names: <code>useMemo(() =&gt; fn, [])</code> memoises the <i>result</i> of calling your function, <code>useCallback(fn, [])</code> memoises the function itself. They exist as a pair precisely because "a function argument" is ambiguous, and React chose to disambiguate by API name rather than by inspection.</p>
+    <div class="hf-scatter"><span>two names for one ambiguity</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Storing a class in a Java generic container</h4>
+    <p><code>Map&lt;String, Supplier&lt;T&gt;&gt;</code> versus <code>Map&lt;String, T&gt;</code> is the same decision made explicitly, and it is why factories exist as a named concept: "the thing" and "something that makes the thing" are different types, and conflating them is a whole category of bug.</p>
+    <div class="hf-scatter"><span>the value or the way to get it</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A shell variable holding a command</h4>
+    <p><code>CMD="rm -rf $DIR"</code> versus <code>CMD='rm -rf $DIR'</code> — one expands now, one expands when run, and the quote character is the entire difference. <b>Whenever a value can be "what it is" or "what it does", something small and easy to omit has to say which.</b></p>
+    <div class="hf-scatter"><span>evaluate now, or evaluate later</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> type props with a plain type alias and a typed parameter rather than <code>React.FC</code>, prefer string-literal unions over <code>string</code>, annotate <code>useState</code> when the initial value does not tell the whole story, type DOM refs as <code>useRef&lt;HTMLInputElement&gt;(null)</code>, and reach for <code>ComponentProps</code> to extend native elements. The sentence worth adding: <b>React's setter calls any function you pass it</b>, so storing a callback in state needs <code>setValue(() =&gt; fn)</code> — and TypeScript cannot warn you, because the unwrapped call is perfectly well typed.
+</div>
+
 </div>
 
 <!-- ── Code Walkthrough: React + TypeScript ── -->
@@ -259,6 +379,7 @@ DevHubCodeWalk.mount('#cw-rtsx',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -58,7 +58,110 @@
     <div class="intro-ciam"><span class="tag">Angular equivalent:</span> <code>useState</code> ≈ <code>signal()</code>; <code>useEffect</code> ≈ <code>ngOnInit</code>/<code>ngOnDestroy</code>/<code>effect()</code> (the cleanup return = teardown); <code>useRef</code>(DOM) ≈ <code>@ViewChild(..., {read: ElementRef})</code>; <code>useMemo</code> ≈ <code>computed()</code>; <code>useCallback</code> ≈ stable class methods. Key difference: Angular drives change detection via Zone.js/Signals, while React needs an explicit <code>setState</code> to re-render — mutating a plain variable never updates the UI.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the hook that "fixes" state one render too late</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You reset a piece of state with a perfectly reasonable-looking <code>useEffect</code> — and for one whole frame, the screen shows you a lie.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The highlighted comment belongs to the WRONG post</div>
+  <p>A comment thread component keeps <code>const [selectedId, setSelectedId] = useState(null)</code>. When the user switches posts, you want the selection to clear, so you write the hook every tutorial teaches you to reach for: <code>useEffect(() =&gt; { setSelectedId(null); }, [postId]);</code> — clean, declarative, and it does eventually clear the selection.</p>
+  <p>But "eventually" is the trap. React already renders and paints the NEW post's comments with the OLD <code>selectedId</code> still attached, because the effect cannot run until AFTER that render is already on screen. For one real frame, comment #4 from post 12 shows highlighted inside post 7's list — and if your render code does <code>comments.find(c =&gt; c.id === selectedId).author</code> without a guard, that frame throws instead of just looking wrong.</p>
+  <div class="hf-scatter">
+    <span>the effect's dependency array ✓</span>
+    <span>the state shape itself ✓</span>
+    <span>the timing of WHEN it runs ⚠</span>
+  </div>
+  <p class="hf-foot">Every line is correct. The bug is entirely about WHEN "correct" arrives.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Reset the state during render, not after it</div>
+  <div class="hf-ladder">
+    <b>Track the previous prop value in a plain useState — no ref needed</b>
+    <i>↓ <code>const [prevPostId, setPrevPostId] = useState(postId);</code> is just a normal state slot, used only as a comparison</i>
+    <b>Compare it WHILE rendering, and call setState right there if it changed</b>
+    <i>↓ <code>if (postId !== prevPostId) { setPrevPostId(postId); setSelectedId(null); }</code> — yes, calling setState mid-render is allowed for exactly this case</i>
+    <b>And stop reaching for useEffect just to mirror a prop into state</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>An effect is a message you send after the show already started.</b> useEffect runs after React commits and the browser paints — it exists for things outside React (subscriptions, DOM APIs, logging), not for keeping one piece of state in sync with a prop that's already available during render. When state depends purely on props you already have, computing or resetting it inline isn't a hack — React's own documentation recommends it, because it collapses two renders (and one visibly wrong frame) into one.
+</div>
+
+<div class="hf-note">A sticky note for the whiteboard: <b>an effect is a text message — it arrives after the fact.</b> If you need the answer before you hang up the phone, say it out loud during the call instead. Setting state during render is saying it during the call; a useEffect reset is the text message that shows up after you've already hung up.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>But I was always told never to call setState while rendering — isn't that how you get infinite loops?</p></div>
+  <div class="hf-bub right"><span class="who">The React docs</span><p>Only if you call it unconditionally. Guard it with a comparison against a value from the previous render — like <code>prevPostId</code> above — and it fires at most once per real prop change, same as an effect, just one render sooner.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So is useEffect just... wrong for this?</p></div>
+  <div class="hf-bub right"><span class="who">useEffect</span><p>Not wrong — late. I'm for synchronizing with something OUTSIDE React: a WebSocket, <code>document.title</code>, an interval. Resetting a piece of YOUR OWN state because a prop changed doesn't need me at all.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Walk through why the effect version costs you an entire extra render — and why that extra render is visible, not theoretical.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>postId</code> changes from 12 to 7 — the parent re-renders this component</span><span class="tag">render #1 starts</span></li>
+    <li class="open"><span>The component body runs top to bottom; <code>selectedId</code> is still whatever it was under post 12</span><span class="tag">stale state</span></li>
+    <li><span>React commits render #1 to the DOM and the browser paints it</span><span class="tag">frame on screen</span></li>
+    <li class="open"><span>The user SEES post 7's comments with post 12's selection still highlighted — this frame is real, not theoretical</span><span class="tag">visible bug</span></li>
+    <li><span>Only now does <code>useEffect</code> fire (post-paint) and call <code>setSelectedId(null)</code></span><span class="tag">effect runs</span></li>
+    <li class="open"><span>React schedules and commits render #2 — now it's correct, one full frame later than the user's eyes</span><span class="tag">render #2</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the one to stare at. It isn't a rare race condition — it happens on every single prop change, every time, because "run after commit" is <code>useEffect</code>'s entire contract, not an implementation detail you can tune away. The fix in the good card skips straight from step 1 to a corrected step 3 by doing the comparison inline, so there is only ever ONE render, and it's already right.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Render #1 — mismatched</span>
+      <span class="go"><em>postId: 12 → 7</em> <span class="arrow">→</span> new comments + OLD selectedId</span></div>
+    <div class="stt"><span class="nm">Paint — stale frame visible</span>
+      <span class="go"><em>browser commits the DOM</em> <span class="arrow">→</span> wrong highlight, or a crash if unguarded</span></div>
+    <div class="stt"><span class="nm">Render #2 — corrected</span>
+      <span class="go"><em>useEffect fires post-paint</em> <span class="arrow">→</span> setSelectedId(null), now right</span></div>
+  </div>
+  <p class="hf-annot">Three states, one avoidable middle one. The "good" fix collapses this into a single render by doing the comparison during the FIRST render instead of reacting to it afterward — the middle state, the one the user actually sees, simply never exists.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A settings drawer keeps <code>const [draftName, setDraftName] = useState(user.name)</code> to let someone edit a display name locally before saving. When the parent passes a DIFFERENT <code>user</code> object (an admin switches to editing a second profile), the team resets the draft with <code>useEffect(() =&gt; setDraftName(user.name), [user.id])</code>. QA reports that the OLD user's name flashes in the input for a moment before snapping to the new one. What is actually happening?</p>
+  <button type="button">The dependency array should list the whole <code>user</code> object, not <code>user.id</code> — right now the effect just never re-runs</button>
+  <button type="button">React updates the <code>user</code> prop and repaints the DOM in two separate passes, one render apart</button>
+  <button type="button">React already committed a render with the new user and the old draftName, since the effect can't run until after that paint</button>
+  <p class="why" data-for="0">The dependency array isn't the problem — <code>user.id</code> DID change, so the effect re-runs exactly on schedule. "Stale" describes an effect that never fires; this one fires, just one render late. Widening the deps wouldn't remove the flash.</p>
+  <p class="why" data-for="1">There's one prop here and one render pass — React doesn't split a single prop update into two DOM passes that drift apart. That describes a mechanism React doesn't have; the real gap is between commit and the effect that follows it.</p>
+  <p class="why" data-for="2">Exactly — the render with the new <code>user</code> and the still-old <code>draftName</code> is a real, painted frame, because <code>useEffect</code> only runs after commit. Comparing <code>user.id</code> to a value stored from the previous render and resetting <code>draftName</code> inline, during that same render, removes the gap entirely.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Compute it now instead of reacting to it later" shows up everywhere state can lag behind its source.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Database triggers vs. computed columns</h4>
+    <p>An AFTER INSERT trigger that backfills a derived column runs in a second transaction after the row is already visible to some readers; a GENERATED ALWAYS AS column is correct the instant the row commits, because it's computed inline instead of reacted to afterward.</p>
+    <div class="hf-scatter"><span>reacting after the fact always leaves a visible gap</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Angular's <code>ngOnChanges</code> vs. a getter</h4>
+    <p>Resetting a field inside <code>ngOnChanges</code> runs on the NEXT change-detection pass; deriving the same value with a plain getter, or a <code>computed()</code> signal, is correct on the same pass — the Angular version of "during render, not after."</p>
+    <div class="hf-scatter"><span>same one-tick lag, same fix, different framework</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Cache invalidation webhooks</h4>
+    <p>A webhook that busts a CDN cache after a save means the very first reader after that save can still get the stale response — there's a window. Writing through the cache synchronously during the save closes that window entirely.</p>
+    <div class="hf-scatter"><span>"eventually consistent" always has a visible instant of "not yet"</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> hooks give function components state (useState), effects (useEffect), a stable escape hatch (useRef), and two ways to skip repeated work (useMemo/useCallback) — all governed by one rule about call order. <b>The one new sentence this block adds:</b> when you're only mirroring a prop into state, doing it inside <code>useEffect</code> isn't just extra code — it's a whole extra, and visibly wrong, render.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="rhSeg">
@@ -276,6 +379,7 @@ DevHubCodeWalk.mount('#cw-rxhooks',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

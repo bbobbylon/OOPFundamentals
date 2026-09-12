@@ -109,7 +109,112 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> <code>CreateUserRequest</code> uses <code>@NotBlank @Email String email</code>, <code>@NotBlank @Size(max=100) String displayName</code>, <code>@NotNull @ValidRoleId Long defaultRoleId</code>; the controller takes <code>@Valid @RequestBody</code>. On failure Angular gets <code>400 &#123;"errors":[&#123;"field":"email"…&#125;]&#125;</code> → the HTTP error interceptor marks that form control invalid with the server message. This Spring-validation → structured-400 → Angular-form-error loop is the standard CIAM pattern for every form.</div>
   </div>
 
-  <!-- ── HERO: animated validation walk · request chip + live constraint/ProblemDetail inspector ── -->
+  <p class="hf-deck">or, the validation failure that skips straight past the handler you built for validation failures</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say"><code>@Min(1)</code> stopped a bad request cold — the method body never ran. The client still got a bare 500 with a stack trace instead of your nice field-level 400.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">reserveStock()'s ConstraintViolationException skips your validation handler entirely</div>
+  <p><code>POST /internal/inventory/{sku}/reserve?quantity=0</code> reaches <code>InventoryService</code>, a <code>@Validated @Service</code> bean with <code>public void reserveStock(@Min(1) int quantity)</code>. The validation does exactly its job: <code>quantity = 0</code> is rejected and the method body never executes. But the response your client actually receives is a generic 500 with a raw stack trace — not the clean <code>400</code> ProblemDetail with field errors that your <code>@RestControllerAdvice</code> was built to return for "a validation failure."</p>
+  <p><code>@Validated</code> at the class level, combined with constraints directly on method parameters, is auto-configured by <code>ValidationAutoConfiguration</code> to wrap the bean in a proxy backed by Spring's <code>MethodValidationInterceptor</code>. On a violation, that interceptor throws <code>jakarta.validation.ConstraintViolationException</code> — a completely different type from <code>MethodArgumentNotValidException</code>, which only ever comes from <code>@Valid</code> on a controller's <code>@RequestBody</code> argument. Your <code>@ExceptionHandler(MethodArgumentNotValidException.class)</code> only matches that one type and its subtypes. <code>ConstraintViolationException</code> is neither, so it falls straight through to whatever handler is broad enough to catch it — usually your generic <code>@ExceptionHandler(Exception.class)</code>.</p>
+  <div class="hf-scatter">
+    <span>@Min(1) is spelled correctly ✓</span>
+    <span>the method body never executes ✓</span>
+    <span>the thing that is not ⚠ your MethodArgumentNotValidException handler firing</span>
+  </div>
+  <p class="hf-foot">The validation worked exactly as designed. The handler you built for "a validation failure" just isn't listening for the exception type this one actually throws.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Give ConstraintViolationException its own handler</div>
+  <div class="hf-ladder">
+    <b>Add @ExceptionHandler(ConstraintViolationException.class) to the same advice</b>
+    <i>↓ now service-layer violations get routed on purpose instead of falling through to the catch-all</i>
+    <b>Read violations via getConstraintViolations(), not getBindingResult()</b>
+    <i>↓ it's a Set&lt;ConstraintViolation&lt;?&gt;&gt; with getPropertyPath()/getMessage() — a different shape than field errors, so the extraction code can't be copy-pasted from the other handler</i>
+    <b>And expect an ugly property path like reserveStock.quantity, not a clean field name</b>
+    <i>↓ method validation names the violation after the METHOD and PARAMETER, so map it to something presentable before it reaches a client</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> <code>@Valid</code> on a controller's <code>@RequestBody</code> and <code>@Validated</code> on a service's method parameters both run Bean Validation, but they throw two unrelated exception types — <code>MethodArgumentNotValidException</code> versus <code>ConstraintViolationException</code> — neither of which is a subtype of the other. A <code>@RestControllerAdvice</code> handler matches on actual exception type, exactly like a Java <code>catch</code> clause, so a handler written for one never fires for the other no matter how conceptually similar the two failures look to you.
+</div>
+
+<div class="hf-note">"<b>Your @ExceptionHandler is a catch clause, not a mood.</b>" It fires for the exact type (or a real subtype) it names — "feels like the same kind of failure" doesn't count.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I already built a handler for MethodArgumentNotValidException. Every validation failure should hit it, right?</p></div>
+  <div class="hf-bub right"><span class="who">ConstraintViolationException, personified</span><p>Not this one. I don't come from @Valid on a @RequestBody — I come from @Validated on your service's method parameters. I'm not a MethodArgumentNotValidException and I never will be.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So where do I end up if nothing catches me by name?</p></div>
+  <div class="hf-bub right"><span class="who">ConstraintViolationException, personified</span><p>Wherever your broadest handler is. If that's @ExceptionHandler(Exception.class), the client gets a bare 500 for what was, structurally, an entirely ordinary constraint violation.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow the request from the controller call to whichever handler actually fires.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Controller calls inventoryService.reserveStock(sku, 0)</span><span class="tag">quantity fails @Min(1)</span></li>
+    <li class="open"><span>InventoryService is @Validated → Spring wrapped it in a validation proxy</span><span class="tag">MethodValidationInterceptor</span></li>
+    <li><span>Interceptor validates arguments BEFORE the real method body runs</span><span class="tag">Hibernate Validator</span></li>
+    <li class="open"><span>quantity=0 violates @Min(1) → interceptor throws ConstraintViolationException</span><span class="tag">not MethodArgumentNotValidException</span></li>
+    <li><span>Exception propagates as an unchecked RuntimeException toward the controller advice</span><span class="tag">bubbles up</span></li>
+    <li class="open"><span>@RestControllerAdvice matches by actual type — no match on the specific handler → falls to @ExceptionHandler(Exception.class)</span><span class="tag">generic 500</span></li>
+  </ol>
+  <p class="hf-annot">Step 6 is where the assumption breaks: exception-handler matching walks the real class hierarchy, the same way a Java <code>catch</code> clause does. <code>ConstraintViolationException</code> lives in <code>jakarta.validation</code>; <code>MethodArgumentNotValidException</code> lives in <code>org.springframework.web.bind</code>. They are siblings in concept only — nothing in their type hierarchy connects them, so nothing routes one into the other's handler by accident.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">reserveStock(@Min(1) int quantity) fails validation<small>quantity = 0, thrown as ConstraintViolationException</small></div>
+    <div class="arrow">which @RestControllerAdvice handler actually catches it →</div>
+    <div class="opts">
+      <span>@ExceptionHandler(MethodArgumentNotValidException.class)</span>
+      <span>@ExceptionHandler(ResourceNotFoundException.class)</span>
+      <span class="on">@ExceptionHandler(Exception.class)</span>
+    </div>
+  </div>
+  <p class="hf-annot">Two of your three handlers were built for failures this isn't. Only the generic catch-all's type check — plain <code>Exception</code> — is broad enough to match <code>ConstraintViolationException</code>, which is exactly why it lands there instead of in the handler that was actually written with validation failures in mind.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q"><code>@Service @Validated class InventoryService { public void reserveStock(@Min(1) int quantity) {...} }</code>. A controller calls it with <code>quantity = 0</code>. Your <code>@RestControllerAdvice</code> has handlers for <code>MethodArgumentNotValidException</code> (400 + field errors), <code>ResourceNotFoundException</code> (404), and <code>Exception</code> (generic 500). Which one actually runs?</p>
+  <button type="button">The MethodArgumentNotValidException handler — it's a validation failure</button>
+  <button type="button">The generic Exception handler, because ConstraintViolationException doesn't match the more specific one</button>
+  <button type="button">The ResourceNotFoundException handler, since quantity 0 means there's nothing to reserve</button>
+  <p class="why" data-for="0">It feels like the same kind of failure, but @Validated on a service method throws jakarta.validation.ConstraintViolationException, not MethodArgumentNotValidException — and a handler matches on actual type, not on what the failure conceptually resembles.</p>
+  <p class="why" data-for="1">Right — ConstraintViolationException isn't a subtype of either specific handler's declared exception, so Spring falls back to the broadest match it has. The validation logic worked; only the routing to a specific handler didn't.</p>
+  <p class="why" data-for="2">ResourceNotFoundException is presumably something you throw yourself when a lookup fails — nothing in this scenario ever runs far enough to look anything up, since the interceptor rejects the call before the method body executes.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Two failures that feel identical but don't share a type" shows up anywhere a handler is written against one entry point and reused across others.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's catch clauses match types, not intent</h4>
+    <p><code>catch (IOException e)</code> never catches a <code>SQLException</code> just because both "feel like" an I/O failure — the JVM matches the literal exception hierarchy. Spring's <code>@ExceptionHandler</code> dispatch is doing the exact same lookup, not something smarter.</p>
+    <div class="hf-scatter"><span>the JVM doesn't do vibes-based matching either</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Sync throw vs. Promise rejection in JavaScript</h4>
+    <p>A function that sometimes throws synchronously and sometimes returns a rejected Promise puts the exact same logical failure on two different paths — a plain <code>try/catch</code> only ever sees one of them, missing the other completely.</p>
+    <div class="hf-scatter"><span>same failure, two different pipes</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>HTTP client libraries with two error shapes</h4>
+    <p>Axios throws a plain <code>Error</code> when the request never reaches a server, but an <code>AxiosError</code> with a populated <code>.response</code> when the server answers with 4xx/5xx — code that only checks <code>err.response</code> silently mishandles the first case.</p>
+    <div class="hf-scatter"><span>one library, two unrelated failure shapes</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> <code>@Valid</code>/<code>@Validated</code> runs Bean Validation against a request, and a <code>@RestControllerAdvice</code> turns the resulting failure into a clean, structured <code>ProblemDetail</code> for the client. <b>The one new sentence this block adds:</b> <code>@Valid</code> on a controller's <code>@RequestBody</code> and <code>@Validated</code> on a service method's parameters throw two unrelated exception types for what feels like the same failure, so a handler written for one silently never fires for the other — and which one you get back depends purely on which layer caught the bad value.
+</div>
+
+<!-- ── HERO: animated validation walk · request chip + live constraint/ProblemDetail inspector ── -->
   <div class="card" style="border:1px solid #a78bfa;margin-bottom:18px">
     <h2 id="hero-viz" style="margin-top:0;color:#a78bfa">▶ Submit a payload — watch validation gate it before your code</h2>
     <p style="font-size:13px;color:var(--muted);margin:6px 0 12px">Bean Validation runs at the controller boundary, so your service only ever sees clean data. Pick a scenario and press ▶ — the chip is the request, and the inspector shows the <b>real result</b>: each constraint checked, the exception thrown when one fails, and the RFC 7807 <code>ProblemDetail</code> body your <code>@ControllerAdvice</code> returns.</p>
@@ -732,6 +837,7 @@ they catch different classes of bad input.`},
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

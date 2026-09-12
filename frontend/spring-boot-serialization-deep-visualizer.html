@@ -95,7 +95,112 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> Standardize early — <code>camelCase</code>, ISO-8601 dates, <code>NON_NULL</code> — so <code>interface UserResponse { id; email; displayName; roleNames: string[]; createdAt: string }</code> matches the wire exactly. Parse <code>createdAt</code> to <code>Date</code> in an Angular interceptor, and never return <code>ZonedDateTime</code>/<code>Instant</code> without a configured timezone (Angular needs UTC or an explicit offset).</div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, why your <code>isActive</code> field ships as <code>active</code> and nobody warned you</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You wrote <code>private boolean isActive;</code>, Lombok generated the getter, Jackson serialized the DTO — and the JSON key isn't <code>isActive</code>. It's <code>active</code>.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">"isActive" vanishes into "active" — and Angular reads undefined</div>
+  <p>Your <code>AccountDto</code> has one field: <code>private boolean isLocked;</code>. <code>@Data</code> (or a hand-written getter) gives you <code>public boolean isLocked() { return isLocked; }</code>. It compiles clean, nothing warns, and the field is right there in the class, spelled exactly the way you want the JSON key spelled.</p>
+  <p>Jackson doesn't serialize fields — it serializes <b>properties</b>, and it derives a property's name from its <b>getter</b> using the same rule the JDK's own <code>java.beans.Introspector</code> has used for decades: a getter named <code>isXxx()</code> names the property <code>xxx</code>, first letter lowercased, full stop. It never checks whether your FIELD already happened to be spelled <code>isLocked</code> — it just strips the leading <code>is</code> off the METHOD name it sees. So <code>isLocked()</code> maps to the property <code>locked</code>, not <code>isLocked</code> — even though the field, the getter, and the constructor parameter are ALL literally spelled <code>isLocked</code>.</p>
+  <div class="hf-scatter">
+    <span>field is named isLocked ✓</span>
+    <span>getter compiles as isLocked() ✓</span>
+    <span>the thing that is not ⚠ JSON key is "locked"</span>
+  </div>
+  <p class="hf-foot">Your Angular <code>interface AccountDto { isLocked: boolean }</code> isn't wrong syntax — it's just reading a key that was never on the wire.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Force the wire name, or stop guessing it</div>
+  <div class="hf-ladder">
+    <b>Add @JsonProperty("isLocked") to the field</b>
+    <i>↓ field-level @JsonProperty overrides every naming rule Jackson would otherwise apply — the highest-priority lever from Section 3</i>
+    <b>Or rename the field to locked and let the getter read isLocked()</b>
+    <i>↓ now the stripped name ("locked") IS the name you meant, so there's nothing left to fight</i>
+    <b>And add one integration assertion on the literal JSON string</b>
+    <i>↓ assertThat(json).contains("\"isLocked\"") catches this in CI, not in a bug report</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Jackson names a property after what its accessor method is called, not what your field is called — and for a boolean, an "is"-shaped getter always drops the "is". This is the exact same JavaBeans <code>Introspector</code> rule the whole JDK uses, so it isn't a Jackson bug — it's Jackson faithfully doing what a beans-aware framework has always done. Lombok doesn't fight it either: for a field already spelled <code>isXxx</code>, Lombok emits the getter as <code>isXxx()</code> verbatim instead of doubling it to <code>isIsXxx()</code>, which is the right call for Lombok and the trigger for Jackson's stripping. The bug only becomes visible once a client mirrors the field name instead of the wire.
+</div>
+
+<div class="hf-note">"<b>Jackson reads the getter's lips, not the field's name tag.</b>" If the getter says <code>isActive()</code>, Jackson hears "active" — every single time, no exceptions.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I named the field isLocked so the JSON would obviously say isLocked. Why is it "locked"?</p></div>
+  <div class="hf-bub right"><span class="who">Jackson, personified</span><p>I never looked at your field. I looked at the getter, saw isLocked(), and did what every is-getter has taught me to do since JavaBeans existed: strip the "is", lowercase the rest.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So if I'd called the field enabled and generated isEnabled(), I'd have gotten... "enabled"?</p></div>
+  <div class="hf-bub right"><span class="who">Jackson, personified</span><p>Exactly — and you'd never have noticed a mismatch, because that time the strip happened to match what you wanted.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Walk the exact path from your field declaration to the byte on the wire.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Field declared: private boolean isLocked;</span><span class="tag">your code</span></li>
+    <li class="open"><span>Lombok/IDE emits public boolean isLocked() {...}</span><span class="tag">no double "is"</span></li>
+    <li><span>Jackson's bean introspector scans the class's public getters</span><span class="tag">reflection</span></li>
+    <li class="open"><span>It sees isLocked() — matches the is-getter pattern (is + capitalized word)</span><span class="tag">pattern match</span></li>
+    <li><span>Strips "is", decapitalizes "Locked" → property name locked</span><span class="tag">the rule</span></li>
+    <li class="open"><span>ObjectMapper writes "locked": true to the response body</span><span class="tag">on the wire</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the one to memorize: Jackson doesn't care that your FIELD is already named <code>isLocked</code> — it only ever looks at the accessor method's name, and <code>isLocked()</code> is indistinguishable to Jackson from a getter Lombok would have generated for a field named just <code>locked</code>. Two totally different field names produce the identical wire output, because Jackson's introspection only sees the getter's shape, never your source code.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">the getter Jackson sees: isLocked()<small>public boolean isLocked() { return isLocked; }</small></div>
+    <div class="arrow">the JSON key Jackson actually writes →</div>
+    <div class="opts">
+      <span>isLocked</span>
+      <span class="on">locked</span>
+      <span>is_locked</span>
+    </div>
+  </div>
+  <p class="hf-annot">Read it left to right: Jackson never asks what your field is called — it only ever asks what the getter is called, applies the is-getter rule, and whichever of these three slots that produces is what ships. Only the middle one is real; the left one is the guess every new hire makes, and the right one is what you'd get if a snake_case naming strategy were ALSO active.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">Your <code>AccountDto</code> has <code>private boolean isLocked;</code> with a hand-written <code>public boolean isLocked() { return isLocked; }</code> getter (no Lombok). A teammate insists the JSON key must be <code>isLocked</code> because that's exactly how both the field and the getter are spelled. What does Jackson actually put in the response body?</p>
+  <button type="button">locked</button>
+  <button type="button">isLocked</button>
+  <button type="button">IsLocked</button>
+  <p class="why" data-for="0">Right — isLocked() matches the classic is-getter pattern, so Jackson strips "is" and decapitalizes the rest, giving the property name "locked," identically to how it would for a field just named "locked." The deeper point: a getter's spelling is the only input to this rule; your source field name is invisible to Jackson entirely.</p>
+  <p class="why" data-for="1">That's what most people guess because it's what the field AND the getter method are literally spelled — but Jackson never reads either of those; it only applies the is-getter stripping rule to the getter's name, so this spelling never survives to the wire.</p>
+  <p class="why" data-for="2">Jackson always decapitalizes the first letter of the remainder before using it as a property name — the same lowercase-first-letter convention the JDK's own Introspector uses — so a capital-I property name never comes out of this path.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">This exact "the accessor's name is the only truth" rule shows up anywhere reflection-based tooling infers a name instead of reading your literal declaration.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Lombok's own naming rule</h4>
+    <p>Lombok makes the SAME call for the SAME reason: it also has to decide a getter name from a field name, and it deliberately special-cases <code>isXxx</code> fields so it never emits <code>isIsXxx()</code> — the same is-aware naming logic on the way IN that Jackson is using on the way OUT.</p>
+    <div class="hf-scatter"><span>reflection agrees with itself, twice</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Spring Data JPA derived query methods</h4>
+    <p><code>findByIsActiveTrue()</code> vs <code>findByActiveTrue()</code> — Spring Data has the identical ambiguity resolving a property name from a boolean accessor, which is why the two frameworks usually (but not always) agree on what a boolean is "really" called.</p>
+    <div class="hf-scatter"><span>one naming rule, two frameworks reading it</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>OpenAPI-generated TypeScript clients</h4>
+    <p>Run <code>openapi-generator</code> against a controller returning this DTO and the generated <code>.ts</code> model faithfully says <code>locked</code> — because the generator reads the ACTUAL response schema, not your Java source, which is exactly the discipline Section 6 recommends to stop hand-written interfaces from drifting like this one did.</p>
+    <div class="hf-scatter"><span>generate the model, don't guess it</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Jackson turns your DTO into JSON using naming, date, and null-handling settings that are contract decisions your Angular interface must mirror exactly. <b>The one new sentence this block adds:</b> for a boolean, that naming contract is decided by your getter's spelling, not your field's — so an <code>isXxx</code> field can ship as <code>xxx</code> even when you did nothing "wrong."
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -530,6 +635,7 @@ DevHubCodeWalk.mount('#cw-serial',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

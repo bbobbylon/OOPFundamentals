@@ -107,6 +107,127 @@
     </div>
   </div>
 
+<p class="hf-deck">or, the atomic operation that is atomic because it is holding a lock you cannot see</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Every line on this page so far said <code>computeIfAbsent</code> is the safe, atomic way to do cache-aside. It is. There is one rule attached to it, and it is not in the method name.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A cache that warms itself — and hangs the thread doing the warming</div>
+  <p>The cache-aside pattern on a <code>ConcurrentHashMap</code> is the textbook answer, and it is the right one: <code>map.computeIfAbsent(kid, this::fetchKey)</code> looks the key up, and if it is missing, calls your function exactly once even under heavy concurrency. No <code>synchronized</code>, no double-checked locking, no torn state.</p>
+  <p>Then somebody makes it smarter. The JWKS endpoint returns <i>every</i> signing key in one response, so why throw the rest away — the fetch function now caches all of them, calling <code>map.put(...)</code> for each of the others before returning the one that was asked for. It is strictly less network traffic and it passes every test. <b>And it is the one thing the Javadoc for <code>computeIfAbsent</code> forbids: the mapping function must not update any other mapping of the same map.</b></p>
+  <p>The reason is that "atomic" here is implemented with a lock — <code>computeIfAbsent</code> holds the lock on the key's <i>bin</i> for the entire time your function runs. Your function then reaches back into the same map and tries to take a lock the same thread is already inside, on a lock that is not reentrant. On Java 8 that thread spins forever at 100% CPU with no exception and no deadlock to find in a thread dump. Since Java 9 the map detects the same-bin case and throws <code>IllegalStateException: Recursive update</code> — which is a considerable improvement, and still not a case anybody wrote a test for.</p>
+  <div class="hf-scatter">
+    <span>ConcurrentHashMap, correctly chosen ✓</span>
+    <span>computeIfAbsent, genuinely atomic ✓</span>
+    <span>one fetch per key under load ✓</span>
+    <span>the mapping function writes to the same map ⚠</span>
+    <span>spin on Java 8, IllegalStateException on 9+ ⚠</span>
+  </div>
+  <p class="hf-foot">"Lock-free" describes the reads. The compute methods take a lock, and your code runs inside it.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Do the work outside, then publish</div>
+  <div class="hf-ladder">
+    <b>Keep the mapping function pure: compute and return a value, touch nothing else</b>
+    <i>↓ the rule is narrow and absolute — no <code>put</code>, no <code>remove</code>, no second <code>computeIfAbsent</code>, on this map, from inside that function</i>
+    <b>To cache a whole batch, fetch first and publish after, with <code>putAll</code> or per-key <code>putIfAbsent</code></b>
+    <i>↓ the bulk write then happens with no bin lock held by this thread, and a lost race just means one redundant fetch — which is what you were optimising away in the first place</i>
+    <b>And keep the function short for the ordinary reason too: while it runs, other threads updating that bin are blocked</b>
+    <i>↓ a network call inside <code>computeIfAbsent</code> is a stall other threads pay for; if the fetch is slow, cache a <code>CompletableFuture</code> rather than the value</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>"Thread-safe" is a promise about the collection's own state, never about what your callback does while the collection is mid-operation.</b> Any API that takes a function and runs it under an internal lock inherits the callback's behaviour into its own invariants — so the question to ask of <code>computeIfAbsent</code>, <code>merge</code>, <code>compute</code> and every framework method shaped like them is not "is this atomic?" but "what am I allowed to do inside the function it calls?"
+</div>
+
+<div class="hf-note"><b>computeIfAbsent hands you a pen and stands on the page.</b> Write your value and give it back. Try to fill in a different line while it is standing there, and on Java 8 you both wait forever.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>It's a <code>ConcurrentHashMap</code>. Writing to it from any thread is safe — that's the entire point of the class.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">ConcurrentHashMap</span>
+    <p>From any thread, yes. From inside a function <i>I</i> am currently running, no — because to make that call atomic I locked the bin your key hashes to, and I am still holding it. You are not another thread competing with me. You are me, asking myself for a lock I already have.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The bin lock</span>
+    <p>And I am not reentrant, which is the part that surprises people who know <code>synchronized</code> is. Java 8 had no check at all, so the thread just spun. Java 9 added a recursion test, so now you usually get <code>IllegalStateException: Recursive update</code> instead of silence.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The Javadoc</span>
+    <p>All of which I say, in one sentence, in the paragraph most people scroll past: the computation "must not attempt to update any other mappings of this map". It reads like tidiness advice. It is a correctness requirement.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps. The bug is entirely in step 4, and step 4 is the line someone added to make it faster.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A request needs the signing key for <code>kid=abc</code>, so it calls <code>keyCache.computeIfAbsent("abc", this::fetchJwks)</code></span><span class="tag">correct cache-aside</span></li>
+    <li class="open"><span>The map hashes <code>"abc"</code>, finds the bin empty, and <b>locks that bin</b> before calling your function</span><span class="tag">how "exactly once" is achieved</span></li>
+    <li><span><code>fetchJwks</code> makes the HTTPS call and gets back all five keys in the key set</span><span class="tag">still fine, just slow</span></li>
+    <li class="open"><span>Being helpful, it caches the other four with <code>map.put(...)</code> — a write to the same map, from inside the locked call</span><span class="tag">the forbidden line</span></li>
+    <li><span>If any of those four hashes into the same bin, the thread asks for a lock it already holds and cannot release</span><span class="tag">not reentrant</span></li>
+    <li class="open"><span>Java 8: an infinite spin, no exception, nothing in the thread dump that says "deadlock". Java 9+: <code>IllegalStateException: Recursive update</code></span><span class="tag">whichever, in production only</span></li>
+  </ol>
+  <p class="hf-annot">Note what makes this so hard to reproduce: whether step 5 fires depends on whether two unrelated key IDs happen to land in the same bin, which depends on their hash codes and the map's current capacity. Change the number of keys, resize the map, deploy to an instance that warmed in a different order — and the same code passes. <b>A bug whose trigger is a hash collision has no reliable test case</b>, which is precisely why the rule is stated as an absolute rather than a "be careful". You cannot test your way to knowing you obeyed it; you can only read the function and see that it doesn't.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">what your mapping function is allowed to do<small>while <code>computeIfAbsent</code> holds the bin lock</small></div>
+    <div class="arrow">the map's contract says →</div>
+    <div class="opts">
+      <span class="on">compute a value from the key and return it — including slow work like I/O, at the cost of blocking that bin</span>
+      <span>read or write a <i>different</i> map, a database, a file — all fine, none of it touches this map's locks</span>
+      <span><code>put</code>/<code>remove</code>/<code>compute</code> on <b>this</b> map — forbidden: spin on Java 8, <code>IllegalStateException</code> on 9+</span>
+      <span>return <code>null</code> — legal, and means "no mapping": nothing is stored and the next call computes again</span>
+    </div>
+  </div>
+  <p class="hf-annot">The last row is worth carrying separately, because it bites the same cache: returning <code>null</code> from the mapping function records nothing, so a key that genuinely has no value is fetched again on every single request — a cache that silently degrades to no cache at all for exactly the keys that miss. If "absent" is a real answer worth remembering, store a sentinel or an <code>Optional</code>, because <code>ConcurrentHashMap</code> cannot hold a null value and therefore cannot distinguish "not cached" from "cached as nothing".</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A JWKS cache calls <code>keyCache.computeIfAbsent(kid, this::fetchAllKeys)</code>. To save network calls, <code>fetchAllKeys</code> fetches the whole key set and does <code>keyCache.put(...)</code> for every other key it received before returning the requested one. What happens?</p>
+  <button type="button">It works and is a genuine optimisation — <code>ConcurrentHashMap</code> is thread-safe for writes from any thread, and the mapping function runs on the calling thread like any other code</button>
+  <button type="button">The extra <code>put</code> calls are silently discarded, because <code>computeIfAbsent</code> takes a snapshot of the map before invoking the function and applies only the returned value</button>
+  <button type="button">It violates the documented contract — the function must not update other mappings of the same map — and when a second key hashes to the same bin the thread spins forever on Java 8, or throws <code>IllegalStateException: Recursive update</code> on Java 9+</button>
+  <p class="why" data-for="0">Thread-safe for writes from other threads is exactly right, and it is why this looks obviously fine. The case it does not cover is a write from <i>inside</i> the compute call: that thread is already holding the bin lock that makes the operation atomic, and the lock is not reentrant. Same thread, same lock, no way through.</p>
+  <p class="why" data-for="1">There is no snapshot — <code>computeIfAbsent</code> operates on the live map, which is what lets it guarantee the function runs at most once per absent key. If it copied the map first it could not make that guarantee, and your writes would not be lost so much as meaningless.</p>
+  <p class="why" data-for="2">Correct, and the fix keeps the optimisation: fetch the key set, return the requested key from the function, and publish the other four <i>after</i> <code>computeIfAbsent</code> returns, with <code>putAll</code> or <code>putIfAbsent</code>. No bin lock is held by then, and the worst case is one wasted fetch.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Every "just give me a callback" API quietly ships a list of things the callback may not do.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Modifying a collection inside its own <code>forEach</code></h4>
+    <p>The original version of this rule, and the reason <code>ConcurrentModificationException</code> exists. Same shape: the iteration is in the middle of an operation on the structure, and your callback changes the structure underneath it. The difference is only that the plain collections tell you immediately.</p>
+    <div class="hf-scatter"><span>the callback runs mid-operation</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Calling <code>setState</code> during render in React</h4>
+    <p>The function you passed is being run inside the framework's own pass, so touching the state that pass is computing re-enters it. React's answer is the same as the map's: do it in an effect, after the pass — <b>compute in the callback, publish outside it.</b></p>
+    <div class="hf-scatter"><span>publish after, not during</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Spring <code>BeanPostProcessor</code> that asks for a bean</h4>
+    <p>Requesting a bean from inside the container's own creation callback drags it into the middle of a lifecycle it is currently running, which is how you get half-initialised beans and proxies that were never applied. Same rule, same reason: the framework is not finished with the object you are asking about.</p>
+    <div class="hf-scatter"><span>don't re-enter a framework mid-pass</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> threads and the executor framework, <code>synchronized</code> for mutual exclusion and <code>volatile</code> for visibility (never atomicity), atomics and CAS for lock-free counters, the happens-before relationship that makes any of it mean anything, deadlock and starvation, and safe publication. The sentence worth adding to your interview answer about <code>ConcurrentHashMap</code>: <b><code>computeIfAbsent</code> runs your function while holding a non-reentrant lock on that key's bin</b>, so the function must not write to the same map — return the value and publish anything else afterwards.
+</div>
+
   <div class="panel">
     <h2>▶ PATTERN RECOGNITION — which concurrency fix applies, and what happens when volatile alone isn't enough?</h2>
     <div class="rt-ctlbar">
@@ -1178,6 +1299,7 @@ DevHubCodeWalk.mount('#cw-javacon',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -58,7 +58,107 @@
     <div class="intro-ciam"><span class="tag">CIAM context:</span> The App Router is a natural <strong>BFF</strong>: the root <code>layout</code> reads the session from an <strong>httpOnly cookie on the server</strong>, Server Components render user-specific data without exposing the token to client JS, and a <strong>Server Action</strong> performs the login — calling your Spring API, then setting the httpOnly cookie — so the access token never touches the browser (no XSS token theft). A small Client Component handles the interactive form. The "keep tokens off the browser" pattern, built into the framework.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the caching you assumed you already had</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Two components ask for the exact same data in the exact same request — and your database answers twice.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The user's profile query runs twice on every single page load</div>
+  <p><code>app/dashboard/layout.tsx</code> calls <code>getUser(session.userId)</code> to render the account menu. <code>app/dashboard/page.tsx</code> calls the SAME <code>getUser(session.userId)</code> to render the profile form. <code>getUser</code> is a normal async function that calls Prisma directly: <code>return db.user.findUnique({ where: { id } })</code>.</p>
+  <p>You've read that "Next.js dedupes data fetching during a render," so you assume this is free. Add logging to the database driver and you'll see two identical SELECTs fire for the one request — not because of a bug, but because that automatic memoization is a feature of Next's extended <code>fetch()</code>, and this code never calls <code>fetch</code> at all.</p>
+  <div class="hf-scatter">
+    <span>the SQL itself ✓</span>
+    <span>both call sites needing the same row ✓</span>
+    <span>assuming ALL data fetching gets deduped ⚠</span>
+  </div>
+  <p class="hf-foot">"Next.js dedupes data fetching" is true of <code>fetch()</code>. It says nothing about your ORM.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Wrap it in React's cache()</div>
+  <div class="hf-ladder">
+    <b>Import cache from react and wrap the data function once</b>
+    <i>↓ <code>const getUser = cache(async (id: string) =&gt; db.user.findUnique({ where: { id } }))</code></i>
+    <b>Call the SAME wrapped function from both layout.tsx and page.tsx</b>
+    <i>↓ <code>cache()</code> keys its memo on the function plus its arguments for the lifetime of ONE render — a second call with the same id returns the first call's pending promise instead of starting a new query</i>
+    <b>And reserve un-cached calls for data you deliberately want fetched fresh on every read</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Automatic request memoization in Next.js is a property of fetch(), not of the App Router itself.</b> Server Components can call anything — an ORM, a raw SQL client, a third-party SDK — and none of those get deduped for free. React's <code>cache()</code> function extends the same "one call per render, no matter how many callers" behavior to arbitrary functions; reach for it any time non-fetch data is read by more than one component in a single render.
+</div>
+
+<div class="hf-note">fetch has a bouncer checking IDs at the door — ask for the same thing twice in one render, and the second ask just gets handed the first ask's ticket stub. <b>A raw database call has no bouncer</b> — every caller walks straight to the counter and places their own order, unless you post a bouncer yourself with cache().</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>Doesn't Next.js cache all my data fetching automatically?</p></div>
+  <div class="hf-bub right"><span class="who">Next.js</span><p>Only calls that go through my extended fetch(). I patch that one function to remember "I already started this exact request in this render — here's the pending promise."</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>I'm not calling fetch, I'm calling my ORM directly.</p></div>
+  <div class="hf-bub right"><span class="who">React's cache()</span><p>Then you need me. Wrap your data function in cache(fn) and I'll do for your Prisma call what Next already does for fetch — one call per render, no matter how many components ask.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Trace one request through both call sites to see exactly where the second query sneaks in.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A request comes in for <code>/dashboard</code></span><span class="tag">request start</span></li>
+    <li class="open"><span><code>layout.tsx</code> renders first and calls <code>getUser(42)</code> — a plain async function, not fetch</span><span class="tag">call #1</span></li>
+    <li><span>Prisma opens a connection and runs <code>SELECT * FROM users WHERE id=42</code></span><span class="tag">query #1 fires</span></li>
+    <li class="open"><span><code>page.tsx</code> renders next, in the SAME request, and calls <code>getUser(42)</code> again</span><span class="tag">call #2</span></li>
+    <li><span>Because <code>getUser</code> isn't wrapped in <code>cache()</code>, React has no memory of call #1 at all</span><span class="tag">no memo</span></li>
+    <li class="open"><span>Prisma runs the IDENTICAL SELECT a second time, for the same request, for the same data</span><span class="tag">query #2 fires</span></li>
+  </ol>
+  <p class="hf-annot">Steps 5 and 6 are the whole story. There's no bug in the reconciler, no missing await, nothing to catch in a code review — the function is just called twice, and without a memoization layer sitting in front of it, Prisma has no way to know that's redundant. Wrapping <code>getUser</code> in <code>cache()</code> is what gives step 5 something to check against.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>layout.tsx: getUser(42)</span><span>page.tsx: getUser(42)</span><span>a nested widget: getUser(42)</span></div>
+    <div class="funnel">React's cache() — the SAME pending promise reused ↓</div>
+    <div class="instance">Exactly ONE database query<small>remove cache() and the funnel disappears — three separate queries for identical data</small></div>
+  </div>
+  <p class="hf-annot">Three call sites, one query — but only because something is standing in the funnel matching up identical calls. Take cache() away and each caller walks straight past each other to the database, unaware any of the others exist.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q"><code>layout.tsx</code> calls a plain async <code>getUser(id)</code> that queries Prisma directly, and <code>page.tsx</code> calls the exact same function with the exact same id during the same request. The team assumes "Next dedupes data fetching in a render, so that's one query." What actually happens, and what fixes it?</p>
+  <button type="button">It's already deduped — Next.js memoizes every data call made during a single render pass, fetch or not</button>
+  <button type="button">It fires TWO separate database queries — automatic memoization only covers fetch(); wrap getUser in cache() from react for the same dedup</button>
+  <button type="button">It fires the query once per navigation but twice on the very first load, because layout.tsx cold-starts before page.tsx's module is ready</button>
+  <p class="why" data-for="0">Next's automatic memoization is real, but it's scoped to its extended fetch() implementation. A plain async function calling Prisma directly never passes through that layer, so nothing dedupes it.</p>
+  <p class="why" data-for="1">Right — two identical SELECTs fire because nothing is watching for repeat calls to a non-fetch function. React's cache() adds exactly that watcher, keyed on the function and its arguments for one render.</p>
+  <p class="why" data-for="2">There's no special first-load cold-start behavior here, and layout.tsx/page.tsx module readiness isn't the mechanism at play — the query fires twice on EVERY request, first load or the hundredth, for the same reason each time.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Many callers, one real trip" is a problem every layer of a stack eventually needs its own answer for.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>The GraphQL N+1 problem and DataLoader</h4>
+    <p>A resolver that loads an author for each of 50 posts fires 50 separate queries unless a DataLoader batches and memoizes calls with the same key within one request — React's cache() is essentially a DataLoader for a single render.</p>
+    <div class="hf-scatter"><span>no batching layer means no batching, by default</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>HTTP request coalescing at a reverse proxy</h4>
+    <p>Nginx/Varnish "request collapsing" merges many simultaneous identical requests hitting a cold cache into a single trip to the origin server — the same "one real trip per unique request" idea, enforced at the network layer instead of the function-call layer.</p>
+    <div class="hf-scatter"><span>same key, same in-flight work, shared result</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An ORM's per-request identity map</h4>
+    <p>Some ORMs (Hibernate's session, for instance) keep a first-level cache so fetching the same entity by id twice in one unit of work returns the same object without a second query — exactly the guarantee cache() bolts onto a plain Prisma call.</p>
+    <div class="hf-scatter"><span>the memoization has to exist somewhere to exist at all</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> the App Router makes routing file-based and components server-rendered by default, with fetch caching modes and Server Actions for mutations. <b>The one new sentence this block adds:</b> fetch's automatic request memoization doesn't extend to your ORM or database client — wrap it in React's cache() yourself, or pay for the same query once per component that asks.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="rnextSeg">
@@ -257,6 +357,7 @@ DevHubCodeWalk.mount('#cw-rnext',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

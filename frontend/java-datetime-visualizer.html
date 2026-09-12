@@ -128,6 +128,109 @@ public class Main {
   </div>
 
 
+<p class="hf-deck">or, how "today" can change without a single line of your code changing</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">LocalDate carries no time zone. LocalDate.now() still depends on one — invisibly.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">LocalDate.now() returns a different "today" with zero code changes</div>
+  <p>Your CIAM app schedules a daily password-expiry sweep: <code>LocalDate today = LocalDate.now();</code> — clean, zone-free, exactly what this page recommends for "just a date." It works correctly for months. Then a third-party library your app depends on — a legacy SDK, a scheduled job, even a test in the same test suite — calls <code>TimeZone.setDefault(TimeZone.getTimeZone("Asia/Tokyo"))</code> somewhere else entirely, for its own unrelated reason.</p>
+  <p><code>LocalDate.now()</code> itself didn't change. What changed is which zone it silently reads the clock through: it calls <code>Clock.systemDefaultZone()</code> internally, which asks <code>ZoneId.systemDefault()</code> for the current process-wide default zone — and <code>TimeZone.setDefault(...)</code> is a single global, mutable, static setting shared by the entire JVM. Near midnight, "today" in Tokyo and "today" in your server's original zone can be different calendar days, so every LocalDate.now() call after that line, anywhere in the process, silently shifts by a day at the boundary — no exception, no log line, no code change anywhere near the bug.</p>
+  <div class="hf-scatter">
+    <span>LocalDate has no zone field ✓ (this page says so)</span>
+    <span>your sweep job's code, unchanged ✓</span>
+    <span>one unrelated library's TimeZone.setDefault() call ⚠</span>
+  </div>
+  <p class="hf-foot">"No zone" describes the object. It says nothing about the clock that built it — and that clock's zone is one static setter-call away from changing for the whole JVM.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Stop reading a mutable global for "now"</div>
+  <div class="hf-ladder">
+    <b>Never call the zero-arg now() in shared or library code</b>
+    <i>↓ LocalDate.now(clock) or LocalDate.now(zoneId) makes the dependency explicit and testable instead of silently reading a mutable global</i>
+    <b>Inject a Clock bean in Spring rather than reaching for the static now()</b>
+    <i>↓ @Bean Clock clock() { return Clock.systemUTC(); }, then LocalDate.now(clock) everywhere — one seam to fix, mock, or freeze in tests</i>
+    <b>And never call TimeZone.setDefault() from application code at all</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> LocalDate and LocalDateTime instances genuinely carry no zone once built — but the factory method now() reads the JVM's default zone at the moment it's called, and that default is global mutable state any code in the process can change for every other class, including yours.
+</div>
+
+<div class="hf-note">A sticky-note memory hook — <b>the object is zone-free. The moment it was born wasn't.</b> LocalDate.now() is a snapshot through whatever lens the JVM happened to be wearing that instant — swap the lens mid-flight and the next snapshot looks different, even though no snapshot ever remembers which lens took it.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>This page already told me LocalDate has no time zone — so how can now() be zone-dependent?</p></div>
+  <div class="hf-bub right"><span class="who">LocalDate.now(), personified</span><p>I don't carry a zone once I exist — but I can't be born without asking the clock what zone it's currently reading in.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>And that clock's zone can just... change?</p></div>
+  <div class="hf-bub right"><span class="who">Clock.systemDefaultZone(), personified</span><p>Anyone in this JVM can call TimeZone.setDefault() and I'll use the new one from that instant on — I don't check who set it or why.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Tracing one now() call from a global setting to the date you get back.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Some code, anywhere in the JVM, calls TimeZone.setDefault(tz)</span><span class="tag">global write</span></li>
+    <li class="open"><span>the JVM's one process-wide default time zone is updated — not per-thread, not per-class, the whole process</span><span class="tag">process-wide</span></li>
+    <li><span>later, your code calls LocalDate.now()</span><span class="tag">your call</span></li>
+    <li class="open"><span>internally this calls Clock.systemDefaultZone(), which reads ZoneId.systemDefault() at that exact instant</span><span class="tag">reads default</span></li>
+    <li><span>the current wall-clock instant is converted to a calendar date using that zone</span><span class="tag">convert</span></li>
+    <li class="open"><span>the returned LocalDate stores only the resulting year/month/day — no trace of which zone produced it, or that it changed since the last call</span><span class="tag">zone-free result</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is the whole bug: the write isn't scoped to the library that made it. It's process-wide, so it reaches every other class's now() calls too, including ones written years before that library existed.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">JVM starts</span>
+      <span class="go"><em>OS locale read</em> <span class="arrow">→</span> default zone = the server's real zone, e.g. America/New_York</span></div>
+    <div class="stt"><span class="nm">An unrelated library runs</span>
+      <span class="go"><em>TimeZone.setDefault(tz)</em> <span class="arrow">→</span> default zone silently becomes Asia/Tokyo, process-wide</span></div>
+    <div class="stt"><span class="nm">Your code calls LocalDate.now()</span>
+      <span class="go"><em>reads the current default</em> <span class="arrow">→</span> "today" is computed in Tokyo time, not New York time</span></div>
+  </div>
+  <p class="hf-annot">Nothing in this sequence is a bug in LocalDate — every arrow is documented behavior. The trap is that the middle step can happen in code you don't own, and the last step gives no sign it was ever affected by it.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A Spring service runs <code>LocalDate expiry = LocalDate.now().plusDays(30);</code> to set a token's expiry date. A library initialized earlier at startup called <code>TimeZone.setDefault(TimeZone.getTimeZone("Pacific/Kiritimati"))</code> (UTC+14) for its own logging format. Your server's actual OS zone is UTC. What date does LocalDate.now() return, right after that startup?</p>
+  <button type="button">Today's date in UTC — LocalDate always uses the OS clock's real zone</button>
+  <button type="button">Today's date as seen in Pacific/Kiritimati (UTC+14) — the process-wide default the library just changed</button>
+  <button type="button">It throws an exception — you can't call now() after the default zone has been changed</button>
+  <p class="why" data-for="0">That would be true if nothing had touched the default — but TimeZone.setDefault() already overwrote it before your line ran. LocalDate.now() has no way to know, or care, that the OS zone was originally UTC.</p>
+  <p class="why" data-for="1">Right — ZoneId.systemDefault() returns whatever was set most recently, process-wide, no matter which zone the machine is actually in. Near a day boundary this can even land on tomorrow relative to UTC.</p>
+  <p class="why" data-for="2">Java never protects you from this — TimeZone.setDefault() is a completely ordinary method call. Nothing throws; it just quietly changes what every future now() call means.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A single mutable global, read by code that never asked to depend on it.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Locale.setDefault() — the same shape, a different global</h4>
+    <p>Formatting and parsing that "just worked" changes for the entire JVM the moment any code calls Locale.setDefault(), exactly like TimeZone.setDefault() for zones.</p>
+    <div class="hf-scatter"><span>one static setter, every caller affected</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>System.setProperty() read lazily by a library</h4>
+    <p>A config value a driver or logging framework checks on first use behaves differently depending on when, during startup, something else sets it — an order-of-initialization bug from shared global state.</p>
+    <div class="hf-scatter"><span>global mutable config, timing-dependent reads</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A shared Intl locale mutated in a running Angular app</h4>
+    <p>A global date-formatting default changed by one module silently affects formatting everywhere else in the same running app — the same "whoever mutates the shared default affects everyone" shape, on the frontend.</p>
+    <div class="hf-scatter"><span>a shared default, mutated once, read everywhere</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> why java.time replaced Date/Calendar, the class hierarchy, arithmetic, formatting, and time zones — including that LocalDate and LocalDateTime carry no zone. <b>The one new thing this block adds:</b> "no zone" describes the object, not the now() call that built it — now() reads the JVM's single global default zone at that instant, and any code anywhere in the process can silently move that default out from under you.
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -708,6 +811,7 @@ function convertTz(){
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

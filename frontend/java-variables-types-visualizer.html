@@ -148,6 +148,110 @@ public class Main {
   </div>
 
 
+<p class="hf-deck">or, why the -128..127 rule you just memorized has an asterisk nobody mentioned</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The cache boundary you just learned isn't a promise the language makes — it's a default someone can turn a dial on.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The exact == test that passes in dev and flips in prod — same jar, same JDK</div>
+  <p>You've internalized the rule from this very page: <code>Integer x = 127; Integer y = 127;</code> makes <code>x == y</code> true (cached), while <code>Integer a = 200; Integer b = 200;</code> makes <code>a == b</code> false (not cached). A teammate leans on that: a "fast path" compares small request-count Integers with <code>==</code> instead of <code>.equals()</code>, reasoning "everything under 128 is cached, so it's safe." It passes review. Every local test is green.</p>
+  <p>Months later, ops tunes the production JVM with <code>-XX:AutoBoxCacheMax=1000</code> to cut GC pressure from a hot path elsewhere in the app that boxes a lot of small integers. Nobody touches the == code — why would they, it's unrelated. In production only, <code>Integer a = 200; Integer b = 200; a == b</code> now evaluates <b>true</b> — the exact comparison that was false on every dev machine and in every unit test. The "fast path" starts short-circuiting differently under load, and it takes a production-only heisenbug for anyone to notice.</p>
+  <div class="hf-scatter">
+    <span>the -128..127 rule you learned ✓ (as a default)</span>
+    <span>unit tests, all green ✓</span>
+    <span>the JVM flag nobody told you about ⚠</span>
+  </div>
+  <p class="hf-foot">Nothing about the Integer cache is a language guarantee — it's a JVM default, and JVM defaults are exactly the kind of thing a flag changes without recompiling a single line of your code.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make correctness independent of the cache size, always</div>
+  <div class="hf-ladder">
+    <b>Use .equals() (or Integer.compare/Objects.equals) for every boxed comparison</b>
+    <i>↓ correctness stops depending on cache size, JDK vendor, or a flag someone sets six months from now</i>
+    <b>Treat any == on a wrapper type as a code-review flag</b>
+    <i>↓ it's either comparing primitives (fine, unbox first) or relying on an implementation detail (never fine)</i>
+    <b>Don't try to outsmart it by "knowing" the cache bound</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> <code>-128..127</code> is the JDK's default answer to "how many boxed Integers should we pre-allocate," tunable with <code>-XX:AutoBoxCacheMax=&lt;n&gt;</code> — so any code whose correctness depends on that specific range is one ops ticket away from different, unannounced behavior.
+</div>
+
+<div class="hf-note">A sticky-note memory hook — <b>127 is a setting, not a spec.</b> The language guarantees caching happens somewhere in -128..127 — it never guarantees where it stops, and a JVM flag can move the goalposts without recompiling anything.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>This page already told me 127 is the cache boundary — why does it matter that it's tunable?</p></div>
+  <div class="hf-bub right"><span class="who">The JVM, personified</span><p>Because I only promised you a minimum. -128 to 127 is the floor I guarantee — I never said I'd stop there.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So the same jar, same JDK version, could behave differently on two machines?</p></div>
+  <div class="hf-bub right"><span class="who">The JVM</span><p>Identical bytecode, identical vendor, identical version — one flag in a startup script, and your == results flip. I don't recompile anything to do that.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Where the cache actually lives, and what moves its edge.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>JVM starts; <code>java.lang.Integer</code> is loaded</span><span class="tag">load</span></li>
+    <li class="open"><span>its nested <code>IntegerCache</code> class initializes an array sized to cover -128..127 by default — one boxed object per value</span><span class="tag">-128..127</span></li>
+    <li><span><code>-XX:AutoBoxCacheMax=N</code> is read at this exact point, if it was passed on the command line</span><span class="tag">flag read</span></li>
+    <li class="open"><span>if N is larger than 127, the cache array is sized to cover -128..N instead — more pre-boxed Integers, upper bound moved</span><span class="tag">resized</span></li>
+    <li><span><code>Integer.valueOf(n)</code> — what autoboxing calls for every <code>Integer x = n;</code> — returns a cached instance for anything inside the (possibly widened) range</span><span class="tag">valueOf()</span></li>
+    <li class="open"><span>outside the cached range, valueOf() falls back to allocating a fresh object — so == is false regardless of any flag once you're past the edge</span><span class="tag">fresh object</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the whole bug: the cache isn't a fixed-size table baked into the class file, it's an array sized at class-init time from whatever flag was passed that particular run — the same source, compiled once, can produce two different array sizes on two different machines.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">JVM startup (-XX:AutoBoxCacheMax=N)</span>
+      <div class="ring"><span class="lbl">Integer.IntegerCache class init (runs once)</span>
+        <div class="ring"><span class="lbl">cached Integer[] sized -128..N</span>
+          <div class="core">Integer.valueOf(n) — what autoboxing secretly calls for every <code>Integer x = n;</code><small>hits the cache inside the range, allocates fresh outside it</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Everything your code sees — the <code>Integer x = 200;</code> line, the <code>==</code> comparison — sits at the innermost core. The setting that decides whether that core hits a shared object or a fresh one lives three layers out, in a place your code never looks and a startup script controls.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Two identical deployments of the same jar, same JDK build. Deployment A runs with default JVM flags. Deployment B runs with <code>-XX:AutoBoxCacheMax=500</code> (set by ops for an unrelated perf tweak). Both execute <code>Integer p = 300; Integer q = 300; System.out.println(p == q);</code>. What prints on each?</p>
+  <button type="button">false on both — 300 is always outside the cache</button>
+  <button type="button">true on both — boxed Integers under 1000 are always cached</button>
+  <button type="button">false on A, true on B — the same code, two different answers</button>
+  <p class="why" data-for="0">True on A, but not on B — the classic -128..127 range is only the default floor, and ops raised the ceiling to 500 on B, which comfortably covers 300.</p>
+  <p class="why" data-for="1">There's no universal 1000 threshold — the range runs from -128 to whatever -XX:AutoBoxCacheMax was set to, and it defaults to 127, not 1000.</p>
+  <p class="why" data-for="2">Exactly — identical source, identical bytecode, two different results, because the cache boundary is a runtime JVM setting, not a compiled-in constant.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A tuning knob nobody wired into your mental model of the code.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>String interning and string-pool tuning</h4>
+    <p>An identity shortcut (<code>==</code> on interned literals) that happens to work because of a cache, where the cache's existence is a JVM implementation detail rather than a language guarantee about every String.</p>
+    <div class="hf-scatter"><span>identity shortcuts ride on caches; caches are configuration</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Database connection pool sizing</h4>
+    <p>Code that "works" because a pool happens to be big enough for today's load silently breaks the moment ops resizes the pool for an unrelated reason — the same "an operational tuning knob changes application-visible behavior" shape.</p>
+    <div class="hf-scatter"><span>a config change nobody told the code about</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Spring profile values tuned in prod YAML</h4>
+    <p>An <code>application-prod.yml</code> value ops adjusts for performance — a cache TTL, a pool size — can flip behavior your code silently depended on, exactly like a JVM flag flips ==.</p>
+    <div class="hf-scatter"><span>prod config drift breaks assumptions dev never tested</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> primitives vs references, stack vs heap, casting, autoboxing, var, and scope — including the -128..127 Integer cache as the classic == vs .equals() trap. <b>The one new thing this block adds:</b> that 127 is a JVM default you can tune with -XX:AutoBoxCacheMax, so code that "safely" relies on the cached range can pass every test and still flip behavior in a production JVM nobody recompiled.
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -833,6 +937,7 @@ function doCast() {
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

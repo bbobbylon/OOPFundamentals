@@ -58,7 +58,110 @@
     <div class="intro-ciam"><span class="tag">CIAM React app:</span> An <code>AuthProvider</code> wraps the app in <code>main.tsx</code> and <code>useAuth()</code> is read by the NavBar, the login page (dispatch <code>LOGIN_SUCCESS</code> after the OAuth callback), router loaders (token for API headers), and every protected route. Actions map to the auth flow — <code>OAUTH_CALLBACK_SUCCESS { user, token, idpType }</code> → <code>TOKEN_REFRESHED</code> → <code>LOGOUT</code> — and the reducer keeps transitions atomic (you can never have <code>user</code> set but <code>token</code> null). Test it in isolation: <code>expect(authReducer(initial, {type:'LOGOUT'})).toEqual({user:null,...})</code>.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the refactor that looked like a pure simplification</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">A teammate deletes your reducer to "simplify" the component, and a working +2 button starts adding 1.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Clicking +2 only ever adds 1</div>
+  <p>The original stepper dispatches twice per click: <code>dispatch({type:'increment'}); dispatch({type:'increment'});</code> against a reducer that does <code>return {...state, count: state.count + 1}</code>. It has always correctly added 2.</p>
+  <p>To "remove the boilerplate," a teammate swaps the whole thing for plain <code>useState</code>, keeping the handler's shape identical: <code>setCount(count + 1); setCount(count + 1);</code>. The diff looks like a pure refactor — same handler, same two calls, same intent — but now the count only goes up by 1 per click.</p>
+  <div class="hf-scatter">
+    <span>both versions call their updater twice ✓</span>
+    <span>both run inside the same click handler ✓</span>
+    <span>assuming both updaters combine the same way ⚠</span>
+  </div>
+  <p class="hf-foot">The two versions aren't equivalent, and nothing about the JSX or the click handler reveals why.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Keep the reducer, or use the functional updater form</div>
+  <div class="hf-ladder">
+    <b>If you keep useReducer, dispatch is already safe — no change needed</b>
+    <i>↓ each dispatched action is threaded through the reducer against whatever state is already pending, by construction</i>
+    <b>If you do move to useState, never compute the next value from the closed-over variable twice in one handler</b>
+    <i>↓ <code>setCount(c =&gt; c + 1); setCount(c =&gt; c + 1);</code> — the FUNCTION form receives the pending value, the same way a reducer does</i>
+    <b>And treat "dispatch twice" and "setCount(value) twice" as different tools, not interchangeable syntax</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>dispatch always behaves like a functional state update; a plain setCount(value) never does unless you write it as one.</b> A reducer recomputes its result from whatever the pending state already is, action by action, so queuing the same action twice in one handler correctly applies it twice. setCount(count + 1) bakes in a value computed from that render's stale count the instant the line runs, so two identical calls in one handler just overwrite each other.
+</div>
+
+<div class="hf-note">dispatch doesn't hand React a finished number — it hands over an instruction card that says "add one to whatever's next." <b>React works through the stack of instruction cards in order</b>, each starting where the last one left off. setCount(count + 1), by contrast, IS the finished number, sealed the instant that line runs — call it twice from the same render and you've sealed the same envelope twice.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>Isn't dispatch just a fancier setState? Why does one survive being called twice and the other doesn't?</p></div>
+  <div class="hf-bub right"><span class="who">useReducer</span><p>Every dispatch hands me an ACTION, not a value. When your render finally happens, I run each queued action through the reducer IN ORDER, and each one sees the result of the one before it.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>And plain setCount(count + 1)?</p></div>
+  <div class="hf-bub right"><span class="who">useState</span><p>I get handed the final number, already computed from the count your render closed over. Call me twice in one handler with the same math and I get the same number twice. If you want ME to thread through updates like that, you have to opt in: setCount(c =&gt; c + 1).</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch what each queued dispatch actually receives as its starting state.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The button click fires <code>addTwo()</code></span><span class="tag">event</span></li>
+    <li class="open"><span><code>dispatch({type:'increment'})</code> #1 is queued — not applied yet</span><span class="tag">queued #1</span></li>
+    <li><span><code>dispatch({type:'increment'})</code> #2 is queued right after it, in the same handler</span><span class="tag">queued #2</span></li>
+    <li class="open"><span>React starts processing the queue for the next render: <code>reducer(state0, action1)</code> → <code>state1</code></span><span class="tag">apply #1</span></li>
+    <li><span><code>reducer(state1, action2)</code> → <code>state2</code> — note it received <code>state1</code>, NOT the original <code>state0</code></span><span class="tag">apply #2 (threaded)</span></li>
+    <li class="open"><span>React commits ONE render showing <code>state2</code> — the count is correctly up by 2</span><span class="tag">one render, right answer</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the entire mechanism, condensed into one word: threaded. The second call to the reducer isn't recomputing from the same starting point as the first — it's picking up exactly where the first one left off, because the reducer is invoked once per queued action, in order, each time against whatever the PREVIOUS action already produced.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">state0 (count: 5)</span>
+      <span class="go"><em>dispatch #1 ({type:'increment'})</em> <span class="arrow">→</span> reducer(state0, action) = state1 (count: 6), queued</span></div>
+    <div class="stt"><span class="nm">pending state1 (count: 6)</span>
+      <span class="go"><em>dispatch #2, same handler</em> <span class="arrow">→</span> reducer(state1, action) = state2 (count: 7)</span></div>
+    <div class="stt"><span class="nm">count: 7 — committed</span>
+      <span class="go"><em>React finishes the batch</em> <span class="arrow">→</span> one render, right answer</span></div>
+  </div>
+  <p class="hf-annot">The middle state is the one plain useState's non-functional form skips right past — it never gets a "pending state1" to build on, because the value it queues was already computed, in full, before either call was ever processed.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A stepper's +2 button dispatches <code>{type:'increment'}</code> twice in one click handler against a reducer, and always correctly adds 2. After removing the reducer for plain useState with the SAME two-call shape — <code>setCount(count + 1); setCount(count + 1);</code> — clicking +2 only ever adds 1. What changed?</p>
+  <button type="button">React 18 batches both calls into one render either way, but the fix here is wrapping addTwo in flushSync now that it's plain state</button>
+  <button type="button">Both calls compute count + 1 from the SAME stale closure, so the second overwrites the first — dispatch avoids this because a reducer recomputes from whatever is already pending</button>
+  <button type="button">useState setters aren't queued at all outside class components, so the second call in the same handler is simply ignored and never runs</button>
+  <p class="why" data-for="0">Batching isn't the issue — both versions batch into one render either way, and always did. Batching only decides how many renders happen; it says nothing about whether the two calls build on each other's result. flushSync forces a synchronous render and wouldn't touch this bug.</p>
+  <p class="why" data-for="1">Exactly — count + 1 is computed once, eagerly, from that render's captured count, so both calls produce the identical number and the second write clobbers the first. A reducer never has this problem: it recomputes its result from the pending state at the moment each action is processed, not from a value captured earlier.</p>
+  <p class="why" data-for="2">Both calls DO run — the setter is queued the same way in function components as a reducer's dispatch is. The bug isn't a dropped call; it's that both queued calls carry the same precomputed value instead of building on each other.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Apply each change against the running result, not against a snapshot taken before any of them ran" is a rule every system with sequential updates has to get right.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A bank ledger vs. two tellers reading the same balance slip</h4>
+    <p>A ledger applies "+$10" then "+$10" against the RUNNING total, landing on +$20. Two tellers who both start from the same printed balance slip and each write "balance + $10" both compute the same final number — the account is only $10 richer.</p>
+    <div class="hf-scatter"><span>sequential application vs. a shared stale snapshot</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>git rebase --onto vs. cherry-picking against the original base</h4>
+    <p>Rebase replays each commit against the RESULT of the previous one; cherry-picking the same two diffs independently against the original base can silently drop a change if both touch the same lines — sequential threading vs. same-base application, the same contrast as dispatch vs. a raw setter.</p>
+    <div class="hf-scatter"><span>replaying in sequence beats reapplying from scratch</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Redux — useReducer's own namesake</h4>
+    <p>Redux's <code>store.dispatch</code> makes this exact guarantee for the same exact reason: modeling updates as actions run through a reducer, instead of raw setters, is precisely what makes a sequence of updates composable and order-correct.</p>
+    <div class="hf-scatter"><span>the whole point of the pattern, spelled out by its name</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> useReducer centralizes state transitions in one pure, testable function and pairs with useContext to distribute state and dispatch without prop drilling — a dependency-free "poor man's Redux." <b>The one new sentence this block adds:</b> dispatch is immune to the classic "two updates in one handler only apply once" bug by construction, because the reducer always recomputes from the latest pending state instead of a value captured in the render's closure.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="rcSeg">
@@ -267,6 +370,7 @@ DevHubCodeWalk.mount('#cw-rred',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

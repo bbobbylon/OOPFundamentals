@@ -117,6 +117,127 @@
     </div>
   </div>
 
+<p class="hf-deck">or, the comparator that sorts 30 items perfectly and throws on 40</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The overflow trap above is real. There is a second way to break a comparator that has nothing to do with arithmetic, is far more common, and announces itself with an exception most people have never read carefully.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle"><code>IllegalArgumentException: Comparison method violates its general contract!</code></div>
+  <p>Here is the comparator almost everybody writes at least once: <code>(a, b) -> a.getScore() > b.getScore() ? 1 : -1</code>. It reads as "bigger first, otherwise smaller", it compiles, and on your test list of eight players it produces a perfectly sorted result.</p>
+  <p>It has no case for equal scores. Two players on the same score make <code>compare(a, b)</code> return <code>-1</code> <i>and</i> <code>compare(b, a)</code> return <code>-1</code> — each is simultaneously "less than" the other. The contract requires <code>sgn(compare(x, y)) == -sgn(compare(y, x))</code>, and this breaks it for every tie. Not a rounding problem, not an overflow: the function is simply not an ordering.</p>
+  <p>What makes it a production incident rather than a caught bug is the threshold. <code>Collections.sort</code>, <code>List.sort</code> and <code>Arrays.sort(Object[])</code> all use <b>TimSort</b>, and TimSort handles any input shorter than 32 elements with a plain binary insertion sort — no merges, and therefore no invariant to violate. It will happily produce a wrong-but-plausible order and say nothing. At 32 or more it starts merging runs, the merge detects that the comparator is contradicting itself, and it throws <code>IllegalArgumentException: Comparison method violates its general contract!</code> — an exception from inside the JDK, on a line that did nothing wrong, months after the comparator was written.</p>
+  <div class="hf-scatter">
+    <span>no overflow anywhere ✓</span>
+    <span>correct on every small list ✓</span>
+    <span>passes code review — it reads fine ✓</span>
+    <span>no result for "equal" ⚠</span>
+    <span>throws only at 32+ elements ⚠</span>
+  </div>
+  <p class="hf-foot">The exception is not TimSort failing. It is TimSort noticing that you gave it something that is not an ordering — and it can only notice once it has enough elements to merge.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Build comparators, do not write them</div>
+  <div class="hf-ladder">
+    <b>Use the factory methods: <code>Comparator.comparingDouble(Player::getScore).reversed()</code></b>
+    <i>↓ they delegate to <code>Double.compare</code>/<code>Integer.compare</code>, which are total orderings by construction — there is no branch for you to leave out</i>
+    <b>If you must write one by hand, return <code>Integer.compare(...)</code> or <code>Double.compare(...)</code>, never a ternary</b>
+    <i>↓ a ternary has two outcomes and an ordering has three; the missing third is the entire bug, every time</i>
+    <b>And never sort on a field that can change while the sort runs</b>
+    <i>↓ the same exception appears when the comparator is fine but the data moves underneath it — a shared mutable object, or a field another thread is updating, makes the comparison inconsistent over time rather than over pairs</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A comparator is not a "which one is bigger" function — it is a claim that your data has a total order, and the library builds on that claim.</b> Every sort, every <code>TreeMap</code>, every <code>binarySearch</code> assumes antisymmetry and transitivity to skip comparisons it can infer. Break the claim and you have not made the sort slightly wrong: you have invalidated the inferences, which is why the failure is an exception from deep inside a merge rather than a slightly-off list.
+</div>
+
+<div class="hf-note"><b>An ordering has three answers and a ternary has two.</b> The missing one is "equal", and it is the one your test data never had.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>The comparator worked for months. Why would it start throwing now?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">TimSort</span>
+    <p>Because the list crossed 32 elements. Below that I sort with binary insertion and never merge, so I never have an invariant to check — I just apply whatever you gave me. Above it I merge runs, and merging depends on your comparator being consistent. When it contradicts itself I detect it and stop, rather than silently corrupting the array.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The <code>Comparator</code> contract</span>
+    <p>And I have been violated since the day it was written. <code>sgn(compare(x,y)) == -sgn(compare(y,x))</code>, for all x and y. Two equal scores both return <code>-1</code>. The size of the list changed nothing about whether the contract held — only whether anybody was in a position to notice.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The legacy escape hatch</span>
+    <p>Worth knowing I exist, mostly so you do not use me: <code>-Djava.util.Arrays.useLegacyMergeSort=true</code> restores the pre-Java-7 sort, which does not check. It makes the exception go away and leaves you with an incorrectly ordered list, which is the outcome the check was added to prevent.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps from a reasonable-looking lambda to a stack trace with none of your classes in it.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A leaderboard sorts with <code>(a, b) -> a.getScore() > b.getScore() ? 1 : -1</code></span><span class="tag">reads correctly</span></li>
+    <li class="open"><span>Equal scores make the function antisymmetric-violating: both directions answer "less than"</span><span class="tag">broken from day one</span></li>
+    <li><span>Every test fixture has fewer than 32 players, so TimSort uses binary insertion sort and never merges</span><span class="tag">no check runs</span></li>
+    <li class="open"><span>The order is subtly wrong among tied players, which nobody asserts on and nobody can see</span><span class="tag">wrong, and invisible</span></li>
+    <li><span>The product grows. A real leaderboard has 40 entries, two of them tied</span><span class="tag">the threshold crossed</span></li>
+    <li class="open"><span>A merge hits the contradiction and throws from inside <code>java.util.TimSort</code> — a stack trace containing none of your code except the <code>sort</code> call</span><span class="tag">months after the change</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the part worth taking away, because it is true of the whole class of bug: the exception at step 6 is not the failure, it is the <i>detection</i>. The failure happened at step 2 and had been producing quietly wrong output ever since. That reframes what the exception is for — it is the JDK doing you a favour by refusing to continue, which is exactly why the legacy-sort flag is such a trap. <b>An error that appears when you scale up is usually a defect that was always there and finally became observable</b>, so the question to ask is never "what changed?" but "what stopped hiding it?"</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">one comparator with no case for "equal"<small>a ternary where an ordering was needed</small></div>
+    <div class="fan">everything downstream that assumed a total order ↓</div>
+    <div class="obs">
+      <span><code>Collections.sort</code> on a short list — quietly wrong order among ties</span>
+      <span><code>TreeMap</code> / <code>TreeSet</code> built with it — entries that can never be found again</span>
+      <span><code>Collections.binarySearch</code> — undefined result, no exception</span>
+      <span class="new"><code>List.sort</code> at 32+ elements — <code>IllegalArgumentException</code> from inside TimSort</span>
+    </div>
+  </div>
+  <p class="hf-annot">Only the last of these announces itself, and it is the one people treat as the bug. The <code>TreeMap</code> row is the quietest and the worst: a tree built on an inconsistent comparator places entries by comparisons that no longer hold, so <code>get</code> walks the wrong branch and returns <code>null</code> for a key that is demonstrably present when you iterate. It is the same failure as a mutated <code>HashMap</code> key, reached through ordering rather than hashing — and the general rule behind both is that <b>a data structure's invariants are only as true as the function you handed it</b>.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A leaderboard sorts with <code>(a, b) -> a.getScore() > b.getScore() ? 1 : -1</code>. It has worked for a year. Today, with 40 players and two tied on score, <code>List.sort</code> throws <code>IllegalArgumentException: Comparison method violates its general contract!</code>. What is actually wrong?</p>
+  <button type="button">The score values have grown large enough that the comparison overflows, which is the same defect as using <code>a - b</code> and is fixed by switching to <code>Integer.compare</code></button>
+  <button type="button">Two players were mutated by another thread mid-sort; the comparator is correct, and the fix is to synchronise the list or sort a defensive copy</button>
+  <button type="button">The comparator never returns 0, so for tied players both <code>compare(a,b)</code> and <code>compare(b,a)</code> return -1 — it has never been a valid ordering, and TimSort only merges (and therefore only checks) at 32+ elements</button>
+  <p class="why" data-for="0">No arithmetic happens here at all — the ternary compares and returns a literal <code>1</code> or <code>-1</code>, so nothing can overflow. The overflow trap is real and is a different bug; this one is structural, and it would be present even if every score were 0 or 1.</p>
+  <p class="why" data-for="1">Concurrent mutation genuinely does produce this exact exception, and is worth keeping on your list of causes — a comparator reading a field that changes mid-sort is inconsistent over time. It is not this case, though: this comparator is broken on a single thread with entirely immutable data, purely because it has no answer for equality.</p>
+  <p class="why" data-for="2">Correct. Replace it with <code>Comparator.comparingInt(Player::getScore).reversed()</code>, which delegates to <code>Integer.compare</code> and returns 0 for ties. And note the list was already ordering tied players wrongly for the whole year — the exception is the detection, not the defect.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A library is allowed to assume the thing you promised, and it will build on it.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4><code>equals</code> without <code>hashCode</code></h4>
+    <p>The same bargain on the hashing side: <code>HashMap</code> is allowed to assume equal objects hash alike, and it uses that to skip looking in other buckets. Break it and lookups miss objects that are demonstrably in the map — again with no exception, because the structure is doing exactly what your promise entitled it to do.</p>
+    <div class="hf-scatter"><span>the optimisation is the promise</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A non-deterministic SQL <code>ORDER BY</code> under pagination</h4>
+    <p>Order by a non-unique column and rows with the same value can appear on both page 1 and page 2, or on neither — because the database was never promised a total order either. The fix is the same shape: add a tiebreaker, usually the primary key.</p>
+    <div class="hf-scatter"><span>add a tiebreaker, get a total order</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An unstable sort where stability was assumed</h4>
+    <p>Sort by date, then by name, expecting the second sort to preserve the first — that only works if the second sort is stable. <b>Every "sort twice" trick is a claim about the algorithm, not about your data</b>, and it is worth writing down which one you are relying on.</p>
+    <div class="hf-scatter"><span>stability is a guarantee, not a habit</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> the O(n²) sorts are for understanding, merge sort is the stable O(n log n) guarantee, quicksort is the fast average case with an O(n²) worst, binary search needs sorted input and a careful mid calculation, and Java uses dual-pivot quicksort for primitives and TimSort for objects. The sentence worth adding: <b>a comparator that never returns 0 is not an ordering</b> — TimSort only detects it at 32+ elements, so it sorts wrongly and silently until the list grows.
+</div>
+
   <div class="panel">
     <h2>▶ PATTERN RECOGNITION — which sort/search fits, and what happens if the input isn't actually sorted?</h2>
     <div class="rt-ctlbar">
@@ -1346,6 +1467,7 @@ DevHubCodeWalk.mount('#cw-sortsrch',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

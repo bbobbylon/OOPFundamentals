@@ -696,6 +696,109 @@ pm.matches(a);     <span class="cm">// false — not .java</span>
     </div>
   </div>
 
+<p class="hf-deck">or, the cleanup call that is itself the leak</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You add a one-line safety net so a temp file always gets removed eventually — and that exact line is what slowly fills your server's heap over the next three months.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The "cleanup" call that's actually a leak</div>
+  <p>An upload endpoint saves each file to disk for processing: <code>File tmp = File.createTempFile("upload-", ".tmp"); tmp.deleteOnExit();</code> — reasoning: "if my own cleanup code has a bug, at least the JVM deletes it on the way out." The real cleanup code runs moments later and calls <code>tmp.delete()</code> once processing finishes. The disk stays completely clean. It ships.</p>
+  <p><code>deleteOnExit()</code> doesn't just note "delete this if nothing else does" — it inserts the file's path into a <code>static</code> set that lives for the entire life of the JVM, and there is no method to remove a single entry from it early. Your own <code>delete()</code> call two seconds later removes the file from disk perfectly. It does nothing to that set. After three months of uptime and a few hundred thousand uploads, that one set holds a few hundred thousand leftover path strings, still growing, with no restart in sight.</p>
+  <div class="hf-scatter">
+    <span>the disk stays clean, no leftover files ✓</span>
+    <span>the app runs fine for the first few weeks ✓</span>
+    <span>one internal Set grows forever, unbounded, until restart ⚠</span>
+  </div>
+  <p class="hf-foot"><code>deleteOnExit()</code> isn't a safety net with a self-cleaning trigger. It's a promise the JVM writes down and refuses to erase early — even after you've already kept it yourself.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Delete it yourself — don't outsource it to "eventually"</div>
+  <div class="hf-ladder">
+    <b>Don't call <code>deleteOnExit()</code> for files a long-running process creates and deletes routinely</b>
+    <i>↓ it's built for a short script or a handful of files across one run — not once per request, for a process that stays up for months</i>
+    <b>Delete the file yourself, deterministically, in a <code>finally</code> block or try-with-resources-style cleanup</b>
+    <i>↓ an explicit <code>file.delete()</code> / <code>Files.deleteIfExists()</code> removes the file immediately and leaves nothing registered anywhere to grow</i>
+    <b>And if you still want a last-resort net, use a periodic sweep instead</b>
+    <i>↓ a scheduled job that deletes anything in the temp directory older than an hour bounds the damage of a missed cleanup without leaking memory for the life of the process</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> <code>File.deleteOnExit()</code> registers a filename in a static set that only shrinks once — at JVM shutdown — with no way to unregister a single file early, so calling it repeatedly in a process that doesn't exit for months is an unbounded memory leak wearing the disguise of a cleanup call.
+</div>
+
+<div class="hf-note"><b>deleteOnExit() doesn't forget once the file is gone — it only forgets when the whole program does.</b> A promise the JVM writes down and won't erase, even after you've already kept it yourself.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I called <code>deleteOnExit()</code> right after creating this temp file, just as a safety net.</p></div>
+  <div class="hf-bub right"><span class="who">The JVM, personified</span><p>Noted. I've written that filename down. I'll get to it when I shut down.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>I already deleted the file myself two seconds later, though.</p></div>
+  <div class="hf-bub right"><span class="who">The JVM, personified</span><p>Good for you. I still have it written down. I'm not erasing that note until I exit — however many months from now that is.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one filename into the JVM's internal hook list — and watch it never leave early.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>File tmp = File.createTempFile("upload-", ".tmp"); tmp.deleteOnExit();</code></span><span class="tag">one call, one registration</span></li>
+    <li class="open"><span>internally, <code>DeleteOnExitHook.add(path)</code> inserts the path into a <code>static LinkedHashSet&lt;String&gt;</code></span><span class="tag">one shared set for the whole JVM</span></li>
+    <li><span>your own cleanup code runs <code>tmp.delete()</code> moments later — the file is gone from disk</span><span class="tag">disk is clean</span></li>
+    <li class="open"><span>the path string is still sitting in that set — nothing in the previous step touched it</span><span class="tag">no matching remove() exists</span></li>
+    <li><span>this repeats for every upload — thousands, then millions, of path strings accumulate</span><span class="tag">same set, never trimmed</span></li>
+    <li class="open"><span>the set is only ever cleared inside <code>runHooks()</code>, called exactly once, at JVM shutdown</span><span class="tag">which, for a server, might be months away</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the surprise. Deleting the file yourself feels like it should undo the <code>deleteOnExit()</code> registration too, since both are about the same file. They aren't connected at all. <code>deleteOnExit()</code> writes an entry into a completely separate bookkeeping set the moment you call it, and nothing about that entry's lifecycle is tied to whether the file still exists on disk. The set doesn't check; it just keeps growing.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">the JVM process — up for 3 months and counting</span>
+      <div class="ring"><span class="lbl">DeleteOnExitHook's static LinkedHashSet&lt;String&gt;</span>
+        <div class="core">600,000 leftover path strings<small>one per upload, ever — none removed early</small></div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Nothing about this requires a bug in your cleanup code — the leak is there even when every single temp file gets deleted exactly on schedule. The set lives one level further out than the file itself: inside the JVM process, for as long as that process keeps running. A short-lived script exits in seconds, so nobody ever notices this set exists at all. A server that stays up for months is exactly the shape of program this call was never designed for.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A long-running Spring Boot service calls <code>tempFile.deleteOnExit()</code> on every uploaded file, then explicitly deletes each file a few seconds later once processing finishes. After three months of uptime with no restart, what's true?</p>
+  <button type="button">The disk is clean — every file really is gone — but the JVM's internal <code>deleteOnExit</code> bookkeeping has been growing the whole time and has never released a single entry</button>
+  <button type="button">Nothing unusual happens — <code>deleteOnExit()</code> only tracks the most recently registered file, so older registrations get overwritten automatically</button>
+  <button type="button">The explicit <code>delete()</code> calls fail silently, because a file already registered with <code>deleteOnExit()</code> can only be deleted at JVM shutdown</button>
+  <p class="why" data-for="0">Right. Deleting the file yourself removes it from disk immediately and completely — that part works exactly as expected. What never happens is any shrinking of the internal hook's set: it only clears everything, all at once, when the JVM actually shuts down. Three months of uploads means three months of leftover string entries sitting in memory.</p>
+  <p class="why" data-for="1">There's no such overwriting — <code>deleteOnExit()</code> adds to a <code>Set</code>, it doesn't replace some single "most recent file" slot. Every distinct path you've ever registered stays in that set independently, which is exactly why it grows without bound instead of holding steady at one entry.</p>
+  <p class="why" data-for="2">Explicit <code>delete()</code> works completely normally regardless of any earlier <code>deleteOnExit()</code> call — they're independent operations on the same file. The registration only controls what happens at shutdown to files that are STILL there; it never blocks or delays a delete you perform yourself.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The short-lived thing is gone; the long-lived thing's record of it isn't" shows up anywhere a bookkeeper outlives what it's keeping books on.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>An Angular subscription that outlives its component</h4>
+    <p>A component subscribes to a shared, app-wide <code>Observable</code> in <code>ngOnInit</code> and never calls <code>unsubscribe()</code> in <code>ngOnDestroy</code>. Navigate to that route and away again, and one more subscription piles onto the <code>Observable</code> — the component is long gone, but its subscription lives inside an object that never dies.</p>
+    <div class="hf-scatter"><span>the component is gone; its footprint isn't</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A memoization cache with no eviction</h4>
+    <p>A <code>static Map&lt;String,Object&gt;</code> used to cache expensive per-key results grows by one entry per unique key ever seen, with no expiry and no size limit. It behaves perfectly for the first million requests, and is the exact reason the heap is full on request one million and one.</p>
+    <div class="hf-scatter"><span>correct on every call, unbounded in total</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>CI build artifacts nobody prunes</h4>
+    <p>A self-hosted runner that never runs a cleanup step keeps every image layer from every build. Each individual build looks completely successful — until the runner's disk fills up and the next checkout fails for a reason that has nothing to do with that day's code.</p>
+    <div class="hf-scatter"><span>disk fills from success, not failure</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> this page walks Java's file I/O — legacy streams versus the modern <code>Path</code>/<code>Files</code> NIO.2 API, readers/writers, serialization, and the try-with-resources patterns that keep resources from leaking. <b>The one new sentence this block adds:</b> <code>deleteOnExit()</code> isn't a self-cleaning safety net — it's a write-only entry in a set that lives as long as the JVM does, so calling it once per file in a long-running server leaks memory for every file the process ever touches, even when every single one of them gets deleted correctly.
+</div>
+
 <h2 id="cw-ionc">👣 Step through it, line by line</h2>
 <div id="cw-ionc-mount"></div>
 <script src="devhub-codewalk.js"></script>
@@ -856,6 +959,7 @@ function show(id,el){
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>
