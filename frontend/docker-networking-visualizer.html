@@ -110,7 +110,110 @@
     <div class="intro-ciam"><span class="tag">CIAM local dev networking:</span> Compose auto-creates a <code>projectname_default</code> network, so <code>ciam-auth</code> reaches <code>postgres</code> via <code>jdbc:postgresql://postgres:5432/ciam</code>, Redis via <code>spring.redis.host=redis</code>, and Ping via <code>https://ping-server:9031</code> — all by service-name DNS. Only what you list under <code>ports:</code> is externally reachable; expose 8080 (and Ping admin if needed) but not postgres (5432). Debug tip: <code>docker exec -it ciam-auth curl http://postgres:5432</code> — "connection refused" (not "host not found") means DNS is fine but the port isn't listening.</div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, why the exact same connection string works in your terminal and fails in your container</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">"localhost" is not one address. It's a different address depending on which network namespace asks for it.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The JDBC URL didn't change. The result did.</div>
+  <p>Postgres runs natively on your Windows machine — not in Docker at all — listening on <code>127.0.0.1:5432</code>. From PowerShell, <code>psql -h localhost -p 5432</code> connects instantly. You containerize the Spring Boot app and leave <code>SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/mydb</code> exactly as it was, because why would it need to change — Postgres hasn't moved.</p>
+  <p>The container logs show <code>Connection refused</code>. Same host string, same port number, same driver. The only thing that changed is which process is asking "where is localhost," and that turns out to matter completely.</p>
+  <div class="hf-scatter">
+    <span>Postgres is running ✓</span>
+    <span>the port number is right ✓</span>
+    <span>what "localhost" means here ⚠</span>
+  </div>
+  <p class="hf-foot">Every container ships with its own private loopback interface, sealed off from the host's before the container even starts.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Cross the boundary on purpose, not by accident</div>
+  <div class="hf-ladder">
+    <b>Name what you actually mean by "localhost"</b>
+    <i>↓ decide: do you want the container's OWN loopback, or the host machine sitting outside it? They are never the same thing</i>
+    <b>Use the DNS name built for exactly this</b>
+    <i>↓ <code>host.docker.internal</code> resolves to the host machine from inside a container — built in on Docker Desktop; on Linux (20.10+) add <code>--add-host=host.docker.internal:host-gateway</code></i>
+    <b>Or skip reaching out to the host entirely</b>
+    <i>↓ containerize Postgres too and put both containers on the same user-defined network (Section 5 above) — then it's ordinary container-name DNS, no host boundary to cross at all</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>"localhost" is relative to whoever asks.</b> It always means "my own loopback interface" — but a container's network namespace has its own loopback, completely separate from the host's, created fresh before the container's first line of code even runs. The string never crosses that boundary by itself, no matter how correct it looked a second ago in a terminal that wasn't inside a container.
+</div>
+
+<div class="hf-note">Every container is a stranger in their own studio apartment, and every apartment's front door is labeled <b>"localhost."</b> Knocking on your own door doesn't reach the neighbor's apartment just because the labels match.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>My JDBC URL says localhost:5432 and Postgres is definitely running there. Why is the container refusing the connection?</p></div>
+  <div class="hf-bub right"><span class="who">"localhost"</span><p>I'm not one address. Ask a container for me and I mean ITS loopback. Ask your laptop and I mean YOURS. We've genuinely never met.</p></div>
+  <div class="hf-bub"><span class="who">The container's network namespace</span><p>I shipped with my own private <code>lo</code> interface, sealed before I even started. Nothing outside me answers to "localhost" from in here.</p></div>
+  <div class="hf-bub right"><span class="who">host.docker.internal</span><p>I'm the workaround — a DNS name that actually points at your real host machine, invented specifically because this mistake is so common.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Trace the exact connection attempt from a terminal that works to a container that doesn't.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Postgres runs directly on the host machine, bound to <code>127.0.0.1:5432</code></span><span class="tag">not containerized</span></li>
+    <li class="open"><span><code>psql -h localhost -p 5432</code> from a normal terminal connects immediately</span><span class="tag">host's own loopback</span></li>
+    <li><span>Spring Boot container starts with the identical connection string, unchanged</span><span class="tag">looks correct</span></li>
+    <li class="open"><span>Inside the container, "localhost" resolves to 127.0.0.1 — but that address now lives in the container's own namespace</span><span class="tag">a different 127.0.0.1</span></li>
+    <li><span>Nothing is listening on port 5432 inside the container's own loopback — the OS refuses the connection</span><span class="tag">refused, not "host unreachable"</span></li>
+    <li class="open"><span>Switching to <code>host.docker.internal:5432</code>, or containerizing Postgres onto a shared network, actually crosses the boundary</span><span class="tag">the real fix</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is worth sitting with: the error is "connection refused," not "host not found" or "timed out." That's the tell. A DNS failure or an unreachable host times out or says unknown host; "refused" means the connection reached a real network stack and a real (if empty) port — just the wrong stack's port.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">Your machine — "localhost" here means your laptop's own loopback</span>
+      <div class="ring"><span class="lbl">Docker's network layer — bridge networks and container-name DNS live here</span>
+        <div class="core">The container's own network namespace<small>a private, sealed loopback interface — "localhost" means only this, and nothing outside it</small></div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Three layers, three different answers to "what does localhost mean here." Section 1 above already showed you that container-to-container traffic needs a shared Docker network to resolve names — this is the same idea one layer further out: reaching the HOST from inside a container needs its own explicit bridge, because the innermost ring never automatically sees past its own walls.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Postgres runs directly on your Windows machine (not in Docker), and <code>psql -h localhost -p 5432</code> connects fine from PowerShell. You containerize your Spring Boot app with <code>SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/mydb</code> left unchanged. The container logs show <code>Connection refused</code>. Why?</p>
+  <button type="button">Docker's embedded DNS server doesn't recognize the hostname "localhost," so the lookup fails before any connection is attempted</button>
+  <button type="button">Inside the container, "localhost" resolves to the container's own private loopback interface, completely separate from the host machine's — nothing is listening on port 5432 in there</button>
+  <button type="button">Postgres only accepts connections from the Docker bridge subnet, and the host's 127.0.0.1 address falls outside that subnet</button>
+  <p class="why" data-for="0">DNS isn't what fails here. "localhost" resolves to 127.0.0.1 instantly, every time, inside a container or out — there's no lookup to break. The problem is what 127.0.0.1 points to once you're inside the container's own namespace, not whether the name resolves.</p>
+  <p class="why" data-for="1">Right. Every container gets its own private loopback interface, sealed off from the host's before the container even starts. The container asks its OWN 127.0.0.1 for something on port 5432, finds nothing, and refuses the connection. <code>host.docker.internal</code>, or containerizing Postgres onto the same network as Section 5 above, is what actually crosses that boundary.</p>
+  <p class="why" data-for="2">There's no subnet access-control rule involved — the real story is simpler and stranger. The container isn't being blocked from reaching 127.0.0.1; it successfully reaches its OWN 127.0.0.1, which just has nothing running on port 5432.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"My own namespace's localhost isn't the one I meant" shows up anywhere namespaces stack.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Kubernetes pods flip the rule</h4>
+    <p>Inside a single Kubernetes pod, ALL containers (your app plus any Ping/Envoy sidecar) share ONE network namespace — so <code>localhost</code> genuinely DOES cross container boundaries there. That's the opposite rule from plain <code>docker run</code>, which is exactly why engineers moving between Compose locally and pods in production get bitten switching directions.</p>
+    <div class="hf-scatter"><span>same word, opposite rule, one layer of infrastructure apart</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>WSL2's own loopback</h4>
+    <p>WSL2 runs Linux inside a lightweight VM, so historically a service bound to <code>localhost</code> inside a WSL2 distro lived in a separate network namespace from Windows' own <code>localhost</code> — a Windows tool and a WSL2 tool couldn't just assume they shared the word, until Microsoft added explicit localhost-forwarding to paper over exactly this gap.</p>
+    <div class="hf-scatter"><span>a VM boundary, not a container boundary, same confusion</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>SSH local port forwarding</h4>
+    <p><code>ssh -L 5432:localhost:5432 jumphost</code> is famous for tripping people up the first time: the <code>localhost</code> inside that command means the JUMP HOST's loopback once the tunnel lands, not your own laptop's — the same word resolving relative to wherever the connection actually terminates.</p>
+    <div class="hf-scatter"><span>the tunnel's far end has its own "localhost" too</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> This page shows how containers find each other by name on a user-defined bridge, how <code>-p</code> exposes a container port outward to the host, and how separate networks isolate containers from each other. <b>The one new sentence this block adds:</b> "localhost" never crosses any of those boundaries on its own — it always means the asker's own loopback, so a container reaching the HOST machine needs <code>host.docker.internal</code> or a shared network, the same way reaching another container needs the DNS this page already covers.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -550,6 +653,7 @@ function showNet(name) {
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

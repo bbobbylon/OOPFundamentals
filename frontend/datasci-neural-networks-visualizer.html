@@ -63,7 +63,111 @@
     <div class="intro-ciam"><span class="tag">Why this matters for CIAM:</span> a tiny 2-input, 1-hidden-layer, sigmoid-output network is exactly the shape of a lightweight adaptive-auth risk scorer — inputs like login velocity and IP reputation score, output a risk probability that feeds a step-up-MFA decision. The same forward-pass/loss/backprop/gradient-descent loop taught here scales, with a very different architecture, all the way up to the transformer models behind Claude and GPT — covered in the AI/LLM Engineering track.</div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, why the "* 0.1" in your weight init isn't decoration — it's the whole difference between learning and silence</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You did everything the tutorials warn you to do, and the network still won't learn a single thing.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Ten layers deep, and every activation is 0.0000000003</div>
+  <p>You take the two-layer net from this page's own code — <code>W1 = np.random.randn(2, 3) * 0.1</code> — and stack it ten layers deep, because your real dataset needs more capacity than a toy 2-input net. You keep the exact same <code>* 0.1</code> scale on every layer, because it's what worked before.</p>
+  <p>Layer 1's activations look fine. By layer 5 they're barely a whisper. By layer 10, every activation has rounded down to something indistinguishable from zero — and so has every gradient trying to flow back through them. <code>loss.backward()</code> runs. No exception. No NaN. The loss number simply refuses to move, epoch after epoch.</p>
+  <div class="hf-scatter">
+    <span>random init, not zero ✓</span>
+    <span>ReLU in every hidden layer ✓</span>
+    <span>the *scale* of that randomness was never adjusted for how many layers it has to survive ⚠</span>
+  </div>
+  <p class="hf-foot">Randomizing your weights only solves the symmetry problem. It says nothing about whether the signal survives the trip through ten layers.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Scale the initial variance to the layer's fan-in</div>
+  <div class="hf-ladder">
+    <b>Compute each layer's fan-in — the number of inputs it receives</b>
+    <i>↓ that's how many terms get summed into each neuron's weighted sum, and more terms means more variance unless you correct for it</i>
+    <b>Draw initial weights from a distribution scaled by 1/fan_in (Xavier/Glorot) or 2/fan_in (He, for ReLU layers)</b>
+    <i>↓ this keeps activation variance roughly constant from the first layer to the last, instead of compounding smaller (or larger) at every layer</i>
+    <b>Let a framework default do it instead of a single hand-picked constant</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A network's activations have to stay in a usable range from the first layer to the last, and that range depends on both the weights' scale AND how many of them get summed per neuron — a constant like <code>* 0.1</code> that's perfectly safe for a 2-input toy net can silently strangle a 10-layer real one.
+</div>
+
+<div class="hf-note">If training loss is completely flat — not slow, <b>flat</b> — go check whether activations even reach the output layer with a non-zero magnitude before you blame the learning rate, the architecture, or the data.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I randomized the weights, used ReLU everywhere, and the loss just sits at the same number for 200 epochs. What am I missing?</p></div>
+  <div class="hf-bub right"><span class="who">Layer 10, personified</span><p>Not much reaches me anymore. Whatever signal came out of your inputs got a little smaller at every layer I sit behind — by the time it's my turn, it's rounding to zero.</p></div>
+  <div class="hf-bub"><span class="who">Layer 1</span><p>I'm fine, for what it's worth. My activations look completely normal — this isn't a problem you can see by only checking me.</p></div>
+  <div class="hf-bub right"><span class="who">He initialization</span><p>Which is exactly why I scale by how many inputs each layer has, instead of reusing one constant you picked once and never revisited.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">This isn't a bug in any one layer — it's a compounding effect across all of them.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Layer 1 receives raw inputs and multiplies them by weights drawn from N(0, 0.1&sup2;)</span><span class="tag">L1</span></li>
+    <li class="open"><span>Layer 2 receives layer 1's already-shrunk output and applies the same 0.1-scale weights again</span><span class="tag">L2</span></li>
+    <li><span>Each layer's output variance is roughly (previous variance) &times; fan_in &times; weight variance — with the weight variance fixed too small, that ratio lands below 1 at every single layer</span><span class="tag">THE RATIO</span></li>
+    <li class="open"><span>A ratio under 1, multiplied by itself ten times, doesn't shrink gently — it collapses exponentially</span><span class="tag">COMPOUNDING</span></li>
+    <li><span>By layer 8-10, activations are computationally indistinguishable from 0.0 — ReLU's derivative there is 0, so backprop's gradient is 0 too</span><span class="tag">SIGNAL GONE</span></li>
+    <li class="open"><span>loss.backward() still computes real numbers the whole way — they're just all ~0. Nothing throws, nothing warns, training just silently does nothing</span><span class="tag">SILENT FAILURE</span></li>
+  </ol>
+  <p class="hf-annot">Steps 3 and 4 are the ones to sit with: a 5% shortfall per layer sounds harmless, but 0.95 raised to the tenth power is 0.60, and 0.7 raised to the tenth power is only 0.03. Small per-layer ratios compound into near-total signal loss within the number of layers most real networks actually have.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">the same *0.1 initialization scale, now inside a 10-layer network instead of a 2-layer one<small>nothing else about the code changed</small></div>
+    <div class="fan">every layer downstream reacts ↓</div>
+    <div class="obs">
+      <span>layer 2 — barely different from before</span>
+      <span class="new">layer 10 — activations ~1000&times; smaller, functionally zero</span>
+      <span>the loss curve — flat for 200 straight epochs, no error thrown</span>
+    </div>
+  </div>
+  <p class="hf-annot">Nothing about this diagram involves a mistake in any single layer's code — <code>x @ W1 + b1</code> is exactly as correct at layer 10 as it was at layer 1. The failure is a property of the WHOLE STACK, which is exactly why it stays invisible if you only ever print or debug one layer at a time.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">You take this page's two-layer ReLU network and stack it to 10 layers for a bigger real dataset, keeping the same <code>np.random.randn(...) * 0.1</code> initialization on every layer. Training loss doesn't move for 200 epochs, and no exception is ever raised. What's most likely happening?</p>
+  <button type="button">The learning rate is too low, so training just needs far more epochs to show progress</button>
+  <button type="button">The 0.1 scale factor was never adjusted for the new fan-in per layer, so activations — and their gradients — are shrinking toward zero by the last few layers</button>
+  <button type="button">10 layers is simply too deep for a feedforward network built from NumPy instead of a real framework</button>
+  <p class="why" data-for="0">A too-low learning rate would still show SOME gradual movement over 200 epochs, just slowly. A loss that is completely flat — not just slow — points to a gradient that's actually near-zero, not merely a small step size. Check the activations themselves before blaming the learning rate.</p>
+  <p class="why" data-for="1">Right. Each layer's output variance depends on both the weight variance and how many inputs it sums (fan-in); leaving the scale factor fixed while stacking more layers compounds a small per-layer shrinkage into a near-total collapse by layer 10, silently — no exception fires because every operation still produces valid, just tiny, numbers.</p>
+  <p class="why" data-for="2">Depth itself isn't the limit — production networks routinely run far deeper than 10 layers in any framework, NumPy included. What breaks a naive deep network is exactly this kind of initialization mismatch, which is also why frameworks ship a sensible default (Kaiming/He, Xavier) instead of leaving the scale to one hand-picked constant.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A constant that's safe at one scale and dangerous at a bigger one shows up everywhere in software, not just in weight initialization.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A recursive function with a fine base case</h4>
+    <p>A recursive function that works perfectly against the 5-item list you wrote by hand blows the call stack the day a real caller passes 50,000 items. Nothing about the recursion itself was wrong — the constant (available stack depth) that was fine at test scale simply was never checked against production scale.</p>
+    <div class="hf-scatter"><span>a constant that's safe at your test scale isn't automatically safe at production scale</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A connection pool sized for a demo</h4>
+    <p>A HikariCP pool configured to comfortably serve a 3-user demo login flow silently starves once the same Spring Boot CIAM service takes real traffic. Every setting was "correct" at demo scale, and every one of those same settings was wrong at the scale that actually mattered.</p>
+    <div class="hf-scatter"><span>the setting doesn't change — the scale it was tested at does</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A change-detection default that works fine on one component</h4>
+    <p>Angular's default change detection scanning a handful of components in a demo app costs nothing measurable; the identical default strategy on a production dashboard with a few thousand bound bindings turns every click into a multi-millisecond scan of the whole tree. Same code, same default, just a scale the demo never exercised.</p>
+    <div class="hf-scatter"><span>a default that's invisible at small scale can be the entire story at real scale</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> every neuron is a weighted sum plus a non-linearity, and training is forward pass &rarr; loss &rarr; backprop &rarr; gradient step, repeated by the millions. <b>The one new sentence this block adds:</b> random initialization only solves the symmetry problem — get the variance of that randomness wrong relative to how many layers it has to survive, and a network can fail to learn anything at all without ever throwing an error.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -370,6 +474,7 @@ DevHubCodeWalk.mount('#cw-nnfund',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

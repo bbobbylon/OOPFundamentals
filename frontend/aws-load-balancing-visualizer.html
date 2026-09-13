@@ -46,6 +46,113 @@
     <div class="intro-ciam"><span class="tag">CIAM / production shape:</span> a Spring Boot CIAM API sits in a target group behind an ALB, health-checked on <code>/actuator/health</code> (which should itself check the DB connection pool, not just "the JVM is up"). The ASG's target-tracking policy on CPU keeps capacity matched to OAuth/token-validation load; because JWT validation is CPU-bound (signature verification) rather than I/O-bound, CPU-based scaling tracks real load well here — a service that was mostly waiting on a slow downstream call would need a different metric (e.g. request count per target) instead.</div>
   </div>
 
+<p class="hf-deck">or, the load-balancer setting that looks like a checkbox and behaves like a leash</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Nothing ever errors. Nothing ever pages on its own. Your on-call just stares at a CPU graph that makes no sense.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">One task at 95% CPU, three idling under 15%, and total traffic hasn't moved</div>
+  <p>Your CIAM API is stateless by design — every request carries its own JWT, validated fresh, no server-side session anywhere. Someone enables ALB sticky sessions on the target group anyway, "cheap insurance," 7-day cookie duration, and moves on. Load tests look fine. Nothing in code changed. Nothing in the deploy pipeline changed.</p>
+  <p>Three weeks later, on-call gets paged for a target-tracking scale-out that doesn't make sense: one ECS task is pinned at 95% CPU, its three siblings are idling under 15%, and total request volume across the service hasn't spiked at all. The autoscaling math is watching the <i>average</i>, so it just quietly adds a task to fix a problem that was never about total load — it was about where that load was landing.</p>
+  <div class="hf-scatter">
+    <span>JWT signature verification ✓</span>
+    <span>health checks passing on every task ✓</span>
+    <span>target-tracking policy doing its job ✓</span>
+    <span>the thing that is not ⚠ a routing decision nobody thought was a routing decision</span>
+  </div>
+  <p class="hf-foot">Every layer you'd normally suspect is innocent. The layer that's guilty is the one setting that looked too boring to be load-bearing.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Turn stickiness off for anything that's actually stateless</div>
+  <div class="hf-ladder">
+    <b>Check whether anything server-side actually needs affinity</b>
+    <i>↓ a JWT-validated API has no session to protect — stickiness has nothing to do and only downside left to give</i>
+    <b>If you're not sure, look at per-target request count in CloudWatch before you flip it</b>
+    <i>↓ a real skew across otherwise-identical targets confirms the theory instead of guessing under pressure</i>
+    <b>And if one specific caller genuinely needs affinity, scope it narrowly</b>
+    <i>↓ a short duration, or an application cookie your own code issues and controls, beats a blanket multi-day default applied to every client alike</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Stickiness pins the connection, not the authentication.</b> A JWT re-proves who the caller is on every single request, which is exactly why a stateless API never needed a pinned target in the first place. Turning stickiness on doesn't make a stateless service safer — it just hands one lucky (or unlucky) target a client it can never hand back until the cookie says so.
+</div>
+
+<div class="hf-note">A sticky note is supposed to hold <b>one page</b> in place. It was never supposed to hold <b>one-seventh of your entire traffic</b> in place for a week at a time — but that's exactly what a 7-day duration on your heaviest caller's cookie does.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I'm stateless. Every request proves itself with its own JWT. Why would I need sticky sessions?</p></div>
+  <div class="hf-bub right"><span class="who">The ALB, honestly</span><p>You wouldn't. But nobody asked me to check that — I just do whatever the target group's stickiness attribute tells me to do.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Fine, so it's just a harmless extra cookie. It can't actually hurt anything, right?</p></div>
+  <div class="hf-bub right"><span class="who">The cookie itself</span><p>I'm not "just" anything for a week. Whoever gets handed to me first is stuck riding with me for 604,800 seconds — good target or bad one.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Walk it forward one request at a time and the trap builds itself.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A client sends its very first request — no AWSALB cookie present yet.</span><span class="tag">no cookie</span></li>
+    <li class="open"><span>The ALB's normal algorithm (round robin, or least-outstanding-requests) picks a target for this one request — say, Task B.</span><span class="tag">normal routing</span></li>
+    <li><span>Because stickiness is enabled on the target group, the ALB now generates an AWSALB cookie encoding Task B's identity, encrypts it, sets it to expire in 7 days, and returns it with the response.</span><span class="tag">cookie issued</span></li>
+    <li class="open"><span>Every later request from that same client presents the cookie. The ALB decodes it and forwards straight to Task B — the load-balancing algorithm from step 2 is never consulted again for this client.</span><span class="tag">bypasses the algorithm</span></li>
+    <li><span>This particular client happens to be your busiest machine caller — a token-introspection consumer making thousands of requests a minute — and none of that traffic gets rebalanced for the full 7 days, because nothing about this looks wrong from the ALB's side.</span><span class="tag">quiet accumulation</span></li>
+    <li class="open"><span>Target-tracking autoscaling watches <i>average</i> CPU across the whole target group. Three idle siblings pull that average down, so the one metric that would explain the problem is never the one anything is alarming on.</span><span class="tag">the blind spot</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the whole story in one sentence: stickiness doesn't bias the load-balancing algorithm toward fairness, it <b>replaces</b> it entirely for every client holding a valid cookie. A perfectly reasonable per-request algorithm and a perfectly reasonable per-client memory combine into something neither one would do alone.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">First contact — no cookie</span>
+      <span class="go"><em>round robin picks a target</em> <span class="arrow">→</span> Task B gets this client, ALB issues an AWSALB cookie naming Task B</span></div>
+    <div class="stt"><span class="nm">Every request after — cookie present</span>
+      <span class="go"><em>stickiness enabled, 7-day duration</em> <span class="arrow">→</span> all of this client's traffic pinned to Task B, load-balancing algorithm skipped entirely</span></div>
+    <div class="stt"><span class="nm">Task B deregistered — deploy or scale-in</span>
+      <span class="go"><em>cookie now names a target that no longer exists</em> <span class="arrow">→</span> ALB quietly picks a new target and re-signs the cookie — no error, no alert, no client-visible failure</span></div>
+    <div class="stt"><span class="nm">New pin forms — same client, same habits</span>
+      <span class="go"><em>next request carries the new cookie</em> <span class="arrow">→</span> whichever task it landed on this time becomes the next hot spot</span></div>
+  </div>
+  <p class="hf-annot">That third state is the part worth sitting with. AWS designed the failover to be graceful on purpose — a deregistered or unhealthy target just gets silently swapped out, cookie and all. That's good engineering for the failure it's solving, and it's exactly why this gotcha never shows up as an error rate anyone would notice. The imbalance just relocates to a new task and keeps going.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">Your CIAM API validates a fresh JWT on every request — there is no server-side session anywhere in the design. Someone enables ALB sticky sessions on it anyway, 7-day cookie duration, "cheap insurance." Three weeks later on-call gets paged: one ECS task is pinned at 95% CPU while its three siblings idle under 15%, with no spike in total request volume across the service. What is actually going on?</p>
+  <button type="button">Your highest-volume caller got cookie-pinned to that one task on its very first request, and keeps sending that same cookie back on every call for the full 7-day duration</button>
+  <button type="button">That task's JVM never finished warming up its JIT compiler, so JWT signature verification is running slower there than on the others</button>
+  <button type="button">That one task's health check is configured to run more frequently than its siblings, burning CPU on the checks themselves</button>
+  <p class="why" data-for="0">Exactly. Duration-based stickiness (the AWSALB cookie) pins a client to whichever target it first landed on, for however long you configured — up to 7 days. It has nothing to do with load, health, or fairness; it's a lookup table with one row per cookie. A single chatty machine client sending thousands of requests a minute, every one carrying that same cookie, lands every one of them on the same task, because the ALB is honoring the cookie instead of re-running its load-balancing algorithm.</p>
+  <p class="why" data-for="1">JIT warm-up is real, but it resolves itself within the first couple of minutes of a task's life, not three weeks in — and it wouldn't explain why the SAME task stays hot indefinitely while identically-deployed siblings stay idle the whole time.</p>
+  <p class="why" data-for="2">Health check interval is a target-group-level attribute applied identically to every target behind it — one task can't be checked more often than its siblings, and a lightweight GET every 30 seconds doesn't move CPU by 80 points regardless.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Pinning-by-accident is not an AWS-specific idea — it's what happens anywhere a cache outlives the thing it's caching.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A gRPC client that resolved once and never let go</h4>
+    <p>A thick client that looks up one backend address at startup and keeps a persistent connection alive for the life of the process is making the same trade: great latency, right up until that one backend becomes the only one anybody is actually hitting.</p>
+    <div class="hf-scatter"><span>resolve once, pay for it for the process's whole lifetime</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A naive consistent-hash ring with no load awareness</h4>
+    <p>Hashing a key to a node is a clean idea right up until one key is far hotter than the rest — the ring doesn't know that, so it keeps sending every request for that key to the same unlucky node no matter how many nodes you add to the cluster.</p>
+    <div class="hf-scatter"><span>the algorithm is fair per-key, not fair per-node</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A DNS record with a huge TTL outliving the box it points to</h4>
+    <p>The server behind it can be long gone; the cache doesn't know that until its own clock runs out. The bug was never in the DNS system — it was in a duration someone set once and then forgot was still ticking.</p>
+    <div class="hf-scatter"><span>the failure mode is the cache's duration, not the resource it describes</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> an ALB and an ASG are two independent control loops that only cooperate through health checks — the ALB decides who's healthy enough to receive traffic, the ASG decides how many targets should exist at all. <b>The one new sentence this block adds:</b> a "harmless" load-balancer checkbox like sticky sessions can quietly defeat that whole cooperation by welding one client's traffic to one target for days at a time, and because the failover is graceful by design, the only symptom you'll ever see is a CPU graph that looks like a mystery.
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
@@ -249,6 +356,7 @@ DevHubCodeWalk.mount('#cw-lb',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

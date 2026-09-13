@@ -107,6 +107,208 @@
     <div class="intro-ciam"><span class="tag">Debug "status 0" in CIAM:</span> Open the Network tab, find the <code>OPTIONS</code> preflight, check its status — 200 means CORS is fine; 403 means Security rejected it before CORS ran (add <code>.requestMatchers(HttpMethod.OPTIONS).permitAll()</code>). Then verify the <code>Access-Control-Allow-Origin</code> header matches your Angular origin exactly — it's case-sensitive and the trailing slash matters.</div>
   </div>
 
+<p class="hf-deck">or, the header is sitting right there in DevTools and your code still reads <code>null</code></p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Your preflight is green, your login returns 200, and Angular still can't find the token.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Login works, the body parses, and <code>headers.get('Jwt-Token')</code> is null</div>
+  <p>Your Spring login endpoint does the sensible thing: it puts the freshly minted JWT in a
+  response header — <code>Jwt-Token</code> — instead of burying it in the JSON body. The CORS
+  config looks complete: <code>allowedOrigins("https://app.contoso.com")</code>,
+  <code>allowedMethods("*")</code>, <code>allowedHeaders("*")</code>,
+  <code>allowCredentials(true)</code>. The preflight <code>OPTIONS</code> comes back 204. The
+  <code>POST /login</code> comes back 200. The body deserialises into your <code>UserDTO</code>
+  perfectly.</p>
+  <p>Then you open the Network tab and there it is, plainly visible under Response Headers:
+  <code>Jwt-Token: eyJhbGciOiJIUzUxMiJ9…</code>. And in the very next line of your code,
+  <code>res.headers.get('Jwt-Token')</code> returns <code>null</code>. No CORS error in the
+  console. No red request. Nothing failed. The browser simply received that header, decided your
+  JavaScript wasn't allowed to see it, and said nothing about it. DevTools shows you the wire;
+  your code gets a filtered view of the wire, and nobody tells you they differ.</p>
+  <div class="hf-scatter">
+    <span>preflight OPTIONS → 204 ✓</span>
+    <span>POST /login → 200 ✓</span>
+    <span>DevTools shows Jwt-Token on the response ✓</span>
+    <span>headers.get('Jwt-Token') → null ⚠</span>
+  </div>
+  <p class="hf-foot">The assumption underneath: that <code>allowedHeaders</code> means "headers
+  this API is allowed to use." It means the opposite direction — headers the browser is allowed to
+  <em>send</em> you.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Name the header you want read back, on the response side</div>
+  <div class="hf-ladder">
+    <b>.allowedHeaders("Authorization", "Content-Type")</b>
+    <i>↓ that is the request direction — what the browser may put ON the call. It has no opinion about reading anything back.</i>
+    <b>.exposedHeaders("Jwt-Token", "Location")</b>
+    <i>↓ now the actual response carries <code>Access-Control-Expose-Headers: Jwt-Token, Location</code>, and the browser un-hides exactly those two</i>
+    <b>res.headers.get('Jwt-Token') returns the token — with no change to Angular, the endpoint, or the preflight</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>CORS filters the response your JavaScript receives, not just the request it is allowed to
+  send.</b> Out of every header on the wire, a cross-origin read exposes only seven by default —
+  <code>Cache-Control</code>, <code>Content-Language</code>, <code>Content-Length</code>,
+  <code>Content-Type</code>, <code>Expires</code>, <code>Last-Modified</code>,
+  <code>Pragma</code> — and nothing else, ever, until <code>Access-Control-Expose-Headers</code>
+  names it. That is why a paging API's <code>X-Total-Count</code>, a 201's <code>Location</code>,
+  a 429's <code>Retry-After</code> and your auth header all go missing together the first time the
+  SPA moves to its own subdomain. And the wildcard is not the easy way out: per the Fetch standard
+  <code>Access-Control-Expose-Headers: *</code> is treated as a literal header name — not a
+  wildcard — as soon as the request sends credentials, which is every authenticated CIAM call you
+  make.
+</div>
+
+<div class="hf-note">Think of the pharmacy pickup window. Your whole order is on the counter three
+feet away — you can see it, the label has your name on it — but you only get what the pharmacist
+slides through the slot. <b><code>exposedHeaders</code> is the list of what gets slid through the
+slot.</b> Everything else stays on the counter, in full view, permanently out of reach.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>The header is in the response. I can see it in DevTools. Why is <code>headers.get()</code>
+    giving me null?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The browser's CORS layer</span>
+    <p>Because DevTools is me showing you what arrived on the socket, and <code>headers.get()</code>
+    is me showing your script what it's cleared to read. Those are two different lists.
+    Cross-origin, your script gets seven safelisted response headers plus whatever the server
+    explicitly names in <code>Access-Control-Expose-Headers</code>. Yours named nothing.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">DefaultCorsProcessor, in Spring</span>
+    <p>I write that header, and only if your <code>CorsConfiguration</code> has exposed headers
+    set. There is no default — <code>applyPermitDefaultValues()</code> fills in origins, methods,
+    allowed headers and a 1800-second max-age, and leaves exposed headers empty. I'm not
+    withholding anything; I was never asked.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Angular's HttpHeaders</span>
+    <p>And don't go hunting for a casing bug in my map — I lower-case every key, so
+    <code>'Jwt-Token'</code> and <code>'jwt-token'</code> find the same entry. If I say null, the
+    header genuinely never reached me.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One credentialed <code>POST /login</code> from <code>app.contoso.com</code> to <code>api.contoso.com</code>, start to finish.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The <code>Content-Type: application/json</code> body makes this non-simple, so the browser sends an <code>OPTIONS</code> preflight first</span><span class="tag">permission to send</span></li>
+    <li class="open"><span>Spring answers the preflight with <code>Allow-Origin</code>, <code>Allow-Methods</code>, <code>Allow-Headers</code> and <code>Allow-Credentials</code> — every one of them about the <b>request</b> you are about to make</span><span class="tag">nothing here is about reading</span></li>
+    <li><span>The preflight passes, the real <code>POST</code> goes out with the cookie, and your controller runs and mints the JWT</span><span class="tag">server side is completely fine</span></li>
+    <li class="open"><span>The 200 comes back carrying <code>Content-Type</code>, <code>Date</code>, <code>Jwt-Token</code> and half a dozen others. All of them physically arrive in the browser process</span><span class="tag">the wire has everything</span></li>
+    <li><span>Before handing the response to your <code>fetch</code>/<code>XHR</code>, the browser builds a <i>filtered</i> header list: the seven CORS-safelisted names, plus anything listed in <code>Access-Control-Expose-Headers</code> on <b>this</b> response</span><span class="tag">the invisible step</span></li>
+    <li class="open"><span>That header wasn't sent, so <code>Jwt-Token</code> is dropped from the filtered list — silently, with a 200 status and a perfectly readable body</span><span class="tag">success, minus the part you needed</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the one nobody pictures. Every CORS diagram you have ever seen
+  stops at "the preflight was approved, the request went through" — as if approval were a single
+  yes/no gate at the front door. There is a second gate on the way out, it runs on the actual
+  response and not the preflight, and it defaults to closed. Which is also why re-reading the
+  <code>OPTIONS</code> response in DevTools for the hundredth time will never show you the
+  problem: the fix has to land on the <code>POST</code>'s own headers.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">the response Spring actually sent</span>
+      <div class="ring"><span class="lbl">every header that arrived in the browser process — this is the DevTools view</span>
+        <div class="ring"><span class="lbl">the 7 CORS-safelisted names + whatever Access-Control-Expose-Headers lists</span>
+          <div class="core">what res.headers.get() can return<small>null for Jwt-Token, until exposedHeaders names it</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Read it inwards and the bug stops being mysterious. Nothing was lost between
+  the first ring and the second — your server did its job and the network delivered it. The whole
+  bug lives in the third ring, a list that starts with seven entries and grows only when you say
+  so. Debugging from the outermost ring (curl, Postman, the Network tab) will always look healthy,
+  because all three of those tools live in ring two.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Same-origin in dev on <code>localhost:4200</code> with a proxy, everything worked.
+  In prod the SPA is at <code>app.contoso.com</code> and the API at <code>api.contoso.com</code>.
+  Preflight 204, login 200, body fine, and <code>res.headers.get('Jwt-Token')</code> is
+  <code>null</code> even though DevTools shows the header on the response. Which change actually
+  fixes it?</p>
+  <button type="button">Add <code>Jwt-Token</code> to <code>allowedHeaders</code> — the <code>"*"</code> wildcard stops covering custom header names once <code>allowCredentials(true)</code> is on</button>
+  <button type="button">Add <code>Jwt-Token</code> to the preflight's <code>Access-Control-Allow-Headers</code>, so the browser knows to keep it when the real response arrives</button>
+  <button type="button">Add <code>.exposedHeaders("Jwt-Token")</code>, so the actual response carries <code>Access-Control-Expose-Headers: Jwt-Token</code></button>
+  <p class="why" data-for="0">Two things wrong here, and both are worth having straight.
+  <code>allowedHeaders</code> only ever governs headers the browser may <i>send</i> on the request
+  — adding a response header's name to it changes nothing about reading. And Spring doesn't leave
+  you with a broken wildcard either: when <code>allowedHeaders</code> is <code>"*"</code>,
+  <code>CorsConfiguration.checkHeaders()</code> resolves it to the concrete header names the
+  preflight actually asked for, so the response echoes real names rather than a literal
+  <code>*</code>. The request direction was never the problem.</p>
+  <p class="why" data-for="1">This is the trap answer, because it's where everyone looks. The
+  preflight is a negotiation about the request that is about to be sent — method, headers,
+  credentials — and it is finished by the time the real call goes out. Exposure is decided on the
+  <b>actual response</b>: the browser reads <code>Access-Control-Expose-Headers</code> off the
+  <code>POST</code>'s own headers, not off the <code>OPTIONS</code>'. You can stare at that 204
+  all afternoon and the answer is never in it.</p>
+  <p class="why" data-for="2">Right. One line on the <code>CorsConfiguration</code> — or
+  <code>.exposedHeaders("Jwt-Token")</code> on the <code>CorsRegistry</code> mapping — and the
+  browser un-hides exactly that name on the real response. Note what did <i>not</i> change: the
+  endpoint, the preflight, the Angular code. The deeper point is that CORS is two gates, not one:
+  one on what you may send, one on what you may read, and only the first one announces itself when
+  it fails. While you're there, list <code>Location</code> too, or the 201 from your registration
+  endpoint hands Angular a response whose <code>Location</code> is equally invisible.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Three other places where the data arrived intact and the layer you read it through handed you nothing.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>JWT claims vs. granted authorities</h4>
+    <p>Your Entra access token carries a <code>groups</code> claim, you can paste it into jwt.io
+    and see it, and <code>hasAuthority("ROLE_ADMIN")</code> still fails. Spring Security's default
+    <code>JwtGrantedAuthoritiesConverter</code> reads <code>scope</code>/<code>scp</code> and
+    prefixes each with <code>SCOPE_</code> — it never looks at <code>groups</code>. The claim is
+    present, decoded and validated; it just isn't in the list the authorization check reads from
+    until you supply your own converter.</p>
+    <div class="hf-scatter"><span>present in the token ≠ present in the authorities</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>HttpClient's default <code>observe: 'body'</code></h4>
+    <p>Even with <code>exposedHeaders</code> configured correctly, a plain
+    <code>http.post(url, body)</code> hands you the deserialised body and throws the
+    <code>HttpResponse</code> away. There is no <code>.headers</code> to ask. You need
+    <code>observe: 'response'</code> before the question is even askable — a second, entirely
+    client-side filter stacked on top of the browser's one.</p>
+    <div class="hf-scatter"><span>two filters between the wire and your variable</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4><code>HttpOnly</code> on a session cookie</h4>
+    <p>The server sets it, the browser stores it, and every subsequent request sends it back
+    faithfully — and <code>document.cookie</code> returns an empty string. Same shape, opposite
+    intent: here the invisibility is the entire point, because a cookie your JavaScript can read
+    is a cookie an injected script can steal. It's the clearest proof that "on the wire" and
+    "readable by my code" were never the same list.</p>
+    <div class="hf-scatter"><span>invisible on purpose, this time</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> your SPA and your API are different origins, so the browser
+  enforces the Same-Origin Policy and your API has to opt in with <code>Access-Control-*</code>
+  headers — with a preflight <code>OPTIONS</code> in front of any non-simple call, a specific
+  origin rather than <code>*</code> whenever credentials ride along, and <code>http.cors()</code>
+  wired into the filter chain so Security doesn't 401 the preflight. All of that is about the
+  request. <b>The new sentence: CORS gates the response too — your JavaScript sees seven safelisted
+  headers and nothing else until <code>exposedHeaders</code> names the rest, which is why a token
+  you can see in DevTools reads back as <code>null</code>.</b>
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -582,6 +784,7 @@ document.getElementById('run').onclick=send;
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

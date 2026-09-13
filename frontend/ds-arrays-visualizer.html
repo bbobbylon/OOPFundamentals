@@ -149,7 +149,108 @@ console.log("read xs[3] instantly:", xs[3], " <- indexing never shifts anything"
   </div>
 
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or: the line the compiler waved through, that only explodes when the wrong array shows up.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You pass a String[] into a method that takes an Object[] — perfectly legal — write what looks like a harmless value into it, and code that compiled clean throws at runtime, from a line the compiler had every chance to reject.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A "fill the gaps with a default" helper crashes on someone else's array</div>
+  <p>You write a small utility: <code>static void fillGaps(Object[] arr, Object def) { for (int i = 0; i &lt; arr.length; i++) if (arr[i] == null) arr[i] = def; }</code>. It's been called safely for months with actual <code>Object[]</code> and <code>String[]</code> arrays passed as defaults of the same family.</p>
+  <p>Then someone calls <code>fillGaps(userNames, 0)</code>, where <code>userNames</code> is declared <code>String[] userNames = new String[50]</code>. It compiles — <code>String[]</code> IS-A <code>Object[]</code>, arrays are covariant. It throws <code>java.lang.ArrayStoreException: java.lang.Integer</code> the first time it tries to write the boxed <code>0</code> into a null slot.</p>
+  <div class="hf-scatter">
+    <span>fillGaps compiles clean ✓</span>
+    <span>the call site compiles clean ✓</span>
+    <span>String[] silently accepted where Object[] was declared ⚠</span>
+  </div>
+  <p class="hf-foot">An array remembers exactly one thing about itself forever: its real component type from the moment it was created. Every single write checks the value against that type — no compiler can catch a mismatch that depends on which concrete array happens to show up at runtime.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Stop asking "any array" to mean "any array of anything"</div>
+  <div class="hf-ladder">
+    <b>Use a generic method instead of a raw Object[] parameter</b>
+    <i>↓ <code>static &lt;T&gt; void fillGaps(T[] arr, T def)</code> ties the array's element type to the default's type at compile time — there's no way to pass a String[] with an Integer default, ever</i>
+    <b>If you must accept a raw Object[], copy it into an array you actually control</b>
+    <i>↓ <code>Arrays.copyOf(arr, arr.length, Object[].class)</code> hands back an array whose real component type genuinely is Object, immune to the mismatch</i>
+    <b>And reach for a List&lt;Object&gt; when the whole point is "accept anything"</b>
+    <i>↓ collections don't inherit this hole — a List&lt;String&gt; can't even be assigned to a List&lt;Object&gt; variable, so the equivalent mistake is a compile error, not a page at 3pm</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Arrays remember their real element type at runtime; generics erase theirs — and that's the opposite of what most people assume.</b> <code>Object[] o = new String[3]</code> compiles because Java made arrays covariant on purpose, before generics existed, so a single method like <code>Arrays.sort(Object[] a)</code> could sort any reference array. Every array carries its true component type as a runtime tag and checks it on every store. Generics arrived a decade later to close exactly this hole for collections, and went the other way entirely: <code>List&lt;Object&gt;</code> and <code>List&lt;String&gt;</code> have no subtype relationship at all, so the equivalent mistake simply never compiles.
+</div>
+
+<div class="hf-note">An array is covariant on the way in and honest on the way out: it'll let you point an Object[] variable at a String[], but it never forgets what it actually is underneath — and it will remind you, loudly, at the worst possible line, the moment you try to put the wrong thing in it.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>arr[i] = def; compiled. Why did it just blow up at runtime?</p></div>
+  <div class="hf-bub right"><span class="who">the array</span><p>Because I'm not really an Object[] — I'm a String[] wearing an Object[] label. You handed the compiler a name tag; it didn't change what's underneath me.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Then why did javac let me write an Integer into you at all?</p></div>
+  <div class="hf-bub right"><span class="who">the array</span><p>Because covariance was legal in this language before generics existed, and nobody ever revoked it. The compiler trusts the label on the box. I'm the one who checks IDs at the door.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Step through exactly what happens between "compiles clean" and "throws."</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>String[] userNames = new String[50]</code> — the JVM tags this array's real component type as String, permanently, at creation</span><span class="tag">creation</span></li>
+    <li class="open"><span><code>fillGaps(userNames, 0)</code> is called — 0 autoboxes to Integer, and userNames is passed where Object[] is expected, legal because String[] IS-A Object[]</span><span class="tag">the call</span></li>
+    <li><span>Inside fillGaps, the parameter is declared Object[] — the compiler only checks that Integer is assignable to Object, which it is</span><span class="tag">compile check</span></li>
+    <li class="open"><span>javac emits an <code>aastore</code> instruction for <code>arr[i] = def</code> — this instruction does not trust the declared type</span><span class="tag">bytecode</span></li>
+    <li><span>At runtime, the JVM compares Integer against the array's real tagged component type, String — they don't match</span><span class="tag">runtime check</span></li>
+    <li class="open"><span>ArrayStoreException is thrown mid-write, naming the value's class, not the array's — often the first clue this was ever a String[]</span><span class="tag">the throw</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the whole gotcha compressed into one bytecode instruction. Every ordinary array write you've ever done — an int into an int[], a String into a String[] — passes this exact same check trivially, so it's invisible right up until the one time the declared type and the real type disagree.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>arr[i] = def;</span><span>Arrays.fill(arr, def)</span><span>a comparator that swaps in a boxed value</span></div>
+    <div class="funnel">all compile down to the same aastore check ↓</div>
+    <div class="instance">runtime compares the value's class to the array's real component type<small>one enforcement point, any number of call sites can trip it</small></div>
+  </div>
+  <p class="hf-annot">It doesn't matter how the write happens — a direct index assignment, a library method, a lambda inside a sort. Every path into an array element passes through the identical runtime check, because the check lives inside the array itself, not in whichever line of code happened to reach it.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A method is declared <code>static void tag(Number[] arr) { arr[0] = 3.14; }</code>. You call it as <code>tag(new Integer[]{1, 2, 3})</code>. What happens?</p>
+  <button type="button">It throws ArrayStoreException — the array's real component type is Integer, and 3.14 is a Double</button>
+  <button type="button">It compiles and runs fine — Double and Integer are both Number, so any Number[] should accept either</button>
+  <button type="button">It fails to compile — you can't pass an Integer[] where a Number[] is expected</button>
+  <p class="why" data-for="0">Right — passing Integer[] as Number[] is exactly the covariance Java allows, so it compiles fine. But the array's real identity stays Integer[] forever, and 3.14 is a Double, not an Integer — same mismatch as the String[]/Integer example, just a different pair of types.</p>
+  <p class="why" data-for="1">Wrong — this is the natural but incorrect read of the declared parameter type. Number[] describes what the compiler will let you assign through this reference, not what the array actually is underneath; the array underneath is still, specifically, an Integer[].</p>
+  <p class="why" data-for="2">Wrong — this overcorrects, assuming arrays behave like generics. Passing an Integer[] where a Number[] is expected is precisely the covariance Java allows, and it compiles without complaint. The mismatch only surfaces later, at the specific store that violates the real type, and only at runtime.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Covariant arrays aren't a Java wart nobody else repeated — they're a trade-off more than one runtime chose on purpose.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's own generics refused to make the same trade</h4>
+    <p>Assigning a <code>List&lt;String&gt;</code> to a <code>List&lt;Object&gt;</code> variable doesn't compile — generics are invariant precisely so the array mistake couldn't happen again for collections. The same bug, one generation later, moved from a runtime exception to a compile error.</p>
+    <div class="hf-scatter"><span>same language, the fix already shipped for something else</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>TypeScript makes the identical trade, with no runtime check at all</h4>
+    <p><code>let objs: Object[] = ["a", "b"]; objs.push(42);</code> compiles in TypeScript too — arrays are covariant there by design, a documented unsoundness in the type system. But JavaScript has no <code>aastore</code>-style guard, so the wrong value just sits in the array forever. Nothing ever throws.</p>
+    <div class="hf-scatter"><span>the same unsound design, minus the safety net</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>.NET made the same call and named the same exception</h4>
+    <p>C# arrays are covariant for the same historical reason Java's are, and the CLR throws <code>ArrayTypeMismatchException</code> at the exact same kind of store. Two unrelated major runtimes hit the same wall and built the identical guard rail — proof this is a deliberate, shared trade-off, not a one-off Java mistake.</p>
+    <div class="hf-scatter"><span>a different runtime, the identical exception in spirit</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> an array gets O(1) access and predictable layout by fixing its size and element type once, at creation, and never renegotiating either one. <b>The one new sentence this block adds:</b> the compiler is willing to let a reference to that array pretend to be a broader type than it really is, but the array itself never forgets what it actually was built as, and checks every write against that truth instead of the label you're currently looking at.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -651,6 +752,7 @@ function simReset(){simData=[];simCapacity=4;simLog=[];simRender();document.getE
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

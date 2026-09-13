@@ -761,25 +761,33 @@ repeat them): every code snippet explained line-by-line in depth (never a one-li
 syntax coloring on ALL code, the Head First brain-friendly aesthetic on ALL subjects (not just
 the Java patterns pages), colored/manipulated text as a deliberate memory device.
 
-### 1. Head First rhythm — sitewide rollout (⭐ SWEEP IN PROGRESS — 245 of 363 pages left)
+### 1. Head First rhythm — sitewide rollout (✅ COMPLETE 2026-09-12 — 0 pages left in the 40–60 band)
 The design language shipped and is opted into on **515 of 530 pages** (`<html data-hf>`), and
-**220 pages are now authored to the full nine-point rhythm** (102 before this sweep): deck line, problem/fix cards, a
+**all 474 scored lesson pages are now authored to the full nine-point rhythm**: deck line, problem/fix cards, a
 "one thing to remember" principle callout, a three-way dialogue, ONE shape-matched mechanism
 diagram, a knowledge check, "where you've seen this before", back-row Q&A, napkin predict-note.
 
-**✅ SWEEP STARTED 2026-09-11 — in progress.** Bobby approved it ("lets do all of those
-things you proposed, in that order"), so the 40–60 band is being authored one page at a time,
-each block teaching ONE specific, verified gotcha the page did not already cover.
+**✅ SWEEP STARTED 2026-09-11, FINISHED 2026-09-12.** Bobby approved it ("lets do all of those
+things you proposed, in that order"), so the 40–60 band was authored one page at a time, each
+block teaching ONE specific, verified gotcha the page did not already cover. The last 24 pages
+were split across **3 Sonnet subagents (8 pages each)** rather than 6×4 — fewer agents amortise
+the fixed cost of reading the standard/recipe/exemplar better — and every page scored 86–97
+(gate was 75), all passing `tmp_vcheck.mjs`/`tmp_smoke.mjs` clean.
 
 Band movement (`node frontend/tmp_hfaudit.mjs`, 474 scored lesson pages):
 
 | band | before the sweep | now |
 |---|---|---|
 | under 40 (thin) | **0** — was 69 | **0** |
-| 40–60 (design, not yet the rhythm) | 363 | **245** |
+| 40–60 (design, not yet the rhythm) | 363 | **0** |
 | 60–75 | 5 | 9 |
-| 75+ (at the bar) | 102 | **220** |
-| mean score | 57.2 | **68.2** |
+| 75+ (at the bar) | 102 | **465** |
+| mean score | 57.2 | **90.5** |
+
+Remaining 9 pages in the 60–75 "solid" band are not thin — they have the rhythm but score just
+under the 75 cutoff (shell-aws-cli, shell-cli-basics, shell-azure-cli, shell-gcloud-cli, streams,
+design-patterns, solid, and two config/typescript pages). Not part of this sweep's scope; pick
+up only if Bobby flags them specifically.
 
 Two things the first measurement pass established, both of which shaped how the sweep is being
 run:

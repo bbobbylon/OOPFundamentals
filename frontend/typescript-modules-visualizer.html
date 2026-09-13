@@ -151,7 +151,110 @@ console.log("second import sees shared state:", sameModule.current());
   </div>
 
 
-    <!-- ── EXTREME-VIZ HERO ── -->
+    <p class="hf-deck">or, what "guaranteed to be erased" actually erases</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">A one-word editor quick-fix can quietly unplug code that was never touched.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">One quick-fix later, your auth header stops going out</div>
+  <p><code>tokenStore.ts</code> does two things: it exports <code>interface TokenClaims</code>, and at module scope it calls <code>axios.interceptors.request.use(...)</code> to attach the bearer token to every outgoing request. Somewhere else you write <code>function decode(t: string): TokenClaims</code>, and your editor offers "convert import to type-only import." You accept it: <code>import type { TokenClaims } from './tokenStore';</code>.</p>
+  <p><code>import type</code>'s contract is that the line is <b>always</b> erased — no exception for what else lives in that module. If nothing else in your app imports <code>tokenStore.ts</code> with a real, non-type-only import, the emitted JS never imports <code>tokenStore.js</code> at all. The module is never loaded, so the interceptor registration inside it never runs. Requests go out with no <code>Authorization</code> header, silently.</p>
+  <div class="hf-scatter">
+    <span>the type-check passes ✓</span>
+    <span>the build finishes with zero warnings ✓</span>
+    <span>no import of tokenStore.js survives the bundle ⚠</span>
+  </div>
+  <p class="hf-foot">The compiler kept its promise exactly — it said that line would disappear, and it did.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Split the side effect from the type</div>
+  <div class="hf-ladder">
+    <b>Move the interceptor setup into its own file, e.g. <code>setupAuthInterceptor.ts</code>, exporting no types</b>
+    <i>↓ a file that exists purely for its side effect can never accidentally become "type-only imported"</i>
+    <b>Import it once, for its side effect only, from your app's real bootstrap: <code>import './setupAuthInterceptor';</code></b>
+    <i>↓ a bare side-effect import has no specifier to mark as type-only — there's nothing for a quick-fix to convert</i>
+    <b>Keep <code>import type { TokenClaims }</code> everywhere you only need the shape</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b><code>import type</code> is a promise that the LINE disappears — not a promise about what else lives in that module.</b> If a file exports both a type and a side effect, and every remaining importer only takes the type, the whole module can go unloaded, and nothing in the compiler warns you. From <code>tsc</code>'s point of view it kept every promise it made; it was never told that this particular file also happened to matter at load time.
+</div>
+
+<div class="hf-note">A side effect hiding behind a types-only import is a <b>smoke detector wired through a light switch nobody uses anymore</b> — remove the switch, and the alarm is still bolted to the ceiling. It's just never going to fire.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I only changed one import to <code>import type</code> — how did that turn off an entire interceptor?</p></div>
+  <div class="hf-bub right"><span class="who">The bundler, personified</span><p>I only emit what <code>tsc</code> hands me. If <code>tsc</code> erased every import of a file, I have zero instructions telling me to ever load that file — so I don't.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But the interceptor code is still sitting right there in tokenStore.ts.</p></div>
+  <div class="hf-bub right"><span class="who">The module loader, personified</span><p>Sitting in a file and being imported are two different things. Nobody asked me to run that file, so I never did.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one <code>type</code> keyword from an editor quick-fix to a missing Authorization header.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>tokenStore.ts</code> exports <code>TokenClaims</code> and also calls <code>axios.interceptors.request.use(...)</code> at module scope</span><span class="tag">source</span></li>
+    <li class="open"><span>The only other file needing it writes <code>import { TokenClaims } from './tokenStore'</code>, using it purely as a type</span><span class="tag">before</span></li>
+    <li><span>An editor quick-fix rewrites it to <code>import type { TokenClaims } from './tokenStore'</code></span><span class="tag">the edit</span></li>
+    <li class="open"><span><code>tsc</code> erases the entire line — <code>import type</code> guarantees erasure, no exception for side effects</span><span class="tag">erasure</span></li>
+    <li><span>No file left in the bundle imports <code>tokenStore.js</code> at all anymore</span><span class="tag">unreachable</span></li>
+    <li class="open"><span>The interceptor's <code>axios.interceptors.request.use(...)</code> line never executes — the file it lives in is never loaded</span><span class="tag">silent breakage</span></li>
+  </ol>
+  <p class="hf-annot">Step four has no exception clause. The compiler's job is "erase every <code>import type</code> line," full stop — it isn't in the business of checking whether that file does anything important the moment it loads.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">import { TokenClaims } from './tokenStore'</span>
+      <span class="go"><em>used only as a type in this file</em> <span class="arrow">→</span> tsc probably erases it — but only because of usage, not a guarantee</span></div>
+    <div class="stt"><span class="nm">import type { TokenClaims } from './tokenStore'</span>
+      <span class="go"><em>the type keyword</em> <span class="arrow">→</span> ALWAYS erased, even if this was the module's only importer</span></div>
+    <div class="stt"><span class="nm">import { type TokenClaims, setupInterceptor } from './tokenStore'</span>
+      <span class="go"><em>a real value specifier riding along</em> <span class="arrow">→</span> the whole line survives, the module loads, the side effect runs</span></div>
+  </div>
+  <p class="hf-annot">The difference between "erased" and "kept" isn't about whether the module matters — it's entirely about whether any specifier on that one line is a real value. The fix was never "stop using <code>import type</code>," it was "give the side effect a reason to load that has nothing to do with a type."</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q"><code>tokenStore.ts</code> exports <code>interface TokenClaims</code> and, in the same file, calls <code>axios.interceptors.request.use(...)</code> as a side effect the moment the module loads. The only other file in the app imports it with <code>import type { TokenClaims } from './tokenStore'</code>, purely for a function signature. What happens when the app runs?</p>
+  <button type="button">The interceptor installs the first time TokenClaims is used as a type annotation</button>
+  <button type="button">The interceptor never installs — tokenStore.ts is never loaded, because its only import was fully erased</button>
+  <button type="button">TypeScript refuses to compile, because the file has a side effect and can't be type-only imported</button>
+  <p class="why" data-for="0">No — types are erased entirely and carry no runtime behavior. Using something "as a type" doesn't cause a module to load; there's no JS statement left that references it at all.</p>
+  <p class="why" data-for="1">Right. <code>import type</code> is always fully erased, regardless of whether it's the only reference to that module. If nothing else imports tokenStore.ts with a real import, the JS module is simply never loaded, so none of its top-level code — interceptor included — ever runs.</p>
+  <p class="why" data-for="2">No — TypeScript has no such guard. It erases the import whether or not the target module has side effects; that's exactly the danger, because nothing warns you either way.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Erasing something because nobody seemed to need it has bitten every build tool that does it.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's JDBC driver registration</h4>
+    <p>A JDBC driver's <code>static { DriverManager.registerDriver(...); }</code> block only runs once something actually loads that class. The classic <code>Class.forName("com.mysql.cj.jdbc.Driver")</code> idiom exists purely to force that load — drop the "unused" reference and the driver never registers, for the exact same reason: the side effect only runs if something triggers the class to load at all.</p>
+    <div class="hf-scatter"><span>a side effect nobody explicitly calls only runs if something makes the class load</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Angular's tree-shakable providers</h4>
+    <p>A service registered with <code>providedIn: 'root'</code> that nothing ever injects can be dropped from the compiled bundle entirely — constructor side effects included. Angular's DI doesn't instantiate "just in case"; if nothing asks for it, it was never worth keeping.</p>
+    <div class="hf-scatter"><span>never injected, never built — even if the constructor did something important</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Bundler tree-shaking via "sideEffects": false</h4>
+    <p>A package.json that claims <code>"sideEffects": false</code> tells bundlers it's safe to prune any import that looks unused. If that claim is wrong — the package secretly polyfills something on load — the bundler drops it with total confidence, the same way <code>import type</code> drops a module it was told had nothing left worth keeping.</p>
+    <div class="hf-scatter"><span>the tool trusted a declaration over what the file actually does</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> every TS file lives in two universes, type and value, and TypeScript gives you per-specifier control — down to one inline <code>type</code> keyword — over exactly which import lines survive into the JS you ship. <b>The one new sentence this block adds:</b> "erased" doesn't just mean the annotation disappears — if that was the only reference to a module, the whole module, including whatever it does the moment it loads, never runs at all.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
     <div style="margin:0 0 28px">
       <div class="rt-ctlbar">
         <span class="lbl">Scenario</span>
@@ -1185,6 +1288,7 @@ DevHubCodeWalk.mount('#cw-mods-mount', {
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

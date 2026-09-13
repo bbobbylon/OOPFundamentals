@@ -103,6 +103,188 @@
     </div>
   </section>
 
+<p class="hf-deck">or, the 403 that has nothing to do with roles — GET works, POST doesn't, and your controller never ran</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You can spend a whole afternoon comparing authorities against a rule that was never evaluated.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">GET /api/customers returns 200. POST /api/customers returns 403. Same token, same user, same minute.</div>
+  <p>So you do the sensible thing this page just taught you: it's a 403, therefore it's authorization,
+  therefore compare the token's authorities against the endpoint's rule. You decode the token —
+  <code>"roles":["CIAM_ADMIN"]</code>. You check the converter — it prefixes correctly, so the
+  principal carries <code>ROLE_CIAM_ADMIN</code>. You check the annotation —
+  <code>@PreAuthorize("hasRole('CIAM_ADMIN')")</code>. It matches. You add a breakpoint in the
+  controller method to print the authorities, hit POST again, and <b>the breakpoint never fires</b>.</p>
+  <p>It never fires because Spring Security turns CSRF protection on by default, and the default
+  matcher exempts exactly <code>GET</code>, <code>HEAD</code>, <code>TRACE</code> and
+  <code>OPTIONS</code>. Every read sails through; every write hits <code>CsrfFilter</code>, which sits
+  near the front of the filter chain — ahead of the bearer-token authentication filter and far ahead
+  of method security. Finding no CSRF token, it hands the request to an access-denied handler and
+  writes <b>403</b> itself. Your rule was never consulted. Your controller was never reached. The
+  status code you spent the afternoon interpreting was produced by a filter that had not yet looked
+  at your token at all.</p>
+  <div class="hf-scatter">
+    <span>token valid and unexpired ✓</span>
+    <span>ROLE_CIAM_ADMIN present ✓</span>
+    <span>@PreAuthorize expression correct ✓</span>
+    <span>CsrfFilter rejected the POST before any of that ⚠</span>
+    <span>identical 403 either way ⚠</span>
+  </div>
+  <p class="hf-foot">403 means "a component refused this request". It does not promise the component
+  was your authorization rule.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Prove which filter answered before you argue about roles</div>
+  <div class="hf-ladder">
+    <b>Ask whether the verb matters: does the same URL work as a GET and fail as a POST?</b>
+    <i>↓ authorities don't care about HTTP verbs, and CSRF's default matcher cares about nothing else</i>
+    <b>Resend the failing POST with <u>no</u> Authorization header at all</b>
+    <i>↓ a real authorization failure needs an authenticated principal first, so stripping the credential should turn it into a 401 — if it stays 403, something ahead of authentication is answering</i>
+    <b>Turn on <code>logging.level.org.springframework.security=DEBUG</code> and read which filter wrote the response</b>
+    <i>↓ "Invalid CSRF token found for …" and an authorization decision look nothing alike in the log, however identical they look in the browser</i>
+    <b>Then fix it for what your API actually is: a stateless bearer-token API disables CSRF deliberately; an API authenticated by a cookie keeps it and sends the token header</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A status code names the outcome, never the component.</b> 401 and 403 are honest about
+  <i>what</i> the server decided and silent about <i>who</i> decided it — and on a Spring app there
+  are a dozen candidates, most of them filters running before your code exists to the request. The
+  fastest way to shorten an auth investigation is not a better reading of the number; it is one
+  experiment that changes which components can possibly be involved. Drop the credential. Change the
+  verb. Call a <code>permitAll</code> route. Each one rules out a whole stretch of the chain, which a
+  second look at the same three-digit number never will.
+</div>
+
+<p class="hf-big">Same number. Different filter. Different afternoon.</p>
+
+<div class="hf-note">Your parcel comes back stamped <b>REFUSED</b>, so you spend the day emailing the
+recipient about whether you're on their approved-sender list. You are. The <b>loading dock</b> turned
+the courier away for missing paperwork; the recipient never knew a parcel arrived. <b>Find out who
+refused it before you argue about why.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>403 on POST. The token has the role. Why is method security denying me?</p></div>
+  <div class="hf-bub right"><span class="who">Method security</span><p>I'm not. I never ran. I evaluate <code>@PreAuthorize</code> when an authenticated request reaches your bean, and no request reached your bean. Check my DEBUG log — there's no decision from me to read.</p></div>
+  <div class="hf-bub"><span class="who">CsrfFilter</span><p>That was me. I'm on by default, I sit near the front of the chain, and I let <code>GET</code>, <code>HEAD</code>, <code>TRACE</code> and <code>OPTIONS</code> straight through. Your <code>POST</code> arrived with no CSRF token, so I called the access-denied handler and wrote the response myself. I hadn't read your <code>Authorization</code> header — I run before the filter that does.</p></div>
+  <div class="hf-bub right"><span class="who">The 403 status line</span><p>And I can't tell you any of that. I'm three digits. "Somebody said no" is the entire message I'm capable of carrying.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Walk one POST down the filter chain and watch it die three filters before the code you were debugging.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The browser sends <code>POST /api/customers</code> with <code>Authorization: Bearer eyJ…</code> and a JSON body</span><span class="tag">everything the endpoint needs</span></li>
+    <li class="open"><span>Early in the chain, <code>CsrfFilter</code> asks one question: is this verb exempt? <code>GET/HEAD/TRACE/OPTIONS</code> are; <code>POST</code> is not</span><span class="tag">why reads "work" and writes don't</span></li>
+    <li><span>Not exempt → it looks for the expected CSRF token in the request. A stateless SPA sending only a bearer token has none</span><span class="tag">no header, no cookie, no match</span></li>
+    <li class="open"><span><code>CsrfFilter</code> calls the access-denied handler <b>itself</b> and returns. The chain stops here — the bearer-token filter downstream never runs</span><span class="tag">the token is never even parsed</span></li>
+    <li><span>So there is no <code>Authentication</code> in the context, no authorities list, no <code>@PreAuthorize</code> evaluation, and no entry in your controller's log</span><span class="tag">every clue you'd look for is absent</span></li>
+    <li class="open"><span>The browser shows <b>403 Forbidden</b> — the same three digits a genuine missing-role failure produces, and with no <code>WWW-Authenticate</code> header to hint otherwise</span><span class="tag">two very different bugs, one identical symptom</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the one to hold on to, and it generalises well past CSRF: a filter that
+  writes the response itself ends the request, so every downstream component you were mentally
+  debugging did not participate. This is also why the same misconfiguration 403s a route you marked
+  <code>permitAll</code> — "public" is an authorization decision, and the request never got as far as
+  authorization to have it applied.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>token lacks <code>ROLE_ADMIN</code></span>
+      <span>ownership rule: <code>#id != authentication.name</code></span>
+      <span>CSRF token missing on a POST</span>
+    </div>
+    <div class="funnel">all three end the same way ↓</div>
+    <div class="instance">403 Forbidden<small>same status line, no body worth reading, no <code>WWW-Authenticate</code> — and only one of these three is about permissions at all</small></div>
+  </div>
+  <p class="hf-annot">Two of those causes are settled by comparing authorities against a rule. The
+  third is settled by looking at the HTTP verb, and no amount of staring at the token will get you
+  there. That is what makes the 403 family harder to debug than the 401 family: 401 at least tells
+  you the credential is the problem, while 403 only tells you that <i>something</i> said no.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q"><code>POST /api/customers</code> returns 403. The decoded token carries
+  <code>CIAM_ADMIN</code>, the converter prefixes it, and the endpoint asks for exactly
+  <code>hasRole('CIAM_ADMIN')</code>. <code>GET /api/customers</code> with the same token returns 200.
+  You resend the POST from curl with <b>no</b> <code>Authorization</code> header at all — and get 403
+  again. What has that last experiment told you?</p>
+  <button type="button">Something ahead of authentication answered — a credential-less request that reached authorization would have been a 401, so the 403 is coming from a filter that ran before the token was ever read</button>
+  <button type="button">That the route is annotated <code>permitAll</code>, so Spring authenticated you as the anonymous principal, then evaluated method security against that anonymous principal and reported the resulting denial as forbidden rather than as a challenge to log in</button>
+  <button type="button">Nothing useful — 403 is the normal response to any request without credentials</button>
+  <p class="why" data-for="0">Exactly, and it is the cheapest experiment in auth debugging: removing the
+  credential should change the answer, and when it doesn't, the components that read credentials are
+  not involved. On a Spring Security 6 app whose CSRF protection is still at its default, this is the
+  signature of <code>CsrfFilter</code> — it runs ahead of the bearer-token filter, exempts only
+  <code>GET/HEAD/TRACE/OPTIONS</code>, and answers the request itself. Confirm it in the DEBUG log,
+  then decide deliberately: disable CSRF for a genuinely stateless bearer-token API (there is no
+  ambient credential for a hostile page to ride on), or keep it and send the token if your auth
+  travels in a cookie.</p>
+  <p class="why" data-for="1"><code>permitAll</code> is worth understanding precisely: it means the
+  authorization step allows anyone, so a credential-less request to such a route should return
+  <b>200</b>, not 403. Anonymous authentication is a real thing in Spring Security — an
+  unauthenticated request does get an <code>AnonymousAuthenticationToken</code> — but a denial
+  against an anonymous principal is specifically translated into a <b>401</b> challenge, because the
+  right thing to tell someone with no credential is "authenticate", not "you may not". A 403 here
+  means the decision was made somewhere that translation never reaches.</p>
+  <p class="why" data-for="2">This is the assumption that costs the afternoon. A missing credential is
+  the textbook 401: the server cannot identify you, so it challenges you, and it is required to say
+  how in a <code>WWW-Authenticate</code> header. 403 is reserved for "I understood the request and I
+  am refusing it anyway" — so a credential-less 403 is genuinely surprising information, not noise,
+  and it points at something in front of authentication rather than at your roles.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Anything sitting in front of your app can answer for it — and it never says so.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Angular's XSRF interceptor and the absolute URL</h4>
+    <p>Angular's <code>HttpClient</code> reads the <code>XSRF-TOKEN</code> cookie and attaches
+    <code>X-XSRF-TOKEN</code> automatically — but only on mutating requests to <b>relative</b> URLs,
+    never on absolute ones, because it will not leak your token to another origin. So the identical
+    code that passes against a dev proxy (<code>/api/…</code>) starts 403-ing in production the day
+    someone switches the base URL to <code>https://api.example.com</code>. Nothing about your
+    Spring config changed; the header simply stopped being sent.</p>
+    <div class="hf-scatter"><span>the client silently changed the request, not the server</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>The 403 your application logs have never heard of</h4>
+    <p>A WAF rule, an API gateway authorizer, or an ingress controller can refuse a request and write
+    a 403 without your app receiving anything. The tell is the same one as here: you grep the
+    application log for the request and find <i>no entry at all</i>. An absent log line is evidence —
+    it means the responder is upstream of whatever writes that log.</p>
+    <div class="hf-scatter"><span>no log line means it never arrived</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4><code>SameSite=Lax</code>, the browser's own CSRF defence</h4>
+    <p>Modern browsers default cookies to <code>SameSite=Lax</code>, which withholds them on
+    cross-site POSTs while still sending them on top-level GET navigations — the same verb split, for
+    the same threat, one layer lower. It is also a famous source of mystery failures in federated
+    login flows, where the IdP POSTs back to your app and the session cookie you were relying on
+    quietly isn't there. Same lesson: the request that arrived is not always the request you sent.</p>
+    <div class="hf-scatter"><span>the browser edits your request too</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  This page teaches you to read the number as a question — 401 is "who are you?", decided in the
+  filter chain and often fixed by a fresh credential; 403 is "you, but no", decided by an
+  authorization rule that a refresh cannot satisfy. <b>The new sentence: 403 names an outcome and
+  not a component, so before you compare a single authority, run one experiment that changes which
+  components could be involved — drop the credential, or change the verb.</b> Now predict: your
+  Angular app moves from <code>/api/customers</code> to
+  <code>https://api.example.com/customers</code> and every write starts failing while every read
+  keeps working. Is that a CORS problem, a CSRF problem, or a token problem — and which single
+  request in the Network tab would tell you the difference?
+</div>
+
   <!-- 2 INTERACTIVE -->
   <section>
     <h2>2. Interactive: walk the decision tree to the verdict</h2>
@@ -310,6 +492,7 @@ diagnose();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

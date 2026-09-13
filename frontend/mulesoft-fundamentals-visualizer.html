@@ -57,7 +57,108 @@
     <div class="intro-ciam"><span class="tag">CIAM / integration:</span> MuleSoft usually sits as the <strong>integration tier</strong> between channel apps and systems of record — including identity. A flow can call an IdP's token or userinfo endpoint via the HTTP Connector, normalize claims with DataWeave, and aggregate user data from several systems behind one API. Token validation itself is best done at the <strong>Anypoint API Gateway</strong> with a JWT/OAuth2 policy (see the API-Led page) rather than hand-coded in a flow — the same edge-validation idea as a Spring resource server or the gateway in the <code>node-auth</code> / <code>aspnet-auth</code> pages.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the one Mule Event this page promised follows you everywhere — except through an Async scope</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You set a variable inside an Async scope, read it right after the scope ends, and get the value it held BEFORE the async block ever ran.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Your Async scope silently throws away everything it computed</div>
+  <p>You add an <code>&lt;async&gt;</code> scope after the DB call in the flow above to fire an audit-log write without slowing the response down: <code>&lt;async&gt;&lt;http:request config-ref="audit-api" .../&gt;&lt;set-variable variableName="auditStatus" value="#[payload.status]"/&gt;&lt;/async&gt;</code>. Right after the async block, you build the response using <code>vars.auditStatus</code>, expecting "ok" or "failed" depending on whether the audit call worked.</p>
+  <p>Section 2 above says "one event, threaded through every processor" — and that's true for every processor except Async. The Async scope forks the event onto a separate thread to run in the background, and the main flow continues <em>immediately</em>, carrying a COPY of the event taken at the moment it <strong>entered</strong> the scope — before any processor inside it ran. <code>vars.auditStatus</code> after the async block always holds whatever it held (or didn't hold) right before the audit call started, never the actual outcome. The audit call runs and completes just fine; the response is built from stale, pre-async data every single time.</p>
+  <div class="hf-scatter">
+    <span>HTTP Listener → connector → response flow ✓</span>
+    <span>the audit call actually fires and succeeds ✓</span>
+    <span>assumed Async's changes rejoin the main event afterward ⚠</span>
+  </div>
+  <p class="hf-foot">"One event flows through every processor" stops being true the instant that processor is Async.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Never read what Async computed, from outside Async</div>
+  <div class="hf-ladder">
+    <b>Reserve Async for genuinely fire-and-forget work</b>
+    <i>↓ logging, metrics, and notifications where nothing downstream ever needs the outcome are the only safe use — anything the response depends on can't live inside Async</i>
+    <b>Need the result back? Don't fork — call it inline</b>
+    <i>↓ a connector with no Async wrapper stays on the same thread, so its output genuinely does propagate to everything after it</i>
+    <b>Need several results aggregated? Use scatter-gather and read its output</b>
+    <i>↓ scatter-gather explicitly combines every route's payload into one aggregated result instead of discarding it — the difference is it hands the outcome BACK, Async never does</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Async forks the Mule Event onto a separate thread and lets the main flow continue immediately with a copy taken at the moment it entered the scope — anything that scope sets, computes, or replaces is invisible to everything downstream of it, no matter how fast the async work actually finishes.
+</div>
+
+<div class="hf-note">Handing a coworker a <b>photocopy</b> of a form and walking off to finish your own work: whatever they write on the original doesn't retroactively appear on your photocopy, no matter how quickly they finish filling it in.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I set vars.auditStatus inside my Async scope. Why does the response always show the value from before the audit call ran?</p></div>
+  <div class="hf-bub right"><span class="who">Async scope</span><p>I forked your event the moment I started. The flow after me kept a copy from that exact instant — I never hand anything back.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But the audit call finishes in about 40 milliseconds. Surely that's fast enough to matter?</p></div>
+  <div class="hf-bub right"><span class="who">Async scope</span><p>Speed has nothing to do with it. I don't rejoin, ever — even if I finished before you finished reading this sentence, the main flow already moved on with its own copy.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one Mule Event as it forks in two, and never becomes one again.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The main flow reaches &lt;async&gt;, carrying vars.auditStatus = undefined</span><span class="tag">entry</span></li>
+    <li class="open"><span>Mule forks the event: the main flow gets a COPY, taken right now — before anything inside async runs</span><span class="tag">fork happens</span></li>
+    <li><span>The main flow continues immediately, building the response from ITS copy — the audit call hasn't even started yet</span><span class="tag">main flow proceeds</span></li>
+    <li class="open"><span>Meanwhile, on a separate thread, the async block's HTTP request completes and sets vars.auditStatus = "ok" — but only on the forked event, not the one racing ahead</span><span class="tag">async completes</span></li>
+    <li><span>The response has already been built and sent, from the copy that never had auditStatus set</span><span class="tag">response sent</span></li>
+    <li class="open"><span>vars.auditStatus = "ok" now exists — on an event nobody downstream will ever read again</span><span class="tag">discarded result</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is the whole trap. Nothing about steps 3–6 is broken — the flow returns 200, the audit call genuinely succeeds, nothing throws. The event simply split into two independent stories the instant it entered the scope, and only one of those stories is the one your response gets written from.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>logging call, vars read right after</span><span>notification call, response awaited</span><span>"quick enrichment" call wrapped in async for speed</span></div>
+    <div class="funnel">same underlying mistake ↓</div>
+    <div class="instance">Downstream code reads a pre-fork copy of the event<small>Async's changes are already gone by the time anything after it runs</small></div>
+  </div>
+  <p class="hf-annot">All three habits look completely different in the flow designer — one is logging, one is a notification, one is "just a quick lookup" — but every one of them commits the identical act: reading something Async computed as though the fork never happened.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">Inside an &lt;async&gt; scope, you call an audit API and set vars.auditStatus from its response. Immediately after the async block, you build the HTTP response using vars.auditStatus. What value does it hold?</p>
+  <button type="button">Whatever vars.auditStatus held (or didn't hold) before the async block ran — the main flow already continued with a copy of the event taken at the moment it entered the scope.</button>
+  <button type="button">The audit API's actual response value, as long as the audit call completes faster than the rest of the flow.</button>
+  <button type="button">A MuleSoft runtime exception, because variables can't be set inside an Async scope.</button>
+  <p class="why" data-for="0">Right. The main flow forks away from the event the instant it enters Async, taking a copy from that exact moment. Nothing async does afterward can reach back and change what the main flow is already holding.</p>
+  <p class="why" data-for="1">Timing is irrelevant — Async never rejoins the main flow's event, no matter how quickly the work inside it finishes. Even a call that completes in microseconds still can't affect a copy that was already taken and already moving on.</p>
+  <p class="why" data-for="2">Setting a variable inside Async is completely legal and throws nothing. The value gets set just fine — on the forked copy of the event that nothing downstream will ever read again.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"This runs on its own copy, and nothing it does travels back" is the shape of every fork-and-continue pattern, on every stack you touch.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>scatter-gather — the same fork, just with more routes</h4>
+    <p>Each route inside a <code>scatter-gather</code> router also processes its own copy of the incoming event — a variable set inside one route doesn't persist to the main flow either. Only the explicitly <strong>aggregated payload</strong>, combining every route's output, survives past the router. It's the same underlying rule as Async: forked work only gets back in through an explicit aggregation step, never automatically.</p>
+    <div class="hf-scatter"><span>same fork, a different Mule scope</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Spring's @Async and SecurityContextHolder — the identical bug, in Java</h4>
+    <p>Spring Security's <code>SecurityContextHolder</code> defaults to a <code>ThreadLocal</code> strategy. Kick off a <code>@Async</code> method (or a raw <code>CompletableFuture.runAsync</code>) and the security context you set on the calling thread simply isn't there on the new one — and anything the async method sets doesn't travel back either. It requires an explicit propagation strategy (<code>DelegatingSecurityContextRunnable</code> or similar) for exactly the same reason DataWeave's async doesn't rejoin automatically.</p>
+    <div class="hf-scatter"><span>the same gap, on the JVM side of a CIAM stack</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Web Workers — the frontend's version of "you get a copy, not a reference"</h4>
+    <p>Passing an object into a Web Worker via <code>postMessage</code> sends a <strong>structured clone</strong>, not a live reference — mutations the worker makes to its copy never appear on the main thread's original object unless the worker explicitly posts the changed value back. An Angular service handing data to a worker for background processing hits the exact same "nothing rejoins automatically" rule Mule's Async scope enforces.</p>
+    <div class="hf-scatter"><span>the same gap, reopened in the browser</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a Mule flow is a source plus an ordered chain of processors that one Mule Event travels through, connectors reach external systems through typed operations, DataWeave reshapes the payload declaratively, and typed errors route to on-error-propagate or on-error-continue. <b>The one new sentence this block adds:</b> Async (and scatter-gather) fork that one event onto a separate execution path, so anything they set or compute is invisible to whatever runs after them, no matter how fast the forked work finishes.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="msSeg">
@@ -259,6 +360,7 @@ DevHubCodeWalk.mount('#cw-ms',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

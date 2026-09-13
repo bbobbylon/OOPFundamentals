@@ -57,7 +57,112 @@
   </div>
 
   <!-- ── EXTREME-VIZ HERO ── -->
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the "promote the same artifact everywhere" rule from Section 2 above — and the one deploy target on this page where it quietly can't be true</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You wire the Angular SPA pipeline exactly like the Docker/Kubernetes one above — build once, promote the same files everywhere — and staging starts silently calling production's API.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Angular's own environment files quietly break "build once, promote everywhere"</div>
+  <p>Section 2 above says environments should differ only in config injected at the TARGET, never in the artifact itself — and the Spring Boot/Kubernetes scenario proves it works: the same Docker image runs in staging and prod, with only a Kubernetes Secret changing between them. You apply the identical discipline to the Angular pipeline: run <code>ng build --configuration production</code> once in CI, sync <code>dist/browser/</code> to the staging bucket, run smoke tests, then sync those exact same files to the prod bucket with no rebuild.</p>
+  <p>But <code>ng build</code> never produced an environment-agnostic artifact. Angular's <code>angular.json</code> uses <code>fileReplacements</code> to swap <code>environment.ts</code> for <code>environment.prod.ts</code> BEFORE compilation, and every value inside it — <code>apiUrl</code>, feature flags, an OAuth client ID — gets inlined as a literal string directly into <code>main.[hash].js</code>. There is no separate config file sitting next to <code>index.html</code> for a deploy target to inject values into afterward; the only artifact you built already has <code>"https://api.prod.example.com"</code> compiled into its source, indistinguishable from any other string in the bundle. Promoting that exact build to staging doesn't make staging test itself — it makes staging silently call production's API.</p>
+  <div class="hf-scatter">
+    <span>ng build ran clean, dist/browser/ produced correctly ✓</span>
+    <span>the exact same files synced to both buckets ✓</span>
+    <span>assumed config lives outside the bundle, like it does for a container ⚠</span>
+  </div>
+  <p class="hf-foot">"Promotable unchanged across environments" holds for anything that reads its config at START-UP — a static SPA's default build reads it at BUILD time, and once the bundle exists, that door is already closed.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Give the SPA a config it reads at runtime, not build time</div>
+  <div class="hf-ladder">
+    <b>Stop treating environment.prod.ts as your deploy-time config</b>
+    <i>↓ it's Angular's build-time seam, genuinely useful for build-only differences like enabling production optimizations — the wrong tool for anything that must differ per deployed environment</i>
+    <b>Fetch a small config.json (or read a window.__env global) at app bootstrap</b>
+    <i>↓ a plain static file living next to index.html, fetched before the app renders, restores exactly the "same artifact, different config per target" property Section 2 promised — because the value is now genuinely injected at the target</i>
+    <b>Or accept the rebuild, and stop calling it "the same artifact"</b>
+    <i>↓ building one bundle per environment is a legitimate choice, but staging and prod are now honestly two different artifacts — the "never test what you're not about to ship" promise needs its own story for that</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> "Build once, promote unchanged" assumes the artifact reads its configuration at start-up — a static SPA's default Angular build compiles that configuration into the bundle at BUILD time, so the identical files literally cannot point at two different backends without a runtime-config fetch or a second, environment-specific build.
+</div>
+
+<div class="hf-note">Printing a thousand business cards with the office phone number engraved in the ink: cheap and fast, right up until you move offices and realize the cards already printed <b>can't be told the new number</b> — you print a fresh batch instead of correcting the old one.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I built dist/browser/ once and promoted the exact same files to staging then prod — same as the Docker image scenario. Why is staging calling prod's API?</p></div>
+  <div class="hf-bub right"><span class="who">main.js</span><p>Because apiUrl was never a config value you can hand me later — ng build already wrote "https://api.prod.example.com" straight into my source, character for character.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So there's no equivalent to a Kubernetes Secret for a static file?</p></div>
+  <div class="hf-bub right"><span class="who">main.js</span><p>Not unless you build one. I'd have to fetch a config file myself, at startup, if you want me to find out which backend I'm talking to after I've already been built.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one apiUrl value from a TypeScript file into a compiled bundle that can never be told anything different again.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>CI runs ng build --configuration production</span><span class="tag">build</span></li>
+    <li class="open"><span>angular.json's fileReplacements swaps environment.ts for environment.prod.ts BEFORE compilation — this happens once, at build time</span><span class="tag">file swap</span></li>
+    <li><span>The bundler inlines environment.prod.ts's exported object directly into main.[hash].js as literal values</span><span class="tag">inlined</span></li>
+    <li class="open"><span>dist/browser/ is synced to the staging bucket unchanged, exactly like "one artifact, many targets" recommends</span><span class="tag">promote</span></li>
+    <li><span>The browser loads main.[hash].js on staging — apiUrl is still the production string, because copying files doesn't rewrite JS source</span><span class="tag">no rewrite</span></li>
+    <li class="open"><span>Every request from "staging" now silently hits the production API — no build error, no runtime warning, nothing obviously wrong in the network tab</span><span class="tag">silent</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the whole trap. Nothing about steps 1, 2, or 4 is a mistake — this is exactly how Angular's environment files are documented to work, and exactly how "promote the same artifact everywhere" is documented to work elsewhere on this page. The two documented behaviors just can't both be true for a static SPA at the same time.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">"Promote the same artifact, unchanged, to every environment" — applied to three different TARGET types<small>Section 2's rule, tested against reality</small></div>
+    <div class="fan">each target's config model reacts differently ↓</div>
+    <div class="obs">
+      <span>Docker image (Kubernetes) — config injected as env vars at container start, artifact never touched</span>
+      <span class="new">Static bundle (CDN) — apiUrl already compiled into main.js at build time, nothing left to inject</span>
+      <span>Lambda zip — config set on the function's environment variables, read at invocation, artifact never touched</span>
+    </div>
+  </div>
+  <p class="hf-annot">Two of these three targets read their configuration when they start running, which is exactly what makes "the same artifact everywhere" true for them. The static bundle is the surprising reactor — its configuration was decided the moment ng build finished, long before any target ever sees it.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">You run ng build --configuration production once in CI, then sync the identical dist/browser/ files to a staging bucket and, after smoke tests pass, to the prod bucket without rebuilding — following Section 2's "promote the same artifact unchanged" rule. What happens to staging's traffic?</p>
+  <button type="button">Nothing changes — Angular reads environment.prod.ts at runtime from the deployed bucket, so staging correctly resolves its own apiUrl automatically.</button>
+  <button type="button">The build fails, because ng build refuses to produce an artifact that could be deployed to more than one environment.</button>
+  <button type="button">Staging's app calls production's API, because environment.prod.ts's values were compiled directly into the JS bundle at build time — there is no separate config file for a target to inject into, unlike a Docker image or a Lambda's environment variables.</button>
+  <p class="why" data-for="0">Angular's default environment files are a BUILD-time seam, not a runtime one — fileReplacements swaps the file before compilation, and nothing reads it again once the bundle exists.</p>
+  <p class="why" data-for="1">ng build has no idea a bundle is destined for more than one environment, and has no such safeguard — it happily produces a bundle with one baked-in configuration and no warning about it.</p>
+  <p class="why" data-for="2">Right. fileReplacements bakes environment.prod.ts's values into the compiled bundle at build time. Once dist/browser/ exists, there's no config file left for a deploy target to inject into — the same files calling the same API is exactly what you'd expect, and exactly why this bites.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Config decided at build time instead of start-up time" is a trap waiting in nearly every static-site toolchain, and even inside Docker itself.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>React and Vue hit the identical wall — this isn't an Angular quirk</h4>
+    <p>Create React App's <code>process.env.REACT_APP_*</code> variables and Vite's <code>import.meta.env.VITE_*</code> variables are ALSO inlined into the bundle at build time by the bundler's define/replace step. Any static-site framework's default build-time environment approach hits this exact limitation — and the runtime-config-fetch workaround is the same fix across all of them, not something specific to Angular.</p>
+    <div class="hf-scatter"><span>the same gap, three different frontend frameworks</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Spring Boot's config model is exactly why the Kubernetes scenario above never hits this</h4>
+    <p>Spring reads <code>application.properties</code> and environment variables at process START-UP through its <code>Environment</code> abstraction, not at compile time — the identical .jar can run against a different <code>DATABASE_URL</code> in staging vs. prod because nothing about that value was ever baked into a .class file. This is precisely why "one artifact, config injected at the target" works cleanly for the Spring/K8s scenario at the top of this page, and needs a workaround for the CDN one.</p>
+    <div class="hf-scatter"><span>the reason this page's own first scenario is immune</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Dockerfile's ARG instead of ENV can reintroduce the identical bug</h4>
+    <p>Dockerfile <code>ARG</code> values are baked in at image BUILD time and disappear from the running container, unlike <code>ENV</code>, which stays readable and overridable at runtime. Using <code>ARG</code> for something like a database URL bakes it into the image the exact same way <code>ng build</code> bakes <code>apiUrl</code> into <code>main.js</code> — the same mistake, hiding inside the container path this page treats as the safe one.</p>
+    <div class="hf-scatter"><span>the same mechanism, reopened inside Docker itself</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> every deploy path answers the same four questions in order — what builds and validates the code (CI), what format it ships as (Docker image / static bundle / zip), what actually runs it (orchestrator / CDN / serverless / PaaS), and how new code safely becomes live traffic — and the artifact format follows from the runtime target, not the other way around. <b>The one new sentence this block adds:</b> "promote the same artifact unchanged across every environment" only holds for a target that reads its configuration at start-up — a static SPA's default build compiles that configuration into the bundle itself, so the identical files literally cannot serve two different backends without a runtime-config fetch or a second, environment-specific build.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="pdSeg">
@@ -302,6 +407,7 @@ DevHubCodeWalk.mount('#cw-proddeploy-mount', {
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

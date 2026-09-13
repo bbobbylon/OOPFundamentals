@@ -59,7 +59,108 @@
     <div class="intro-ciam"><span class="tag">CIAM in production:</span> A Service Account is GCP's workload identity — it can authenticate to APIs the same way a user does, and its short-lived OAuth token comes from the instance/container metadata server, never a downloaded key file if you set it up right. In CI/CD, prefer <strong>Workload Identity Federation</strong> over a downloaded Service Account JSON key: the pipeline runner presents its own OIDC token (GitHub Actions, GitLab, another cloud), GCP's STS exchanges it for a short-lived access token, and no long-lived credential is ever stored as a secret. See <code>gcp-iam-secrets-visualizer.html</code> for the full identity picture.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the identity nobody granted on purpose</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You wrote tight IAM bindings for every human on the team — then created a VM without thinking about identity at all, and that VM can now edit almost anything in the project.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">gcloud compute instances create with no --service-account flag</div>
+  <p>You provision <code>shop-batch-vm</code> the fast way: <code>gcloud compute instances create shop-batch-vm --zone=us-central1-a --machine-type=e2-medium</code>. No <code>--service-account</code> flag, no <code>--scopes</code> flag — you just needed a VM to run a nightly script.</p>
+  <p>GKE, Cloud Run, and Cloud Functions all make you think about identity explicitly; a bare Compute Engine VM doesn't. Skip the flag and the VM attaches to the project's <strong>default Compute Engine service account</strong> — <code>PROJECT_NUMBER-compute@developer.gserviceaccount.com</code> — an account that exists in every project automatically, and that has historically shipped bound to the broad, legacy <strong>Editor</strong> role at the project level unless someone has already gone in and stripped it down. Anyone who can SSH into that VM, or trigger an SSRF bug in whatever's running on it, can hit the metadata server and mint an OAuth token scoped to whatever that default account can do — which, if nobody locked it down, is most of the project.</p>
+  <div class="hf-scatter">
+    <span>IAM bindings for every human user ✓</span>
+    <span>condition-scoped contractor access ✓</span>
+    <span>the VM's own identity ⚠</span>
+  </div>
+  <p class="hf-foot">You spent an afternoon getting human access right and gave a batch script the keys to the project in one un-flagged command.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Give every VM its own minimally-scoped identity</div>
+  <div class="hf-ladder">
+    <b>Create a dedicated service account per workload</b>
+    <i>↓ <code>gcloud iam service-accounts create batch-runner</code> — an identity that exists only for this VM's job</i>
+    <b>Grant it only the roles the job needs, nothing project-wide</b>
+    <i>↓ e.g. roles/storage.objectAdmin on one bucket, not roles/editor on the whole project</i>
+    <b>Attach it explicitly and audit the default account</b>
+    <i>↓ --service-account batch-runner@… at create time, and check whether the default SA still holds Editor anywhere it shouldn't</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Every workload identity — a VM, a service account, a pod — should be able to do only what that specific workload needs, and GCP will happily hand out a much broader default than that if you never make the explicit choice; the absence of a decision is itself a decision, and it's usually the wrong one.
+</div>
+
+<div class="hf-note">No <code>--service-account</code> flag doesn't mean no identity — it means the loudest, broadest identity in the project by default. <b>Silence isn't neutral here; it's Editor.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I didn't grant this VM any permissions, so it can't do much, right?</p></div>
+  <div class="hf-bub right"><span class="who">Compute Engine</span><p>You didn't grant it anything — so I attached the project's default service account, like I do for every VM that doesn't specify one.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>And what can that default account do?</p></div>
+  <div class="hf-bub right"><span class="who">The default service account</span><p>Whatever role it was bound to when the project was set up. In a lot of existing projects, that's still Editor — I can create, modify, and delete almost anything here.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Here's what actually decides a VM's identity, and it happens before you ever touch IAM.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>gcloud compute instances create runs with no --service-account given</span><span class="tag">no flag</span></li>
+    <li class="open"><span>Compute Engine falls back to the project's default Compute Engine service account</span><span class="tag">fallback</span></li>
+    <li><span>That account is attached as the VM's metadata-server identity</span><span class="tag">attach</span></li>
+    <li class="open"><span>IAM bindings on that service account — set once, maybe years ago — now apply to anything running on the VM</span><span class="tag">inherited grant</span></li>
+    <li><span>Any process on the VM can call the metadata server and receive a live OAuth token for that identity</span><span class="tag">token available</span></li>
+    <li class="open"><span>No code change, no explicit grant — the VM's blast radius equals the default SA's role, whatever that turned out to be</span><span class="tag">blast radius</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is the one nobody sees happen. There's no prompt, no warning, no diff to review — the fallback is silent, so the VM's real permissions are whatever was bound to that default account long before this VM ever existed.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>no --service-account flag</span><span>a Terraform module missing service_account{}</span><span>click-through Console VM creation</span></div>
+    <div class="funnel">all fall back to the same default Compute Engine SA ↓</div>
+    <div class="instance">One over-permissioned identity<small>three unrelated-looking ways to end up attached to it</small></div>
+  </div>
+  <p class="hf-annot">Three completely different workflows — a rushed CLI command, an incomplete Terraform module, a Console click-through — all land on the exact same identity, because they all skip the same one decision.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A teammate creates a VM through the Cloud Console, leaving the default service account option selected, to run a script that only needs to read one Cloud Storage bucket. What's the actual risk?</p>
+  <button type="button">None — Console-created VMs get a read-only identity by default, unlike the CLI</button>
+  <button type="button">The VM inherits the project's default Compute Engine service account, whose IAM bindings may be far broader than "read one bucket" — anyone with access to the VM effectively has that broader access too</button>
+  <button type="button">None — the script's own code determines what it can do, regardless of the VM's attached identity</button>
+  <p class="why" data-for="0">The Console has no special-cased safer default — leaving the identity field on its default does exactly what the CLI's missing flag does: attaches the project's default Compute Engine service account.</p>
+  <p class="why" data-for="1">Right — the VM's actual permissions come from whatever role is bound to that default service account, not from what the script intends to do. A narrowly-scoped script running under a broadly-scoped identity still has the broad identity's access available to it.</p>
+  <p class="why" data-for="2">Code intent doesn't limit IAM. If the default service account can write to any bucket in the project, any process on that VM — the intended script or anything else that ends up running there — can too.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">An identity nobody explicitly scoped down is not a safe identity — you've seen this shape before.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring Security's <code>/**</code> catch-all placed before specific rules</h4>
+    <p>A broad matcher sitting ahead of the specific ones it should narrow grants more than intended, exactly like an unscoped default service account — the fix in both cases is the same discipline: specific rules before broad ones, and audit what the fallback actually grants.</p>
+    <div class="hf-scatter"><span>the fallback is doing the granting, not you</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An Entra ID app registration with admin consent granted once, years ago</h4>
+    <p>The consent event is one-time and silent going forward; the app keeps that access indefinitely until someone audits it, just like a default SA's Editor binding sits untouched until someone goes looking.</p>
+    <div class="hf-scatter"><span>granted once, trusted forever</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Docker image with no USER line, running as root</h4>
+    <p>Omitting a decision doesn't mean no identity — it means the most powerful one (root) by default, the identical shape to omitting --service-account and getting the project's most-privileged fallback instead.</p>
+    <div class="hf-scatter"><span>no USER line = root, not nobody</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> GCP's access model is a hierarchy of IAM bindings that only ever add permissions as you descend from org to folder to project to resource, gated by project-scoped API enablement. <b>The one new sentence this block adds:</b> that same hierarchy also decides the identity your compute resources get by default, and skipping the choice doesn't mean "no access" — it means whatever the default service account was bound to, possibly years before you created this VM.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="gcpSeg">
@@ -262,6 +363,7 @@ DevHubCodeWalk.mount('#cw-gcp',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

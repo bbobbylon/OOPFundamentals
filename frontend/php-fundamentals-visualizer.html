@@ -57,7 +57,111 @@
     <div class="intro-ciam"><span class="tag">CIAM with PHP:</span> Shared-nothing is actually friendly to stateless JWT auth — there is no in-memory session to manage, so each request independently verifies the Ping/Entra bearer token and builds the user context from scratch (the token IS the state). Laravel's middleware verifies the JWT per request and attaches the user; because nothing persists between requests, there is no risk of identity bleed across requests. State that must survive (sessions, rate-limit counters) goes to Redis or the database, exactly where a stateless model wants it.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the shared-nothing lifecycle above — and what it stops guaranteeing the day someone deploys it on Swoole</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You cache the logged-in user in a static property so you don't have to pass it through six function calls. On php-fpm that's completely harmless. On Laravel Octane, it just handed User B a piece of User A's identity.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Your "obviously safe" static cache leaks one user into another user's request</div>
+  <p>On classic php-fpm you write a tiny helper: <code>class AuthContext { private static ?User $current = null; public static function set(User $u): void { self::$current = $u; } public static function user(): ?User { return self::$current; } }</code>. Middleware verifies the JWT, calls <code>AuthContext::set($user)</code> once, and the rest of the request reads <code>AuthContext::user()</code> from anywhere — controllers, views, logging — without threading it through every function. Section 1 above says "no state survives a request." A static property is memory, and memory gets freed at teardown. This looks obviously safe.</p>
+  <p>It IS safe — on php-fpm. But the moment this app runs under Laravel Octane (or directly on Swoole/RoadRunner/FrankenPHP) for performance, the PHP process is no longer thrown away after each request — it stays alive and handles the next one too, specifically to skip the "bootstrap: compile the script" step this page's own diagram shows. <code>AuthContext::$current</code> is process memory, and the process now outlives the request boundary. It still holds User A's object when the very next request — from User B, on that same warm worker — starts running. If that request's own <code>set()</code> call is skipped or merely delayed by a few lines, anything reading <code>AuthContext::user()</code> before it fires gets User A's identity handed to User B.</p>
+  <div class="hf-scatter">
+    <span>JWT verification logic ✓</span>
+    <span>middleware order ✓</span>
+    <span>assumption that a static property can't outlive a request ⚠</span>
+  </div>
+  <p class="hf-foot">"Shared-nothing" describes php-fpm's process model, not a guarantee the PHP language enforces — swap the runtime and the guarantee goes with it.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Never let per-request identity live in a static or global</div>
+  <div class="hf-ladder">
+    <b>Pass request-scoped values explicitly, not through statics</b>
+    <i>↓ the authenticated user, the parsed JWT, a tenant id — anything that must be different for every request belongs in something rebuilt every request, never a class-level or global variable</i>
+    <b>Use your framework's request-scoped container if it has one</b>
+    <i>↓ Laravel's service container can bind an object as request-scoped instead of process-scoped — under Octane, that's precisely what those bindings exist to give back to you</i>
+    <b>Test under the real worker runtime before trusting shared-nothing at all</b>
+    <i>↓ this class of bug is invisible on every local php-fpm dev box and only shows up once two different users' requests can land on the same warm worker — which is production, by definition</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> "Shared-nothing" is a promise your deployment model makes, not one the PHP language enforces — a static property is just memory, and memory survives for exactly as long as the process holding it does, whether that's php-fpm's one-process-per-request or Swoole's one-process-for-thousands.
+</div>
+
+<div class="hf-note">A hotel room stripped and remade after every guest is "shared-nothing" by <b>policy</b>, not by any law of physics — leave a note under the mattress and the next guest finds it too, the moment housekeeping stops doing its job between stays.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I cached the logged-in user in a static property instead of passing it through six functions. Section 1 says nothing survives a request — that's safe, right?</p></div>
+  <div class="hf-bub right"><span class="who">php-fpm</span><p>On me, yes. I throw away my entire process after every request — your static property dies right along with it.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Then why did staging show User B's name on User A's dashboard after we switched to Octane?</p></div>
+  <div class="hf-bub right"><span class="who">Octane worker</span><p>Because I don't throw myself away. I'm the same process, alive across thousands of requests, specifically so I can skip re-booting PHP every time. Your static property was still sitting in my memory from the request before this one.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow the exact same static property through two different runtimes — identical code, opposite outcome.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Request A arrives; middleware verifies its JWT and calls <code>AuthContext::set($userA)</code></span><span class="tag">setup</span></li>
+    <li class="open"><span>A controller reads <code>AuthContext::user()</code> later in the SAME request — gets User A, correctly</span><span class="tag">works so far</span></li>
+    <li><span>Request A finishes. On php-fpm, this worker process is destroyed — <code>AuthContext::$current</code> is freed with it</span><span class="tag">php-fpm teardown</span></li>
+    <li class="open"><span>On Octane/Swoole, this worker is NOT destroyed — it stays alive, still holding <code>AuthContext::$current = User A</code>, waiting for the next request</span><span class="tag">process reused</span></li>
+    <li><span>Request B arrives on that same warm worker, from a completely different user</span><span class="tag">next request</span></li>
+    <li class="open"><span>If Request B's own <code>set()</code> call is skipped or delayed by even one line, any read of <code>AuthContext::user()</code> before it fires returns User A's identity to User B</span><span class="tag">identity bleed</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the whole bug. Nothing about steps 1–3 is wrong — on php-fpm this code is completely correct, forever. The static property was never unsafe in the abstract; it was only ever safe under an assumption about the runtime that quietly stopped being true the day someone changed which server ran the app.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Worker handles Request A</span>
+      <span class="go"><em>JWT verified</em> <span class="arrow">→</span> AuthContext::$current = User A</span></div>
+    <div class="stt"><span class="nm">Request A completes</span>
+      <span class="go"><em>response sent</em> <span class="arrow">→</span> php-fpm destroys the process · Octane keeps the worker alive, memory intact</span></div>
+    <div class="stt"><span class="nm">Same worker handles Request B</span>
+      <span class="go"><em>next request lands here</em> <span class="arrow">→</span> php-fpm: fresh AuthContext (null) · Octane: AuthContext still = User A</span></div>
+  </div>
+  <p class="hf-annot">The first transition looks identical on both runtimes — a request comes in, state gets set. The second transition is where they diverge, and it's completely invisible from inside the request that triggers it: nothing in Request A's code path knows or cares whether its process is about to die or keep going.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">You cache the authenticated user in a static <code>AuthContext::$current</code> property, set once by middleware after verifying the JWT. The app runs correctly on php-fpm for months. Then it's deployed on Laravel Octane (Swoole) for performance. What's the risk?</p>
+  <button type="button">None — PHP's shared-nothing model guarantees static properties are cleared at the end of every request, on any runtime.</button>
+  <button type="button">The app throws a fatal error on startup, because Octane doesn't support static properties.</button>
+  <button type="button">A worker process can stay alive across many requests, so AuthContext::$current set during one user's request can still be present when the next request — possibly a different user's — runs on that same worker.</button>
+  <p class="why" data-for="0">Shared-nothing is php-fpm's process model, not a guarantee the PHP language itself enforces. Octane keeps workers alive across requests specifically to avoid the reset that guarantee depended on.</p>
+  <p class="why" data-for="1">Static properties work perfectly fine on Octane — that's exactly the problem. They behave too well, persisting across requests when you needed them not to.</p>
+  <p class="why" data-for="2">Right. Octane reuses the same process (and its memory) for many requests. A static property set for one user's request is still sitting there, unless something explicitly overwrites or resets it before the next request reads it.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"This process outlives a single request, so nothing about it is actually shared-nothing" is a trap waiting in every long-lived runtime, including two you already use daily.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A Spring @Component with a mutable field — the same bug, in Java</h4>
+    <p>A Spring bean is <b>singleton-scoped by default</b> — one shared instance for the entire JVM, which is exactly as long-lived as an Octane worker. Storing the current request's user on a mutable field of that singleton bean produces the identical bug: request B on the same JVM reads request A's leftover value. The fix is the same shape too — <code>@RequestScope</code>, or simply never storing per-request data on a singleton in the first place.</p>
+    <div class="hf-scatter"><span>same shared-process trap, one layer up in Spring</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Node.js module-level variables — the "always been long-lived" version</h4>
+    <p>Node has never had a shared-nothing model — one process serves every request for the app's entire lifetime. A common Node/Express mistake is setting a module-level variable (<code>let currentUser</code>) inside a middleware instead of attaching it to <code>req</code>; because the event loop can interleave two requests' async work on that one process, one request's write can leak into another's read mid-flight. PHP developers moving to Octane are discovering a bug Node developers have had to watch for from day one.</p>
+    <div class="hf-scatter"><span>the same gap, just the default instead of the surprise</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An Angular service with providedIn: 'root' — the frontend's single-page-app version</h4>
+    <p>A service registered <code>providedIn: 'root'</code> is instantiated exactly once for the app's whole lifetime — a single-page app is itself one long-lived process, just like an Octane worker. Caching "the current user" as a plain field on that service and forgetting to clear it on logout means the next person who logs in on the same tab can briefly render with the previous user's cached state, for the identical reason: the "process" never actually restarted between the two users.</p>
+    <div class="hf-scatter"><span>the same gap, reopened on the browser tab</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> PHP's request-per-script model boots a fresh process per request on a clean global state, layers a modern typed language (PHP 8: enums, readonly, strict types) on top, and organizes code with namespaces autoloaded by Composer's PSR-4 convention. <b>The one new sentence this block adds:</b> "shared-nothing" describes php-fpm's process lifecycle, not a rule the PHP language itself enforces — any static or global state written under that assumption becomes a live, cross-user data leak the moment the same code runs on a long-lived worker runtime like Octane or Swoole.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="phSeg">
@@ -257,6 +361,7 @@ DevHubCodeWalk.mount('#cw-php',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

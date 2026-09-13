@@ -58,6 +58,120 @@
     <div class="intro-ciam"><span class="tag">CIAM React app:</span> A user-detail page renders a skeleton (commit→paint), <code>useEffect</code> fetches <code>/api/users/{id}</code>, then <code>setUser(data)</code> triggers a second render that paints the real data. An auth check in <code>useEffect(() =&gt; { if (!token) navigate('/login') }, [token])</code> runs after paint, so the page flashes — better to gate it in the router loader before render. A token-refresh interval (<code>setInterval(refreshToken, 5*60*1000)</code>) must return a cleanup that <code>clearInterval</code>s on unmount — the same memory-leak guard as Angular's <code>ngOnDestroy() { this.subscription.unsubscribe() }</code>.</div>
   </div>
 
+<p class="hf-deck">or, the setState call that's a sanctioned React idiom in one component and a crash in the next</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">React tells you render must be pure. React also explicitly lets you call a state setter right there in the render body. Both are true — the trap is whose state you're setting.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The "harmless" refactor that ends in "Maximum update depth exceeded"</div>
+  <p>A <code>Gallery</code> resets its selection whenever a new <code>items</code> prop arrives, using React's own documented render-time pattern — no <code>useEffect</code>, just a guarded call inside the function body: <code>if (items !== prevItems) { setPrevItems(items); setSelected(null) }</code>. It works: one extra silent re-render, zero flash, no warning.</p>
+  <p>A teammate "simplifies" it by moving the comparison into a child, <code>&lt;FilterBar onItemsChanged={resetSelection} /&gt;</code>, which calls the PARENT's setter conditionally during the CHILD's own render. Same shape of code, same guard — except now the console lights up with "Cannot update a component (Gallery) while rendering a different component (FilterBar)", and if the guard ever fails to stabilize, the app hard-locks with "Maximum update depth exceeded."</p>
+  <div class="hf-scatter">
+    <span>the guard condition is identical in both versions ✓</span>
+    <span>no useEffect either way, by design ✓</span>
+    <span>the setter now belongs to a DIFFERENT component than the one currently rendering ⚠</span>
+  </div>
+  <p class="hf-foot">Same syntax, different owner — one is a sanctioned React escape hatch, the other is a race against your own render.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">The fix: only adjust state you own, in the render that owns it</div>
+  <div class="hf-ladder">
+    <b>Move the comparison and the setters back inside <code>Gallery</code> itself</b>
+    <i>↓ React's exception only covers a component adjusting its OWN state mid-render</i>
+    <b>If a child must react to a prop change, do it in the child's <code>useEffect</code></b>
+    <i>↓ an effect runs after commit, so notifying a parent there can never race the parent's own render</i>
+    <b>And keep the trick to one obviously-conditional line per component</b>
+    <i>↓ it's an escape hatch for "adjust state from props," not a general replacement for effects</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Render-phase updates are scoped to the renderer, not the target.</b> React only folds a
+  <code>setState</code> call into the render currently unwinding when that state belongs to a
+  component that is part of THIS SAME pass — itself, or an ancestor already re-rendering above it.
+  A setter reached through a prop and called from a different component's render body is not part of
+  that pass, so React can't silently absorb it — it has to warn you, and if nothing stops the update
+  from recurring, it warns you forever.
+</div>
+
+<div class="hf-note">Think of render-phase setState like editing a shared draft while it's still being
+written: fixing a typo in <b>the paragraph you yourself are writing</b> is invisible to everyone else
+— reaching over to edit a different section while its author is mid-sentence is how you get two people
+overwriting each other.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I called setSelected(null) right in the middle of the function body and nothing broke. I thought renders had to be pure?</p></div>
+  <div class="hf-bub right"><span class="who">React</span><p>They do — except for this one carve-out. You updated a piece of state that belongs to the component I'm CURRENTLY running. I just throw away this pass and call your function again immediately, before anyone commits or paints.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So I moved the identical call into a child's prop callback to save a render.</p></div>
+  <div class="hf-bub right"><span class="who">React</span><p>Now you're editing a DIFFERENT component's state while ITS render is what's running. I can't fold that into this pass — the best I can do is warn you, and if your guard doesn't hold, we do this forever.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch what React does the instant it sees a same-component setState mid-render.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The Gallery function begins executing — this IS the render phase</span><span class="tag">render starts</span></li>
+    <li class="open"><span><code>items !== prevItems</code> is true — a new list arrived</span><span class="tag">guard passes</span></li>
+    <li><span><code>setPrevItems(items)</code> and <code>setSelected(null)</code> run, still before <code>return</code></span><span class="tag">same component</span></li>
+    <li class="open"><span>React recognizes: this fiber is CURRENTLY rendering, and the update targets its own state</span><span class="tag">ownership check</span></li>
+    <li><span>React discards the JSX this pass would have returned</span><span class="tag">pass thrown away</span></li>
+    <li class="open"><span>React calls Gallery again immediately — synchronously, before commit or paint — and this time the guard is false</span><span class="tag">instant re-run</span></li>
+  </ol>
+  <p class="hf-annot">Step 6 is why this never causes a visible flash: the discarded first pass never reached commit, so the browser only ever paints the SECOND result. An effect-based reset, by contrast, would commit the stale render first and correct it a frame later — which is exactly why React documents this pattern as the more efficient option when you genuinely need it.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>adjusting your OWN state mid-render</span><span>calling a parent's setter from a child's render</span><span>calling an external store's setter mid-render</span></div>
+    <div class="funnel">an update scheduled while SOME render is in progress ↓</div>
+    <div class="instance">React must decide: same pass, or a new one?<small>same component currently rendering → folded in silently; anyone else → a warning, and possibly a loop</small></div>
+  </div>
+  <p class="hf-annot">All three call sites look like "just calling a setter during render." React's response depends entirely on whose fiber is executing right now versus whose state the call targets — the syntax gives no hint of the difference, which is exactly why the child-callback version reads as "the same trick" right up until the console disagrees.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A <code>SearchResults</code> component resets <code>page</code> to 1 whenever <code>query</code> changes, using React's documented render-time pattern directly in its own function body (no useEffect). A teammate refactors so a child <code>&lt;Filters onQueryChanged={resetPage}&gt;</code> calls that same setter, still conditionally, but now from inside the CHILD's render. What changes the next time query updates?</p>
+  <button type="button">Nothing — React can't tell which component the code originally lived in, so both versions behave identically</button>
+  <button type="button">Filters immediately throws "Too many re-renders", because calling any function prop during render is forbidden in React</button>
+  <button type="button">React logs "Cannot update a component while rendering a different component", because the setter now targets an ancestor's state from inside a DIFFERENT component's render instead of the currently-rendering component's own state</button>
+  <p class="why" data-for="0">It's not the same at runtime even though the guard logic is identical text — React tracks WHICH fiber is currently rendering, and "the same lines of code" moved to a different component is a different fiber, with a different rule applied to it.</p>
+  <p class="why" data-for="1">Calling a function prop during render is completely normal (that's how you compute a derived value from a callback, for instance) — the problem here isn't "calling a function," it's specifically that the function sets state belonging to a component that isn't the one currently rendering.</p>
+  <p class="why" data-for="2">Right — React's render-phase-update exception only covers a component updating state that's part of the CURRENT render pass. Reached from a child's render body, the parent's setter is out of scope for that pass, so React warns instead of silently folding it in — and a guard that never stabilizes turns the warning into an infinite loop.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"You may touch your own turn, never someone else's mid-turn" shows up anywhere a system lets you self-correct but polices reaching sideways.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Angular's <code>ExpressionChangedAfterItHasBeenCheckedError</code></h4>
+    <p>Angular allows a binding to update within its own change-detection pass, but throws this dev-only error the moment a value changes AFTER Angular already checked it in this cycle — the same "you can adjust during your own pass, not after the fact from somewhere else" boundary.</p>
+    <div class="hf-scatter"><span>a dev-only error whose entire job is to catch a timing/ownership violation</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Redux's "may not dispatch while a reducer is executing"</h4>
+    <p>Reducers are supposed to be pure, like render — and Redux explicitly throws if a reducer (even indirectly) triggers another dispatch back into the store mid-reduction, for the identical reason: you can't reach back into a pass that's still in progress.</p>
+    <div class="hf-scatter"><span>purity rules always carve out one specific self-directed exception, never a general one</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Oracle's "ORA-04091: table is mutating" trigger error</h4>
+    <p>A BEFORE UPDATE trigger may freely modify the row it's currently processing, but querying or updating a DIFFERENT row of the same table mid-statement raises this exact "mutating table" error — touching your own in-flight record is fine, reaching sideways into the same working set is not.</p>
+    <div class="hf-scatter"><span>the boundary is never "state," it's always "whose turn is it"</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> render is a pure function call, commit mutates the DOM, layout
+  effects run synchronously before paint, passive effects run after, and StrictMode double-invokes all
+  of it in dev to expose impurity and missing cleanup. <b>New: React quietly forgives a component for
+  calling its OWN setter mid-render (and instantly re-runs the pass before paint) — but the same call
+  reaching sideways into a different component's state from inside someone else's render is not
+  forgiven, and logs a warning that becomes an infinite loop if nothing stops it.</b>
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -259,6 +373,7 @@ DevHubCodeWalk.mount('#cw-rlife',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -109,7 +109,119 @@ except RuntimeError as e:
   </div>
 
 
-  <!-- ── HERO ── -->
+  <p class="hf-deck">You already know finally always runs. Here's the part that isn't in "always runs": it can also always WIN — even over an exception that's actively in flight.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">A finally block can silently delete an exception that already started propagating, and hand back its own return value instead — with no warning, no traceback, nothing.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A token validator that never rejects an invalid token</div>
+  <p>You write a validator that records a metric no matter what happens, using the pattern this page just taught you — <code>finally</code> for unconditional cleanup:</p>
+  <p><code>def validate(token):</code><br>
+  <code>&nbsp;&nbsp;try:</code><br>
+  <code>&nbsp;&nbsp;&nbsp;&nbsp;claims = jwt.decode(token, KEY)</code><br>
+  <code>&nbsp;&nbsp;&nbsp;&nbsp;if claims["exp"] &lt; now(): raise TokenExpired(claims["sub"])</code><br>
+  <code>&nbsp;&nbsp;&nbsp;&nbsp;return claims</code><br>
+  <code>&nbsp;&nbsp;finally:</code><br>
+  <code>&nbsp;&nbsp;&nbsp;&nbsp;metrics.increment("validate.attempts")</code><br>
+  <code>&nbsp;&nbsp;&nbsp;&nbsp;return cached_claims&nbsp;&nbsp;# "just in case decode was slow"</code></p>
+  <p>Every code review comment on this function would be about the weird caching line — nobody flags it as a security bug. But <code>TokenExpired</code> is raised inside <code>try</code>, starts propagating out of the function... and then hits that <code>return</code> in <code>finally</code>. The exception is thrown away, mid-flight, and the function calmly returns <code>cached_claims</code> as if nothing happened. An expired token now authenticates successfully.</p>
+  <div class="hf-scatter">
+    <span>the expiry check ✓</span>
+    <span>the raise ✓</span>
+    <span>a return sitting in finally ⚠</span>
+  </div>
+  <p class="hf-foot">The exception didn't get caught. It got out-voted.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Keep finally free of return, break, and continue</div>
+  <div class="hf-ladder">
+    <b>Use finally ONLY for side effects — logging, closing files, releasing locks</b>
+    <i>↓ side effects don't compete with an in-flight exception; a return does</i>
+    <b>If you truly need a fallback value, put it in except, not finally</b>
+    <i>↓ except only runs when you intended to handle that specific error</i>
+    <b>Lint for it: pylint's W0134 / flake8-bugbear's B012 flag return-in-finally</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A control-flow statement in finally always wins, silently.</b> Python's own language reference says it plainly: "If the finally clause executes a return, break or continue statement, exceptions are not re-raised." Not "may be suppressed under some conditions" — not re-raised, full stop. The same is true if <code>try</code> itself already had a pending <code>return</code>: finally's return replaces it too, exception or not.
+</div>
+
+<div class="hf-note">Think of <code>finally</code> as the <b>last person to speak in the room</b> before everyone leaves. It doesn't matter how loudly the exception was arguing its case two sentences ago — if <code>finally</code> says "we're returning <code>cached_claims</code>" on the way out the door, <b>that's the only thing anyone outside the room hears.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I definitely raised TokenExpired. Why did the caller get a successful claims object back?</p></div>
+  <div class="hf-bub right"><span class="who">The finally block</span><p>Your exception was on its way out. But I run no matter what — success, failure, doesn't matter to me — and I happen to end in a return statement. Once I execute a return, I replace whatever the function was about to produce, including an exception that hadn't left yet.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Shouldn't Python at least warn me that I'm throwing away a live exception?</p></div>
+  <div class="hf-bub right"><span class="who">CPython's compiler</span><p>Some linters will warn you — I won't, at the language level. Syntactically your finally block is completely ordinary code; nothing marks "there might be an exception mid-unwind right now" as special.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Trace exactly what the interpreter does when a raise inside try meets a return inside finally.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>try</code> raises <code>TokenExpired</code></span><span class="tag">exception created</span></li>
+    <li class="open"><span>No matching <code>except</code> here, so the exception begins unwinding toward the caller</span><span class="tag">in flight</span></li>
+    <li><span>Before leaving the function, Python must still run <code>finally</code></span><span class="tag">finally scheduled</span></li>
+    <li class="open"><span><code>finally</code> executes <code>metrics.increment(...)</code> — a normal side effect, no conflict yet</span><span class="tag">safe line</span></li>
+    <li><span><code>finally</code> then executes <code>return cached_claims</code></span><span class="tag">the collision</span></li>
+    <li class="open"><span>A return inside finally overrides the frame's outcome — the in-flight <code>TokenExpired</code> is discarded, not raised</span><span class="tag">exception dropped</span></li>
+  </ol>
+  <p class="hf-annot">Step 6 has no error, no warning, no log line — the interpreter treats "finally decided to return" as a completely ordinary, deliberate choice, because syntactically that's exactly what it is. The bug is entirely in what the human meant, which the interpreter has no way to know.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">try: raises TokenExpired</span>
+      <div class="ring"><span class="lbl">exception unwinds toward the caller</span>
+        <div class="ring"><span class="lbl">finally block begins running anyway</span>
+          <div class="core">return cached_claims executes<small>the exception is discarded here — never reaches the caller</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Reading from the outside in: every layer looks like it's protecting the exception's journey out of the function — until the innermost layer turns out to be a wall, not a doorway. The exception never gets past the last thing that runs.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q"><code>def f(): </code><br><code>&nbsp;&nbsp;try: raise ValueError("bad")</code><br><code>&nbsp;&nbsp;finally: return "fallback"</code><br>What does <code>f()</code> do when called?</p>
+  <button type="button">Returns <code>"fallback"</code> — the <code>ValueError</code> is discarded, no exception ever reaches the caller</button>
+  <button type="button">Raises <code>ValueError("bad")</code>, then logs a <code>RuntimeWarning</code> about the ignored return in finally</button>
+  <button type="button">Raises a <code>RuntimeError</code> because you can't return from finally while an exception is active</button>
+  <p class="why" data-for="0">Correct — and this is the whole danger of it. No exception, no warning, just a clean, quiet return of <code>"fallback"</code> as if <code>raise</code> never ran.</p>
+  <p class="why" data-for="1">Python emits no warning of any kind here. This isn't a deprecated pattern with a nag message — it's ordinary, fully legal control flow that happens to have a surprising interaction.</p>
+  <p class="why" data-for="2">There's no restriction like this. <code>return</code> is completely legal syntax inside <code>finally</code>, active exception or not — which is exactly why nothing stops you from writing this bug.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The cleanup step quietly overrides the real result" is a pattern that outlives any one language.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's finally-return does the identical thing</h4>
+    <p>Java's own spec calls this out by name: a <code>return</code> in a <code>finally</code> block "completes abruptly" and discards any exception the <code>try</code>/<code>catch</code> was propagating — line-for-line the same trap, same fix (never put control flow in finally).</p>
+    <div class="hf-scatter"><span>identical rule, different language, same bug reports</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Spring @Transactional method that swallows a rollback</h4>
+    <p>A try/finally around a transaction where finally always commits regardless of an exception is the same shape at a higher level — cleanup code that unconditionally decides the outcome instead of just reacting to it.</p>
+    <div class="hf-scatter"><span>unconditional cleanup outranking the real outcome</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A JavaScript Promise .finally() that returns a value</h4>
+    <p>Unlike Python, <code>.finally()</code>'s callback return value is deliberately ignored by the Promise spec specifically to prevent this exact class of "cleanup accidentally changes the result" bug — a design fix for the same failure mode.</p>
+    <div class="hf-scatter"><span>one ecosystem's postmortem became another's spec</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> exceptions unwind the stack until a matching except catches them, else/finally split "only on success" from "no matter what," and EAFP beats LBYL for anything racy. <b>The one new sentence this block adds:</b> "no matter what" is stronger than you think — a return, break, or continue inside finally silently deletes an exception that was already on its way out, with zero warning.
+</div>
+
+<!-- ── HERO ── -->
   <div class="card" style="border-color:var(--accent)">
     <h2 id="hero" style="margin-top:0;border:0;padding:0;color:var(--accent2)">▶ Watch an exception travel</h2>
     <p class="note top">An exception isn't a return value — it <em>unwinds</em> the stack, abandoning each frame until a handler matches. Pick a
@@ -412,6 +524,7 @@ document.addEventListener('click', function (e) {
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -111,7 +111,108 @@
     </div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, how <code>-pl</code> quietly builds against yesterday's code</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You fix a bug in <code>ciam-domain</code>, run a fast partial build of <code>ciam-api</code>, watch it go green — and ship the old bug anyway.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Green build, old bug — the <code>-pl</code> without <code>-am</code> trap</div>
+  <p>You're iterating on <code>ciam-domain</code>'s <code>User</code> entity, fixing a validation rule that was letting empty display names through. To save time you skip the full reactor build and run <code>mvn install -pl ciam-api</code> — just the module you're actually testing changes in. It compiles clean, tests pass: <code>BUILD SUCCESS</code>.</p>
+  <p>The bug is still there when you run the app. Not because your fix was wrong — because <code>-pl</code> on its own never rebuilt <code>ciam-domain</code> at all. Maven resolved <code>ciam-domain</code> for <code>ciam-api</code> exactly the way it resolves any third-party library: by pulling whatever version is already sitting in <code>~/.m2/repository</code>, which is the JAR from the last time someone ran a full <code>mvn install</code> — days ago, before your fix existed.</p>
+  <div class="hf-scatter">
+    <span>the fix compiles correctly inside domain's own source ✓</span>
+    <span><code>mvn install -pl ciam-api</code> reports BUILD SUCCESS ✓</span>
+    <span>ciam-domain was never part of this build at all ⚠</span>
+  </div>
+  <p class="hf-foot"><code>-pl</code> tells Maven which modules to build. It says nothing about which modules to trust from cache — that's what <code>-am</code> is for.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Pair <code>-pl</code> with <code>-am</code> whenever a sibling module changed</div>
+  <div class="hf-ladder">
+    <b>Run <code>mvn install -pl ciam-api -am</code></b>
+    <i>↓ <code>-am</code> (also-make) pulls every module ciam-api depends on INTO this build's reactor, so domain gets recompiled and reinstalled, not just referenced from cache</i>
+    <b>Or run the full <code>mvn install</code> from the parent when in doubt</b>
+    <i>↓ the whole reactor rebuilds in dependency order — slower, but there's no stale-cache question left to ask</i>
+    <b>Treat a suspiciously fast, green <code>-pl</code>-only build as a reason to check, not celebrate</b>
+    <i>↓ if you touched a module upstream of the one you built and the build didn't seem to take any longer, ask what it quietly skipped</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A module left out of the current reactor run isn't rebuilt, isn't checked for staleness, and isn't even looked at — Maven simply resolves its dependency coordinate against whatever artifact already sits in your local repository, so a fresh edit to that module's source stays invisible until something puts the module back inside the reactor.
+</div>
+
+<div class="hf-note"><code>-pl</code> picks who's in the room for this build. <b>Anyone left outside is represented by whatever they said last time</b> — not by what they'd say right now.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I fixed the bug in domain, ran -pl api, got BUILD SUCCESS. Why is the bug still there?</p></div>
+  <div class="hf-bub right"><span class="who">The reactor, personified</span><p>Because you only invited api into the room. I resolved domain the same way I'd resolve any dependency you didn't hand me fresh source for — I went and found the last jar with that name and version in your local repo.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So it doesn't matter that I edited domain's source two minutes ago?</p></div>
+  <div class="hf-bub right"><span class="who">The reactor, personified</span><p>Not to me, not this run. I only know about source I'm actually asked to compile. Add -am and domain's in the room too — then your edit counts.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Here's exactly what <code>-pl</code> decides to skip, and why the skip never shows up in the build log.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Weeks ago: a full <code>mvn install</code> from the parent puts <code>ciam-domain-1.0-SNAPSHOT.jar</code> into <code>~/.m2</code></span><span class="tag">baseline</span></li>
+    <li class="open"><span>Today you edit <code>User.java</code> inside <code>ciam-domain</code>, fixing a validation bug</span><span class="tag">source changed</span></li>
+    <li><span>You run <code>mvn install -pl ciam-api</code> to build just the module you're testing</span><span class="tag">-pl only</span></li>
+    <li class="open"><span>Maven builds a reactor containing exactly one module: ciam-api. Domain is not in it.</span><span class="tag">reactor of one</span></li>
+    <li><span>ciam-api's pom asks for <code>com.company.ciam:ciam-domain:1.0-SNAPSHOT</code> — Maven resolves it from ~/.m2, same as any external library</span><span class="tag">cache hit</span></li>
+    <li class="open"><span><code>BUILD SUCCESS</code> prints. Nowhere does it say "used a copy of domain from 3 weeks ago" — success looks identical either way.</span><span class="tag">the silent part</span></li>
+  </ol>
+  <p class="hf-annot">Sit with step 6 — it's what makes this trap so durable. A stale dependency doesn't produce a warning, a yellow flag, or even a slower build; it produces the exact same <code>BUILD SUCCESS</code> you'd get from a fully fresh build, because from Maven's point of view nothing went wrong — you asked it to resolve a coordinate, and it did, honestly, from the one place it was told to look. The absence of an error is not evidence the right code got built.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>you ran -pl for speed</span><span>CI caches ~/.m2 across jobs</span><span>a teammate's mvn install from last week</span></div>
+    <div class="funnel">the same underlying gap ↓</div>
+    <div class="instance">api links against a domain.jar that predates your fix<small>one symptom, three unrelated-looking causes</small></div>
+  </div>
+  <p class="hf-annot">Three completely different habits — a shortcut you took today, an optimization your CI pipeline takes for you automatically, and someone else's forgotten build from last week — all collapse into the exact same failure mode: a module excluded from the reactor gets resolved from whatever's cached, with zero regard for how old that cache is.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Your local <code>~/.m2</code> has <code>ciam-domain-1.0-SNAPSHOT.jar</code> installed from three weeks ago. You edit ciam-domain's source today and immediately run <code>mvn install -pl ciam-api</code>. What actually gets linked into ciam-api's build?</p>
+  <button type="button">Your edited version of ciam-domain — Maven detects the newer source file timestamp and rebuilds it automatically</button>
+  <button type="button">Nothing — the build fails because ciam-domain hasn't been rebuilt</button>
+  <button type="button">The three-week-old ciam-domain-1.0-SNAPSHOT.jar already sitting in ~/.m2, unchanged</button>
+  <p class="why" data-for="0">Maven doesn't scan sibling module source for freshness when that module is excluded from the reactor by <code>-pl</code> without <code>-am</code> — it never even looks at domain's source directory this run.</p>
+  <p class="why" data-for="1">The build doesn't fail — it succeeds, using the old jar. That's exactly what makes this dangerous: a failure would at least get noticed and investigated.</p>
+  <p class="why" data-for="2">Correct. With domain excluded from the reactor, Maven resolves its GAV coordinate from the local repository like any external dependency — the three-week-old jar, untouched by your edit. <code>-am</code> is what would have pulled domain back into the build.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The piece you left out of the build gets represented by whatever it said last time" is a shape that repeats across every layered build system.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>An Angular monorepo's shared auth library</h4>
+    <p>You fix a token-parsing bug in a shared <code>@ciam/auth-interceptors</code> library inside an Nx or Angular workspace, then run <code>ng build web-app</code> alone. If the workspace serves the library from its already-built <code>dist/</code> output instead of rebuilding it as part of this run, the app links against the interceptor code from before your fix — same shape, same silence, just TypeScript instead of a JAR.</p>
+    <div class="hf-scatter"><span>a workspace library excluded from the build is served from stale dist output</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Docker layer cache on a mutable base tag</h4>
+    <p><code>FROM company/base-image:latest</code> in a Dockerfile gets cached by content hash the first time you build. Someone pushes a new <code>:latest</code> with a critical patch; your next <code>docker build</code> — without <code>--pull</code> — happily reuses the cached layer for the OLD "latest," because Docker never re-checks a tag it already has cached under that name.</p>
+    <div class="hf-scatter"><span>a mutable reference resolved from a frozen local cache instead of the real current thing</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An AWS Lambda function pinned to an old layer version</h4>
+    <p>You publish version 5 of a shared Lambda Layer with a security fix. Every function still configured with the layer ARN ending <code>:4</code> keeps running the old code on every invocation — Lambda layers are immutable per version, and publishing a new one changes nothing for a function until you explicitly repoint it at <code>:5</code>.</p>
+    <div class="hf-scatter"><span>publishing a new version doesn't reach consumers still pinned to the old one</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a Maven multi-module project uses one parent POM with <code>packaging: pom</code> to aggregate child modules — domain, infrastructure, api, app — and the reactor topologically sorts their <code>&lt;dependency&gt;</code> graph to decide build order, with <code>-pl</code>/<code>-am</code> letting you build subsets. <b>The one new sentence this block adds:</b> <code>-pl</code> on its own only decides which modules get REBUILT this run — any sibling module you leave out is resolved straight from whatever's cached in your local repo, however old, behind a BUILD SUCCESS that looks identical either way.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -529,6 +630,7 @@ DevHubCodeWalk.mount('#cw-mvnmm',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

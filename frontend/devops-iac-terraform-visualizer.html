@@ -57,7 +57,143 @@
     <div class="intro-ciam"><span class="tag">CIAM / provisioning:</span> the infrastructure a CIAM app needs — an App Service/Container App, a managed database, a <strong>Key Vault</strong> for client secrets and signing keys, DNS, and the app registration's redirect URIs — is exactly what you want in code: reviewed in a PR, identical across dev/stage/prod, and rebuildable after a disaster. Store the <strong>state file remotely</strong> (an Azure Storage container or S3 bucket with locking) so a team shares one source of truth, and never commit secrets — reference them from Key Vault. This pairs with the CI/CD page: a pipeline typically runs <code>terraform plan</code> on a PR and <code>terraform apply</code> on merge behind an approval gate.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the pure refactor that Terraform reads as "delete this one, and, separately, build a new one that happens to look similar"</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Terraform doesn't track a resource by what it IS in the cloud — it tracks it by the exact string you happened to type as its name in your HCL file.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">You renamed one resource block for readability. Terraform deleted your production Key Vault to do it.</div>
+  <p>The Key Vault from this page's own code walkthrough has been live for a year, holding your IdP's
+  client secrets and JWT signing keys: <code>resource "azurerm_key_vault" "kv" { name = "ciam-secrets"
+  ... }</code>. A new engineer does a readability pass and renames the local identifier —
+  <code>"kv"</code> becomes <code>"secrets_vault"</code> — leaving every argument inside the block
+  untouched. It feels like a no-op, so obviously safe that they skip running <code>plan</code> before
+  opening the PR.</p>
+  <p>Terraform's state maps by address — <code>azurerm_key_vault.kv</code> — never by the vault's
+  actual Azure resource id, and certainly not by "what this HCL block conceptually represents." The
+  next <code>plan</code> finds <code>azurerm_key_vault.kv</code> in state with no matching block left
+  in the HCL (<code>- destroy</code>), and <code>azurerm_key_vault.secrets_vault</code> in the HCL with
+  no entry in state (<code>+ create</code>) — two completely unrelated resources, as far as Terraform
+  is concerned, even though every argument inside them is byte-for-byte identical. The reviewer skims
+  a diff that reads like a rename and approves it. <code>apply</code> runs both actions: the real, live
+  vault is deleted, then a brand-new, empty one is created under the new address. Every client secret
+  and signing key that lived in the old vault is gone. Every JWT the old signing key backs becomes
+  unverifiable the instant the key disappears.</p>
+  <div class="hf-scatter">
+    <span>the <code>name</code> argument is unchanged ✓</span>
+    <span><code>sku_name</code> and every other setting are unchanged ✓</span>
+    <span>the PR diff reads like a cosmetic rename ✓</span>
+    <span>Terraform sees two unrelated resources, not one renamed one ⚠</span>
+  </div>
+  <p class="hf-foot">State doesn't know what a Key Vault is FOR. It only knows the string <code>azurerm_key_vault.kv</code> used to map to an id, and nothing in your HCL claims that string anymore.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Tell Terraform a rename is a rename — don't let it guess</div>
+  <div class="hf-ladder">
+    <b>Add a <code>moved</code> block (Terraform 1.5+)</b>
+    <i>↓ <code>moved { from = azurerm_key_vault.kv; to = azurerm_key_vault.secrets_vault }</code> tells Terraform explicitly "this is the same object under a new address" — plan then shows a clean no-op instead of a destroy+create</i>
+    <b>Or run <code>terraform state mv</code> before you ever touch the HCL name</b>
+    <i>↓ this re-points the EXISTING state entry to the new address directly, so the moment your renamed HCL runs a plan, it already matches — the pre-1.5 way of doing exactly what <code>moved</code> now automates</i>
+    <b>Run <code>plan</code> on every change — even a "pure" rename — and actually read the <code>-/+</code> lines</b>
+    <i>↓ a destroy+create is right there in plan output; the failure here was never in Terraform, it was in deciding a rename was too trivial to preview</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Terraform's state maps a fixed string — the resource's address in your
+  HCL — to a real object's identity; the moment that string changes with no explicit migration,
+  Terraform has no way to know you meant "rename" instead of "delete this one, and, unrelated, also
+  make a new one that happens to look similar."
+</div>
+
+<div class="hf-note">It's like changing the name plate on your office door and having the building's
+directory delete your entire office and build a brand-new empty one under the new name — <b>instead of
+just updating the label on the door you're already sitting behind.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I only changed the variable name in the HCL. Why did the Key Vault actually get deleted?</p></div>
+  <div class="hf-bub right"><span class="who">The state file</span><p>I don't track "the vault your team has used for a year." I track the string azurerm_key_vault.kv, mapped to an id. The moment your HCL stopped saying that string, that resource just vanished from your desired configuration, as far as I'm concerned.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But secrets_vault is obviously the same thing, just renamed!</p></div>
+  <div class="hf-bub right"><span class="who">The state file</span><p>Obviously to you. I don't read intent — I match addresses. Tell me it's the same thing with a moved block or state mv, and I'll treat it as the same thing. Otherwise I take your HCL exactly as literally as it's written.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one resource through a plan that looks like nothing, and turns out to be everything.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>State holds one entry: <code>azurerm_key_vault.kv</code> → a real Azure id, currently holding live secrets</span><span class="tag">before the rename</span></li>
+    <li class="open"><span>Engineer renames the HCL block's local name to <code>secrets_vault</code> — every argument inside stays identical</span><span class="tag">pure refactor</span></li>
+    <li><span><code>terraform plan</code> compares state's addresses against the new HCL's addresses</span><span class="tag">address comparison</span></li>
+    <li class="open"><span><code>azurerm_key_vault.kv</code> is in state with no matching HCL block anymore → planned for destroy</span><span class="tag">orphaned in state</span></li>
+    <li><span><code>azurerm_key_vault.secrets_vault</code> is in HCL with no entry in state → planned for create</span><span class="tag">unmatched in HCL</span></li>
+    <li class="open"><span><code>apply</code> runs both actions: the live vault (and everything in it) is deleted, then an empty one is created under the new address</span><span class="tag">data gone</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the entire mechanism, and there's no bug in it anywhere — <code>plan</code>
+  is doing exactly its documented job, matching state addresses against HCL addresses. The mistake
+  happened one step earlier, in step 2, the instant a human treated a rename as too small to need an
+  explicit <code>moved</code> block or an actual plan review. Terraform never had the information
+  needed to know the two blocks were "the same resource, renamed" — that information only ever existed
+  in the engineer's head.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>renaming a resource's local name</span><span>moving a resource into a module</span><span>changing a for_each key</span></div>
+    <div class="funnel">the old address vanishes from HCL, matching nothing in the new config ↓</div>
+    <div class="instance">Terraform plans a destroy for something that never logically went away<small>only its address in the file changed — three different refactors, the identical mechanism</small></div>
+  </div>
+  <p class="hf-annot">All three of these are ordinary, well-intentioned edits that Terraform's own
+  documentation specifically calls out as needing a <code>moved</code> block — because all three change
+  a resource's address without changing the resource itself. The fix is identical regardless of which
+  refactor caused it: tell Terraform explicitly that the old address and the new address name the same
+  object, instead of leaving it to infer that from arguments it never compares.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">An engineer renames a Terraform resource's local name — <code>resource "azurerm_key_vault" "kv"</code> becomes <code>resource "azurerm_key_vault" "secrets_vault"</code> — changing nothing else inside the block. No <code>moved</code> block or <code>terraform state mv</code> is used. What does the next <code>terraform plan</code> show?</p>
+  <button type="button">One resource to destroy (<code>azurerm_key_vault.kv</code>, no longer in HCL) and one to create (<code>azurerm_key_vault.secrets_vault</code>, not yet in state) — Terraform treats them as two unrelated resources because it matches by address, not by the arguments inside the block.</button>
+  <button type="button">No changes — Terraform recognizes that every argument inside the block is identical and infers this is the same resource, just renamed.</button>
+  <button type="button">An error — Terraform refuses to plan when a resource's local name doesn't match any entry in state.</button>
+  <p class="why" data-for="0">Right. State keys are addresses — type plus local name — not a hash of the block's arguments. <code>kv</code> disappearing and <code>secrets_vault</code> appearing with no state entry look, to Terraform, like an unrelated deletion and an unrelated creation, even though a human can plainly see they're the same vault.</p>
+  <p class="why" data-for="1">Terraform never compares the contents of an orphaned state entry against the contents of an unmatched HCL block to guess they're related — it only matches on address. Identical arguments inside two differently-addressed blocks are, to Terraform, a coincidence, not a signal of anything.</p>
+  <p class="why" data-for="2">A resource address with no matching state entry is an entirely ordinary situation — it's exactly what a brand-new resource looks like on its very first plan. Terraform has no way to tell "this is new" apart from "this used to have a different name" without you telling it explicitly.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Identity is tracked by a fragile label, not by what the thing actually is" breaks the same way in every tool that has to key on a name.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Natural keys used as foreign keys</h4>
+    <p>A schema that foreign-keys on a "natural" value — a username, an email — instead of a surrogate numeric id breaks the moment that natural value legitimately changes: every row referencing the old username now points at nothing. Database design guidance has recommended surrogate keys for exactly this reason for decades — the underlying entity's identity shouldn't be tied to a value that's allowed to change.</p>
+    <div class="hf-scatter"><span>the same fragile-key trap, one layer down in the schema</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Renaming a Kubernetes Deployment</h4>
+    <p>Changing a Deployment's <code>metadata.name</code> isn't a rename to the Kubernetes API — it's a brand-new object. The old Deployment (and its ReplicaSets and Pods) gets torn down or orphaned, and a new Deployment starts fresh, because the API server has no concept of "this is the same workload, just relabeled."</p>
+    <div class="hf-scatter"><span>a different orchestrator, the identical delete-and-recreate trap</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>AWS CloudFormation logical IDs</h4>
+    <p>This page's own intro compares Terraform to CloudFormation — here's where they share a scar: CloudFormation tracks resources by the logical ID you give them in the template, and renaming that logical ID plans a <code>DeleteResource</code> plus a separate <code>CreateResource</code>, the exact same shape of accident, in the sibling tool this page already put side by side with Terraform.</p>
+    <div class="hf-scatter"><span>the tool this page compares itself to, sharing the identical gotcha</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Terraform reads your HCL as the desired end state, diffs it in a
+  dry-run <code>plan</code> against state and the live cloud, and <code>apply</code> executes only the
+  create/update/destroy actions needed to converge — with the state file mapping each resource's
+  address to its real cloud id. <b>The one new sentence this block adds:</b> that map is keyed on the
+  address you happen to type in your HCL, not on what the resource actually is, so a pure rename with
+  no explicit <code>moved</code> block or <code>state mv</code> looks to Terraform exactly like deleting
+  one resource and creating an unrelated new one — and it will do precisely that.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="tfSeg">
@@ -255,6 +391,7 @@ DevHubCodeWalk.mount('#cw-tf',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

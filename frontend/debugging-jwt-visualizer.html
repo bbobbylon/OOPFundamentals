@@ -102,6 +102,183 @@ SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV…  <span class="cm">  ← signature (needs t
     </div>
   </section>
 
+<p class="hf-deck">or, you disabled the account at 09:14 and the API kept saying 200 until 09:35</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Every check on this page's checklist can pass on a token that should have stopped working twenty minutes ago.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Support disabled the account. The API kept serving her data for another 21 minutes.</div>
+  <p>09:05 — Alice signs in. Ping mints an access token with a 30-minute lifetime, so <code>exp</code>
+  lands at 09:35. 09:14 — a support engineer disables her account in the admin console and, being
+  thorough, also calls the issuer's revocation endpoint with her refresh token. 09:20 — Alice's
+  still-open browser tab calls <code>GET /api/accounts</code>. Your Spring resource server answers
+  <b>200</b>, with her data in the body.</p>
+  <p>Nothing failed. Your decoder fetched the JWKS keys once, at startup, and cached them. On every
+  request since, it verifies the signature against that cached public key, compares <code>exp</code>
+  to the local clock, string-matches <code>iss</code>, and checks <code>aud</code> — all in process,
+  all in microseconds, and <b>without ever speaking to Ping again</b>. That speed is the entire point
+  of a self-contained token. The cost is that revocation happened somewhere your API never looks.</p>
+  <div class="hf-scatter">
+    <span>signature verifies ✓</span>
+    <span>exp is 09:35, it's 09:20 ✓</span>
+    <span>iss and aud both match ✓</span>
+    <span>the account behind the token no longer exists ⚠</span>
+    <span>nobody told the resource server ⚠</span>
+  </div>
+  <p class="hf-foot">The checklist answers "was this token genuinely issued, and is it still inside its
+  window?" It has never once answered "should this token still work?"</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Shrink the window, then close it deliberately where it matters</div>
+  <div class="hf-ladder">
+    <b>Decide what your revocation gap actually is, out loud, and write it down</b>
+    <i>↓ it equals the access-token lifetime, exactly — a 60-minute TTL is a 60-minute gap, whatever the admin console says</i>
+    <b>Cut the access-token TTL to 5-15 minutes and let refresh-token rotation do the re-checking</b>
+    <i>↓ the refresh call DOES hit the issuer, so a disabled account fails there — that round trip is where revocation lands</i>
+    <b>For the endpoints where 15 minutes is too long, check state on purpose: a <code>jti</code> denylist in Redis, or token introspection (RFC 7662) on that route only</b>
+    <i>↓ you are choosing to pay a network hop for "delete this customer" and not for "load the dashboard"</i>
+    <b>And subscribe to the issuer's logout/revocation signals — OIDC back-channel logout, or Entra's Continuous Access Evaluation — so the news reaches you instead of waiting for <code>exp</code></b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A stateless token is a decision cached in the client's pocket, and cached decisions go stale.</b>
+  Validation proves the issuer said yes at issue time and that the deadline has not passed. It cannot
+  prove the issuer would still say yes now, because nobody asked. Every property you love about JWTs
+  — no session store, no per-request call to the IdP, horizontal scale for free — is the same
+  property that makes revocation slow. You do not fix that by adding a seventh claim to the
+  checklist. You fix it by choosing a token lifetime you can live with, and by paying for a real
+  state check on the few operations that deserve one.
+</div>
+
+<p class="hf-big">Tokens expire. They do not get recalled.</p>
+
+<div class="hf-note">A validated JWT is a <b>concert wristband</b>, not the guest list. Security scans
+the band at the door — is it genuine, is it today's colour? Crossing someone off the list at the box
+office changes nothing for the person already wearing a band. You either print bands that expire
+sooner, or you put a radio in the bouncer's ear. <b>The bouncer checks the wristband, not the
+list.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I revoked her token at 09:14. Why is your API still returning her data at 09:20?</p></div>
+  <div class="hf-bub right"><span class="who">Your Spring resource server</span><p>Because I never asked you anything. I cached Ping's public keys, and since then every request has been six local checks on bytes the client handed me. I don't have a phone line to the IdP — that's what made me fast enough to run twelve instances behind a load balancer.</p></div>
+  <div class="hf-bub"><span class="who">The revocation endpoint</span><p>I did my job. I killed the refresh token so no NEW access token can be minted from that grant. The one already in her browser isn't mine to reach into — it's a signed string that exists in a hundred places I've never seen.</p></div>
+  <div class="hf-bub right"><span class="who">The 30-minute <code>exp</code> claim</span><p>Which makes me the actual security control here, and I'm just a number someone typed into a config screen. Set me to 5 minutes and your worst case gets six times better without a single line of code.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one token from mint to grave and watch exactly where the revocation news fails to arrive.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>09:05 — Alice authenticates. Ping mints an access token (<code>exp</code> 09:35) plus a refresh token, and records the grant in its own store</span><span class="tag">the issuer is stateful; it remembers</span></li>
+    <li class="open"><span>Your API's decoder fetches the JWKS public keys <b>once</b> and caches them. It will not call Ping again unless it meets an unknown <code>kid</code></span><span class="tag">the last call to the IdP for 30 minutes</span></li>
+    <li><span>09:06-09:13 — 400 API requests. Each one: verify signature locally, compare <code>exp</code> to the local clock, match <code>iss</code>, check <code>aud</code>. Zero network calls</span><span class="tag">this is the feature, not the bug</span></li>
+    <li class="open"><span>09:14 — support disables the account and revokes the refresh token. Ping updates <b>Ping's</b> store. Your API is not a subscriber, is not polled, and is not notified</span><span class="tag">the news stops here</span></li>
+    <li><span>09:20 — Alice's tab calls <code>GET /api/accounts</code>. All six checks pass, because all six are about the token, and the token has not changed</span><span class="tag">200 OK, correctly</span></li>
+    <li class="open"><span>09:35 — <code>exp</code> passes. Now she gets a 401. The SPA tries to refresh, Ping rejects the revoked grant, and only <i>then</i> does the disabled account become visible to your API</span><span class="tag">revocation, delivered 21 minutes late by a clock</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the whole lesson: it is the only step where something important happens
+  and <i>nothing happens in your process</i>. There is no log line, no failed check, no red entry in
+  the Network tab — the absence of an event is the event. Which is also why this bug never shows up
+  in debugging: you are staring at a request that is behaving perfectly.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Minted (09:05)</span>
+      <span class="go"><em>Ping signs it</em> <span class="arrow">→</span> a self-contained string, valid for 30 minutes, now living in the browser</span></div>
+    <div class="stt"><span class="nm">Accepted (09:06-09:34)</span>
+      <span class="go"><em>every request</em> <span class="arrow">→</span> six local checks, cached keys, no call to the issuer</span></div>
+    <div class="stt"><span class="nm">Revoked at the issuer (09:14)</span>
+      <span class="go"><em>admin disables the account</em> <span class="arrow">→</span> Ping's store changes; the token in the browser does not, and neither does your API's answer</span></div>
+    <div class="stt"><span class="nm">Expired (09:35)</span>
+      <span class="go"><em>exp passes</em> <span class="arrow">→</span> 401, refresh attempt, issuer finally consulted, revocation lands</span></div>
+  </div>
+  <p class="hf-annot">Read the third state again. It is the only one where the token's status and the
+  API's behaviour disagree, and it lasts exactly as long as whatever number you configured for the
+  access-token lifetime. That number is not a performance tuning knob. It is the answer to "how long
+  can a fired employee keep calling our API?", and it belongs in your threat model with the
+  seriousness that implies.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your Spring resource server is configured with <code>issuer-uri</code> pointing at Ping,
+  and your audience validator is in place. At 09:14 an admin disables Alice's account and calls
+  Ping's revocation endpoint with her refresh token. At 09:20 her open tab sends the access token
+  she received at 09:05 (<code>exp</code> 09:35) to <code>GET /api/accounts</code>. What does your
+  API return?</p>
+  <button type="button">401 — revoking at the issuer invalidates every token from that grant everywhere at once</button>
+  <button type="button">200 — the signature still verifies and <code>exp</code> is still in the future, and your API asks Ping nothing else</button>
+  <button type="button">403 — Spring re-reads the account's status from the issuer's userinfo endpoint on each request and strips her authorities when the account is disabled</button>
+  <p class="why" data-for="0">This is what the admin console's wording leads you to expect, and it is
+  true of the <i>refresh</i> token — that grant really is dead, and no new access token can be minted
+  from it. But revocation is a change of state <b>at the issuer</b>. The access token already sitting
+  in Alice's browser is a signed string; there is no channel by which Ping reaches into it or into
+  your process. Nothing about that string changed at 09:14.</p>
+  <p class="why" data-for="1">Right — and importantly, your API is not misbehaving. It is answering
+  the only question it was ever asked: is this token genuine and inside its window? Both are still
+  true. The gap between "revoked" and "stops working" equals the access-token lifetime, which is why
+  a 5-minute TTL plus refresh rotation is a real security control and a 12-hour TTL is a 12-hour
+  window for anyone holding a copy. If a specific endpoint cannot tolerate even 5 minutes, that
+  endpoint gets a deliberate state check — a <code>jti</code> denylist lookup or an introspection
+  call — and pays the round trip on purpose.</p>
+  <p class="why" data-for="2">Spring's JWT resource-server support does not call userinfo, or anything
+  else, during request validation — the whole design is a local verification against cached JWKS
+  keys, which is what lets a stateless API scale horizontally without a shared session store. (And
+  403 would be the wrong shape anyway: 403 means "I know who you are and you still can't", which
+  implies a successfully authenticated principal.) If you want per-request issuer contact, you opt
+  into it explicitly with token introspection — and you accept the latency you just bought.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">The same shape shows up any time a yes/no answer gets copied away from whoever owns the truth.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>The session you replaced to get here</h4>
+    <p>A server-side <code>HttpSession</code> has the opposite trade. Calling
+    <code>session.invalidate()</code> — or Spring Security's <code>SessionRegistry.expireNow()</code>
+    — takes effect on the very next request, because the truth lives in one store your app reads
+    every time. That is precisely the lookup JWTs deleted for scale. Stateless auth did not make
+    revocation harder by accident; revocation was the thing it traded away.</p>
+    <div class="hf-scatter"><span>you sold instant revocation to buy the missing round trip</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>The S3 presigned URL you can't take back</h4>
+    <p>You generate a presigned link, it leaks into a Slack channel, and you want it gone. There is no
+    "unshare" button — the URL is a signature over parameters plus an expiry, verified without any
+    lookup. Your options are wait for the expiry, or invalidate the signing credential and break every
+    other URL signed with it. Same maths as a JWT, same reason: the check is offline.</p>
+    <div class="hf-scatter"><span>anything signed and self-describing is un-revokable by design</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>CDN TTL and the purge you forgot to run</h4>
+    <p>You fix the price on the product page, deploy, and customers see the old number for another
+    hour because CloudFront is serving a cached object with time left on its TTL. The origin is
+    correct; the edge is confidently serving a stale copy of a correct past answer. "Purge the cache"
+    is exactly what back-channel logout and Continuous Access Evaluation are for tokens: an explicit
+    push, because the puller was never going to ask again.</p>
+    <div class="hf-scatter"><span>a short TTL is the cheap fix; a purge channel is the real one</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  This page teaches that a JWT is three base64url parts you can decode without a key, and that a
+  resource server validates it through an ordered checklist where the first failing check is your
+  bug. <b>The new sentence: every one of those checks can pass on a token whose owner was disabled
+  twenty minutes ago, because none of them asks the issuer anything — so your real revocation
+  window is the access-token lifetime, not the moment someone clicks "disable".</b> Now predict:
+  your SPA's Logout button clears <code>localStorage</code> and routes to <code>/login</code>. If
+  someone copied that access token out of the Network tab thirty seconds earlier, what exactly does
+  clicking Logout do to their copy — and would your answer change if the token had a
+  <code>jti</code> your API checked against a denylist?
+</div>
+
   <!-- 2 INTERACTIVE -->
   <section>
     <h2>2. Interactive: run the validation checklist</h2>
@@ -341,6 +518,7 @@ renderDecoded(); run();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

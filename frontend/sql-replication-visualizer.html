@@ -47,6 +47,110 @@
       </div>
     </div>
     <div class="intro-ciam"><span class="tag">Replication in a CIAM stack:</span> route the admin user-search UI's reads to a replica (it's read-heavy and tolerates a second of staleness), but route "read your own write" paths — a user updating their own profile and immediately re-fetching it — straight to the primary, or the app will render its own stale write back to the user. Refresh-token validation and login-event writes should never go to a replica at all. If you run synchronous replication for <code>refresh_tokens</code>, promoting a replica during an outage guarantees you don't silently resurrect an already-rotated token.</div>
+<p class="hf-deck">or, the durability guarantee that took your primary down with it</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You turned on synchronous replication for zero data loss. Now a replica hiccup is a primary outage.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Every write to <code>refresh_tokens</code> just... stopped</div>
+  <p>Following exactly the guidance this page already gives — never let a replica silently resurrect a rotated refresh token — you set <code>synchronous_standby_names = 'replica-1'</code> and <code>synchronous_commit = on</code>. The primary now blocks every <code>COMMIT</code> until <code>replica-1</code> specifically confirms it has the WAL. Zero data loss on failover, exactly as documented.</p>
+  <p>At 2:14am, <code>replica-1</code> has a five-minute network blip — nothing dramatic, no disk failure, no crash, just a routing hiccup between availability zones. It stops acknowledging. Every <code>COMMIT</code> on the PRIMARY now hangs, because Postgres is doing exactly what you told it to: refusing to confirm a write until that one specific standby says it has it. Your login and token-refresh endpoints, all of which write to <code>refresh_tokens</code>, start timing out — not because the primary crashed, but because it's obediently waiting on a replica that's temporarily unreachable.</p>
+  <div class="hf-scatter">
+    <span>zero data loss, as promised ✓</span>
+    <span>synchronous_commit configured correctly ✓</span>
+    <span>one replica's health now gates the whole primary's writes ⚠</span>
+  </div>
+  <p class="hf-foot">You didn't misconfigure anything. Postgres's own documentation says outright that a synchronous standby which stops responding will make <code>COMMIT</code> block, potentially indefinitely — this is the trade you signed up for, just not the half of it you were thinking about.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Decide what a lagging standby should cost you — durability or availability</div>
+  <div class="hf-ladder">
+    <b>Name more than one candidate standby with quorum syntax</b>
+    <i>↓ <code>synchronous_standby_names = 'ANY 1 (replica-1, replica-2)'</code> only blocks if BOTH are unreachable — one flaky replica no longer holds the primary hostage</i>
+    <b>Or accept the risk explicitly with a per-transaction escape hatch</b>
+    <i>↓ <code>SET LOCAL synchronous_commit = local</code> for a specific write lets that one transaction skip waiting on any replica, trading its own durability guarantee for availability, on purpose, not by accident</i>
+    <b>Alert on synchronous replication lag BEFORE it becomes a write outage</b>
+    <i>↓ a standby approaching the point of falling out of sync is a warning today; the same standby actually disconnecting is a production incident tonight — the gap between those two moments is exactly the window you want a page to fire in</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Synchronous replication doesn't just move risk from "lose data on failover" to "wait longer on every write" — with a single named standby, it moves the risk all the way to "the primary's write availability now depends on a machine it doesn't control."
+</div>
+
+<div class="hf-note">A synchronous standby isn't a safety net under the primary — it's a <b>second machine with veto power over every COMMIT</b>. One veto-holder that goes quiet is worse than no veto-holder at all, because at least "no veto-holder" (async) never blocks.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>The primary hasn't crashed. Why is every write just... hanging?</p></div>
+  <div class="hf-bub right"><span class="who">The primary, mid-COMMIT</span><p>Because you told me not to confirm a write until replica-1 says it has the WAL. Replica-1 hasn't said anything in three minutes. I'm still waiting, exactly as instructed.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>I only wanted to protect refresh_tokens from getting lost on failover!</p></div>
+  <div class="hf-bub right"><span class="who">synchronous_standby_names</span><p>I don't know which table mattered to you. I block every COMMIT on this connection's session the same way, for as long as the named standby stays unreachable.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one login's token write through a synchronous setup when the standby goes quiet.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>App calls <code>INSERT INTO refresh_tokens ...</code> and issues <code>COMMIT</code></span><span class="tag">write</span></li>
+    <li class="open"><span>Primary writes to its own WAL and immediately streams it to replica-1</span><span class="tag">stream</span></li>
+    <li><span>Postgres holds the transaction open, waiting for replica-1's acknowledgment before returning control to the client</span><span class="tag">block</span></li>
+    <li class="open"><span>replica-1 has a network blip and stops sending acknowledgments</span><span class="tag">standby down</span></li>
+    <li><span>The primary keeps waiting — this isn't a timeout-and-retry, it's an indefinite block by design</span><span class="tag">no timeout</span></li>
+    <li class="open"><span>Every other session trying to COMMIT queues up behind the same wait — one standby now throttles the whole primary</span><span class="tag">cascading</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the detail that catches people: Postgres doesn't fall back to async after some grace period. <code>synchronous_commit = on</code> means what it says for as long as the setting is in effect — the only way out is an operator intervening, or the standby coming back.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Healthy sync commit</span>
+      <span class="go"><em>replica-1 acks each WAL flush</em> <span class="arrow">→</span> COMMIT returns in one extra round trip</span></div>
+    <div class="stt"><span class="nm">Standby unreachable</span>
+      <span class="go"><em>network blip / GC pause on replica-1</em> <span class="arrow">→</span> every new COMMIT blocks, indefinitely</span></div>
+    <div class="stt"><span class="nm">Operator intervenes</span>
+      <span class="go"><em>drop to synchronous_commit=local, or add a quorum standby</em> <span class="arrow">→</span> writes resume, durability guarantee is now weaker until replica-1 returns</span></div>
+  </div>
+  <p class="hf-annot">The middle state is the one this page's earlier sections don't dwell on: "synchronous" was always going to cost write latency, but the diagram makes clear it can cost write <em>availability</em> outright, for as long as the single named standby stays gone — there's no automatic path back to the healthy state without something changing.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">You've set <code>synchronous_standby_names = 'replica-1'</code> for zero-data-loss writes to <code>refresh_tokens</code>. At 2am, replica-1 loses network connectivity for five minutes, but never crashes. What happens to writes on the PRIMARY during that window?</p>
+  <button type="button">Nothing changes — synchronous replication only affects failover behavior, not normal writes.</button>
+  <button type="button">Postgres automatically falls back to asynchronous mode after a short timeout so writes keep flowing.</button>
+  <button type="button">Every COMMIT on the primary blocks, potentially for the whole five minutes, because it's still waiting on an acknowledgment that isn't coming.</button>
+  <p class="why" data-for="0">Synchronous replication changes ordinary write behavior on every single COMMIT, not just what happens during a failover — that's precisely the round-trip cost the page's earlier "sync vs async" comparison already describes, just not what happens when that round trip never completes.</p>
+  <p class="why" data-for="1">There's no built-in timeout-and-degrade behavior here. <code>synchronous_commit = on</code> stays in effect exactly as configured until an operator changes it or the named standby reconnects — Postgres does not quietly downgrade your durability guarantee on your behalf.</p>
+  <p class="why" data-for="2">Correct, and this is the whole point: you asked for a guarantee ("this replica has it before I confirm"), and Postgres kept that promise literally, at the cost of blocking every write on the primary until the standby it named is reachable again.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The safety mechanism becomes the single point of failure" isn't unique to Postgres.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Distributed consensus quorums (etcd, ZooKeeper, Raft)</h4>
+    <p>A three-node etcd cluster needs two nodes to agree before any write commits — lose two nodes and writes stop entirely, even though the cluster "still has a node up." Naming exactly one synchronous Postgres standby is the same shape with a quorum size of one: the smallest possible quorum is also the easiest one to fail.</p>
+    <div class="hf-scatter"><span>a quorum of one is a single point of failure wearing a durability guarantee's clothes</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Synchronous token introspection in a CIAM system</h4>
+    <p>An API gateway that calls out to a central token-introspection service on every request — rather than validating a self-contained JWT locally — has made the exact same trade Postgres makes: stronger real-time correctness (an instantly revocable token) at the cost of the gateway's own availability now depending on a service it doesn't control being reachable on every single call.</p>
+    <div class="hf-scatter"><span>"more correct, synchronously" always imports someone else's uptime into yours</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Two-phase commit across microservices</h4>
+    <p>A distributed transaction coordinator that blocks a commit until every participant acknowledges "prepared" has the identical failure mode: one unresponsive participant and every other participant sits blocked mid-transaction, holding locks, waiting on a peer's health it has no control over.</p>
+    <div class="hf-scatter"><span>"wait for confirmation from everyone" scales your worst participant's downtime to everyone's</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> WAL streaming turns crash recovery into replication, async trades a small failover data-loss window for fast writes, sync trades write latency for that window closing, and failover promotion is where the two modes' guarantees diverge hardest. <b>The one new sentence this block adds:</b> a single named synchronous standby doesn't just add latency to writes — while it's unreachable, it can stop the primary from confirming ANY write at all, so "zero data loss" and "write availability" are guarantees you have to buy separately, usually with a quorum of more than one standby.
+</div>
+
   </div>
 
 <div class="rt-ctlbar">
@@ -244,6 +348,7 @@ $('Run').addEventListener('click',run);renderNodes();chip();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

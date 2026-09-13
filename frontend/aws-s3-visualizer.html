@@ -100,6 +100,111 @@
     </div>
   </div>
 
+<p class="hf-deck">A presigned URL is a promise your code writes a check for — and the credential signing it is the account the check draws on.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You asked for seven days. You got three hours, and nobody told you.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A download link that dies while the file is still there</div>
+  <p>Your Lambda function generates a presigned GET URL so a customer can download their data export later. You set <code>signatureDuration</code> to seven days — plenty of runway for someone to get around to checking their inbox. The bucket policy is fine. The object isn't deleted. Nothing about permissions changed.</p>
+  <p>Three hours after the email goes out, the customer clicks the link and gets <code>AccessDenied</code>. Not 404 — the object is still sitting right there. <code>AccessDenied</code>, as if the whole thing had never been allowed at all.</p>
+  <div class="hf-scatter">
+    <span>bucket policy ✓</span>
+    <span>object still exists ✓</span>
+    <span>the credential that signed the URL ⚠</span>
+  </div>
+  <p class="hf-foot">You didn't configure a 3-hour link. Something else did, and it wasn't in the parameter you set.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Know which clock is actually running</div>
+  <div class="hf-ladder">
+    <b>Find out what signed the URL</b>
+    <i>↓ a long-lived IAM user's access key, or a temporary role session — they are not the same signer</i>
+    <b>If it's a role (Lambda, ECS task, EC2 instance profile), check the role's session duration</b>
+    <i>↓ that session — not your <code>expiresIn</code> — is the real deadline</i>
+    <b>For a link that truly needs to live for days, sign it with long-lived credentials on purpose</b>
+    <i>↓ a dedicated IAM user's access key (kept in Secrets Manager, never in code) can be signed for the full 7-day SigV4 maximum</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A presigned URL can never outlive the credential that signed it.</b> The <code>expiresIn</code> you pass is a request, not a guarantee — the actual deadline is whichever comes first: your requested duration, or the moment the signing credential itself stops being valid. Sign with a role, and you inherit that role's clock whether you meant to or not.
+</div>
+
+<div class="hf-note">Think of it like postdating a check. You can write any date you want on the paper — but if the account behind it closes before that date, the date on the check never mattered. <b>The signature is only as good as the account backing it, not the number written next to it.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I set <code>signatureDuration</code> to <code>Duration.ofDays(7)</code>. Why did the link die after three hours?</p></div>
+  <div class="hf-bub right"><span class="who">The presigned URL</span><p>I only carry a signature. I don't carry permission of my own — I'm valid exactly as long as the credential that signed me is valid, full stop.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But I never set the credential to expire in three hours.</p></div>
+  <div class="hf-bub right"><span class="who">The Lambda execution role</span><p>You didn't set mine, either — AWS did, the moment you attached a role instead of a long-lived key. Rotating myself automatically is the whole point of me. Nobody asked what that would do to a URL signed with my name on it.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Two independent clocks are running, and only one of them is on your screen.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Your code calls <code>S3Presigner.presignGetObject()</code> with <code>signatureDuration = 7 days</code></span><span class="tag">the clock you set</span></li>
+    <li class="open"><span>The SDK signs the URL using whatever credentials are active right now — for a Lambda function, that's the execution role's temporary session, vended by STS</span><span class="tag">the clock you didn't set</span></li>
+    <li><span>The signature embeds both durations: your requested 7-day window, and (implicitly) the signing session's own remaining lifetime</span><span class="tag">baked in at sign time</span></li>
+    <li class="open"><span>The role session itself expires on its own schedule — governed by the role's session duration, commonly just an hour or so up to a low-single-digit number of hours</span><span class="tag">AWS's clock, not yours</span></li>
+    <li><span>S3 validates every request against BOTH: is the request inside the requested <code>expiresIn</code> window, AND was it signed by a credential that was still valid at request time</span><span class="tag">the real gate</span></li>
+    <li class="open"><span>Whichever clock runs out first wins — and for a role-signed URL, that's almost always the session, not your 7 days</span><span class="tag">the surprise</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is the one to stare at. You didn't choose the execution role's session length, you didn't see it anywhere in your code, and nothing in the <code>S3Presigner</code> call warns you it's about to become the real expiry. <code>signatureDuration</code> only ever shortens the window from that ceiling — it can never extend past it.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">The presigned URL you just generated<small>signatureDuration: 7 days</small></div>
+    <div class="fan">everything that can end it early ↓</div>
+    <div class="obs">
+      <span>a long-lived IAM user's access key signing it — no extra limit beyond SigV4's own 7-day ceiling</span>
+      <span class="new">a Lambda execution role's STS session signing it instead — dies on the role's own schedule, hours at most</span>
+      <span>the bucket policy — unchanged, not the cause here</span>
+    </div>
+  </div>
+  <p class="hf-annot">Same seven days requested, same object, same bucket policy — the only thing that changed is WHO signed it. An IAM user's access key doesn't carry a session clock of its own, so SigV4's 7-day cap is the only ceiling in play. A role's credentials carry their own expiry stapled on, and that staple wins every time it's shorter than what you asked for.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">Your Lambda function assumes its execution role's temporary credentials and uses them to generate a presigned S3 URL with <code>expiresIn</code> set to seven days, meant for a customer to download an export later. A few hours later the customer clicks the link and gets <code>AccessDenied</code> — nobody changed the bucket policy or revoked any permission. Why?</p>
+  <button type="button">A presigned URL can never outlive the credentials used to sign it — the temporary session backing the Lambda's execution role expired long before the requested 7-day window</button>
+  <button type="button">S3 caps every presigned URL at 15 minutes for security, regardless of what you request</button>
+  <button type="button">The object transitioned to a different storage class under a lifecycle rule, which invalidated the URL</button>
+  <p class="why" data-for="0">Exactly right. AWS's own documentation states it plainly: a presigned URL expires when the credential used to create it is revoked, deactivated, or simply times out — even when the URL itself was signed for a later date. A role's temporary session is that credential, and it was never going to last seven days.</p>
+  <p class="why" data-for="1">There's no flat 15-minute cap on presigned URLs. The real ceilings are SigV4's own 7-day maximum (reachable with long-lived IAM user keys) and, separately, whatever credential actually signed the request — the S3 console UI happens to cap its own generated links at 12 hours, but that's a console limit, not a protocol one.</p>
+  <p class="why" data-for="2">Storage-class transitions change retrieval cost and, for Glacier, whether a GET needs a restore request first — they don't touch a presigned URL's signature or validity window. If this object had aged into Glacier, the URL would still be "valid," it would just fail for a different reason entirely.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A signature that borrows someone else's expiry date shows up everywhere identity touches storage.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>An OAuth access token minted under a session that ends first</h4>
+    <p>A token service can happily mint you an access token with a 24-hour lifetime — but if it was issued under a browser session or a refresh token that gets revoked in an hour, the access token is dead the moment its parent is, regardless of what its own <code>exp</code> claim says.</p>
+    <div class="hf-scatter"><span>a child credential never outlives the parent that vouched for it</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A database connection borrowed from a pool with its own TTL</h4>
+    <p>You set a 30-second query timeout, feel safe, and never notice the connection pool recycles idle connections every 10 minutes on the server side — your query is fine, but the connection underneath it can vanish on a schedule nobody put in your code.</p>
+    <div class="hf-scatter"><span>the timeout you set is not the only timeout in play</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Kubernetes projected service-account token</h4>
+    <p>Pods increasingly mount short-lived, auto-rotated tokens instead of the old long-lived secrets — great for security, but any code that quietly cached that token at startup inherits its rotation schedule whether it planned for it or not.</p>
+    <div class="hf-scatter"><span>auto-rotating credentials leak their rotation schedule onto whatever they sign</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> S3 is durable object storage with strongly consistent reads since 2020, presigned URLs let a client PUT or GET directly without routing bytes through your backend, and Block Public Access can silently override a bucket policy that looks correct. <b>The one new sentence this block adds:</b> the URL's real expiry is the sooner of your requested duration and the signing credential's own — sign with a role, and AWS's rotation schedule becomes your outage.
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -500,6 +605,7 @@ function selectObj(el, idx) {
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -42,7 +42,112 @@
     <div class="intro-ciam"><span class="tag">The CIAM parallel:</span> a shared session-cache or a Spring Boot app's uploaded profile-photo store both illustrate the block-vs-file-vs-object choice directly: an app server's own OS/app binaries live on EBS (one instance, one disk); a directory of files that MULTIPLE app server instances behind a load balancer need to read and write concurrently (like a shared temp-upload staging area) needs EFS, not EBS; and the final, durable copy of an uploaded profile photo belongs in S3, with a lifecycle rule quietly moving photos nobody's viewed in 90 days into IA to cut storage cost.</p></div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, you turned on Intelligent-Tiering for the whole bucket and the bill barely moved</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Ninety days went by. Some objects tiered down exactly like scenario ③ promised. Thousands of others never budged, and never will.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The bucket that "auto-optimized" itself into almost nothing</div>
+  <p>The CIAM team flips on S3 Intelligent-Tiering for the whole <code>ciam-audit-logs</code> bucket, expecting the same automatic Standard → IA → Archive movement this page's own lifecycle-rule Code Walkthrough shows — except free, with no JSON rule to write. The bucket holds two very different populations: a smaller set of multi-MB batch-export CSVs, and a much larger set of tiny per-event JSON audit records — <code>session-created</code>, <code>mfa-verified</code>, <code>token-refreshed</code> — each just a few kilobytes.</p>
+  <p>Ninety days later, storage cost has barely dropped. The per-object storage-class breakdown shows exactly why: the large CSV exports tiered down to Infrequent Access right on schedule — but the enormous population of small per-event records never moved at all, and never will. S3 Intelligent-Tiering doesn't monitor or ever tier objects smaller than 128 KB — they're permanently billed at Frequent Access rates, no matter how old or unread they get.</p>
+  <div class="hf-scatter">
+    <span>enabled Intelligent-Tiering bucket-wide ✓</span>
+    <span>waited the full monitoring period ✓</span>
+    <span>most objects were under 128 KB ⚠</span>
+  </div>
+  <p class="hf-foot">Intelligent-Tiering optimizes objects big enough to be worth optimizing — a 4 KB audit record never clears that bar, no matter how many years go untouched.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Check the object-size distribution before trusting the automatic savings</div>
+  <div class="hf-ladder">
+    <b>Before making Intelligent-Tiering your whole cost strategy, check what's actually in the bucket</b>
+    <i>↓ S3 Storage Lens or a bucket inventory report shows you what fraction of objects sit above the 128 KB monitoring floor before you find out the hard way</i>
+    <b>For a bucket dominated by small objects, batch them instead of tiering them individually</b>
+    <i>↓ bundling many small per-event records into fewer, larger files (one compressed batch per day, say) crosses the 128 KB floor and makes the automatic tiering actually apply</i>
+    <b>For small objects you can't batch, use an explicit age-based lifecycle rule instead</b>
+    <i>↓ a manual lifecycle Transition — like the one in this page's own Code Walkthrough — has no minimum-size floor; it moves a 2 KB object to Glacier exactly as readily as a 2 GB one</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Intelligent-Tiering and a manual lifecycle rule solve the same problem through two different mechanisms with two different eligibility rules, and only one of them cares about object size — Intelligent-Tiering's monitoring and automation simply never engages below 128 KB, while a lifecycle rule's age-based Transition fires on any object regardless of size. Picking Intelligent-Tiering because "it's automatic and free to set up" is a real advantage for a bucket of large objects, and a non-answer for a bucket full of small ones.
+</div>
+
+<div class="hf-note">Intelligent-Tiering doesn't ignore small objects on purpose. <b>It just never notices them in the first place.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>We turned on Intelligent-Tiering three months ago. Why hasn't the bill moved?</p></div>
+  <div class="hf-bub right"><span class="who">Intelligent-Tiering</span><p>I've been watching every object over 128 KB the whole time. Your batch exports already tiered down.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>What about the other few hundred thousand objects?</p></div>
+  <div class="hf-bub right"><span class="who">Intelligent-Tiering</span><p>Those are 4 KB each. I don't monitor them, I don't move them, and I never charge a monitoring fee for them either — as far as my tiering logic is concerned, they don't exist.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Here's what actually happens to two very differently sized objects sitting in the exact same Intelligent-Tiering bucket.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A 4 MB CSV export and a 4 KB JSON audit record both land in the bucket on day 0</span><span class="tag">upload</span></li>
+    <li class="open"><span>Intelligent-Tiering's daily monitoring pass checks every object's size against the 128 KB floor</span><span class="tag">the check</span></li>
+    <li><span>The 4 MB file clears the floor and enters monitoring; the 4 KB file doesn't and is skipped entirely</span><span class="tag">split here</span></li>
+    <li class="open"><span>After 30 days with no access, the 4 MB file automatically tiers to Infrequent Access</span><span class="tag">CSV tiers down</span></li>
+    <li><span>The 4 KB file is still sitting in Frequent Access — not because it was recently read, but because it was never eligible to move</span><span class="tag">record stays put</span></li>
+    <li class="open"><span>Day 365: same story. The CSV may have tiered further; the audit record hasn't moved once</span><span class="tag">permanent split</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the fork in the road, and it happens completely silently — there's no error, no log line, no console warning telling you an object was excluded. The bucket-level "Intelligent-Tiering: Enabled" setting looks identical whether it's actually helping or doing nothing at all for a given object.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">Intelligent-Tiering's daily monitoring pass<small>runs across every object in the bucket</small></div>
+    <div class="fan">how each object responds ↓</div>
+    <div class="obs">
+      <span>4 MB CSV export → tiers to IA after 30 days</span>
+      <span class="new">4 KB audit record → never tiers, ever</span>
+      <span>800 KB batch file → tiers to IA after 30 days</span>
+    </div>
+  </div>
+  <p class="hf-annot">Two of these three objects behave exactly the way the intro card describes — automatic, no code required, real savings after 30 days of inactivity. The third one sits in the same bucket, under the same "Enabled" setting, and is structurally incapable of ever reacting the same way, purely because of its size.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A <code>ciam-audit-logs</code> bucket is switched to S3 Intelligent-Tiering. It holds a small number of multi-MB batch-export files and a much larger number of small, few-KB per-event JSON audit records. Ninety days later, storage cost has barely changed. What's the most likely explanation?</p>
+  <button type="button">Intelligent-Tiering only works on buckets under a certain total size, and this bucket exceeded it</button>
+  <button type="button">Most of the bytes are locked in small per-event JSON records under 128 KB, which Intelligent-Tiering never monitors or moves — they stay pinned at Frequent Access rates regardless of age</button>
+  <button type="button">The monitoring period hasn't finished yet — Intelligent-Tiering needs longer than 90 days before the first transition can happen</button>
+  <p class="why" data-for="0">There's no total-bucket-size ceiling on Intelligent-Tiering — it evaluates eligibility per object, not against the bucket as a whole, so a large total bucket size on its own explains nothing here.</p>
+  <p class="why" data-for="1">Correct. The 128 KB floor applies per object, not per bucket — objects below it are excluded from monitoring and automation entirely, which is exactly the silent, size-based split this scenario describes.</p>
+  <p class="why" data-for="2">The documented threshold for the first automatic transition (to the Infrequent Access tier) is 30 consecutive days without access, well under 90 — and regardless of how long you wait, an object under 128 KB is categorically excluded from ever tiering at all, so more time alone doesn't fix it.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">An automatic optimization with an unadvertised size floor is a pattern that shows up wherever "small enough to not bother" is a real engineering tradeoff.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Postgres TOAST on a users.metadata column</h4>
+    <p>A CIAM <code>users</code> table's <code>metadata JSONB</code> column — provider claims, custom attributes — only gets moved out-of-line into TOAST storage once a row's value grows past roughly 2 KB. A small metadata blob stays inline in the main table and behaves completely differently, storage- and performance-wise, from one that's large enough to spill over — same shape as Intelligent-Tiering: an automatic storage optimization with a size floor most people never learn about until they go looking for why performance or cost didn't change.</p>
+    <div class="hf-scatter"><span>a threshold nobody configured</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>JVM JIT compilation thresholds</h4>
+    <p>The JVM's optimizing compiler only promotes a method from the interpreter to fast native code once it's been invoked enough times to look "hot." A method called only a handful of times during a request — some rarely-hit error-handling branch in a Spring Boot controller — stays in the slower interpreted path forever, no matter how logically important that code is, simply because it never crossed the invocation-count floor.</p>
+    <div class="hf-scatter"><span>too rare to ever get optimized</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>HTTP response compression's minimum size</h4>
+    <p>Most web servers and compression middleware skip gzip or Brotli entirely below a minimum response size, because compressing a tiny payload can add more overhead than it saves. A small JSON API response marked as compressible content never actually gets compressed, while a larger one from the same endpoint does — the same "automatic optimization with a floor" shape, just measured in response bytes instead of stored bytes.</p>
+    <div class="hf-scatter"><span>too small to be worth optimizing</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> EBS is a block disk for one instance, EFS is a shared filesystem many instances can mount at once, and S3 is object storage whose storage classes trade retrieval speed for cost — automated by lifecycle rules that age objects from Standard down to Glacier. <b>The one new sentence this block adds:</b> Intelligent-Tiering's automatic version of that same aging never engages for objects under 128 KB, so a bucket full of small objects sees almost none of the savings a bucket of large ones would get from the identical setting.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="sdSeg">
@@ -254,6 +359,7 @@ DevHubCodeWalk.mount('#cw-sd',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

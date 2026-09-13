@@ -58,7 +58,111 @@
     <div class="intro-ciam"><span class="tag">Angular equivalent &amp; CIAM:</span> <code>useTransition</code> ≈ <code>@defer (on interaction)</code> / <code>OnPush</code>; <code>useDeferredValue</code> ≈ RxJS <code>debounceTime()</code>+<code>distinctUntilChanged()</code>; <code>useId</code> ≈ CDK-generated ARIA ids; <code>useSyncExternalStore</code> ≈ Angular Signals' fine-grained subscriptions. In a CIAM app: <code>useTransition</code> for role-filtering a large user table, <code>useDeferredValue</code> for search-while-typing, and <code>useId</code> for accessible labels in the create-user dialog.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, startTransition is a queue-jump ticket for your next click, not a faster network.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You wrapped the slow search in <code>startTransition</code> expecting it to feel faster. The results still take exactly as long to arrive.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The 800ms fetch that startTransition couldn't shrink</div>
+  <p>You've got a directory search box hitting <code>/api/users/search?q=...</code> against Ping/Entra, and on a bad day it takes 800ms to respond. You wrap the whole thing &mdash; <code>setQuery</code> AND the <code>fetch</code> &mdash; inside <code>startTransition</code>, because the docs say transitions keep things responsive. You expect the search to feel snappier.</p>
+  <p>It doesn't. The results still land 800ms later, <code>isPending</code> is <code>true</code> for the entire 800ms, and nothing about the round-trip changed. <code>startTransition</code> scheduled your STATE UPDATE at low priority &mdash; it never touched the network request sitting inside it. The fetch takes exactly as long whether it's wrapped or not, because a transition can only make React's RENDERING work interruptible, and rendering was never the bottleneck here.</p>
+  <div class="hf-scatter">
+    <span>keystrokes stay responsive while waiting ✓</span>
+    <span>isPending correctly reflects the wait ✓</span>
+    <span>the actual 800ms round-trip ⚠ unchanged</span>
+  </div>
+  <p class="hf-foot">Transitions reschedule React's work. They do not reach into your network stack and make the wire faster.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make people feel the wait is shorter &mdash; because you can't make the fetch shorter</div>
+  <div class="hf-ladder">
+    <b>Keep startTransition for what it's actually for: interruptible re-renders</b>
+    <i>&darr; so typing the next character never queues behind a stale render of the previous search's results</i>
+    <b>Use isPending for a subtle stale-state indicator (dim the old results), not a blocking spinner</b>
+    <i>&darr; the old data is still valid and on-screen &mdash; a full-screen loader throws it away for no reason</i>
+    <b>And step three: actually attack the 800ms separately &mdash; caching, debouncing the request, or a Suspense boundary with a skeleton</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> <code>startTransition</code> controls WHEN React commits a render relative to more urgent work &mdash; it has no opinion about, and no effect on, how long the code inside the transition actually takes to run. If the slow part is a network request, a database query, or anything off the render's critical path, wrapping it in a transition changes nothing about its duration; it only changes whether urgent input gets to cut in line while the transition waits.
+</div>
+
+<div class="hf-note">Think of <code>startTransition</code> as a FastPass, not a shorter ride: it lets your next click cut in front of a slow re-render's line, but the ride itself &mdash; the network round-trip &mdash; still takes exactly as long once you're actually on it.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I wrapped my search fetch in startTransition and it's STILL 800ms. Isn't that the whole point of transitions?</p></div>
+  <div class="hf-bub right"><span class="who">startTransition, personified</span><p>I never touched your fetch. I only told React "don't block urgent input while THIS state update is pending" &mdash; the update still waits on whatever promise you handed it.</p></div>
+  <div class="hf-bub"><span class="who">The network request</span><p>I don't know or care what scheduled me. I take 800ms because that's how long the directory search takes. No JavaScript scheduler changes that.</p></div>
+  <div class="hf-bub right"><span class="who">isPending</span><p>I'm the one thing that actually changed. I flip true the instant you start, so you can show something &mdash; dim the list, a subtle spinner &mdash; instead of pretending nothing's happening.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch what a transition actually reschedules &mdash; and what it leaves completely alone.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>User types a character &mdash; <code>setQuery(char)</code> runs OUTSIDE the transition</span><span class="tag">urgent</span></li>
+    <li class="open"><span><code>startTransition(() =&gt; setSearching(query))</code> marks the search state update as low-priority</span><span class="tag">marked</span></li>
+    <li><span>React commits the urgent keystroke immediately &mdash; the input never lags</span><span class="tag">input wins</span></li>
+    <li class="open"><span>The transitioned update calls your search function, which returns a Promise (the fetch)</span><span class="tag">still async</span></li>
+    <li><span>React has nothing to interrupt here &mdash; it's just awaiting a promise like any other async code</span><span class="tag">no render work</span></li>
+    <li class="open"><span>800ms later the promise resolves, the deferred state updates, and THAT render commits</span><span class="tag">same 800ms</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the one everyone misses: once your code hands React a Promise, there's no rendering work left for React to schedule around &mdash; it's just waiting, same as it would if <code>startTransition</code> didn't exist. The scheduler only has power over RENDERS, and a pending fetch isn't a render.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">why does the search still take 800ms after wrapping it in startTransition?<small>the directory search hitting Ping/Entra</small></div>
+    <div class="arrow">what actually happens &rarr;</div>
+    <div class="opts">
+      <span>React's render scheduler is too slow</span>
+      <span class="on">the network round-trip itself is 800ms &mdash; no scheduler touches it</span>
+      <span>startTransition needs an async variant</span>
+    </div>
+  </div>
+  <p class="hf-annot">Cross off the first and third options and you're left with the only one that's ever true: the delay lives on the wire, between the browser and the directory service, and nothing in React's priority scheduler runs on that wire.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Your <code>UserSearch</code> component wraps <code>startTransition(() =&gt; runSearch(query))</code>, where <code>runSearch</code> calls <code>fetch</code> against a directory API that reliably takes 700&ndash;900ms. A teammate says "just wrap it in startTransition and it'll feel instant." After shipping it, the results still visibly take about 800ms to appear. What actually happened?</p>
+  <button type="button">startTransition was applied to the wrong state &mdash; it needs to wrap the query text (setQuery), not the results</button>
+  <button type="button">800ms is just too slow for any scheduling trick to help &mdash; transitions only work below roughly 100ms</button>
+  <button type="button">startTransition only defers a RENDER; it never touches the fetch's execution time, and the 800ms is entirely network latency that no client-side scheduling primitive can shorten</button>
+  <p class="why" data-for="0">Wrapping <code>setQuery</code> in startTransition would be backwards &mdash; the typed text needs to stay urgent so the input never lags. The results update is exactly what you'd defer, and deferring it correctly still doesn't touch the fetch's duration.</p>
+  <p class="why" data-for="1">There's no such cutoff &mdash; transitions don't have a "100ms budget." The issue isn't that 800ms is too big a number; it's that a transition was never going to touch that number at all, no matter its size.</p>
+  <p class="why" data-for="2">Right. Transitions reschedule React's rendering priority, not your I/O. A fetch that takes 800ms takes 800ms whether or not the state update that follows it is wrapped in startTransition &mdash; the only thing you actually bought is a responsive input and an isPending flag to show something during the wait.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Scheduling smarter" and "doing less work" both get mistaken for "doing the same work faster" &mdash; constantly.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Angular's <code>NgZone.runOutsideAngular()</code></h4>
+    <p>Running code outside Angular's zone stops it from triggering change detection on every tick, which can make an app FEEL smoother &mdash; but it does nothing to speed up whatever async work you ran outside the zone. Same category of mistake: a scheduling knob mistaken for a performance knob.</p>
+    <div class="hf-scatter"><span>scheduling &ne; speed</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>RxJS <code>debounceTime</code></h4>
+    <p>Debouncing a search input reduces how OFTEN you fire a request, which genuinely cuts network load &mdash; but once a request is in flight, no downstream operator makes that one request resolve faster. People conflate "fewer, lower-priority requests" with "faster requests" all the time.</p>
+    <div class="hf-scatter"><span>fewer calls &ne; each call being quicker</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Non-blocking I/O in Spring WebFlux</h4>
+    <p>Switching a slow endpoint to WebFlux's non-blocking model frees up the THREAD to do other work while waiting on the database &mdash; it doesn't make the query itself execute faster. The query still takes however long the database needs; you've only freed up capacity elsewhere.</p>
+    <div class="hf-scatter"><span>freeing a resource is not shortening the work</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> <code>useTransition</code> and <code>useDeferredValue</code> let you mark a state update as low-priority so React can keep urgent input responsive while background rendering catches up, and <code>useId</code>/<code>useSyncExternalStore</code> solve SSR id-matching and tear-free external stores. <b>The one new sentence this block adds:</b> none of these hooks make anything actually run faster &mdash; they only change WHEN React is willing to interrupt work, so a slow network request stays exactly as slow, transition or not.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="ccSeg">
@@ -260,6 +364,7 @@ DevHubCodeWalk.mount('#cw-rconc',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

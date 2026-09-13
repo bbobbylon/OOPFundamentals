@@ -170,7 +170,112 @@ ht.layout();
   </div>
 
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or: the record you wrote specifically so Java would generate equals() for you does — and still gets it wrong.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You used a <code>record</code> so you'd never have to hand-write equals()/hashCode() again — and for the one field that actually needed byte-by-byte comparison, the auto-generated version quietly doesn't do it.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Your session cache returns null for a token you inserted ten milliseconds ago</div>
+  <p>Your CIAM service caches active sessions in a <code>HashMap&lt;CacheKey, Session&gt;</code>, keyed by <code>record CacheKey(String tenantId, byte[] tokenHash) {}</code> — <code>tokenHash</code> is the SHA-256 digest of the bearer token, 32 raw bytes straight out of <code>MessageDigest.digest()</code>.</p>
+  <p>You <code>put()</code> the session under a freshly built <code>CacheKey</code>. The next request recomputes the same digest from the same token — same 32 bytes, same order — builds a new <code>CacheKey</code>, calls <code>map.get(key)</code>, and gets <code>null</code>. The compiler's auto-generated equals() swears the two keys are different, even though every byte matches.</p>
+  <div class="hf-scatter">
+    <span>tenantId (String) compares correctly ✓</span>
+    <span>record auto-generates equals()/hashCode() ✓</span>
+    <span>tokenHash (byte[]) compares by identity, not contents ⚠</span>
+  </div>
+  <p class="hf-foot">Two byte[] holding identical bytes are never equals() to each other — arrays don't override equals(), so the record's generated code falls back to Object's bare reference check.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Give the array component real value equality</div>
+  <div class="hf-ladder">
+    <b>Wrap the digest as a String, not a byte[]</b>
+    <i>↓ <code>HexFormat.of().formatHex(digest)</code> turns 32 identity-only bytes into one String — and String.equals() compares characters, not addresses</i>
+    <b>Or hand-write equals()/hashCode() with Arrays.equals()/Arrays.hashCode()</b>
+    <i>↓ if the raw byte[] has to stay on the object, override both methods yourself and delegate to java.util.Arrays, which walks the contents element-by-element</i>
+    <b>And grep the codebase for every other array-shaped record component</b>
+    <i>↓ IP octets stored as byte[4], public keys, anything decoded from a digest or wire format — each one is the same landmine waiting for a HashMap key</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>An array's identity is its address, not its contents.</b> That was true long before records existed, and records didn't change it — they only automated the mistake. If a component's own type has no opinion about content equality, wrapping it in a record doesn't grant it one; it just hides the reference comparison one call further down, exactly where you're least likely to go looking for it.
+</div>
+
+<div class="hf-note">Think of a record's generated equals() as a form letter, not a judge: it forwards the question straight to each field's own equals() and reports back whatever answer it hears. Ask a byte[] "are you equal to that one?" and the only honest answer it knows is <b>"are we the same object?"</b> — nobody ever taught it to look inside the box.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I used a record. Records get equals() for free. Why isn't this key equal to a copy of itself?</p></div>
+  <div class="hf-bub right"><span class="who">CacheKey (the record)</span><p>I did exactly what I promised — I called tokenHash.equals(otherTokenHash) and passed the answer straight through, no editing.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Fine. What did the byte[] actually say?</p></div>
+  <div class="hf-bub right"><span class="who">byte[] tokenHash</span><p>I said no. I don't know how to compare my contents — nobody ever gave me that equals(). All I can check is whether you're pointing at the exact box I am.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Walk the exact call chain your equals() takes the moment one component is an array.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>You call <code>map.get(new CacheKey(tenantId, freshDigest))</code></span><span class="tag">lookup</span></li>
+    <li class="open"><span>HashMap locates the bucket and calls <code>key.equals(candidate)</code> on the entry stored there</span><span class="tag">bucket scan</span></li>
+    <li><span>The record's generated equals() checks <code>tenantId.equals(...)</code> first — that passes, same String</span><span class="tag">field 1</span></li>
+    <li class="open"><span>It then checks <code>Objects.equals(tokenHash, other.tokenHash)</code> for the array field</span><span class="tag">field 2</span></li>
+    <li><span>Objects.equals sees both are non-null and delegates to <code>tokenHash.equals(other.tokenHash)</code></span><span class="tag">delegate</span></li>
+    <li class="open"><span>byte[] never overrode equals(), so this resolves to Object.equals() — a bare <code>==</code> — and returns false</span><span class="tag">the miss</span></li>
+  </ol>
+  <p class="hf-annot">Everything up to the last step is correct — the record faithfully compares every field it has. The failure isn't in any generated code at all; it's one method call further down, inside a class (byte[]) that was never asked to compare contents in the first place.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">map.get(key) calls key.equals(candidate)</span>
+      <div class="ring"><span class="lbl">record's generated equals() compares each component</span>
+        <div class="ring"><span class="lbl">tokenHash field → Objects.equals(a, b)</span>
+          <div class="core">a.equals(b) → Object.equals() → a == b<small>byte[] has no override, so this is the ONLY thing "equals" ever checks</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Three layers of correctly-generated code wrap around one class that was never given contents-based equality. The bug isn't in those three layers at all — the thing at the center was always going to answer this way, records or not.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A record <code>record IpBlock(byte[] octets) {}</code> is used as a <code>HashSet&lt;IpBlock&gt;</code> to deduplicate blocked IPs. You add <code>new IpBlock(new byte[]{10,0,0,1})</code> twice, built from two separate byte[] literals holding the same four values. How many elements are in the set afterward?</p>
+  <button type="button">One — the record's equals() compares the bytes, so the second add is a no-op</button>
+  <button type="button">Two — the two byte[] instances aren't equals() to each other, so the record treats them as unrelated keys</button>
+  <button type="button">Zero — inserting a duplicate key throws and the add fails</button>
+  <p class="why" data-for="0">Wrong — that's what you'd expect from a normal record field, and that's exactly why this bug hides so well: it's true for String, Integer, and every component type you're used to reaching for. It's false specifically for arrays.</p>
+  <p class="why" data-for="1">Right — and it runs deeper than equals(): HashSet is backed by HashMap, so the same array-identity problem decides both the bucket AND the equals() check. Two byte[] with identical contents don't just fail equals() — Object's default hashCode() is identity-based too, so they likely land in different buckets and never even get compared.</p>
+  <p class="why" data-for="2">Wrong — HashSet.add() never throws on a duplicate; it silently returns false and leaves the set unchanged. Here it doesn't even get the chance to look like a duplicate — as far as equals() is concerned these are two unrelated keys, so add() returns true both times and the set ends up with two entries.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Reference-equality-disguised-as-value-equality isn't a records bug. It's everywhere something compares along the wrong axis.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Lombok's @EqualsAndHashCode chose differently</h4>
+    <p>Lombok generates equals()/hashCode() the same way a record does — except when it hits an array field, it emits <code>Arrays.equals(...)</code> / <code>Arrays.hashCode(...)</code> instead of delegating to the array's own methods. Same landmine, already defused, in a tool you've probably annotated a dozen @Entity classes with.</p>
+    <div class="hf-scatter"><span>same shape of bug, opposite default</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Angular's OnPush has the mirror-image bug</h4>
+    <p><code>[10,0,0,1] === [10,0,0,1]</code> is false in JavaScript too — arrays are reference types there as well. Under <code>ChangeDetectionStrategy.OnPush</code>, mutating an array in place keeps the old reference, so Angular never re-renders it; swapping in an equal-but-new array re-renders even though nothing meaningful changed.</p>
+    <div class="hf-scatter"><span>reference identity, same trap, opposite symptom</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>The fix has its own trap when the array is a secret</h4>
+    <p><code>Arrays.equals()</code> on two HMACs or token hashes short-circuits at the first mismatched byte — an attacker who can measure response time can use that to guess a secret one byte at a time. Compare secrets with <code>MessageDigest.isEqual()</code>, which always walks the full length regardless of where the mismatch is.</p>
+    <div class="hf-scatter"><span>the second-order gotcha hiding behind the first fix</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a hash table turns O(n) lookups into O(1) by trusting that equal keys hash the same way and compare equal to each other — load factor, chaining, treeification all exist to keep that promise fast. <b>The one new sentence this block adds:</b> that promise is only as strong as the equals()/hashCode() on every field of your key, and a record automates keeping the promise — it doesn't automate the promise being true.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -1297,6 +1402,7 @@ function hfDemo(s1, s2) {
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

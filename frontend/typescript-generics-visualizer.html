@@ -174,7 +174,107 @@ console.log("longest array: ", longest([1, 2, 3], [4, 5]));
   </div>
 
 
-    <!-- ── HERO: animated generic-instantiation walk · type-arg chip + live binding inspector ── -->
+    <p class="hf-deck">or, why the compiler stops caring the instant your code starts running</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">TypeScript will let you promise it anything with <code>as T</code> — and it never checks the promise again.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">decodeClaims&lt;T&gt;(token) type-checks perfectly and still hands you undefined</div>
+  <p>You write one helper every login flow in the app calls: pull the payload out of a JWT and cast it to whatever shape the caller declares. <code>function decodeClaims&lt;T&gt;(token: string): T { return JSON.parse(atob(token.split('.')[1])) as T; }</code>. Every call site — <code>decodeClaims&lt;AdminClaims&gt;(idToken)</code>, <code>decodeClaims&lt;GuestClaims&gt;(refreshToken)</code> — compiles clean.</p>
+  <p><code>JSON.parse</code> returns <code>any</code>, and <code>any</code> is assignable to every type that exists, so <code>as T</code> never inspects a single field. When your identity provider renames a claim from <code>roles</code> to <code>authorities</code> on a token-format bump, TypeScript doesn't notice — there's no <code>T</code> left by the time this code actually runs, only the plain object <code>JSON.parse</code> handed back.</p>
+  <div class="hf-scatter">
+    <span>the JWT signature verifies fine ✓</span>
+    <span>the token decodes without throwing ✓</span>
+    <span>claims.roles is undefined ⚠</span>
+  </div>
+  <p class="hf-foot">You wrote a promise you never checked, and the compiler co-signed it without reading it.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Verify the shape — don't assert it</div>
+  <div class="hf-ladder">
+    <b>Parse into <code>unknown</code>, not <code>T</code></b>
+    <i>↓ this forces you to prove the shape before anything can use it</i>
+    <b>Run a real type guard (a hand-written <code>isAdminClaims</code>, or a schema library) against the <code>unknown</code></b>
+    <i>↓ this is the one line of actual runtime work the generic version skipped</i>
+    <b>Return the value only after the guard passes — throw or force a re-login otherwise</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A generic parameter is a promise you make to the compiler, not a check the compiler makes for you.</b> <code>T</code> exists only while <code>tsc</code> is running; by the time the bundle executes in a browser, every generic annotation has been erased and the value is just a plain object. <code>as T</code> is you telling the compiler "trust me," and the compiler always trusts you — it never re-derives the assertion from anything real. If the value being asserted came from outside your program — a network response, <code>JSON.parse</code>, <code>localStorage</code>, a webhook body — the assertion is a guess wearing a type.
+</div>
+
+<div class="hf-note">An <code>as T</code> cast on external data is a <b>self-addressed stamped envelope</b>: it looks completely official, but nobody at the post office actually opens it and checks what's inside before delivering it straight to your app.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>But I declared the return type as <code>T</code> — doesn't TypeScript enforce that at the call site?</p></div>
+  <div class="hf-bub right"><span class="who">JSON.parse, personified</span><p>I return <code>any</code>. <code>any</code> turns off type-checking entirely, so I flow into whatever <code>T</code> you name without a single comparison.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Then what was the compiler even doing when it accepted <code>as T</code>?</p></div>
+  <div class="hf-bub right"><span class="who">tsc, personified</span><p>I checked that your syntax was legal. I never had a real <code>AdminClaims</code> object to compare it against — by the time this code runs, I've already gone home.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch what actually survives the trip from <code>.ts</code> to the browser.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>You write <code>function decodeClaims&lt;T&gt;(token: string): T</code></span><span class="tag">source</span></li>
+    <li class="open"><span><code>tsc</code> checks every call site against whichever <code>T</code> the caller supplied</span><span class="tag">type-check</span></li>
+    <li><span><code>tsc</code> erases every type annotation — the <code>&lt;T&gt;</code>, the <code>: T</code>, the <code>as T</code> cast — none of it is legal JavaScript</span><span class="tag">erasure</span></li>
+    <li class="open"><span>The emitted file contains only <code>function decodeClaims(token) { return JSON.parse(...); }</code></span><span class="tag">output</span></li>
+    <li><span>The browser runs that plain function against a real response it has never seen before</span><span class="tag">runtime</span></li>
+    <li class="open"><span>If the shape doesn't match what <code>T</code> promised, the mismatch surfaces as <code>undefined</code> — nowhere near the line that lied about it</span><span class="tag">failure</span></li>
+  </ol>
+  <p class="hf-annot">Step three is the whole story: the moment <code>tsc</code> finishes writing your <code>.js</code> file, <code>T</code> stops existing anywhere. Everything after that step is ordinary JavaScript, guessing.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>as T on a JSON.parse() result</span><span>as T on a fetch() response</span><span>as T on a third-party SDK callback</span></div>
+    <div class="funnel">TypeScript trusts the assertion completely ↓</div>
+    <div class="instance">A runtime shape mismatch nobody caught<small>one crash, three unrelated-looking call sites</small></div>
+  </div>
+  <p class="hf-annot">All three casts share one root cause: they assert a compile-time-only type onto a value TypeScript never actually inspected. Wherever the real shape drifts from the promised one, they fail identically — and the failure always shows up far from the line that asserted it.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">Your Angular login guard calls <code>decodeClaims&lt;AdminClaims&gt;(idToken)</code>, then checks <code>claims.roles.includes('ADMIN')</code>. The build passes; a unit test with a mocked token that has a <code>roles</code> array also passes. In production, your identity provider just renamed that claim from <code>roles</code> to <code>authorities</code>. What happens?</p>
+  <button type="button">It throws at runtime — claims.roles is undefined, and undefined has no .includes</button>
+  <button type="button">TypeScript catches it at compile time, because AdminClaims declares roles: string[]</button>
+  <button type="button">It silently reads authorities as roles, since both are string arrays</button>
+  <p class="why" data-for="0">Right. <code>as T</code> is a cast, not a check, so the shape mismatch is invisible until code actually reads the missing property. This is exactly how "compiles clean" and "wrong at runtime" coexist.</p>
+  <p class="why" data-for="1">No — catching this at compile time would require a real runtime validator. <code>T</code> is erased, so <code>AdminClaims</code> only ever lived in <code>tsc</code>'s head; it can't reach out and inspect a payload that shows up months later in production.</p>
+  <p class="why" data-for="2">No — JavaScript objects don't auto-alias property names. You get literally <code>undefined</code>, not a fuzzy match. That crash is actually the only signal you get that the payload's shape changed at all.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">This isn't a TypeScript quirk — it's the oldest bug at every network boundary you've ever crossed.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's unchecked cast warning</h4>
+    <p><code>(User) session.getAttribute("user")</code> compiles with an "unchecked cast" warning for the exact same reason — the JVM erases generics too, so there's no <code>User</code> left at runtime to check against, only an <code>Object</code>. <code>HttpSession</code> attributes have been catching people this way since Servlets existed.</p>
+    <div class="hf-scatter"><span>generics are erased in both languages — the check you skip is on you</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Jackson's ObjectMapper needs the Class object for a reason</h4>
+    <p><code>objectMapper.readValue(json, User.class)</code> passes an actual <code>Class&lt;User&gt;</code> at runtime — not because Jackson is old-fashioned, but because that's the only way to get real type information past erasure. TypeScript's <code>as T</code> skips that step entirely; there's no equivalent object you can hand it.</p>
+    <div class="hf-scatter"><span>Jackson does the work "as T" pretends is unnecessary</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Angular's InjectionToken exists because of this same erasure</h4>
+    <p>You can't <code>@Inject(Repository&lt;User&gt;)</code> in Angular's DI — by runtime, <code>Repository&lt;User&gt;</code> is just <code>Repository</code>, indistinguishable from <code>Repository&lt;Order&gt;</code>. <code>InjectionToken</code> exists purely to give the container something concrete to look up, because the generic type argument is long gone by the time it runs.</p>
+    <div class="hf-scatter"><span>Angular's DI needed a workaround for the exact same missing information</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> generics let one function or class stay type-safe across every type a caller throws at it, with <code>extends</code> and inference doing the real work at the call site. <b>The one new sentence this block adds:</b> none of that safety survives past compile time — an <code>as T</code> on data you didn't generate yourself is a promise with no enforcement behind it.
+</div>
+
+<!-- ── HERO: animated generic-instantiation walk · type-arg chip + live binding inspector ── -->
     <div class="panel" style="border-color:#5fa9ff">
       <h2 id="hero-viz" style="margin-top:0;border:0;padding:0;color:#5fa9ff">▶ Call a generic — watch T get inferred and bound</h2>
       <p style="font-size:13px;color:var(--muted);margin:6px 0 12px">A type parameter <code>T</code> is a placeholder filled in <em>per call</em>. Pick a scenario and press ▶ — the chip carries the <em>type argument</em>, and the inspector shows the real binding: what <code>T</code> is inferred to be, how the signature specializes, and how a <code>extends</code> constraint accepts or rejects an argument.</p>
@@ -943,6 +1043,7 @@ flexibility without surrendering checks.`},
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -103,7 +103,117 @@ print("Union members:", get_args(IntOrStr))
   </div>
 
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">Everything on this page is erased at runtime — the one line above already told you that. This block is about the ONE typing construct whose syntax actively hides how total that erasure is.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You wrap a raw string in what looks exactly like a constructor call, expecting at least a whisper of validation. You get the identical, unsanitized string back, wearing a costume mypy can see and nothing else can.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A "validated" user ID that was never checked at all</div>
+  <p>You want to stop accidentally passing a raw <code>group_id</code> where a <code>user_id</code> is expected — both are just strings, so you reach for <code>NewType</code>, and the call syntax looks reassuring:</p>
+  <p><code>from typing import NewType</code><br>
+  <code>UserId = NewType("UserId", str)</code><br><br>
+  <code>def load_profile(uid: UserId) -&gt; Profile: ...</code><br><br>
+  <code>raw = request.headers["X-User-Id"]&nbsp;&nbsp;# attacker-controlled</code><br>
+  <code>uid = UserId(raw)&nbsp;&nbsp;# "constructing" a validated UserId... right?</code><br>
+  <code>load_profile(uid)</code></p>
+  <p><code>UserId(raw)</code> reads exactly like instantiating a class — parentheses, a type name, an argument. It performs precisely zero validation, zero sanitization, and zero wrapping. <code>uid</code> is <code>raw</code>, the exact same string object, and <code>type(uid) is str</code> — not <code>UserId</code>, because <code>UserId</code> was never a class to begin with. Any assumption downstream that "if it's a <code>UserId</code>, it's already been checked" is false at runtime, even though mypy will happily agree with you that it's safe.</p>
+  <div class="hf-scatter">
+    <span>the import ✓</span>
+    <span>the call syntax ✓</span>
+    <span>what NewType actually does when called ⚠</span>
+  </div>
+  <p class="hf-foot">You didn't skip a validation step. NewType never had one to give you.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Validate before you type, not instead of typing</div>
+  <div class="hf-ladder">
+    <b>Treat NewType purely as a mypy-only label — it changes nothing your code does</b>
+    <i>↓ the runtime object is always the exact same object you passed in</i>
+    <b>Do real validation first, THEN wrap the already-checked value</b>
+    <i>↓ uid = UserId(raw) if is_valid_uuid(raw) else abort(400)</i>
+    <b>Reach for a Pydantic model or a frozen dataclass with __post_init__ when you need actual runtime enforcement</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>NewType never creates an object — it returns the argument, unchanged.</b> The typing docs describe it exactly this way: calling the thing NewType() returns is "a callable that returns its argument when called" — no new instance, no wrapper, no overhead beyond a plain function call. It exists purely so a type checker can refuse to let a <code>GroupId</code> flow into a function expecting a <code>UserId</code>, even though at runtime they are both just <code>str</code>, indistinguishable by any check you could write.
+</div>
+
+<div class="hf-note">A <code>NewType</code> is a <b>name tag stuck onto a value, not a background check performed on it</b>. Writing "HELLO, I AM A VALIDATED USER ID" on a sticky note and slapping it onto a string doesn't validate the string — <b>and neither does calling <code>UserId(raw)</code>.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I called UserId(raw) — shouldn't that at least check it looks like a UUID?</p></div>
+  <div class="hf-bub right"><span class="who">NewType's runtime implementation</span><p>I don't check anything. When you call me, I return exactly what you handed me, same object, same type. My entire job happens at type-checking time, in mypy's head — at runtime I might as well not exist.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Then why does calling you look exactly like constructing an instance of a class?</p></div>
+  <div class="hf-bub right"><span class="who">NewType's runtime implementation</span><p>Because that syntax is what makes mypy's static story readable — "wrap this raw value as the distinct type" reads naturally as a constructor call. Nobody designed that resemblance to also promise you runtime safety; it's a static-analysis convenience that happens to look like one.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow exactly what happens, line by line, when <code>UserId(raw)</code> executes.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>UserId = NewType("UserId", str)</code> creates a lightweight callable, not a class</span><span class="tag">definition</span></li>
+    <li class="open"><span>mypy privately notes: "UserId is a distinct type, but at runtime it IS a str"</span><span class="tag">static-only fact</span></li>
+    <li><span><code>UserId(raw)</code> calls that callable with <code>raw</code> as the argument</span><span class="tag">the call</span></li>
+    <li class="open"><span>The callable's entire body is "return the argument" — no branching, no checks, no wrapping</span><span class="tag">no-op</span></li>
+    <li><span>The returned object is <code>raw</code> itself — same id(), same type(), same content</span><span class="tag">identical object</span></li>
+    <li class="open"><span>Every "is this validated?" question you might ask at runtime gets the same answer it would have for the unwrapped string, because there is no wrapper</span><span class="tag">no distinction survives</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the whole lesson: there's no code path inside <code>NewType</code>'s generated callable that could validate anything even if it wanted to. It isn't skipping a check — a check was never part of the design.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">uid = UserId(raw_header_value)<small>syntax that looks like constructing a validated object</small></div>
+    <div class="arrow">what actually happens at runtime →</div>
+    <div class="opts">
+      <span>raises if raw isn't a valid ID</span>
+      <span class="on">returns raw_header_value completely unchanged, same type, same object</span>
+      <span>wraps it in a new UserId instance</span>
+    </div>
+  </div>
+  <p class="hf-annot">Every other option on this board is what a "constructor" would normally do — validate, or at least allocate something new. NewType does neither; the slot that looks like "validated wrapper" resolves to "no-op passthrough," and only a type checker ever notices the difference.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q"><code>GroupId = NewType("GroupId", str)</code>; <code>g = GroupId("not-a-real-uuid-at-all")</code>. At runtime, <code>type(g)</code> is:</p>
+  <button type="button"><code>str</code> — NewType returns the original argument unchanged; no GroupId class was ever created</button>
+  <button type="button"><code>GroupId</code> — NewType generates a real subclass of str with no extra behavior</button>
+  <button type="button">Whatever type mypy inferred at the call site, resolved via <code>__class_getitem__</code> at runtime</button>
+  <p class="why" data-for="0">Correct. NewType's callable just hands back its argument. There's no subclass, no wrapper — <code>g</code> is the exact same <code>str</code> object <code>"not-a-real-uuid-at-all"</code> already was.</p>
+  <p class="why" data-for="1">There's no subclass created at all, real or otherwise — that's precisely the misconception the constructor-like syntax invites. If you need an actual subclass with runtime identity, you'd write one yourself.</p>
+  <p class="why" data-for="2">mypy's inferences never reach into the running program — type hints carry zero runtime behavior in standard Python, NewType included. There is no mechanism for a static inference to change what <code>type()</code> reports.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The wrapper that isn't a wrapper" shows up anywhere a language lets you fake a stronger type for free.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>TypeScript's branded types</h4>
+    <p>TypeScript has no native nominal typing either, so people simulate it with a fake intersection type carrying a phantom "__brand" field — purely a compile-time fiction, erased entirely by the time the JavaScript runs, exactly like NewType.</p>
+    <div class="hf-scatter"><span>the same trick, the same total erasure</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>C's typedef</h4>
+    <p><code>typedef int UserId;</code> gives you a new name for documentation and the compiler's benefit — at the machine-code level a UserId and a plain int are byte-for-byte identical, with no runtime tag distinguishing them, the oldest version of this same idea.</p>
+    <div class="hf-scatter"><span>a name with zero runtime weight, decades before Python had one</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Spring's @NotBlank annotation without @Valid behind it</h4>
+    <p>Annotating a DTO field <code>@NotBlank</code> does nothing at all unless <code>@Valid</code> triggers Bean Validation on that specific call path — the annotation alone is metadata, just like a Python type hint, until something actually reads and enforces it.</p>
+    <div class="hf-scatter"><span>metadata isn't enforcement until something enforces it</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> TypeVar/Generic preserve types through generic code, Protocol gives you structural typing, @overload sharpens per-call return types, and ParamSpec/Self round out precise, fully-erased static typing. <b>The one new sentence this block adds:</b> NewType's constructor-like syntax is the most misleading part of that erasure — calling it performs no validation and creates no new object, just returns your input completely unchanged.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="pytypSeg">
@@ -317,6 +427,7 @@ DevHubCodeWalk.mount('#cw-pytyping',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

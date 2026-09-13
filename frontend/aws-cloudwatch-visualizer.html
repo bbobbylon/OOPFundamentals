@@ -114,7 +114,111 @@
     <div class="intro-ciam"><span class="tag">In CIAM / Context:</span> The CIAM production dashboard shows login success/failure rate per minute, JWT validation errors, Ping OAuth latency, ECS task CPU/memory, RDS connection count and ALB 5xx rate. Alarms page on-call when error rate &gt; 5% for 5 minutes, Ping p99 &gt; 3s, or RDS connections &gt; 80% of max — and Logs Insights pinpoints a specific user's auth failures during incident investigation.</div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, how a perfectly green dashboard can be lying to your face</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Your CPU alarm has never fired once. Your JVM has still been pegged at 100% for a few seconds, every single minute, for a week.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The alarm that never rings</div>
+  <p><code>HighCPU</code>: metric <code>CPUUtilization</code>, Statistic <code>Average</code>, Period 1 minute, threshold 80% for 2 consecutive periods. It has stayed OK all week, right through a nightly login burst that repeatedly maxes out the box.</p>
+  <p>Here's what CloudWatch actually saw: CPU spikes to 100% for about 5 seconds during the burst, then idles around 8-12% for the other 55 seconds of that same minute. CloudWatch doesn't remember "100% happened" — it takes however many raw samples fell inside that one-minute Period and reduces them to a single number using whatever Statistic your alarm asked for. Averaged across the whole minute, that number comes out around 17%.</p>
+  <div class="hf-scatter">
+    <span>threshold set correctly ✓</span>
+    <span>evaluation periods reasonable ✓</span>
+    <span>the Statistic quietly averaging away the spike ⚠</span>
+  </div>
+  <p class="hf-foot">The alarm isn't broken. It is doing exactly what you told it to do: average the whole minute into one number, then compare that number.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make the alarm watch the worst second, not the average one</div>
+  <div class="hf-ladder">
+    <b>Change the Statistic from Average to Maximum (or a high percentile like p99 for latency metrics)</b>
+    <i>↓ Maximum reports the single worst datapoint CloudWatch saw in the Period — a 5-second spike to 100% no longer gets diluted by 55 quiet seconds</i>
+    <b>Shorten the Period wherever the metric supports finer resolution</b>
+    <i>↓ fewer quiet seconds are available to dilute the spike in the first place</i>
+    <b>And for a metric you don't want trigger-happy on every blip, keep Average but add an "M out of N" datapoints-to-alarm rule</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>An alarm only ever sees the number its Statistic produces — never the raw data underneath it.</b> Average, Sum, Maximum, Minimum, and percentiles are all lossy compressions of everything that happened inside one Period, and each one is built to throw away a different kind of information on purpose. Before you trust an alarm, ask which compression it's using, and what exactly that compression is designed to hide.
+</div>
+
+<div class="hf-note">Sticky note: an <b>Average is a rumor, not a fact</b> — it tells you what a typical second looked like and says nothing about the worst one. If the worst second is the one that matters (and for a login-latency SLA, it is), ask CloudWatch for the worst second directly.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>My CPUUtilization alarm says everything's fine. So why did three logins time out during last night's traffic burst?</p></div>
+  <div class="hf-bub right"><span class="who">The CloudWatch Alarm</span><p>Fine, according to Average, over the whole minute you configured me to average.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So the 100% CPU spike never actually happened?</p></div>
+  <div class="hf-bub right"><span class="who">The CloudWatch Alarm</span><p>It happened for about five seconds. I was told to hand you one number for the whole sixty. I gave you the honest average of a mostly-idle minute — you picked Average, not me.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch what one noisy minute turns into by the time it reaches your alarm.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>CPU spikes to 100% for ~5 seconds during a burst of concurrent logins</span><span class="tag">raw</span></li>
+    <li class="open"><span>For the other ~55 seconds of that same minute, CPU idles around 8-12%</span><span class="tag">raw</span></li>
+    <li><span>CloudWatch collects however many raw samples land inside the 1-minute Period</span><span class="tag">collect</span></li>
+    <li class="open"><span>The alarm's configured Statistic (Average) reduces all of those samples to ONE number</span><span class="tag">compress</span></li>
+    <li><span>That one number — about 17% — is compared against the 80% threshold</span><span class="tag">evaluate</span></li>
+    <li class="open"><span>17% &lt; 80%, so the alarm stays OK — the 100% second is gone, mathematically, forever</span><span class="tag">OK</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the whole story: everything before it is just data, and everything after it is just arithmetic on whatever Step 4 handed over. Swap the Statistic and every downstream number changes with it — same raw samples, completely different verdict.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">A CIAM login burst pegs CPU at 100% for 5 of the last 60 seconds. Which Statistic decides what the alarm actually sees?<small>same raw datapoints, three different answers</small></div>
+    <div class="arrow">what actually happens →</div>
+    <div class="opts">
+      <span>Sum — the wrong unit entirely for a percentage metric</span>
+      <span class="on">Average — what's actually configured on HighCPU, quietly reporting ~17%</span>
+      <span>Maximum — would have reported 100% and paged on-call, but nobody chose it</span>
+    </div>
+  </div>
+  <p class="hf-annot">The highlighted option isn't the "right" answer — it's the one somebody actually picked when the alarm was created, which is exactly why this survives code review, load testing, and a full week of production traffic without anyone noticing.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A HighDBConnections alarm uses Statistic=Average, Period=5 minutes, threshold=80 connections. For 90 seconds inside one 5-minute window, connections spike to 95 (near pool exhaustion) before dropping back to 20 for the rest of the window. What does the alarm do?</p>
+  <button type="button">Stays OK — the average across the 5 minutes never crosses 80</button>
+  <button type="button">Fires immediately — any datapoint above 80 trips an Average-statistic alarm</button>
+  <button type="button">Goes to INSUFFICIENT_DATA — CloudWatch can't average a spike like that</button>
+  <p class="why" data-for="0">Correct. 90 seconds at 95 blended with the remaining 210 seconds at ~20 lands the 5-minute average somewhere in the 30s — comfortably under 80. The alarm has no idea a near-exhaustion spike happened at all.</p>
+  <p class="why" data-for="1">That's how a Maximum-statistic alarm would behave, not an Average one. Average always reflects the whole window blended together, never a single datapoint acting alone.</p>
+  <p class="why" data-for="2">INSUFFICIENT_DATA means CloudWatch didn't receive enough datapoints to evaluate at all. A diluted-but-real average is still a valid result, so this isn't what happens here.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Averages hiding outliers is not a CloudWatch-only trap.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A Micrometer latency dashboard in Spring Boot</h4>
+    <p>Micrometer timers report Average and percentiles side by side for exactly this reason — an endpoint's average response time can look perfectly healthy while its p99 is timing real users out, because the slow 1% of requests barely moves a mean built mostly from the fast 99%.</p>
+    <div class="hf-scatter"><span>one metric, two very different stories</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Target-tracking Auto Scaling on an average</h4>
+    <p>An Auto Scaling policy tracking average requests-per-instance can under-scale during a short, sharp burst, because the average is measured over the same window that would have shown the spike if you'd asked it for the maximum instead.</p>
+    <div class="hf-scatter"><span>the average smooths away the exact thing scaling needed to react to</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A class average on a stats exam</h4>
+    <p>A class average of 75% tells you nothing about whether everyone scored near 75, or half the class aced it while the other half failed — one summary number can describe an infinite number of very different underlying distributions, which is the entire reason percentiles exist as a separate statistic.</p>
+    <div class="hf-scatter"><span>one number in, many realities it could mean</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> CloudWatch collects metrics, evaluates alarms against thresholds, ingests logs, and pulls it all into dashboards — four pillars of one observability service. <b>The one new sentence this block adds:</b> an alarm never sees your raw metric, only the single number its chosen Statistic compresses it down to, and Average is built to erase exactly the kind of brief spike a login-latency SLA cares about most.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -623,6 +727,7 @@ renderMetrics(normalData);
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

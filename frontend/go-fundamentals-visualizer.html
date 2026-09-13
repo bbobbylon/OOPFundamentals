@@ -58,7 +58,107 @@
     <div class="intro-ciam"><span class="tag">Go in CIAM context:</span> Kubernetes, Docker, Prometheus and most cloud-native tooling are written in Go — the infrastructure your CIAM stack runs on. Knowing it lets you read K8s operators, write dependency-free CLI tools, and build high-throughput services (goroutines handle 10k concurrent connections cheaply — better than Spring's thread-per-request for pure proxy/gateway work). Go fits the CIAM sidecar/gateway role: token-validation sidecars, OAuth callback handlers, Envoy plugins — and its sub-5ms binary startup makes it ideal for AWS Lambda with no JVM cold start.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">Or: code that compiles fine can still blow up on the very first ==.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You write one equality check. It compiles. It ships. It panics in production the first time someone hits the branch.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">== on two any values: fine in dev, a runtime panic in prod</div>
+  <p>You cache parsed webhook payloads keyed by a struct, or diff two <code>map[string]any</code> values field by field with <code>if got[k] == want[k]</code>. Every field you tested during development happened to be a string or an int. Compiles clean, <code>go vet</code> is silent, tests pass.</p>
+  <p>Then a payload arrives with a <code>Roles []string</code> field boxed into that <code>any</code>. The exact same <code>==</code> line — same source, same build — now panics: <code>runtime error: comparing uncomparable type main.Claims</code>. Nothing about the code changed; only the DATA flowing through it did, and only at the moment two of those particular values collided.</p>
+  <div class="hf-scatter">
+    <span>compiled clean ✓</span>
+    <span>go vet clean ✓</span>
+    <span>the field's type at runtime ⚠</span>
+  </div>
+  <p class="hf-foot">The compiler proves interface values are always legal to write == between. It cannot prove the dynamic type inside them is actually comparable — that check waits until the == executes.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Compare structurally, not with ==</div>
+  <div class="hf-ladder">
+    <b>For structs with slice/map fields, write a field-by-field Equals method</b>
+    <i>↓ you decide how to compare the offending field (e.g. <code>slices.Equal</code>) instead of letting == decide for you</i>
+    <b>Or use reflect.DeepEqual / cmp.Equal when a real deep comparison is the goal</b>
+    <i>↓ both are built to walk slices and maps instead of rejecting them</i>
+    <b>And in tests, prefer assert.Equal or cmp.Diff over == on anything decoded from JSON</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Comparability is a property of the value inside the box, not the box.</b> An <code>interface{}</code> (or <code>any</code>) is always legal to write == between — the compiler only checks that both sides are interface-shaped. Whether that expression panics is decided at runtime by whatever concrete type happens to be inside, checked fresh on every single comparison.
+</div>
+
+<div class="hf-note">Picture <code>any</code> as a locked briefcase you're handed at check-in. Security lets you carry <b>any</b> briefcase through — the scanner doesn't care what's inside. Whether it explodes when two briefcases touch depends entirely on what's packed inside, and nobody checks that until the moment they collide.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>== compiled. Doesn't that mean Go already checked it's a legal comparison?</p></div>
+  <div class="hf-bub right"><span class="who">The Go compiler</span><p>I checked that both sides are interface values — that comparison is always syntactically legal, so I say nothing at compile time.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Then who actually checks whether the types inside are comparable?</p></div>
+  <div class="hf-bub right"><span class="who">The Go runtime</span><p>I do — the instant your code executes ==. I look at the dynamic type stored in each interface. If either one is a slice, map, or func under the hood, I panic right there. Every time that line runs, not just the first.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one struct from "obviously fine" to "runtime panic" without a single line changing.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>type Claims struct { Sub string; Roles []string }</code> — Roles is a slice field</span><span class="tag">declared</span></li>
+    <li class="open"><span><code>var a any = Claims{Sub:"u1"}; var b any = Claims{Sub:"u1"}</code> — both compile, both run</span><span class="tag">boxed into any</span></li>
+    <li><span><code>a == b</code> — the compiler accepts this: any two interface values may be compared</span><span class="tag">compiles</span></li>
+    <li class="open"><span>At runtime, Go inspects the dynamic type behind both interfaces: it's Claims</span><span class="tag">runtime type check</span></li>
+    <li><span>Go asks: is Claims comparable? It has a []string field → no</span><span class="tag">answer: no</span></li>
+    <li class="open"><span><code>panic: comparing uncomparable type main.Claims</code> — even though Sub matched</span><span class="tag">panic</span></li>
+  </ol>
+  <p class="hf-annot">Steps 3 and 6 are separated by nothing but time — the exact same source line is legal at compile time and fatal at run time. Nothing about <code>a == b</code> tells you which one you're going to get; only the shape of the type hiding inside <code>a</code> and <code>b</code> does.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>map[string]any diffed field-by-field</span><span>a struct used as a map key</span><span>== on decoded JSON in a test</span></div>
+    <div class="funnel">the dynamic type behind the interface has a slice/map/func field ↓</div>
+    <div class="instance">panic: comparing uncomparable type<small>one runtime message, three unrelated-looking call sites</small></div>
+  </div>
+  <p class="hf-annot">All three call sites look completely different in the source — a cache diff, a map key, a test assertion — but they all reduce to the exact same runtime check on the exact same kind of value, and fail for the exact same reason.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">This compiles and passes go vet: <code>type Session struct { ID string; Scopes []string }; var a any = Session{ID:"s1"}; var b any = Session{ID:"s1"}; fmt.Println(a == b)</code>. What happens when it runs?</p>
+  <button type="button">Prints false, because Scopes differs by reference even when nil.</button>
+  <button type="button">Prints true, because ID matches and Scopes is compared by contents.</button>
+  <button type="button">Panics at runtime: comparing uncomparable type main.Session.</button>
+  <p class="why" data-for="0">Go never gets far enough to compare Scopes by reference or by value — it panics before producing any true/false result, because Session itself is not a comparable type.</p>
+  <p class="why" data-for="1">Slices are never compared by == in Go, not even when both are nil — the compiler would reject that directly. Boxed in interfaces, the check just moves to runtime; it still isn't a content comparison.</p>
+  <p class="why" data-for="2">Session has a []string field, which makes Session an uncomparable type. Wrapping two Session values in any doesn't fix that — it only delays the check from compile time to the moment == actually runs, where it panics instead of returning true or false.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Legal to write, unsafe to run" shows up anywhere a language defers a check past compile time.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's Object.equals() vs identity</h4>
+    <p><code>List.of(1,2) == List.of(1,2)</code> compiles and returns false (reference equality) instead of throwing — Java doesn't panic here, but the same trap exists: reaching for == on a boxed/generic type expecting content comparison and silently getting the wrong answer instead of a crash.</p>
+    <div class="hf-scatter"><span>same trap, quieter failure mode</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Python's TypeError on unorderable types</h4>
+    <p><code>sorted([1, "two"])</code> type-checks fine at parse time and only fails with <code>TypeError</code> when the comparison actually executes on mismatched types — deferred type checking, exactly like Go's deferred comparability check.</p>
+    <div class="hf-scatter"><span>dynamic dispatch defers the failure to call time</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>SQL NULL comparisons</h4>
+    <p><code>WHERE column = NULL</code> is syntactically valid SQL that silently returns zero rows instead of erroring — a comparison operator that LOOKS universally applicable but has a hidden precondition the parser never checks for you.</p>
+    <div class="hf-scatter"><span>a quiet precondition, not a syntax rule</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Go's value types copy on assignment, slices/maps/pointers share underlying data, every variable gets a zero value, and a nil map panics only on write. <b>The one new sentence this block adds:</b> a struct containing a slice or map is fine to store in an <code>any</code> and fine to compile with ==  — it only panics the moment two such values actually get compared at runtime.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="gfSeg">
@@ -260,6 +360,7 @@ DevHubCodeWalk.mount('#cw-gofund',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

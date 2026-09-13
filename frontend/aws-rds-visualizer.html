@@ -116,7 +116,111 @@
     <div class="intro-ciam"><span class="tag">In CIAM / Context:</span> Production CIAM uses RDS PostgreSQL Multi-AZ (db.m5.large or db.r5.large by session/user count). Spring Boot connects via a HikariCP pool (10 connections per ECS task); the password lives in Secrets Manager with 90-day auto-rotation; Flyway manages schema migrations (never <code>ddl-auto=create</code> in prod). A read replica backs the audit-event reporting endpoint to offload heavy queries from the primary.</div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, the maintenance window you scheduled quietly triggered the exact same failover this page just walked you through</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Nothing failed. Nobody paged anyone. Multi-AZ still failed over anyway, on a schedule the team picked for themselves.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The "safe" Tuesday-night resize that dropped connections anyway</div>
+  <p>The team schedules a routine Multi-AZ maintenance window — bumping the instance class from <code>db.m6g.large</code> to <code>db.m6g.xlarge</code> — for 2am on the quietest night of the week. Nothing is failing. Nobody is worried. This is filed as the boring kind of change: a resize, not the outage this page's own failover scenario just spent five steps walking through.</p>
+  <p>AWS applies that instance-class change (and minor-version upgrades, and OS patching) to a Multi-AZ deployment by modifying the <strong>standby first</strong>, then performing a <strong>failover</strong> to promote it — and only afterward applies the same change to what is now the old primary. That means a routine, zero-failure, deliberately-scheduled maintenance operation walks through the identical DNS-flip-and-reconnect mechanism as an actual outage. Every HikariCP pool across every ECS task sees the same ~60-120 second window of dropped or refused connections a real primary failure would cause — on a night nobody was watching for it, because they'd filed it under "boring instance resize," not "failover drill."</p>
+  <div class="hf-scatter">
+    <span>scheduled during low-traffic hours ✓</span>
+    <span>chose a routine, low-risk-sounding change ✓</span>
+    <span>assumed "planned" meant "no failover" ⚠</span>
+  </div>
+  <p class="hf-foot">Multi-AZ's failover mechanism doesn't distinguish between "the primary died" and "we asked AWS to patch it" — both roads promote the standby and flip the same DNS record.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Treat every Multi-AZ maintenance window like a failover drill</div>
+  <div class="hf-ladder">
+    <b>Before scheduling an instance-class change, minor-version upgrade, or OS patch on a Multi-AZ instance, assume a failover WILL happen</b>
+    <i>↓ AWS applies these changes to the standby first, then fails over to promote it — that's the documented mechanism, not an edge case</i>
+    <b>Confirm HikariCP's connection-validation settings are actually configured — the same ones scenario ① depends on</b>
+    <i>↓ a maintenance-triggered failover needs the exact same self-healing reconnect behavior as an unplanned one; there's no gentler recovery path just because the change was planned</i>
+    <b>Schedule and alert on the window like a real failover risk, not a no-op config tweak</b>
+    <i>↓ the connection blip is real, visible downtime from the app's perspective either way — calling it "just a resize" is how a maintenance window turns into an unexplained page</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> "Planned" describes who initiated the change, not what happens to your connections while it runs — AWS reuses the exact same standby-promote-and-flip-DNS mechanism for routine Multi-AZ maintenance that it uses for an actual primary failure, because patching the standby first and failing over to it is the only way to apply the change without both nodes being unavailable at once. The ~60-120 second window from scenario ① isn't a worst case reserved for outages; it's the standard cost of touching a Multi-AZ primary at all, planned or not.
+</div>
+
+<div class="hf-note">A maintenance window doesn't skip the failover. <b>It just picks the time the failover happens.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>We're just bumping the instance class. Nothing's actually broken — why would connections drop?</p></div>
+  <div class="hf-bub right"><span class="who">RDS Multi-AZ</span><p>I don't have a separate "nothing's broken" code path. To resize you, I patch your standby, then promote it, then patch the old primary. Promoting a standby is a failover, whether or not anything failed.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So this is identical to scenario ①'s outage?</p></div>
+  <div class="hf-bub right"><span class="who">RDS Multi-AZ</span><p>From your HikariCP pool's point of view, yes — same DNS flip, same ~60-120 seconds, same reconnect. The only difference is who scheduled it.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Here's the order maintenance actually runs in on a Multi-AZ instance, and why the standby goes first.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A maintenance window opens for an instance-class change, with Multi-AZ enabled</span><span class="tag">scheduled</span></li>
+    <li class="open"><span>AWS applies the new instance class to the STANDBY in AZ-B first, while the primary keeps serving traffic normally</span><span class="tag">standby patched</span></li>
+    <li><span>Once the standby is healthy on the new class, RDS performs a failover — promoting it to primary and flipping the cluster DNS record</span><span class="tag">failover</span></li>
+    <li class="open"><span>Every HikariCP pool's next connection attempt hits the same dead-connection-detection-and-retry path from scenario ①</span><span class="tag">reconnect</span></li>
+    <li><span>The old primary, now demoted to standby, gets the same instance-class change applied last</span><span class="tag">old primary patched</span></li>
+    <li class="open"><span>Both nodes are now on the new instance class — the same end state a "simultaneous" patch would have reached, but reached through a real failover</span><span class="tag">done</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the one that surprises people: nothing failed at that point in the timeline, yet it's the exact same "promote the standby, flip the DNS" action as scenario ①'s outage. AWS has no alternate, gentler path for a change it initiated itself — patching one node at a time, via failover, is what keeps a Multi-AZ deployment from ever having both nodes down together.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Standby (AZ-B)</span>
+      <span class="go"><em>maintenance window opens</em> <span class="arrow">→</span> gets patched to the new instance class first, while primary keeps serving</span></div>
+    <div class="stt"><span class="nm">Failover</span>
+      <span class="go"><em>standby finishes patching</em> <span class="arrow">→</span> RDS promotes it, flips the DNS record, ~60-120s connection blip</span></div>
+    <div class="stt"><span class="nm">Old primary (AZ-A)</span>
+      <span class="go"><em>now demoted to standby</em> <span class="arrow">→</span> receives the same patch applied last, with no user-facing failover this time</span></div>
+  </div>
+  <p class="hf-annot">Reading this back: the failover isn't step one and it isn't a side effect — it's the load-bearing middle step that makes the whole sequence safe. Skip it, and AWS would have to patch both nodes at once, which is precisely the simultaneous-downtime scenario Multi-AZ exists to prevent.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A team schedules a Multi-AZ RDS instance-class upgrade for 2am on a quiet Tuesday, expecting a clean, non-disruptive change since nothing is actually failing. What should they actually expect to happen to their app's database connections during the window?</p>
+  <button type="button">The same kind of brief connection-drop-and-reconnect a real primary failure would cause, because AWS patches the standby first and reaches the new primary via an actual failover</button>
+  <button type="button">Nothing at all — Multi-AZ maintenance is applied to both instances simultaneously with no failover involved</button>
+  <button type="button">A degraded-writes-only period — reads keep working normally against the standby while the primary is patched</button>
+  <p class="why" data-for="0">Correct. AWS patches the standby first, then fails over to promote it, then patches the old primary — the middle step is a real failover with the same DNS flip and reconnect window as scenario ①, regardless of the fact that nothing actually broke.</p>
+  <p class="why" data-for="1">Simultaneous patching would mean both nodes are briefly unavailable at once, which is exactly the outcome Multi-AZ exists to avoid. Patching one node at a time, via a real failover, is the mechanism — not a shortcut around it.</p>
+  <p class="why" data-for="2">This confuses the Multi-AZ standby with a read replica. The standby isn't queryable before it's promoted, so there's no "reads still work" window — the disruption during the flip affects the single endpoint the app connects to for everything, same as scenario ①.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"We called it routine, so it must be gentler" is a trap that isn't specific to databases.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A Kubernetes rollout for a config-only change</h4>
+    <p>Updating a single feature flag in a Spring Boot CIAM service's ConfigMap still triggers a full rolling restart of every pod — graceful shutdown, then a fresh pod warming up its HikariCP pool from zero. In-flight requests see the same connection resets a genuine crash-and-restart would cause, because Kubernetes doesn't have a separate, gentler rollout path reserved for changes that "didn't really need" a restart.</p>
+    <div class="hf-scatter"><span>the mechanism doesn't know it's routine</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Online schema migration's final cutover lock</h4>
+    <p>Tools like gh-ost or pt-online-schema-change are marketed as zero-downtime — they copy the table in the background — but the very last step, swapping the old and new tables into place, still takes a brief, real table lock. "Online" describes almost the entire migration, not literally every millisecond of it.</p>
+    <div class="hf-scatter"><span>the last step is still the real operation</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Blue/green cutover on a load balancer</h4>
+    <p>Repointing an ALB's listener to a new target group looks instantaneous from the deploy log, but any client holding an existing keep-alive connection to the OLD targets keeps talking to them until that connection naturally closes. "We cut over" and "every client is now on the new version" are two different moments, separated by however long those connections happen to stay open.</p>
+    <div class="hf-scatter"><span>the switch and the effect aren't simultaneous</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> RDS is a managed relational database — Multi-AZ gives you a synchronous standby for failover, read replicas give you async copies for read scaling, connection pools need sizing against real limits, and Secrets Manager and RDS Proxy handle credentials and connection multiplexing for you. <b>The one new sentence this block adds:</b> a routine, scheduled Multi-AZ maintenance operation reaches its result through the exact same standby-promote-and-flip-DNS failover as an actual outage, so it produces the identical connection blip — "planned" is not a synonym for "no failover."
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -577,6 +681,7 @@ function resetFailover() {
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

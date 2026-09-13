@@ -58,7 +58,112 @@
     <div class="intro-ciam"><span class="tag">CIAM context:</span> The login lookup is the highest-value injection target in the system — <code>QueryRowContext(ctx, "SELECT id, password_hash, roles FROM users WHERE email=$1", email)</code> with a placeholder makes a malicious <code>' OR '1'='1</code> a literal string that matches no user, not an auth bypass. Pass the request <code>ctx</code> so a cancelled login cancels the query, and wrap "insert user + assign default role" in a transaction so a half-created account can never exist.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the *sql.Row that is never nil — not for a missing row, not for a dead connection, not for a table that was never created</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">This page already taught you that sql.Open doesn't open a connection. Here's the sibling trap: QueryRowContext doesn't report an error either — not yet, not until you call Scan.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">You check the Row for a problem that Row was never going to show you</div>
+  <p>A lookup helper wants to be defensive, the way years of nil-checking Go code trains you to be:</p>
+  <div class="code-block" style="font-family:monospace;font-size:12.5px;color:#e2e8f0;background:#0b1426;border-left:3px solid #00acd7;border-radius:0 6px 6px 0;padding:12px 16px;overflow-x:auto;margin:10px 0">row := db.QueryRowContext(ctx, "SELECT plan FROM accounts WHERE id = ?", id)<br><span style="color:#a78bfa">// "just in case something went wrong up there"</span><br>if row == nil {<br>&nbsp;&nbsp;return "", errors.New("query failed")<br>}<br>var plan string<br>err := row.Scan(&amp;plan)</div>
+  <p>That <code>if row == nil</code> check looks exactly like the kind of guard this codebase writes everywhere else — check the thing you got back before you trust it. Go's own <code>database/sql</code> documentation says something that guard quietly assumes is false: <code>QueryRow always returns a non-nil value</code>. Not "usually." Always. Whether the context was already cancelled, the connection pool is exhausted, the network dropped, the table doesn't exist, or the SQL has a typo in it — every one of those produces a perfectly non-nil <code>*sql.Row</code>. The actual error, whatever it is, is stored inside that <code>Row</code> and deferred until <code>.Scan()</code> is called, which is the ONLY place <code>QueryRowContext</code>'s errors ever surface.</p>
+  <p>The <code>if row == nil</code> branch is dead code — it can never be true — and every real failure mode sails straight past it, unreported, until <code>Scan</code> either returns the value or finally reveals what actually went wrong.</p>
+  <div class="hf-scatter">
+    <span>row == nil check compiles and looks careful ✓</span>
+    <span>db.QueryRowContext always returns a real, non-nil *sql.Row ✓</span>
+    <span>a cancelled context still produces a non-nil Row ⚠</span>
+    <span>"table doesn't exist" still produces a non-nil Row ⚠</span>
+  </div>
+  <p class="hf-foot">The nil check isn't wrong syntax — it's checking a condition that database/sql's own docs guarantee will never occur, while the real error waits patiently inside the Row for Scan to ask for it.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Let Scan be the only place you check for an error, because it's the only place one can appear</div>
+  <div class="hf-ladder">
+    <b>Drop the nil check on the Row entirely — it can never fire</b>
+    <i>&darr; QueryRow/QueryRowContext are documented to always return a non-nil *sql.Row, so testing for nil tests a condition that database/sql guarantees away</i>
+    <b>Call Scan immediately and check ITS error</b>
+    <i>&darr; err := row.Scan(&amp;plan) is where a cancelled context, a dead connection, "no such table," a syntax error, AND sql.ErrNoRows all surface — Scan is the single point of truth</i>
+    <b>Branch on errors.Is(err, sql.ErrNoRows) only after Scan returns, never before</b>
+    <i>&darr; "no rows found" and "the query never had a chance to run" produce the identical non-nil Row beforehand — Scan's error is the only place they become distinguishable</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> database/sql defers every possible failure of QueryRow/QueryRowContext — connection, context, syntax, missing table, and "no rows" alike — into a single non-nil *sql.Row, and Scan is the only method that will ever tell you which one happened.
+</div>
+
+<div class="hf-note">A *sql.Row from QueryRow is like a sealed envelope handed to you before anyone checked whether there was actually a letter inside. The envelope is real either way — you only find out what's in it, or that it's empty, or that it was never sealed properly, when you open it.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I added a nil check on the *sql.Row before calling Scan, just to be safe. It never once caught anything, even when the query context was already cancelled.</p></div>
+  <div class="hf-bub right"><span class="who">database/sql</span><p>It never will. I document QueryRow as always returning a non-nil Row — a cancelled context, a bad connection, a missing table, all of it gets wrapped into that same non-nil value. I'm not hiding the error; I'm just not telling you until Scan asks.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Then how do I ever find out the context was cancelled?</p></div>
+  <div class="hf-bub right"><span class="who">database/sql</span><p>Call Scan. Its returned error is the cancelled context, or the dead connection, or sql.ErrNoRows, or nil for success. That's the only door I open.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow four completely different failures down to the exact same non-nil Row, and watch Scan be the only place they stop looking identical.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Code calls db.QueryRowContext(ctx, query, id) under four different scenarios: healthy query, cancelled ctx, dropped connection, typo'd table name</span><span class="tag">four scenarios</span></li>
+    <li class="open"><span>In EVERY scenario, QueryRowContext returns immediately with a non-nil *sql.Row — per its own documented contract</span><span class="tag">always non-nil</span></li>
+    <li><span>Whatever actually went wrong (or didn't) is stored inside that Row's private error field, not reported to the caller yet</span><span class="tag">deferred</span></li>
+    <li class="open"><span>Any nil-check on the Row itself passes identically in all four scenarios — there is nothing left to distinguish them at that point</span><span class="tag">indistinguishable</span></li>
+    <li><span>Code calls row.Scan(&amp;plan)</span><span class="tag">Scan called</span></li>
+    <li class="open"><span>ONLY NOW does Scan return the real answer for each case: nil error, context.Canceled, a driver connection error, or "no such table" — four different errors from four identical-looking Rows</span><span class="tag">resolved</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the trap in one sentence: at the moment most defensive code reaches for a nil check, all four scenarios look exactly alike. There is no information left in the Row value itself to branch on — Scan is not one way to find the error, it is the only way.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>context already cancelled</span><span>connection pool exhausted / network dropped</span><span>table doesn't exist / SQL syntax error</span></div>
+    <div class="funnel">all silently deferred inside *sql.Row until .Scan() is called &darr;</div>
+    <div class="instance">db.QueryRowContext(...) returns a non-nil *sql.Row, identical in shape, in every one of these cases<small>plus the fourth case: everything actually worked</small></div>
+  </div>
+  <p class="hf-annot">Four causes, indistinguishable outputs, one resolving call. That's a narrower version of the exact shape sql.Open teaches earlier on this page — "the thing you got back doesn't tell you what actually happened yet" — just moved one method downstream, from opening a connection to running a query.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A function calls <code>row := db.QueryRowContext(ctx, query, id)</code> where <code>ctx</code> was already cancelled a moment earlier. What does <code>row</code> hold immediately after that call returns, before <code>Scan</code> is ever invoked?</p>
+  <button type="button">nil, because QueryRowContext checks ctx.Err() before returning and short-circuits on a cancelled context.</button>
+  <button type="button">A non-nil *sql.Row — the same kind of value you'd get from a healthy query — with the cancellation error stored inside it, unreported until Scan is called.</button>
+  <button type="button">A non-nil *sql.Row whose Err() method (called directly on the Row, without Scan) already reports context.Canceled.</button>
+  <p class="why" data-for="0">database/sql's own documentation states QueryRow always returns a non-nil value, with no exception for an already-cancelled context — nil is never on the table here.</p>
+  <p class="why" data-for="1">Right. QueryRowContext defers every failure — a cancelled context included — into the Row it returns, and Scan is the only method that surfaces it. The Row itself looks identical whether the query succeeded, failed, or never had a chance to run.</p>
+  <p class="why" data-for="2">*sql.Row has no public Err() method for this purpose — Scan is the sole way its stored error is exposed. Looking for a way to inspect the Row directly, without calling Scan, is a dead end by design.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The handle you got back is real, but empty of answers until you call the one method that resolves it" is a shape most async or lazy APIs share.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A JavaScript Promise before it settles</h4>
+    <p>A <code>fetch(url)</code> call returns a real, non-null <code>Promise</code> object immediately — regardless of whether the network request will ultimately succeed, 404, or throw a CORS error. Checking the Promise itself for truthiness tells you nothing; only <code>await</code>ing it (or attaching <code>.then/.catch</code>) resolves which outcome actually happened.</p>
+    <div class="hf-scatter"><span>the same deferred-resolution shape, in the browser</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Java Optional that hasn't been unwrapped</h4>
+    <p><code>Optional.ofNullable(x)</code> always returns a real, non-null <code>Optional</code> wrapper — including when <code>x</code> itself was null. Checking <code>optional == null</code> is exactly as pointless as checking a *sql.Row for nil; the real question, "was there a value inside," only gets answered by calling <code>.isPresent()</code>/<code>.get()</code>, the Optional's own equivalent of Scan.</p>
+    <div class="hf-scatter"><span>a wrapper type built the same way, in the JVM</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An HTTP Response object before its body is read</h4>
+    <p>The Fetch API's <code>Response</code> object comes back non-null even for a 500 error — <code>response.ok</code> reports the status, but the actual error detail, if the server sent one as JSON, is still sitting unread in the body until code explicitly calls <code>response.json()</code> to unwrap it.</p>
+    <div class="hf-scatter"><span>a real object standing in front of an answer that hasn't been read yet</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> sql.Open doesn't open a connection, the pool's Max/Idle/Lifetime settings decide whether a real one is ready when you need it, and context propagation lets a caller cancel a query that's already in flight. <b>The one new sentence this block adds:</b> QueryRow/QueryRowContext always return a non-nil *sql.Row no matter what actually happened — connection failure, cancelled context, missing table, or success — and Scan is the only call that ever reveals which one it was.
+</div>
+
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="gdbSeg">
@@ -260,6 +365,7 @@ DevHubCodeWalk.mount('#cw-godbsql',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

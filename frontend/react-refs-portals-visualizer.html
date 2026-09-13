@@ -58,6 +58,121 @@
     <div class="intro-ciam"><span class="tag">CIAM React app:</span> A delete-user confirmation modal must render above fixed headers, <code>overflow:hidden</code> sidebars and stacked dropdowns — so <code>createPortal(&lt;ConfirmDeleteModal .../&gt;, document.getElementById('portal-root')!)</code>, with its confirm button firing a <code>deleteUserMutation.mutate(user.id)</code>. Focus management is the accessibility part: move focus to the first button on open (<code>firstFocusableRef.current?.focus()</code>) and back to the trigger on close (<code>triggerRef.current?.focus()</code>). A ref also measures the trigger (<code>getBoundingClientRect()</code>) so a tooltip portal can position relative to it.</div>
   </div>
 
+<p class="hf-deck">or, the video player that restarts itself every time an unrelated sibling re-renders</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You wire up a third-party widget in a ref callback exactly like the docs show — and it tears itself down and rebuilds on every single re-render.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The video that restarts every time the clock ticks</div>
+  <p>A dashboard has a live clock in the header (<code>setInterval</code>, one re-render per second) and, elsewhere on the page, a video player wrapped like this: <code>&lt;video ref={node =&gt; { if (node) player.current = new Plyr(node) }} src={src} /&gt;</code>. It looks like the textbook callback-ref pattern for handing a DOM node to a non-React library.</p>
+  <p>Once a second, the video visibly flickers and jumps back to 0:00 — even though nothing about the video's own props ever changed, and the video isn't anywhere near the clock in the tree.</p>
+  <div class="hf-scatter">
+    <span>the video element itself is reused, same position ✓</span>
+    <span>src never changes ✓</span>
+    <span>the ref callback is a brand-new function every render ⚠</span>
+  </div>
+  <p class="hf-foot">React can't tell "the same callback, called again" from "a different callback" — a function has no identity beyond the reference itself.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">The fix: give the callback a stable identity</div>
+  <div class="hf-ladder">
+    <b>Wrap it in <code>useCallback</code> with an empty dependency array</b>
+    <i>↓ the SAME function reference now survives every re-render of the parent</i>
+    <b>Or set it up once in a <code>useEffect</code> against a plain <code>useRef</code></b>
+    <i>↓ attach on mount using an object ref, instead of a fresh inline callback every render</i>
+    <b>And watch for the smell: an inline arrow function passed straight to <code>ref=</code></b>
+    <i>↓ if the component re-renders often, that inline function is a silent re-init switch</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>React detaches and reattaches a callback ref whenever the function's identity changes — not
+  just on mount and unmount.</b> An object ref from <code>useRef</code> is the same box every render,
+  so React only ever writes to <code>.current</code> once per real DOM change. A callback ref is a
+  function, and a function declared inline is recreated every render — so from React's point of view,
+  the "old" ref and the "new" ref are two different, unrelated functions, and the only safe thing to do
+  is call the old one with <code>null</code> and the new one with the node, every time.
+</div>
+
+<div class="hf-note">An inline callback ref doesn't remember doing this last render — it's <b>a stranger
+who happens to do the same job</b>, and React politely fires the old stranger and hires the new one on
+every render, even though they're wearing the same nametag.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I only pass this ref callback to one video tag. Why does it fire twice a second when the video itself never changes?</p></div>
+  <div class="hf-bub right"><span class="who">React's reconciler</span><p>I compare the ref you gave me THIS render to the one from last render. They're two different arrow-function objects — I have no way to know you meant "the same logic."</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So what do you do with two different functions?</p></div>
+  <div class="hf-bub right"><span class="who">The old callback, then the new one</span><p>I call the OLD one with null first — that's your teardown — then the NEW one with the real node. To me that's just "attach a different ref," even though the video element underneath never moved.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one clock tick through the ref lifecycle.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The clock's <code>setInterval</code> fires; clock state updates</span><span class="tag">unrelated trigger</span></li>
+    <li class="open"><span>The whole tree re-renders, including the sibling that owns the video</span><span class="tag">re-render</span></li>
+    <li><span>The JSX for the video is evaluated again — a NEW arrow function is created for <code>ref=</code></span><span class="tag">new identity</span></li>
+    <li class="open"><span>React diffs old ref vs new ref by reference — they differ</span><span class="tag">identity check fails</span></li>
+    <li><span>React calls the OLD callback with <code>null</code> — detach</span><span class="tag">teardown fires</span></li>
+    <li class="open"><span>React calls the NEW callback with the DOM node — <code>new Plyr(node)</code> runs again — attach</span><span class="tag">rebuild fires</span></li>
+  </ol>
+  <p class="hf-annot">The video DOM node itself was never removed or recreated — steps 3 through 6 are entirely about the REF, not the element. That's what makes this so easy to miss: the element looks untouched in the diagram, only its ref churns.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Mounted (callback v1)</span>
+      <span class="go"><em>parent re-renders</em> <span class="arrow">→</span> a new inline function is created for ref=</span></div>
+    <div class="stt"><span class="nm">Detached</span>
+      <span class="go"><em>identity mismatch</em> <span class="arrow">→</span> React calls callback v1 with null</span></div>
+    <div class="stt"><span class="nm">Mounted again (callback v2)</span>
+      <span class="go"><em>same commit</em> <span class="arrow">→</span> React calls callback v2 with the unchanged node</span></div>
+  </div>
+  <p class="hf-annot">This is a real cycle, not a one-time cost — it repeats on EVERY re-render for as long as the ref callback stays inline. A <code>useCallback</code>-memoized function breaks the cycle by making "callback v1" and "callback v2" the exact same reference, so the identity check passes and neither detach nor reattach fires again.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A <code>&lt;div ref={node =&gt; { if (node) chart.current = new ChartLib(node) }} /&gt;</code> renders a dashboard chart. Every time an unrelated counter elsewhere on the page updates, the chart briefly flashes blank and redraws from scratch, resetting any zoom the user had set. The chart's own props never change. What's happening?</p>
+  <button type="button">ChartLib itself listens for any DOM mutation anywhere on the page and redraws defensively whenever it detects one</button>
+  <button type="button">The inline arrow function passed to ref is a new function on every render, so React detaches (calls it with null) and reattaches (calls it with the node) each time, re-running new ChartLib(node)</button>
+  <button type="button">React always fully remounts any element that has a ref when a sibling component updates</button>
+  <p class="why" data-for="0">Nothing here is watching the DOM globally — the reset is fully explained by the ref callback re-running new ChartLib(node). Making the library "defensive" wouldn't be necessary if the ref weren't churning in the first place.</p>
+  <p class="why" data-for="1">Right — the div's own identity in the tree never changed, only the function reference passed as its ref. React treats "a different function" as "a different ref," so it tears down and re-attaches, and your setup code re-runs as a side effect.</p>
+  <p class="why" data-for="2">Sibling updates don't remount unrelated elements — React re-renders the tree but reconciles each element in place when its type and position are unchanged. The div stays mounted the whole time; only its ref cycles.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Same job, different identity, treated as a stranger" is a pattern that outlives this one hook.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4><code>useEffect</code> with an inline object dependency</h4>
+    <p>A dependency array holding <code>{ id }</code> built fresh each render re-runs the effect every time for the identical reason: a new object reference looks like a new value, even when every field inside is unchanged.</p>
+    <div class="hf-scatter"><span>reference equality doesn't know about "meaningfully the same"</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Angular's <code>*ngFor</code> without <code>trackBy</code></h4>
+    <p>Without a <code>trackBy</code> function, Angular's default list diffing also compares object identity — a freshly-mapped array of otherwise-identical objects gets every DOM row destroyed and rebuilt, the same "same data, new reference" trap.</p>
+    <div class="hf-scatter"><span>every framework needs YOU to define "the same thing" for it</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Java <code>HashMap</code> key overriding <code>equals()</code> but not <code>hashCode()</code></h4>
+    <p>Two objects can be logically equal yet land in different buckets because the map checks a hash code first — "equal" and "the same slot" are two separate contracts, and forgetting one breaks lookups in a way that looks like nothing is wrong.</p>
+    <div class="hf-scatter"><span>identity checks and equality checks are never automatically the same check</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> useRef is a stable mutable box; forwardRef (or, in React 19, a
+  plain ref prop) routes a ref through to a child's real DOM node; useImperativeHandle narrows what's
+  exposed; portals render elsewhere in the DOM while staying in the React tree. <b>New: an inline
+  callback ref is a brand-new function every render, so React detaches and reattaches it — and re-runs
+  your setup code — on every re-render, not just mount and unmount.</b>
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -253,6 +368,7 @@ DevHubCodeWalk.mount('#cw-rref',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

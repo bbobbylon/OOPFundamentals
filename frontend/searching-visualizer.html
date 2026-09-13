@@ -190,7 +190,112 @@ console.log("the one non-negotiable: the array MUST already be sorted.");
   </div>
 
 
-    <!-- ── EXTREME-VIZ HERO ── -->
+    <p class="hf-deck">or, the linear search that passes every test and quietly locks real users out of their own roles</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Two Integer objects holding the exact same number can compare <code>==</code> false — and whether your search "works" depends entirely on how big the number happens to be.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">It worked in staging. In prod it denies people roles they actually own.</div>
+  <p>Picture a permission check written as a hand-rolled linear search over two <code>List&lt;Integer&gt;</code> collections — the user's owned role ids and the policy's required role ids — comparing entries with <code>==</code> instead of <code>.equals()</code>. It's an easy habit to fall into: it looks just like the <code>arr[i] == target</code> linear search from earlier on this page, except that one runs on primitive <code>int[]</code>. In dev and QA, roles are seeded by hand with small ids, 1 through 20. Every single test passes.</p>
+  <p>In production, role ids are real database primary keys — auto-increment integers that climb into the thousands, say role <code>4821</code>. Java's autoboxing only caches <code>Integer</code> objects for values from -128 to 127 (a range the JLS guarantees, via <code>Integer.valueOf</code>'s internal cache). Below 128, two separately-boxed Integers for the same number are frequently the identical cached object, so <code>==</code> accidentally comes back true. Above 127, each boxing allocates a fresh object, so <code>==</code> compares two different objects that happen to hold the same int — and returns false. <code>hasRequiredRole(4821)</code> reports "not found" for a user who unmistakably owns role 4821.</p>
+  <div class="hf-scatter">
+    <span>loop logic ✓</span>
+    <span>role ids match numerically ✓</span>
+    <span>boxed to Integer, not int ✓</span>
+    <span>compared with == instead of equals() ⚠</span>
+  </div>
+  <p class="hf-foot">The values were equal. The objects weren't. <code>==</code> only ever asked about the objects.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Compare values with .equals(), always, for any boxed type</div>
+  <div class="hf-ladder">
+    <b>Replace == with .equals() on every boxed comparison</b>
+    <i>↓ .equals() compares the actual int value inside each Integer, regardless of whether the JVM happened to reuse an object for it</i>
+    <b>Or unbox to primitive int explicitly before comparing</b>
+    <i>↓ int == int is always a value comparison — once both sides are primitives, object identity never enters the picture</i>
+    <b>And turn on your linter's boxed-equality warning</b>
+    <i>↓ most static analyzers (Error Prone, SonarQube, IntelliJ's inspections) flag == between boxed types by name, because this exact bug is this common and this quiet</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> <code>==</code> on any reference type — <code>Integer</code>, <code>Long</code>, <code>Boolean</code>, <code>Character</code> — compares object identity, never value; Java's boxed-integer cache (-128 to 127) makes small numbers a coincidental exception, not a reason to trust <code>==</code> on anything boxed.
+</div>
+
+<div class="hf-note">Java's own Integer cache is the trap: it makes <code>==</code> <b>look</b> correct for exactly the range of numbers most unit tests use, and wrong for exactly the range production traffic actually produces.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>My linear search does owned == required, both Integer. Why does it work for role 12 but not role 4821?</p></div>
+  <div class="hf-bub right"><span class="who">Integer.valueOf</span><p>For 12, I hand back the same cached object I always hand back for 12 — I only keep a warm cache from -128 to 127. For 4821, I built you a brand-new box every single time you asked.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So the same line of code is sometimes a value comparison and sometimes not?</p></div>
+  <div class="hf-bub right"><span class="who">Integer.valueOf</span><p>It's always a reference comparison. Whether that happens to agree with the value comparison is pure luck of which numbers you picked to test with.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow the exact same == line through two role ids — one inside the cache, one outside it.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>Integer a = 42;</code> — autoboxing calls <code>Integer.valueOf(42)</code>, which returns the shared cached object for 42</span><span class="tag">cached</span></li>
+    <li class="open"><span><code>Integer b = 42;</code> — <code>valueOf(42)</code> again returns that SAME cached object, because 42 sits inside -128..127</span><span class="tag">cache hit</span></li>
+    <li><span><code>a == b</code> compares two references to the identical object → true. The loop reports "role found."</span><span class="tag">lucky true</span></li>
+    <li class="open"><span><code>Integer c = 4821;</code> — 4821 is outside the cached range, so <code>valueOf</code> allocates a brand-new object</span><span class="tag">not cached</span></li>
+    <li><span><code>Integer d = 4821;</code> — same value, but another fresh allocation, a different object from <code>c</code></span><span class="tag">not cached</span></li>
+    <li class="open"><span><code>c == d</code> compares two different objects holding the same int → false. The loop reports "role not found," even though 4821 == 4821.</span><span class="tag">silently wrong</span></li>
+  </ol>
+  <p class="hf-annot">Nothing in your source code changed between these two runs — same variable names, same <code>==</code>, same loop. The only difference is the number, and the JVM's caching decision for that number, which nothing in your code controls or even asks about.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Dev &amp; QA fixtures</span>
+      <span class="go"><em>role ids seeded by hand, 1–20</em> <span class="arrow">→</span> Integer == Integer hits the cache, test passes</span></div>
+    <div class="stt"><span class="nm">Production traffic</span>
+      <span class="go"><em>real role ids are DB auto-increment (e.g. 4821)</em> <span class="arrow">→</span> == compares two fresh objects, silently false</span></div>
+    <div class="stt"><span class="nm">Incident triage</span>
+      <span class="go"><em>engineer reproduces with a quick script using small test numbers</em> <span class="arrow">→</span> bug "disappears" again, ticket closed as could-not-reproduce</span></div>
+  </div>
+  <p class="hf-annot">This is why the bug survives so long: every attempt to chase it down reaches for small, easy numbers, which land right back inside the cache and hide the exact thing you're trying to catch. You only see it by testing with a role id shaped like your real data.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A permission check loops over two <code>List&lt;Integer&gt;</code> collections comparing entries with <code>==</code>. It passes every test using role ids 1 through 20. In production, a user who owns role id 918 is denied a permission that requires role 918. What's actually going on?</p>
+  <button type="button">The user's session expired between the ownership check and the permission check, so the role list was stale.</button>
+  <button type="button"><code>List&lt;Integer&gt;.equals()</code> is broken for large integers, so the two collections aren't actually comparable.</button>
+  <button type="button">918 falls outside Java's cached Integer range (-128 to 127), so <code>==</code> compares two different objects instead of the equal int values inside them.</button>
+  <p class="why" data-for="0">Nothing here involves a session at all — the same two in-memory lists, compared the same way, in the same request. The bug reproduces every single time role 918 is involved, with zero timing component.</p>
+  <p class="why" data-for="1"><code>equals()</code> on <code>Integer</code> is not broken at any size — it correctly compares the underlying int value no matter how large the number is. The actual bug is that this code never calls <code>equals()</code> at all; it uses <code>==</code> instead.</p>
+  <p class="why" data-for="2">Right. 918 is well outside -128..127, so each boxing produces a fresh object, and <code>==</code> compares those objects, not the numbers inside them. The fix is the same one line either way: use <code>.equals()</code>, or unbox to primitive <code>int</code> before comparing.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Two things that are equal compare unequal because you asked for identity instead of value" shows up anywhere boxing hides an object behind a number.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Comparing JPA entity ids as Long</h4>
+    <p>Spring/Hibernate getters return boxed <code>Long</code> for auto-generated primary keys, and <code>Long</code> has the exact same JLS-guaranteed cache range as <code>Integer</code>: -128 to 127. Code that writes <code>user.getId() == otherId</code> instead of <code>.equals()</code> works for the first 128 rows ever inserted into a table and then starts silently failing the moment ids climb past 127 — which, in any real database, is almost immediately.</p>
+    <div class="hf-scatter"><span>the identical bug, one layer up in a Spring service</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Comparing Date objects in Angular forms</h4>
+    <p>A date picker or calendar component comparing two <code>Date</code> objects with <code>===</code> hits the same shape of failure: <code>new Date(2026,0,1) === new Date(2026,0,1)</code> is always false, because each is a distinct object, even though they represent the identical moment. Selection-highlighting bugs where "the date you clicked isn't shown as selected" are usually exactly this.</p>
+    <div class="hf-scatter"><span>reference equality on the frontend, same root cause</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Python's small-integer interning</h4>
+    <p>CPython caches small integers too — traditionally -5 to 256 — so <code>a = 5; b = 5; a is b</code> is True as an implementation detail, while <code>a = 1000; b = 1000; a is b</code> is typically False. It's the same trap in a different language: small test numbers make <code>is</code> lie about what it actually checks.</p>
+    <div class="hf-scatter"><span>every language with object caching hides this somewhere</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> linear search is O(n) and works on anything; binary search is O(log n) but demands sorted data, and its classic bug is a midpoint calculation that overflows. <b>The one new sentence this block adds:</b> even a perfectly-written linear search can silently return the wrong answer if it compares boxed numbers with <code>==</code> instead of <code>.equals()</code>, because Java's Integer cache makes small test data lie to you about what <code>==</code> is actually doing.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
     <div style="margin:0 0 28px">
       <div class="rt-ctlbar">
         <span class="lbl">Scenario</span>
@@ -661,6 +766,7 @@ DevHubCodeWalk.mount('#cw-search',{
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

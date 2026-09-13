@@ -58,7 +58,111 @@
     <div class="intro-ciam"><span class="tag">CIAM React app:</span> A delete-user button inside a clickable row needs <code>e.stopPropagation()</code> so it doesn't also fire the row's "navigate to detail" handler. A create-user form needs <code>e.preventDefault()</code> on submit — without it the browser does a full-page POST and loses all React state. And a custom <code>role="button"</code> element must handle <code>onKeyDown</code> for <kbd>Enter</kbd>/<kbd>Space</kbd> so screen-reader and keyboard users can operate it.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the wheel-preventDefault fix from section 4 has a side effect nobody warns you about.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You followed this page's own fix for onWheel &mdash; a native addEventListener via a ref &mdash; and now two setState calls in that handler behave differently than your onClick handlers ever did.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The fix from section 4 that quietly un-batches your updates</div>
+  <p>Section 4 above told you the truth: React marks <code>onWheel</code>/<code>onTouchMove</code> as passive, so <code>preventDefault()</code> inside them does nothing &mdash; the sanctioned fix is a real <code>addEventListener('wheel', handler, {passive:false})</code> on a ref, bypassing React's synthetic system entirely. You do exactly that, and inside your native <code>handler</code> you call <code>setZoom(z =&gt; z+1)</code> and <code>setDirty(true)</code> back to back.</p>
+  <p>On React 17, that handler runs OUTSIDE React's batching &mdash; those two setState calls trigger two separate synchronous re-renders, back to back, on every wheel tick. Only setState calls made INSIDE a React-attached synthetic event handler were batched in 17; anything from a native listener, a setTimeout, or a promise <code>.then()</code> got one render per call. Your delegated onClick handlers were always fine &mdash; it's specifically the escape hatch this page told you to reach for that loses batching.</p>
+  <div class="hf-scatter">
+    <span>the ref + addEventListener pattern is correct ✓</span>
+    <span>{passive:false} correctly unblocks preventDefault ✓</span>
+    <span>two setState calls in that native handler ⚠ (pre-18: two renders, not one)</span>
+  </div>
+  <p class="hf-foot">The fix for one gotcha (passive listeners) reintroduces a different one (un-batched updates) &mdash; unless you're on React 18+.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">React 18's automatic batching closes this gap for you</div>
+  <div class="hf-ladder">
+    <b>Render with createRoot (React 18+), not the legacy ReactDOM.render</b>
+    <i>&darr; automatic batching is opt-in by root type &mdash; the legacy root API never got it, even running on React 18</i>
+    <b>Trust that setState calls now batch EVERYWHERE &mdash; native handlers, timeouts, promises, not just synthetic events</b>
+    <i>&darr; your two calls in the native wheel handler now collapse into exactly one re-render, same as they always did inside onClick</i>
+    <b>And step three: reach for flushSync only on the rare occasion you need a synchronous render, like measuring the DOM right after a state change</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Before React 18, "batched" effectively meant "inside a handler React itself attached"; React 18's automatic batching changes the rule to "any setState call, from any origin, batches into one render unless you explicitly opt out with flushSync" &mdash; which matters the moment you write a native listener, a setTimeout callback, or a <code>.then()</code>, all of which this very page walks you through.
+</div>
+
+<div class="hf-note">Batching before 18 had a WHITELIST &mdash; React's own synthetic handlers. Batching in 18 has a BLACKLIST &mdash; flushSync, and nothing else. If your mental model is still "only onClick batches," React 18 already proved you wrong; you just haven't hit the native handler that shows it yet.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I added a native wheel listener like this page told me to, and now scrolling feels janky &mdash; way more re-renders than my onClick handlers ever caused.</p></div>
+  <div class="hf-bub right"><span class="who">Your React version</span><p>Which one am I? Because that answer changes everything here.</p></div>
+  <div class="hf-bub"><span class="who">React 17</span><p>I only batch setState calls made inside handlers I attached &mdash; your synthetic onClicks. A native addEventListener handler is invisible to me; each setState in there gets its own render.</p></div>
+  <div class="hf-bub right"><span class="who">React 18 (createRoot)</span><p>I don't care where the call came from anymore. Native listener, timeout, promise, synthetic event &mdash; I batch all of it into one render by default. flushSync is the only way out now.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Trace the SAME two setState calls through both React versions.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A wheel event fires; your native addEventListener handler runs (React never sees this event)</span><span class="tag">native</span></li>
+    <li class="open"><span>Handler calls setZoom(z =&gt; z+1)</span><span class="tag">call #1</span></li>
+    <li><span>React 17: commits a render immediately for setZoom alone</span><span class="tag">17: render #1</span></li>
+    <li class="open"><span>Handler calls setDirty(true)</span><span class="tag">call #2</span></li>
+    <li><span>React 17: commits a SECOND, separate render for setDirty alone &mdash; two renders for one wheel tick</span><span class="tag">17: render #2</span></li>
+    <li class="open"><span>React 18 (createRoot): both calls are collected and committed together &mdash; ONE render for the same wheel tick</span><span class="tag">18: render #1 only</span></li>
+  </ol>
+  <p class="hf-annot">Step 6 is the entire fix, and it costs you nothing &mdash; no code change, no new API to learn, just running on React 18's createRoot. The two setState calls you already wrote are correct; it was the RUNTIME'S batching boundary that used to stop at React's own synthetic handlers and now doesn't.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">React 18 automatic batching (createRoot)</span>
+      <div class="ring"><span class="lbl">synthetic onClick / onChange handlers</span>
+        <div class="ring"><span class="lbl">native addEventListener handlers (your wheel fix)</span>
+          <div class="core">setTimeout callbacks &amp; promise .then()<small>all four layers batch into ONE render together in React 18 &mdash; only the outermost layer batched in React 17</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">In React 17, only the outer ring &mdash; React's own synthetic handlers &mdash; got batching for free; everything nested inside that (native listeners, timeouts, promises) rendered once per setState call. React 18's automatic batching pulls the boundary out to cover all four layers at once, which is exactly why the native wheel handler this page taught you to write now behaves like any other event handler instead of like special, slower code.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">You're on React 18 with createRoot. Inside the native wheel event listener you attached via a ref (this page's fix for the passive-listener preventDefault trap), you call setZoom(z =&gt; z+1) immediately followed by setDirty(true). How many re-renders does that one wheel tick cause?</p>
+  <button type="button">Two &mdash; native listeners are always outside React's batching, on every version, because React never attached them</button>
+  <button type="button">One &mdash; React 18's automatic batching collects setState calls regardless of where they originate (native handlers, timeouts, promises included) and commits them together</button>
+  <button type="button">Zero, until the next synthetic event fires and forces both pending updates through at once</button>
+  <p class="why" data-for="0">That was true in React 17, where batching was limited to React's own synthetic event handlers. React 18 specifically removed that limitation &mdash; "native listeners are always outside batching" stopped being true the moment you're on createRoot.</p>
+  <p class="why" data-for="1">Right &mdash; this is exactly what "automatic batching" means in React 18: the origin of the setState call no longer matters. Both calls land in the same commit.</p>
+  <p class="why" data-for="2">React doesn't hold updates indefinitely waiting for a synthetic event &mdash; that isn't how any version of batching works. The two updates commit together on their own, right after the wheel handler finishes running, not on some later unrelated event.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Coalescing many small operations into one flush is a trick every performance-minded system reaches for eventually.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Angular Signals' batched effect scheduling</h4>
+    <p>Writing to several Angular signals synchronously in one tick doesn't re-run every dependent effect or re-render the template once per <code>set()</code> &mdash; Angular schedules the flush to happen once, after the current work finishes. Same shape as React's automatic batching, solved for a different reactivity model.</p>
+    <div class="hf-scatter"><span>many synchronous writes, one scheduled flush</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Disk write buffering</h4>
+    <p>An OS buffers many small writes in memory and flushes them to disk together instead of hitting the disk on every single <code>write()</code> call &mdash; trading a little latency for far less overhead. React's batching makes the identical trade at the render layer: hold several state updates for one tick, then flush them as a single render.</p>
+    <div class="hf-scatter"><span>many small writes &rarr; one flush</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>TCP's Nagle's algorithm</h4>
+    <p>TCP can buffer several small outgoing writes and send them as one packet instead of a packet per <code>write()</code> call, trading a tiny delay for far less network overhead. React's batching makes the same trade: several state updates become one visible re-render instead of several half-finished ones.</p>
+    <div class="hf-scatter"><span>coalesce many small operations into one</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> onClick isn't a real DOM listener &mdash; React delegates one listener per event type to the root, replays a SyntheticEvent through the fiber tree in capture-then-bubble order, and a handful of specific traps (passive wheel/touch listeners, onScroll not bubbling, portal event bubbling) don't behave the way native DOM code would suggest. <b>The one new sentence this block adds:</b> which setState calls get batched into a single render used to depend on whether React itself attached the handler &mdash; React 18's automatic batching erases that distinction, so the native listener this page tells you to write for the passive-listener trap now batches exactly like a synthetic onClick always did.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="evSeg">
@@ -260,6 +364,7 @@ DevHubCodeWalk.mount('#cw-rxevt',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

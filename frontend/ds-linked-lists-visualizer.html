@@ -133,7 +133,111 @@ console.log("\nmiddle of", show(head), "is:", middle(head));
   </div>
 
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, the exception that only shows up sometimes — and picks its moments by list size</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You write the exact same removal-during-iteration code twice, on lists one element apart in length, and one run throws while the other reports success.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Deleting from a 2-element list "just works" — the same code on a 3-element list throws</div>
+  <p>Take a real <code>java.util.LinkedList</code> (the doubly linked one this page already told you Java ships) holding <code>["A","B"]</code>. You write a for-each loop that removes "A" while iterating: <code>for (String s : list) &#123; if (s.equals("A")) list.remove(s); &#125;</code>. It compiles, it runs, and it finishes with no exception at all — the loop just quietly ends with <code>list</code> now holding <code>["B"]</code>.</p>
+  <p>Run the identical code on <code>["A","B","C"]</code>, removing "A" the same way, and it throws <code>ConcurrentModificationException</code> on the very next iteration. Same removal call, same position in the list (the first element), same for-each syntax — one list length throws, the other doesn't.</p>
+  <div class="hf-scatter">
+    <span>the for-each loop compiles ✓</span>
+    <span>list.remove(s) is a legal, documented call ✓</span>
+    <span>on the 2-element list, hasNext() returns false before anyone checks ⚠</span>
+  </div>
+  <p class="hf-foot">The bug was never in the code that ran — it's in the one hasNext() call that, on the shorter list, never got the chance to catch anything.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Mutate through the iterator, never through the collection you're iterating</div>
+  <div class="hf-ladder">
+    <b>Name the iterator explicitly: Iterator&lt;String&gt; it = list.iterator();</b>
+    <i>↓ the for-each loop already creates this exact object — you just can't call methods on something you never named</i>
+    <b>Call it.remove() instead of list.remove(s)</b>
+    <i>↓ Iterator.remove() updates the iterator's own bookkeeping and the list's modCount together, in one atomic step, so the fail-fast check never fires against itself</i>
+    <b>Or skip the iterator entirely: list.removeIf(s -&gt; s.equals("A"))</b>
+    <i>↓ one call, no cursor or modCount to reason about, and its correctness can't depend on how many elements happen to be left</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A fail-fast iterator only checks for a concurrent structural change inside next() and remove() — never inside hasNext().</b> hasNext() answers one question, "is there an index left," and nothing else. If a removal happens to make that answer "no" one call early, the loop ends before the one method that would have thrown ever runs.
+</div>
+
+<div class="hf-note">The iterator isn't lying to you when it doesn't throw — it was never asked. <b>hasNext() counts positions, it doesn't count promises.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>My loop didn't crash, so my removal logic must be correct — right?</p></div>
+  <div class="hf-bub right"><span class="who">The LinkedList's iterator</span><p>I only check whether you cheated when you ask me for the NEXT element. If your removal shrinks the list so my loop ends one call early, I never get a turn to notice.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So a passing test on a two-item list actually proves less than I think.</p></div>
+  <div class="hf-bub right"><span class="who">The iterator</span><p>It proves your code doesn't crash on exactly two items, with a removal at exactly that position. Add a third item and watch what happens.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Same removal, one element longer — trace both runs side by side.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>2-element list [A, B]: next() returns "A", cursor advances to 1</span><span class="tag">cursor=1, size=2</span></li>
+    <li class="open"><span>list.remove("A") fires: size drops 2 → 1, modCount increments</span><span class="tag">cursor=1, size=1</span></li>
+    <li><span>for-each asks hasNext(): is cursor(1) != size(1)?</span><span class="tag">false → loop ends, no check ever runs</span></li>
+    <li class="open"><span>3-element list [A, B, C]: next() returns "A", cursor advances to 1</span><span class="tag">cursor=1, size=3</span></li>
+    <li><span>list.remove("A") fires: size drops 3 → 2, modCount increments</span><span class="tag">cursor=1, size=2</span></li>
+    <li class="open"><span>for-each asks hasNext(): is cursor(1) != size(2)? true → calls next() → modCount mismatch</span><span class="tag">throws ConcurrentModificationException</span></li>
+  </ol>
+  <p class="hf-annot">Steps 3 and 6 run the exact same hasNext() logic against the exact same kind of post-removal state — the only difference is whether cursor happens to already equal the shrunken size. On the 2-element list it does, so the loop exits silently; on the 3-element list it doesn't, so one more next() call fires and that's where the exception actually lives.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt"><span class="nm">Iterating normally</span>
+      <span class="go"><em>next() called</em> <span class="arrow">→</span> compares modCount to expected, matches, returns element</span></div>
+    <div class="stt on"><span class="nm">List just mutated via list.remove()</span>
+      <span class="go"><em>hasNext() called</em> <span class="arrow">→</span> only compares cursor to size — never looks at modCount</span></div>
+    <div class="stt"><span class="nm">hasNext() says "more remain"</span>
+      <span class="go"><em>next() called</em> <span class="arrow">→</span> now compares modCount, finds the mismatch, throws</span></div>
+  </div>
+  <p class="hf-annot">The highlighted state is the whole bug: it's the one point in the cycle where a structural change has already happened but nothing has checked for it yet. Whether the next transition catches it depends entirely on whether cursor and size happen to already be equal — a fact about list length, not about whether your removal was safe.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">You loop over a 5-element java.util.LinkedList with a for-each and call list.remove(item) once, on the element currently at index 1, then keep iterating. What happens?</p>
+  <button type="button">Nothing throws — LinkedList is a doubly linked list, so removing a node just relinks two pointers and the iterator doesn't notice</button>
+  <button type="button">It throws immediately, on the same iteration where remove() is called, before the loop can continue</button>
+  <button type="button">The loop continues past the removal, then throws ConcurrentModificationException the next time next() is called — because cursor still has three more indices to visit before it would equal the new size</button>
+  <p class="why" data-for="0">LinkedList being doubly linked doesn't exempt it from the fail-fast check — java.util.LinkedList's ListItr tracks modCount exactly the way ArrayList's Itr does. "It's just pointer relinking" is true of the removal itself, but the iterator still notices on its next call.</p>
+  <p class="why" data-for="1">remove() itself doesn't throw — it's a completely legal call on the list. The exception is thrown later, from inside the iterator's next() method, the next time the loop asks for another element.</p>
+  <p class="why" data-for="2">Right. With 5 elements and a removal at index 1, cursor(2) is nowhere near the new size(4) — hasNext() reports true, next() runs, notices modCount doesn't match what it cached, and throws. This only fails to throw in the narrow case where the removal happens to leave exactly one index between cursor and the new size.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A safety check that only fires under the specific circumstance that happens to trigger it — so a clean test run proves far less than it looks like it does.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java assertions do nothing unless you ask for them</h4>
+    <p>An <code>assert</code> statement compiles into your class file either way, but the JVM silently skips every one of them unless you launch it with <code>-ea</code>. A codebase whose tests run with assertions enabled and whose production deploy doesn't can carry a violated invariant into prod for years without a single failure — the check was real, it just was never switched on where it mattered.</p>
+    <div class="hf-scatter"><span>the check exists, whether it fires is a flag</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>TOCTOU: check-then-act file races</h4>
+    <p><code>if (file.exists()) &#123; file.open(); &#125;</code> passes its check almost every time you run it locally. In production, another process can delete or replace that file in the gap between the check and the open, and the "safe" code throws anyway — the check was genuinely correct at the instant it ran, which is exactly the problem.</p>
+    <div class="hf-scatter"><span>correct at check-time, not at use-time</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>JPA optimistic locking only fires on an actual collision</h4>
+    <p>A <code>@Version</code> column throws <code>OptimisticLockException</code> only when two updates to the same row genuinely interleave badly enough for the version numbers to mismatch. Run your integration test single-threaded, as most are, and the lock never has anything to catch — the protection is real, but whether you ever see it depends on timing you didn't control.</p>
+    <div class="hf-scatter"><span>protection is real, triggering it is conditional</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> linked lists trade an array's O(1) random access for O(1) insert/delete at known positions, and the classic interview patterns — reversal, fast/slow pointers, Floyd's cycle detection, merging — are all just disciplined pointer reassignment. <b>The one new sentence this block adds:</b> java.util.LinkedList's fail-fast iterator only checks for a concurrent removal inside next(), never inside hasNext(), so the exact same removal call can throw or silently succeed depending purely on how many elements were left when you made it.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -622,6 +726,7 @@ function llReset(){llData=[];llLogs=[];llRender();document.getElementById('llLog
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

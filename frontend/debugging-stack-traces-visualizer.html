@@ -94,6 +94,185 @@
     </div>
   </section>
 
+<p class="hf-deck">or, the production trace with zero frames — and why the bug that happens 40,000 times a day tells you less than the one that happens once</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Everything on this page assumes you have a stack trace to read. Sometimes the JVM stops giving you one, on purpose, and never says so.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">3am incident. The log says <code>java.lang.NullPointerException</code> and then nothing. No message, no <code>at</code> lines, no <code>Caused by</code>.</div>
+  <p>You know the drill by now: read line one, find the first frame you own, follow the
+  <code>Caused by</code> chain to the bottom. Except there is no line two. One exception type, no
+  message, not a single frame — and the same endpoint, same build, same JDK, throws a beautiful
+  40-frame trace with a Java 14+ helpful message when you hit it on your laptop. So you go hunting
+  for the logging config that must be truncating it. There isn't one.</p>
+  <p>HotSpot did this. When a builtin exception — <code>NullPointerException</code>,
+  <code>ArithmeticException</code>, <code>ArrayIndexOutOfBoundsException</code>,
+  <code>ClassCastException</code>, <code>ArrayStoreException</code> — is thrown implicitly from the
+  same compiled site often enough, the JIT recompiles that site to throw a <b>preallocated</b>
+  instance instead of building a fresh one. Preallocated means shared, and a shared exception cannot
+  carry your call stack or your message, so it carries none. The flag is
+  <code>-XX:+OmitStackTraceInFastThrow</code> and it is <b>on by default</b>. Your laptop never
+  reproduces it because your laptop never ran that line ten thousand times in a row.</p>
+  <div class="hf-scatter">
+    <span>logging config is fine ✓</span>
+    <span>the exception is real ✓</span>
+    <span>local run shows the full trace ✓</span>
+    <span>JIT swapped in a shared, stackless exception ⚠</span>
+    <span>the hotter the bug, the emptier the evidence ⚠</span>
+  </div>
+  <p class="hf-foot">An optimisation that costs you nothing until the day it costs you the only
+  artefact you had.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Get one full trace back, then fix the thing that got hot</div>
+  <div class="hf-ladder">
+    <b>Recognise the signature before you blame the log pipeline: a builtin exception type, no message, zero frames, prod only, hot path only</b>
+    <i>↓ a truncating log encoder would cut frames off the <i>end</i> and do it to every exception — this one loses all of them, and only for the JVM's own implicit throws</i>
+    <b>Search the log backwards to just after the last restart or deploy</b>
+    <i>↓ the earliest occurrences ran interpreted, before the JIT had any reason to optimise the site — those entries carry the complete trace you need, and nobody ever scrolls up that far</i>
+    <b>If there is no early occurrence to find, redeploy with <code>-XX:-OmitStackTraceInFastThrow</code> and wait for the next one</b>
+    <i>↓ you are paying a small cost on the throw path only, in exchange for evidence — turn it back off once you have the trace if that path is genuinely hot</i>
+    <b>Then treat the heat itself as the finding: a throw site the JIT bothered to optimise is an exception being used as control flow thousands of times a second</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A stack trace is not a fact about the exception; it is a cost the runtime chose to pay.</b>
+  Filling one in means walking the stack and allocating an array of frames every single time — cheap
+  once, expensive in a loop. So the JVM stops paying when the same implicit throw turns into a hot
+  path, the same way a logging pipeline samples a repeated message and an error tracker collapses a
+  million events into one row with a counter. Every layer between a failure and your eyes is allowed
+  to decide that the ten-thousandth copy is not worth keeping. Which means the frequency of an error
+  and the quality of your information about it can run in <i>opposite</i> directions — and the first
+  occurrence, right after a restart, is very often the most informative one you will ever get.
+</div>
+
+<p class="hf-big">The louder the bug, the quieter the evidence.</p>
+
+<div class="hf-note">It is the smoke detector you pulled the battery out of because it went off every
+time you made toast. It still detects smoke perfectly. It has simply stopped telling you, on the
+grounds that you clearly already knew. <b>The JVM mutes the alarm it has heard ten thousand
+times.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>Who truncated my stack trace? There's an NPE here with no frames at all.</p></div>
+  <div class="hf-bub right"><span class="who">The JIT compiler</span><p>Nobody truncated it — there were never any frames. That line threw so often that I recompiled the method to reuse one preallocated exception object. It's shared by every throw at that site, so it can't carry anyone's particular stack or message.</p></div>
+  <div class="hf-bub"><span class="who">Your laptop's JVM</span><p>Which is why I look innocent. You hit that endpoint four times; I ran it interpreted and built you a full trace each time. I was never under enough pressure to optimise anything.</p></div>
+  <div class="hf-bub right"><span class="who">The log file, 6 hours earlier</span><p>And I have what you want. The first dozen occurrences after last night's rollout are complete — type, message, every frame. You just stopped scrolling at the most recent one, like everybody does.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch one throw site cool, heat up, and lose its voice.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Deploy at 21:00. Requests arrive; the method runs <b>interpreted</b>. A null slips through and throws an NPE the ordinary way — stack walked, frames allocated, helpful message attached</span><span class="tag">a perfect trace, logged and ignored</span></li>
+    <li class="open"><span>Traffic climbs. The method crosses the JIT's threshold and gets compiled. The throw is still a real, fully-populated exception</span><span class="tag">nothing lost yet</span></li>
+    <li><span>The same implicit NPE keeps firing from the same compiled site, thousands of times. HotSpot notices the pattern</span><span class="tag">this is the trigger — repetition, not time</span></li>
+    <li class="open"><span>It recompiles to the <b>fast-throw</b> form: one preallocated exception object, reused for every occurrence at that site. Shared object, so no per-throw stack, no message</span><span class="tag">-XX:+OmitStackTraceInFastThrow, on by default</span></li>
+    <li><span>03:00 — you're paged. Every entry in the last six hours is a bare <code>java.lang.NullPointerException</code>. You conclude the logging is broken</span><span class="tag">the wrong suspect, confidently identified</span></li>
+    <li class="open"><span>Meanwhile the complete traces are still sitting in the log from 21:00, and a restart would produce more of them — for a while, until the site heats up again</span><span class="tag">the evidence you have and never look at</span></li>
+  </ol>
+  <p class="hf-annot">Step 6 is the practical one. Everybody debugging a production exception scrolls to
+  the <i>latest</i> occurrence, because recent means relevant. Here that instinct is exactly backwards:
+  the newest entries are the emptiest, and the useful ones are the earliest after the last restart.
+  It is worth knowing this before the night it matters, because at 3am "the log is broken" is a much
+  easier story to believe than "the JVM optimised my diagnostics away".</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">the same line throws its 10,000th implicit NPE<small>one hot throw site in compiled code</small></div>
+    <div class="fan">what changes because of the repetition ↓</div>
+    <div class="obs">
+      <span>the JIT recompiles the method</span>
+      <span>the throw starts reusing one preallocated exception</span>
+      <span class="new">your log line loses every frame — and its message</span>
+      <span>your error tracker groups them all into one countless row</span>
+    </div>
+  </div>
+  <p class="hf-annot">Read the fan carefully: not one of those reactions is a bug, and not one of them
+  is reported anywhere. The repetition is the input, and the loss of detail is the output — which is
+  why this only ever bites you in production, on your busiest endpoint, during your worst incident.
+  The bug you can reproduce locally is never the one that hits this.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A production log shows dozens of <code>java.lang.NullPointerException</code> entries
+  with no message and not a single <code>at</code> frame. The same build, hit on your laptop, throws a
+  full trace with a helpful "because <code>user.email</code> is null" message. Most likely
+  explanation?</p>
+  <button type="button">Your JSON log encoder drops the stack field once an event exceeds its size limit</button>
+  <button type="button">HotSpot replaced that throw with a shared, preallocated exception once the site got hot — <code>-XX:+OmitStackTraceInFastThrow</code> is on by default, so a builtin exception that happens constantly reports the least</button>
+  <button type="button">The exception was thrown inside a task submitted to an executor, and because the JVM cannot join the originating thread's stack to the worker thread's stack, it discards both and logs the exception type by itself</button>
+  <p class="why" data-for="0">Worth ruling out, and the way to rule it out is the shape of the loss: a
+  size-limited encoder truncates the <i>tail</i> of a long stack and would do it to any large event,
+  including ones you throw yourself. What you have here is total — zero frames, no message — and it
+  is happening only to exception types the JVM throws implicitly. That combination points at the
+  runtime, not the pipeline.</p>
+  <p class="why" data-for="1">Right, and the tell is exactly the prod/local split: your laptop never
+  runs that line enough times for the JIT to bother. Recovery is cheap — scroll the log back to just
+  after the last restart, where the early occurrences ran interpreted and carry complete traces. If
+  the log doesn't go back that far, redeploy with <code>-XX:-OmitStackTraceInFastThrow</code> and
+  catch the next one. Then take the heat seriously: a throw site HotSpot decided to optimise is an
+  exception firing thousands of times a second, which is usually a bigger problem than the NPE
+  itself.</p>
+  <p class="why" data-for="2">Async really does cost you frames, and it is a genuine source of
+  confusion on this page's territory — an exception thrown in a worker shows the worker's stack, and
+  the submitting code's frames are simply not in it, because that stack no longer exists. But it
+  costs you the <i>caller's</i> frames, not all of them: you would still see the task's own frames and
+  the executor's. A trace with zero frames is a different phenomenon entirely.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Three more layers that quietly decide the tenth thousand copy of something isn't worth keeping.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Sampling and dedup in your observability stack</h4>
+    <p>Error trackers group identical events into one row with a counter, and log pipelines rate-limit
+    or de-duplicate repeated messages to keep ingest costs sane. Useful — until the event you need to
+    inspect individually is the one that fired a million times, and what survived is a count. Same
+    trade the JVM makes, one layer up and with a billing motive.</p>
+    <div class="hf-scatter"><span>aggregation is lossy exactly where volume is highest</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Spring Security hides which half of the login failed — deliberately</h4>
+    <p><code>AbstractUserDetailsAuthenticationProvider</code> defaults
+    <code>hideUserNotFoundExceptions</code> to <code>true</code>, so "no such user" is converted into
+    the same generic <code>BadCredentialsException</code> as "wrong password". That's correct: telling
+    a caller which one it was hands an attacker a user-enumeration oracle. But it also means your
+    <i>own</i> logs lose the distinction, which is why login debugging feels blind. Flip it off in a
+    non-production environment when you need the truth — never in the response to the client.</p>
+    <div class="hf-scatter"><span>sometimes the detail is withheld on purpose, and rightly</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4><code>(Unknown Source)</code> instead of a line number</h4>
+    <p>Compile without debug info and every frame in the trace reads <code>(Unknown Source)</code> —
+    the class is fine, the method name is fine, and the <code>LineNumberTable</code> the trace needs
+    was simply never emitted. Same shape as this page's source-map story in JavaScript: the build
+    optimised away the metadata that makes a trace navigable, and the failure mode is silence rather
+    than an error.</p>
+    <div class="hf-scatter"><span>the build decided what your trace could say</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  This page teaches a trace as a story: line one is the exception and its message, the frames run
+  most-recent first, you skip framework noise to the first frame you own, and in Java you follow
+  <code>Caused by</code> to the bottom for the root cause. <b>The new sentence: the JVM will stop
+  writing that story at all once an implicit throw gets hot enough — so a message-less, frame-less
+  builtin exception in production is not a broken log, it is a fast-throw, and the full trace is
+  sitting in the same file shortly after the last restart.</b> Now predict: you restart the pod to
+  "get the traces back", and for ten minutes they're complete, then go empty again. Has anything
+  about the bug changed — and would adding a <code>try/catch</code> that logs
+  <code>e.getStackTrace().length</code> at that call site tell you anything you don't already know?
+</div>
+
   <!-- 2 INTERACTIVE -->
   <section>
     <h2>2. Interactive: annotate a real trace</h2>
@@ -284,6 +463,7 @@ render();
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

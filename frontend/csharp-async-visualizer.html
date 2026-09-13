@@ -56,6 +56,150 @@
     <div class="intro-ciam"><span class="tag">CIAM async gateway:</span> A token-validating gateway is almost pure I/O — verify a JWT, fetch the JWKS (cached), call <code>/userinfo</code>, hit a session store. Writing each step as <code>await</code> keeps the thread free during every network hop, so a small thread pool serves huge concurrency. <code>Task.WhenAll</code> fans out independent calls (userinfo + entitlements) to cut latency. The one rule: never <code>.Result</code>/<code>.Wait()</code> on an async call inside a request — it ties up a pool thread and can deadlock under load.</div>
   </div>
 
+<p class="hf-deck">or, why the exact same <code>.Result</code> call is harmless in one app and fatal in another</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You copy a method between two C# hosts, change nothing, and one of them hangs forever.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">It worked in the Web API. It deadlocks in the desktop app.</div>
+  <p>You write a small helper in a shared library: <code>public Task&lt;User&gt; GetUserAsync(int id)</code>,
+  with an <code>await</code> inside it hitting the database. Somewhere convenient you call it as
+  <code>var user = GetUserAsync(id).Result;</code> instead of awaiting it — a shortcut, but your ASP.NET
+  Core controller action calls it, the request completes, tests pass. You ship it.</p>
+  <p>Then someone wires the same library method into a WPF button-click handler, or an old ASP.NET
+  (System.Web) action, and it hangs. Forever — not slow, <em>frozen</em>. Nothing in the code changed
+  between the two callers except which application hosts it, and that's exactly the variable that
+  matters: ASP.NET Core has no <code>SynchronizationContext</code>, so <code>.Result</code> blocking a
+  thread there is merely wasteful. WPF and classic ASP.NET both install one, and that context is what
+  actually deadlocks — the continuation after your library's <code>await</code> needs to resume on that
+  same captured context, but the only thread allowed to run it is the one <code>.Result</code> is
+  currently blocking.</p>
+  <div class="hf-scatter">
+    <span>library code unchanged ✓</span>
+    <span>ASP.NET Core caller: fine ✓</span>
+    <span>WPF / classic ASP.NET caller: frozen ⚠</span>
+  </div>
+  <p class="hf-foot">The bug isn't in the method you wrote. It's in the assumption that "it worked when I
+  tested it" tells you anything about a host you didn't test it in.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Fix: library code awaits with <code>ConfigureAwait(false)</code>, always</div>
+  <div class="hf-ladder">
+    <b>await _db.Users.FindAsync(id).ConfigureAwait(false);</b>
+    <i>↓ tells the continuation it doesn't need the original context back — any thread pool thread can run it</i>
+    <b>Do this on every await inside library/shared code, not just the risky-looking ones</b>
+    <i>↓ you don't control who calls your library or from which kind of host, so assume the worst context</i>
+    <b>And still fix the real bug: never call .Result or .Wait() on an async call — await it, all the way up</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A deadlock from blocking on async code needs two things at once: a captured context, and a blocked
+  thread that context needs back.</b> Remove either one and the hang disappears — <code>ConfigureAwait(false)</code>
+  removes the first inside your own code, and never calling <code>.Result</code>/<code>.Wait()</code>
+  removes the second. Relying on "my test host doesn't have a context" is not the same as the bug being
+  fixed.
+</div>
+
+<div class="hf-note">A <code>SynchronizationContext</code> is a <b>venue with exactly one microphone</b> —
+WPF's UI thread, or classic ASP.NET's request context. <code>await</code> without
+<code>ConfigureAwait(false)</code> promises to hand the mic back to whoever was holding it. Block that
+same holder with <code>.Result</code> while it's waiting for the mic back, and the show can never
+resume.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I tested this exact method in my ASP.NET Core API. It's fine. Why is it hanging in the WPF app?</p></div>
+  <div class="hf-bub right"><span class="who">SynchronizationContext</span><p>Because ASP.NET Core never installs me at all — your test proved nothing about a host that does.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So what changed in the WPF app specifically?</p></div>
+  <div class="hf-bub right"><span class="who">SynchronizationContext</span><p>I capture the UI thread before your <code>await</code>, and I insist the continuation runs back on it. Your <code>.Result</code> call is sitting on that exact thread, refusing to let go until the continuation finishes — which can't happen until the thread is free. That's the whole deadlock.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Same code, same await, two different hosts, two different endings.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>UI thread calls <code>GetUserAsync(id).Result</code></span><span class="tag">block</span></li>
+    <li class="open"><span>Inside the method, <code>await</code> captures the current SynchronizationContext</span><span class="tag">capture</span></li>
+    <li><span>The awaited I/O runs on a thread-pool thread, off the UI thread</span><span class="tag">I/O</span></li>
+    <li class="open"><span>I/O completes; the continuation needs to resume on the captured context</span><span class="tag">resume request</span></li>
+    <li><span>The only thread allowed to run that context is the UI thread</span><span class="tag">contention</span></li>
+    <li class="open"><span>That thread is still blocked on step one, waiting for step four to finish — deadlock</span><span class="tag">deadlock</span></li>
+  </ol>
+  <p class="hf-annot">Step two is the one <code>ConfigureAwait(false)</code> changes: skip the capture and
+  step four never insists on a specific thread, so step five's contention never happens. ASP.NET Core
+  never triggers step two in the first place, which is exactly why the same code looked safe there.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">.Result blocks the calling thread<small>after an await with a captured context</small></div>
+    <div class="fan">every host reacts differently ↓</div>
+    <div class="obs">
+      <span>ASP.NET Core controller — no context, thread wasted, request eventually returns</span>
+      <span class="new">WPF button handler — UI context captured, hangs forever</span>
+      <span>console app <code>Main</code> — no context, thread wasted, program eventually returns</span>
+    </div>
+  </div>
+  <p class="hf-annot">Two of the three hosts merely waste a thread — bad practice, but survivable. The one
+  with a <code>SynchronizationContext</code> doesn't just waste a thread, it deadlocks it, because that
+  thread is both the blocker and the only thread the continuation is allowed to run on.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A shared library method awaits a database call with plain <code>await</code> (no
+  <code>ConfigureAwait</code>). It runs fine inside an ASP.NET Core minimal API endpoint. A teammate
+  copies the same method into a WPF app and calls it with <code>.Result</code> from a button-click
+  handler, and the app freezes. What's the most accurate explanation?</p>
+  <button type="button">WPF installs a SynchronizationContext tied to the UI thread; the blocked UI thread and the continuation both need that same thread, so neither can proceed</button>
+  <button type="button">WPF apps can't run asynchronous database calls at all, so the Task never completes</button>
+  <button type="button">The library method has a bug that only appears after it's been JIT-compiled a second time in a new process</button>
+  <p class="why" data-for="0">Right — ASP.NET Core has no SynchronizationContext, so the same code there just burns a thread pool thread rather than deadlocking. WPF's UI-thread context is what turns "wasteful" into "frozen forever."</p>
+  <p class="why" data-for="1">WPF applications run async I/O constantly — every modern desktop app does. Nothing about the WPF host prevents a Task from completing; the problem is entirely about which thread is allowed to run the continuation once it does.</p>
+  <p class="why" data-for="2">JIT compilation doesn't introduce non-determinism like this, and this deadlock reproduces reliably every single time under the same conditions — it isn't a flaky, compilation-order-dependent bug.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Code that behaves differently depending on who calls it is a context problem, not a code problem.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A Spring <code>@Transactional</code> method called from within itself</h4>
+    <p>The self-invocation gotcha is the same shape: identical method, identical annotation, and it
+    silently stops working the moment the call doesn't go through the Spring-managed proxy — because the
+    proxy, not the method, is what implements the behavior. The code you're staring at was never the whole
+    story either time.</p>
+    <div class="hf-scatter"><span>the framework's plumbing around the code decides the outcome</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An Angular <code>HttpClient</code> call outside <code>NgZone</code></h4>
+    <p>Fire a request from inside a raw DOM event listener instead of an Angular-managed one and change
+    detection never fires when it resolves — the component's data updates, the screen doesn't, and the
+    fix is the same category of move as <code>ConfigureAwait(false)</code>: explicitly opt back into (or
+    out of) the zone the framework assumes you're in.</p>
+    <div class="hf-scatter"><span>whether you're "inside the zone" changes what happens next</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Token refresh from inside an Entra ID auth interceptor</h4>
+    <p>Block synchronously waiting for a refreshed access token from inside the very interceptor that's
+    supposed to attach it to outgoing calls, and you can starve the thread that would have delivered the
+    refreshed token — the same "the thing I'm blocking on needs the thing I'm blocking" shape as the
+    <code>.Result</code> deadlock, just in an HTTP pipeline instead of a UI thread.</p>
+    <div class="hf-scatter"><span>blocking inside the very pipeline stage that would unblock you</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> <code>await</code> frees the thread instead of blocking it, the
+  compiler turns your method into a state machine around a continuation, and the one hard rule is never
+  block on async with <code>.Result</code>/<code>.Wait()</code>. <b>The one new sentence this block
+  adds:</b> whether breaking that rule merely wastes a thread or deadlocks the process entirely depends
+  on a <code>SynchronizationContext</code> your test host might not even have — which is exactly why
+  library code should <code>ConfigureAwait(false)</code> and never assume its caller's context.
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
@@ -251,6 +395,7 @@ DevHubCodeWalk.mount('#cw-casync',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

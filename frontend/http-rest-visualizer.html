@@ -125,7 +125,112 @@
       </div>
     </div>
 
-    <!-- ── EXTREME-VIZ HERO ── -->
+    <p class="hf-deck">or, the "idempotent" method that isn't, depending on what's inside it</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The methods table above hedges PATCH with one word — "usually." This is the block where "usually" turns into an outage.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A retried PATCH doubles a number that decides whether someone gets locked out</div>
+  <p>Your CIAM login endpoint tracks failed attempts with <code>PATCH /api/users/42/login-attempts</code>, body <code>{"op": "increment"}</code> — the service does <code>attempts = attempts + 1</code> server-side. The methods table calls PATCH "usually idempotent," so your API gateway's retry policy treats it exactly like PUT and DELETE: safe to resend automatically if the client never got a response.</p>
+  <p>A flaky mobile connection loses one response in transit — the server genuinely incremented attempts to 3, but the acknowledgment never reached the client. Following its idempotent-retry policy, the gateway resends the identical PATCH. The server has no idea this is a repeat; it increments attempts to 4. One real failed login attempt just became two, and the account locks out a full attempt earlier than it should have.</p>
+  <div class="hf-scatter">
+    <span>the request timed out ✓</span>
+    <span>the retry followed policy ✓</span>
+    <span>what "idempotent" means for THIS body ⚠</span>
+  </div>
+  <p class="hf-foot">PUT's idempotency comes from HOW it's written — send the whole final state. PATCH's idempotency, if it exists at all, depends entirely on what operation the body describes.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Ask what the PATCH body actually says before trusting the method name</div>
+  <div class="hf-ladder">
+    <b>Distinguish "set" from "adjust" in every PATCH body you write</b>
+    <i>↓ <code>{"attempts": 4}</code> — set the field to a known final value — is idempotent, since resending it twice leaves attempts at 4 either way; <code>{"op":"increment"}</code> — adjust relative to current state — is not, since resending applies the adjustment twice</i>
+    <b>Give non-idempotent requests an idempotency key, not a blind retry policy</b>
+    <i>↓ the client generates one ID per logical operation and sends it as a header; the server remembers keys it has already processed and returns the ORIGINAL result on a duplicate, instead of re-executing the write</i>
+    <b>Default retries to the genuinely safe methods; opt PATCH in per-endpoint</b>
+    <i>↓ a gateway that blanket-retries "GET, PUT, DELETE, and PATCH because the table says usually" needs that "usually" audited endpoint by endpoint, not assumed once for the whole verb</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Idempotency is a property of the request, not the verb.</b> PUT is idempotent because the convention behind it is to always send the complete final state — applying the same destination twice leaves you in the same place. PATCH carries no such universal convention: it's idempotent only when its body describes a destination too, and not when it describes an adjustment relative to whatever the current state happens to be.
+</div>
+
+<div class="hf-note">PUT promises a destination: <b>"end up looking like THIS"</b> — landing there twice changes nothing. A delta-style PATCH promises a direction instead: "move one step this way" — and taking two steps is never the same as taking one.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>The table says PATCH is idempotent. Why did retrying it double my counter?</p></div>
+  <div class="hf-bub right"><span class="who">PUT</span><p>I always carry the whole final state. Apply me twice and you land in the exact same place both times — that's where my idempotency actually comes from.</p></div>
+  <div class="hf-bub"><span class="who">This particular PATCH body</span><p>I carry an instruction, not a destination — "add one." Apply me twice and you've added two. Nothing about the word PATCH ever promised otherwise.</p></div>
+  <div class="hf-bub right"><span class="who">An idempotency key</span><p>I'm the fix for exactly this. Tag the request once, and the server can recognize a resend and hand back the original answer instead of doing the work twice.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one lost response from a genuine server-side write to a doubled counter.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Client sends <code>PATCH /users/42/login-attempts</code> with body <code>{"op":"increment"}</code> after a failed login</span><span class="tag">a delta, not a destination</span></li>
+    <li class="open"><span>Server receives it, increments attempts from 2 to 3, and starts sending back 200 OK</span><span class="tag">the write already happened</span></li>
+    <li><span>The response is lost on a flaky mobile connection before the client ever sees it</span><span class="tag">the client hears only silence</span></li>
+    <li class="open"><span>The client times out and, trusting "PATCH is usually idempotent," resends the identical request</span><span class="tag">following the retry policy</span></li>
+    <li><span>The server has no memory of the first attempt — it increments attempts from 3 to 4</span><span class="tag">no idea this is a repeat</span></li>
+    <li class="open"><span>One real failed login is now recorded as two — one attempt closer to a lockout the user didn't actually earn</span><span class="tag">the retry caused this, not the user</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the crux, and it's worth naming directly: a timeout tells the client nothing about whether the server received and acted on the request. "No response" and "no effect" are two completely different facts, and a retry policy that conflates them is the actual root cause here — not the PATCH body, and not the flaky network.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">The retry policy assumes every PATCH is safe to resend<small>this is exactly what the methods table's "Usually ✅" is hedging about</small></div>
+    <div class="arrow">what this specific PATCH body actually does →</div>
+    <div class="opts">
+      <span>a full-replacement body — behaves like PUT, idempotent</span>
+      <span class="on">a delta body, {"op":"increment"} — behaves like POST, NOT idempotent</span>
+      <span>DELETE — always idempotent regardless of body</span>
+    </div>
+  </div>
+  <p class="hf-annot">Same HTTP method, same URL, same retry policy — completely different real-world safety, decided entirely by what's inside the body. A retry policy that keys off the method name alone is reading the label on the box, not what's actually packed inside it.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Your API gateway automatically retries any GET, PUT, or DELETE that times out without a response, on the theory that those methods are always idempotent. A teammate proposes adding PATCH to that same auto-retry list, citing the methods table's "PATCH is idempotent" entry. What's the actual risk?</p>
+  <button type="button">None — PATCH is defined by the HTTP spec as idempotent, exactly like PUT and DELETE, so it's safe to add to any idempotent-retry list</button>
+  <button type="button">PATCH requests can't be retried at all, because servers are required to reject a duplicate PATCH with a 409 Conflict</button>
+  <button type="button">PATCH's idempotency depends entirely on the body — a "set this field to X" body is safe to retry, but a delta-style body like "increment this counter" is not, and a blanket retry policy can't tell the two apart</button>
+  <p class="why" data-for="0">The spec doesn't actually guarantee this the way it guarantees PUT and DELETE — RFC 5789 explicitly leaves PATCH's exact semantics to whatever the specific API defines. Treating it as automatically safe is precisely the assumption that produces double-increments.</p>
+  <p class="why" data-for="1">There's no such universal requirement — most servers happily accept and process a duplicate PATCH with no conflict response at all, which is exactly the problem: nothing built into HTTP stops the second one from silently re-applying.</p>
+  <p class="why" data-for="2">Right. A method name is not a safety guarantee — it's the body's semantics that decide whether a retry is harmless or harmful, and a gateway retry policy keyed only on the verb has no way to see the difference.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Retrying it did the thing twice" is one of the oldest bugs in distributed systems.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Payment APIs and idempotency keys</h4>
+    <p>Stripe and every major payment API popularized the idempotency-key pattern for exactly this reason: retrying a "charge $50" request without one can charge the customer twice if the first charge actually succeeded and only its response got lost. The fix is identical to the PATCH fix — tag the operation once, let the server recognize a resend.</p>
+    <div class="hf-scatter"><span>the textbook version of the exact same bug</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>SQL's relative vs absolute UPDATE</h4>
+    <p><code>UPDATE accounts SET balance = balance - 10</code> run twice subtracts 20; <code>UPDATE accounts SET balance = 90</code> run twice still leaves it at 90. Same database, same table, same statement style — the only difference is whether the SQL describes a destination or a delta, one layer beneath the API that wraps it.</p>
+    <div class="hf-scatter"><span>the identical distinction, one layer down the stack</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Kafka's at-least-once delivery</h4>
+    <p>A message broker that redelivers any message it didn't get an acknowledgment for in time will hand a consumer the same message twice. A consumer whose side effect is "increment a counter" or "send an email" duplicates that effect on redelivery — the entire reason "idempotent consumer" is a standing requirement in event-driven architecture, not just a nice-to-have.</p>
+    <div class="hf-scatter"><span>at-least-once delivery, at-most-once safety, only if the consumer earns it</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> This page is the shape of every HTTP request and response — methods, status code families, REST conventions, headers, and how Spring Boot's <code>@RestController</code> maps onto all of it, including the 401-vs-403 and CORS failure paths the visualizer above walks step by step. <b>The one new sentence this block adds:</b> the methods table's "PATCH — usually idempotent" is doing real work in that one word "usually" — a delta-style PATCH body is exactly as unsafe to blindly retry as POST, no matter what the method name promises.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
     <style>
       .who-CLIENT{background:rgba(34,211,238,.14);color:#7dd3fc}
       .who-NET{background:rgba(129,140,248,.16);color:#a5b4fc}
@@ -754,6 +859,7 @@ DevHubCodeWalk.mount('#cw-httprest',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -57,6 +57,111 @@
     <div class="intro-ciam"><span class="tag">CIAM with Entra ID:</span> in a real Microsoft shop you don't hand-roll token validation — <code>Microsoft.Identity.Web</code>'s <code>AddMicrosoftIdentityWebApi(config)</code> wires <code>AddJwtBearer</code> to your Entra tenant: it fetches the OIDC metadata + <strong>JWKS</strong>, validates the RS256 signature and the <code>iss</code>/<code>aud</code>, and maps Entra <strong>app roles</strong> (the <code>roles</code> claim) or group claims into the principal so <code>[Authorize(Roles="...")]</code> just works. That is the .NET counterpart to Spring's <code>NimbusJwtDecoder.withJwkSetUri(...)</code> + an authorities converter. For an SPA, the same <strong>BFF</strong> reasoning applies — keep tokens server-side behind an <code>httpOnly</code> cookie. Compare the same flow in Node on the <code>node-auth</code> page, and on the Spring side see <code>spring-boot-oauth2-resource-server</code> + <code>spring-boot-method-security-deep</code>.</div>
   </div>
 
+<p class="hf-deck">Your 15-minute token is a 20-minute token, and nobody told you</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You set <code>ValidateLifetime = true</code>, minted a 15-minute token, and it still works four minutes after it expired.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The token says exp 10:15:00. At 10:18:40 the endpoint returns 200.</div>
+  <p>You are hardening an API. Access tokens live 15 minutes; refresh handles the rest. Security asks you to prove that a stolen access token dies on schedule, so you grab a token at 10:00:00, watch the clock, and at 10:18:40 you replay it against <code>GET /me</code>.</p>
+  <p>You expect the 401 Challenge the page's scenario ③ shows. You get <code>200 OK</code>, with the full <code>ClaimsPrincipal</code>. Every line of your config is correct: <code>ValidateLifetime</code> is <code>true</code>, the <code>exp</code> claim really is 10:15:00, the signature really is valid. What you never set is <code>ClockSkew</code>, and <code>TokenValidationParameters.ClockSkew</code> defaults to <code>TimeSpan.FromMinutes(5)</code> — <code>DefaultClockSkew</code>. The lifetime check is not <code>exp &lt; now</code>. It is <code>exp &lt; now - skew</code>. Your token is accepted right up to 10:20:00.</p>
+  <div class="hf-scatter">
+    <span>ValidateLifetime = true ✓</span>
+    <span>exp really is 10:15:00 ✓</span>
+    <span>ClockSkew you never set: 5 min ⚠</span>
+  </div>
+  <p class="hf-foot">You did not configure a 15-minute token. You configured a 20-minute token with a 15-minute label on it.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Set the skew yourself instead of inheriting five minutes</div>
+  <div class="hf-ladder">
+    <b>Write <code>ClockSkew</code> explicitly in <code>AddJwtBearer</code>, even when the value you want is the default</b>
+    <i>↓ an unset security knob is still a set security knob — someone else just set it</i>
+    <b><code>o.TokenValidationParameters.ClockSkew = TimeSpan.Zero;</code> when your issuer and your API share a clock</b>
+    <i>↓ Entra, your API and your containers all run NTP-synced; you are tolerating drift that does not exist</i>
+    <b>Keep a small non-zero skew only if a partner IdP is genuinely on a different clock — and write the number down</b>
+    <i>↓ 30 seconds is a decision; 5 minutes is an accident</i>
+    <b>Then size your token lifetime against the real window: exp + skew, not exp</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A token's expiry is a range, not an instant.</b> Every JWT validator on earth accepts some clock drift between the issuer that stamped <code>exp</code> and the API reading it, because two machines never agree on the millisecond. The only question is how much, and who decided. In <code>Microsoft.IdentityModel.Tokens</code> the answer is five minutes and the decision was made in 2013 by someone who was not on your team. The same skew applies to <code>nbf</code> in the other direction: a token stamped "not valid until 10:25" is accepted at 10:20.
+</div>
+
+<div class="hf-note">A parking meter with a grace period the attendant never mentions. The ticket says <b>expires 10:15</b>. The warden does not write a citation until 10:20. If your threat model is "the stolen token dies at 10:15," <b>you are budgeting from the ticket, not from the warden</b>.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>ValidateLifetime is true. Why did an expired token just pass?</p></div>
+  <div class="hf-bub right"><span class="who">JwtBearerHandler</span><p>I did not decide that. I handed the token to the validators with your <code>TokenValidationParameters</code> and they said valid, so I built the principal.</p></div>
+  <div class="hf-bub"><span class="who">The lifetime validator</span><p>I compared <code>exp</code> against <code>now</code> minus <code>ClockSkew</code>. You left <code>ClockSkew</code> alone, so it is five minutes. 10:15 is not earlier than 10:13:40. Valid.</p></div>
+  <div class="hf-bub right"><span class="who">TokenValidationParameters</span><p>I am a bag of defaults. Everything you do not assign, I assign. <code>ClockSkew</code> was one of them, and it is the only one of my defaults that quietly lengthens a token.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Walk one replayed token through <code>UseAuthentication</code> with a stopwatch running.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>10:00:00 — sign-in mints the JWT with <code>expires: DateTime.UtcNow.AddMinutes(15)</code>, so <code>exp</code> is 10:15:00</span><span class="tag">issue</span></li>
+    <li class="open"><span>10:18:40 — the replayed token arrives on <code>GET /me</code>; <code>UseAuthentication</code> runs the JWT Bearer handler</span><span class="tag">replay</span></li>
+    <li><span>Signature, <code>iss</code> and <code>aud</code> all validate — nothing about those depends on time</span><span class="tag">signature ok</span></li>
+    <li class="open"><span>The lifetime validator evaluates <code>exp &lt; now - ClockSkew</code> → is 10:15:00 &lt; 10:13:40? No.</span><span class="tag">the line</span></li>
+    <li><span>No <code>SecurityTokenExpiredException</code>. A <code>ClaimsPrincipal</code> is built and assigned to <code>HttpContext.User</code></span><span class="tag">principal set</span></li>
+    <li class="open"><span><code>UseAuthorization</code> sees an authenticated user, the <code>[Authorize]</code> requirement is met, the endpoint returns 200</span><span class="tag">200 OK</span></li>
+  </ol>
+  <p class="hf-annot">Step four is the whole lesson. The comparison is not "has this expired," it is "has this expired by more than the tolerance." Flip it around and the same subtraction explains the friendly half of skew: when your API's container clock drifts 20 seconds ahead of the IdP, a token minted one second ago would look like it came from the future and every login would fail — skew is why it does not. The default is not a bug. The default being five minutes, in a system where you also chose fifteen, is the bug.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">10:00:00 → 10:15:00 · genuinely valid</span>
+      <span class="go"><em>any request</em> <span class="arrow">→</span> 200, and everyone agrees it should be</span></div>
+    <div class="stt"><span class="nm">10:15:00 → 10:20:00 · expired, still accepted</span>
+      <span class="go"><em>same request</em> <span class="arrow">→</span> 200, because <code>exp</code> is not yet earlier than <code>now - 5 min</code></span></div>
+    <div class="stt"><span class="nm">after 10:20:00 · finally rejected</span>
+      <span class="go"><em>same request</em> <span class="arrow">→</span> <code>SecurityTokenExpiredException</code> → Challenge → 401</span></div>
+  </div>
+  <p class="hf-annot">Read the middle band out loud: for five whole minutes the token is expired <em>and</em> works. That band is where every "but we revoked it" incident report lives. It is also why a five-second access token is a fiction — with the default skew, the shortest token you can actually issue is five minutes and five seconds. If short lifetimes are the point of your design, the skew is not a footnote, it is the floor.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Your API uses <code>AddJwtBearer</code> with <code>ValidateLifetime = true</code> and nothing else about time configured. A token stamped <code>exp</code> 10:15:00 arrives at <code>GET /me</code> at 10:18:40, signature and audience both fine. What does the endpoint return?</p>
+  <button type="button">401 — <code>ValidateLifetime = true</code> means past <code>exp</code> is past <code>exp</code>, so the handler Challenges.</button>
+  <button type="button">403 — the identity is known but the token is stale, so authorization forbids it.</button>
+  <button type="button">200 — the default <code>ClockSkew</code> of 5 minutes keeps the token valid until 10:20:00.</button>
+  <p class="why" data-for="0">That is what the flag's name promises, and it is what almost everyone answers. <code>ValidateLifetime</code> only decides <em>whether</em> the time check runs; <code>ClockSkew</code> decides <em>where the line is</em>. With the check on and the skew untouched at <code>TimeSpan.FromMinutes(5)</code>, the comparison is <code>exp &lt; now - 5min</code> → <code>10:15:00 &lt; 10:13:40</code> → false → valid. You get the 401 at 10:20:01, not at 10:15:01.</p>
+  <p class="why" data-for="1">403 cannot happen here, and knowing why is worth more than the question. 403 is a <em>Forbid</em> — it requires an authenticated principal that failed a policy. An expired token produces no principal at all, so the failure mode would be a <em>Challenge</em> (401), never a Forbid. A stale token is an identity problem, and identity problems are 401 by construction in ASP.NET Core.</p>
+  <p class="why" data-for="2">Right, and the arithmetic is the point: the validator asks <code>exp &lt; now - ClockSkew</code>, not <code>exp &lt; now</code>. <code>TokenValidationParameters.ClockSkew</code> defaults to <code>DefaultClockSkew</code>, five minutes, so 10:15:00 is compared against 10:13:40 and passes. Set <code>o.TokenValidationParameters.ClockSkew = TimeSpan.Zero</code> when your issuer and API share an NTP source, and remember the same tolerance applies to <code>nbf</code> — a token that is not supposed to be valid until 10:25 is accepted at 10:20.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Every system that compares two clocks builds in a fudge factor, and every one of them picked a different number.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring Security's resource server does the same thing with a different number</h4>
+    <p>On the Java side of your stack, <code>NimbusJwtDecoder</code> validates timestamps through <code>JwtTimestampValidator</code>, whose default maximum clock skew is <b>60 seconds</b>, not five minutes. Same design, same invisible extension of your token's life, one-fifth the size. If you run a .NET API and a Spring API against the same Entra tenant and the same token, they stop accepting it four minutes apart — and the one that looks "broken" is the correct one.</p>
+    <div class="hf-scatter"><span>same token, two APIs, two expiry times</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Your authenticator app's 30-second code lasts longer than 30 seconds</h4>
+    <p>TOTP derives a code from a 30-second time step, and RFC 6238 tells verifiers to also accept the adjacent step so a user who types slowly is not punished. That is the same subtraction: the code is compared against a <em>window</em> of steps, not one instant. It is why the digits you typed as the ring finished refreshing were still accepted — and why a phished code stays useful to an attacker for longer than the countdown suggests.</p>
+    <div class="hf-scatter"><span>a 30-second secret with a 60-second life</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Kerberos is where the five minutes came from</h4>
+    <p>Active Directory's "Maximum tolerance for computer clock synchronization" defaults to <b>5 minutes</b>, and a domain-joined machine whose clock drifts past it simply stops authenticating. That policy is the ancestor of the number sitting in your <code>TokenValidationParameters</code> today. Knowing the lineage is the memory hook: five minutes is Windows' historical answer to "how far apart can two clocks be," inherited by a token library that has nothing to do with domain controllers.</p>
+    <div class="hf-scatter"><span>an inherited default, not a chosen one</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> ASP.NET Core splits auth into two ordered middlewares — <code>UseAuthentication</code> turns a Bearer token into a <code>ClaimsPrincipal</code> on <code>HttpContext.User</code>, then <code>UseAuthorization</code> evaluates <code>[Authorize]</code> and its policies, which is why a missing identity is 401 and a failed policy is 403. <b>And the one thing this block adds: <code>ValidateLifetime</code> does not check <code>exp</code> against now — it checks <code>exp</code> against now minus <code>ClockSkew</code>, which defaults to five minutes, so every token you issue lives five minutes longer than its label until you set <code>ClockSkew</code> yourself.</b>
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
@@ -261,6 +366,7 @@ DevHubCodeWalk.mount('#cw-cs',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

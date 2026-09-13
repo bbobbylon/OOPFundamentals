@@ -104,7 +104,108 @@ for url in ["/", "/about", "/admin"]:
   </div>
 
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, why <code>g</code> looking global is the whole trap</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You spun up a background thread to send an email without blocking the response — and it never even sent one email successfully.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The welcome email that always crashed, silently</div>
+  <p>Your <code>/signup</code> view saves the user, then fires off a welcome email so the client doesn't have to wait on SMTP: <code>threading.Thread(target=send_welcome_email, args=(email,)).start()</code>, then <code>return jsonify(...), 201</code> right away. Looks fast, looks clean, ships.</p>
+  <p>Inside <code>send_welcome_email</code> you read <code>g.user</code> to personalize the subject line. Every single time, that line raises <code>RuntimeError: Working outside of request context</code> — and because it's in a background thread, nothing sends the error back to the client. The response was already a clean <code>201</code>.</p>
+  <div class="hf-scatter">
+    <span>the view function ✓</span>
+    <span>returning 201 before the thread finishes ✓</span>
+    <span>reading <code>g.user</code> inside the new thread ⚠</span>
+  </div>
+  <p class="hf-foot">Nothing about the route is wrong. The crash is one thread away from the very request that started it.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Give the thread its own copy, not a borrowed context</div>
+  <div class="hf-ladder">
+    <b>Wrap the target in <code>@copy_current_request_context</code></b>
+    <i>↓ Flask snapshots the current request's data and re-pushes an equivalent context onto the new thread before your function runs</i>
+    <b>Or simpler: read what you need BEFORE spawning the thread</b>
+    <i>↓ pass <code>g.user.id</code> and <code>request.headers.get("X-Locale")</code> in as plain arguments — plain values need no context at all</i>
+    <b>For real async work, hand it to Celery/RQ instead of a bare Thread</b>
+    <i>↓ a worker process builds its OWN app context deliberately, instead of silently depending on one that happened to exist nearby</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Context locals are borrowed, not owned.</b> <code>request</code> and <code>g</code> only resolve on the thread that currently has a request context pushed onto it. Hop to any new thread — even for one line of code — and the borrow doesn't come with you. Flask fails loudly with a <code>RuntimeError</code>; it does not fail quietly.
+</div>
+
+<div class="hf-note">Think of <b>g</b> as a name tag pinned to the exact chair a request is sitting in — not a badge you carry around. Walk into a different room (a new thread) with no tag of your own, and asking "what's my name?" doesn't get a wrong answer. It gets a slammed door.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I just want to send an email without blocking the response. What's wrong with <code>threading.Thread(target=send_email).start()</code>?</p></div>
+  <div class="hf-bub right"><span class="who">g, personified</span><p>Nothing at all — as long as <code>send_email</code> never asks me anything. I'm not a global. I'm scoped to whichever thread currently has a request context pushed.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But I read <code>g.user</code> inside it, to put the customer's name in the subject line.</p></div>
+  <div class="hf-bub right"><span class="who">request, personified</span><p>That's the exact moment it breaks. Your new thread never pushed a context of its own — so when Flask goes looking for "the current request" on that thread's stack, there isn't one. Not a stale one. None.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch what happens in the half-second between your view returning and the thread actually running.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A request hits <code>/signup</code>; Flask pushes a request context onto THIS thread's stack</span><span class="tag">push</span></li>
+    <li class="open"><span>The view starts a bare thread: <code>Thread(target=send_welcome_email, args=(email,)).start()</code>, then returns 201</span><span class="tag">fire-and-forget</span></li>
+    <li><span>The response is sent; Flask pops the request context — <code>g</code> is discarded for THIS thread</span><span class="tag">teardown</span></li>
+    <li class="open"><span>Meanwhile the new OS thread starts running <code>send_welcome_email</code> — on its own stack, which never had a context pushed</span><span class="tag">new stack</span></li>
+    <li><span>Inside it, code accesses <code>g.user</code> to build the subject line</span><span class="tag">access</span></li>
+    <li class="open"><span>Flask's proxy looks for a context on THAT thread's stack, finds none, and raises <code>RuntimeError: Working outside of request context</code></span><span class="tag">boom</span></li>
+  </ol>
+  <p class="hf-annot">Steps 2 and 4 run almost simultaneously — the response can finish and get logged as a clean <code>201</code> before the thread's exception even surfaces, often as nothing more than an unattributed stack trace in your server log, not attached to any request the client can see.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>a bare <code>threading.Thread(...).start()</code></span><span>a <code>ThreadPoolExecutor.submit(...)</code></span><span>an APScheduler job fired from a view</span></div>
+    <div class="funnel">none of them run on a thread with a context pushed ↓</div>
+    <div class="instance">RuntimeError: Working outside of request context<small>one error, three unrelated-looking places it comes from</small></div>
+  </div>
+  <p class="hf-annot">It doesn't matter which API you used to leave the request's thread — a raw thread, a pool, a scheduler. They all land in the exact same trap for the exact same reason: <code>request</code> and <code>g</code> are resolved per-thread, and the new thread never had a context pushed onto it.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A <code>/checkout</code> view starts a background thread to write an audit-log entry, and the thread's target function reads <code>g.user.id</code> to tag the log with the current user. Under real production traffic, what actually happens?</p>
+  <button type="button">It works fine — <code>g</code> is global, so any thread can read whatever the last request set on it.</button>
+  <button type="button">The background thread raises <code>RuntimeError: Working outside of request context</code> the moment it touches <code>g</code>.</button>
+  <button type="button">It silently logs the WRONG user's id — whoever's request happens to be active on the server at that instant.</button>
+  <p class="why" data-for="0">This is the intuitive guess, and it's backwards on purpose — <code>g</code> <em>looking</em> like a global is the whole trap the framework sets. It's a proxy into a per-thread context stack, not a shared object, so a brand-new thread finds nothing there at all.</p>
+  <p class="why" data-for="1">Right — a freshly spawned thread has never had a request context pushed onto its own stack, so Flask's proxy has nowhere to look and raises immediately. This is precisely the failure <code>copy_current_request_context</code> exists to prevent.</p>
+  <p class="why" data-for="2">This would be the genuinely scary outcome if <code>g</code> were a real shared mutable global — and it's worth remembering that IS the failure mode in frameworks that don't isolate state per request. Flask's context-local design exists specifically to rule this one out; it fails loudly instead of failing quietly wrong.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"A value that only exists on the thread that set it" is a much older idea than Flask, and it keeps ambushing people the same way.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring's <code>SecurityContextHolder</code></h4>
+    <p>By default it's backed by a <code>ThreadLocal</code>. Hand work to a new thread — a manual <code>Thread</code>, an <code>ExecutorService</code>, even <code>@Async</code> without a context-propagating executor — and <code>SecurityContextHolder.getContext().getAuthentication()</code> comes back <code>null</code> on that thread. No exception, just no principal. Same shape, quieter failure.</p>
+    <div class="hf-scatter"><span>thread-local anything dies at the thread boundary</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Angular's <code>inject()</code></h4>
+    <p>Angular's <code>inject()</code> only works inside an active "injection context" — a constructor, a field initializer, or <code>runInInjectionContext</code>. Call it inside a <code>setTimeout</code> callback or a bare Promise <code>.then()</code> and Angular throws <code>NG0203: inject() must be called from an injection context</code> for the identical reason: the context was only ever valid on the call stack that owned it, and the callback fires after that stack is gone.</p>
+    <div class="hf-scatter"><span>NG0203: inject() must be called from an injection context</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Python's own <code>threading.local()</code></h4>
+    <p>It's the primitive Flask's context locals are ultimately built on. A <code>threading.local()</code> object holding, say, a per-request DB handle answers correctly for the thread that just wrote to it — and comes back empty for any thread that didn't. Flask didn't invent this failure mode; it just wrapped it in friendlier names.</p>
+    <div class="hf-scatter"><span>a threading.local() only ever answers for the thread that just wrote to it</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Flask is a thin, explicit layer over WSGI where routing, hooks, and blueprints assemble the request/response cycle, and <code>request</code>/<code>g</code> are ergonomic proxies rather than real globals. <b>The one new sentence this block adds:</b> that proxy convenience has a hard edge — the instant your code runs on a thread Flask never pushed a context onto, <code>request</code> and <code>g</code> go from "looks global" to "doesn't exist."
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="flSeg">
@@ -303,6 +404,7 @@ DevHubCodeWalk.mount('#cw-flask',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

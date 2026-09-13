@@ -58,7 +58,111 @@
     <div class="intro-ciam"><span class="tag">CIAM context:</span> Table-driven tests fit an IdM authority mapper perfectly — each case is <code>{name, idmClaims, wantAuthorities}</code> across <code>entra</code>/<code>ping</code>/<code>keycloak</code>/<code>spring</code> shapes, one table proving the whole normalization. Run <code>go test -race</code> on the token cache to prove concurrent reads + refreshes are safe (a data race in a cache is a security bug). And <strong>fuzz the JWT/base64 parser</strong> so a malformed token returns an error instead of panicking and taking down the auth service.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">Or: your cleanup runs before the tests it's supposed to clean up after.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You did everything the table-driven pattern teaches. Your parallel subtests still fail against a resource that's already gone.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">defer db.Close() fires while the parallel subtests are still queued, not finished</div>
+  <p><code>TestUserQueries</code> opens a test database, <code>defer db.Close()</code>s it right after (textbook Go), then loops over cases calling <code>t.Run(tc.name, func(t *testing.T){ t.Parallel(); /* query db */ })</code>. Every subtest looks correct. With one case, it passes every time.</p>
+  <p>Add a few more cases and it gets flaky: some subtests fail with "sql: database is closed." The moment ANY subtest calls <code>t.Parallel()</code>, Go pauses it right there and returns control to the <code>for</code> loop immediately — it does not wait for the subtest to finish. The loop finishes fast, <code>TestUserQueries</code>'s own body returns, and its <code>defer db.Close()</code> fires — all before any of the paused parallel subtests have resumed past their <code>t.Parallel()</code> call and actually touched <code>db</code>.</p>
+  <div class="hf-scatter">
+    <span>table-driven pattern ✓</span>
+    <span>defer right after setup ✓</span>
+    <span>defer's timing relative to t.Parallel() ⚠</span>
+  </div>
+  <p class="hf-foot">t.Parallel() doesn't just mark a test "run me concurrently" — it hands control straight back to whatever called t.Run, right now, before the subtest body below it has executed a single further line.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Scope the cleanup to outlive the parallel subtests, not the loop</div>
+  <div class="hf-ladder">
+    <b>Wrap the whole table in one outer t.Run("group", func(t *testing.T) {...})</b>
+    <i>↓ the outer Run call blocks until every parallel child it contains has actually finished — unlike the bare test function</i>
+    <b>Put the loop of parallel t.Run calls INSIDE that group closure</b>
+    <i>↓ now TestUserQueries's own defer only fires after the group (and its parallel children) are truly done</i>
+    <b>Or use t.Cleanup registered per-subtest instead of one defer in the parent</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A parallel subtest pauses at t.Parallel(); it does not block its caller there.</b> The t.Run call that launched it returns almost immediately once the child hits t.Parallel(). Everything after that — including the rest of the loop, and any code in the enclosing test function after the loop, including its defers when the function returns — runs BEFORE the parallel subtest's remaining body does.
+</div>
+
+<div class="hf-note">Think of t.Parallel() as a subtest saying "hold my seat, I'll be right back" and then stepping out of line entirely — the line (your loop) keeps moving without them. If the parent function was holding a resource meant to be released "once everyone's done," releasing it the moment the line is empty is way too early; the people who stepped out haven't come back yet.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I put defer right after I opened the resource — isn't that the idiomatic, safe pattern?</p></div>
+  <div class="hf-bub right"><span class="who">Go's testing package</span><p>It's exactly right for a defer whose owner is the function it's declared in — I run it the instant that function's body returns, no matter what's still pending elsewhere.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But my subtests are "still pending elsewhere" when that happens?</p></div>
+  <div class="hf-bub right"><span class="who">Go's testing package</span><p>Correct — a parallel subtest paused at t.Parallel() belongs to a later phase I run after the non-parallel work at this level finishes, including your enclosing function returning. Your defer doesn't know that phase exists. It just sees its function end.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Trace one table test from "defer scheduled" to "subtests actually run" and watch where the gap opens up.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>TestUserQueries opens db; defer db.Close() is registered</span><span class="tag">defer armed</span></li>
+    <li class="open"><span><code>for _, tc := range cases { t.Run(tc.name, func(t *testing.T){ t.Parallel(); ... }) }</code></span><span class="tag">loop starts</span></li>
+    <li><span>Each subtest hits t.Parallel() almost immediately and pauses — control returns to the loop right away</span><span class="tag">pause, don't block</span></li>
+    <li class="open"><span>The for loop finishes fast; TestUserQueries's body has nothing left to run</span><span class="tag">parent body ends</span></li>
+    <li><span>TestUserQueries returns → its deferred db.Close() executes NOW</span><span class="tag">defer fires</span></li>
+    <li class="open"><span>Only after that does the test framework resume the paused subtests — some now query a closed db</span><span class="tag">too late</span></li>
+  </ol>
+  <p class="hf-annot">The gap is between steps 3 and 6: everything a subtest does after t.Parallel() is deferred to a later phase the framework controls, but step 5's defer doesn't know that phase is coming — it only knows TestUserQueries's function body just returned.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">TestUserQueries's function body returns<small>right after queuing 5 paused parallel subtests</small></div>
+    <div class="fan">everything that fires at that instant ↓</div>
+    <div class="obs">
+      <span>"--- PASS: TestUserQueries" is NOT yet printed</span>
+      <span class="new">the deferred db.Close() runs — right now</span>
+      <span>the next top-level test function may start</span>
+    </div>
+  </div>
+  <p class="hf-annot">The surprising reactor is the middle one. Nothing about "TestUserQueries returned" sounds like it should mean "and now its subtests' shared database is gone" — but that's exactly what a plain defer in the parent gives you.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">TestFoo does <code>db := openTestDB(); defer db.Close()</code>, then loops calling <code>t.Run(tc.name, func(t *testing.T){ t.Parallel(); useDB(t, db) })</code> for 5 cases. Which best describes the actual execution order?</p>
+  <button type="button">All 5 subtests finish using db, THEN TestFoo returns and closes db.</button>
+  <button type="button">TestFoo's loop finishes queuing all 5 paused subtests, TestFoo returns and closes db, THEN the subtests resume and may hit a closed db.</button>
+  <button type="button">t.Parallel() is ignored inside a defer-protected test, so the 5 cases just run sequentially and db.Close() happens last, safely.</button>
+  <p class="why" data-for="0">That's the order everyone expects from reading top-to-bottom — and it's exactly backwards for parallel subtests. t.Run does not wait for a t.Parallel() child to finish before returning to the loop.</p>
+  <p class="why" data-for="1">t.Parallel() pauses the subtest and hands control back to the loop immediately. Once the loop (and the rest of TestFoo) finishes, TestFoo returns and its defer fires — before the paused subtests resume and actually call useDB. That race is what makes this flaky rather than reliably broken: it depends on scheduling.</p>
+  <p class="why" data-for="2">t.Parallel() has nothing to do with defer semantics, and it's never ignored — it always pauses the calling subtest and queues it to run concurrently with its siblings once the parent's non-parallel work is done.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The cleanup fired at the wrong scope" is really an ownership bug wearing a testing-framework costume.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>JUnit's @AfterAll with untracked async work</h4>
+    <p>A JUnit @AfterAll that closes a shared resource runs once all test methods in the class finish — but if a test kicks off async work JUnit can't see (a raw thread, an unjoined future), @AfterAll can fire while that work is still touching the resource. Same ownership mismatch.</p>
+    <div class="hf-scatter"><span>the framework's "done" doesn't cover work it can't see</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>try-with-resources closing before an async callback runs</h4>
+    <p><code>try (var conn = pool.getConnection()) { conn.queryAsync(cb); }</code> closes conn the instant the try block exits — if cb runs later on another thread, it's holding a reference to an already-closed connection. Same defer-vs-async shape.</p>
+    <div class="hf-scatter"><span>synchronous cleanup syntax, asynchronous actual work</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A React useEffect cleanup racing a fetch</h4>
+    <p><code>useEffect(() => { fetch(url).then(setData); return () => { cancelled = true } }, [])</code> — the cleanup can run (component unmounts) before the fetch resolves, and without checking a cancellation flag you call setState on an unmounted component.</p>
+    <div class="hf-scatter"><span>the cleanup's timing is decided by the framework, not the code's visual order</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Go's testing package gives you table-driven subtests via t.Run, a rich testing.T API, framework-tuned benchmarks, and fuzzing/-race for finding real bugs — no external framework needed. <b>The one new sentence this block adds:</b> a defer in the enclosing test function fires the moment that function's body returns, which — thanks to how t.Parallel() pauses and re-queues a subtest — happens before its parallel children resume, so shared-resource cleanup belongs in t.Cleanup or an outer grouping t.Run, never a bare parent-level defer.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="gtSeg">
@@ -274,6 +378,7 @@ DevHubCodeWalk.mount('#cw-gotest',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

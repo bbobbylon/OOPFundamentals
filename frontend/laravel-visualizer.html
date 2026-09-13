@@ -58,7 +58,114 @@
     <div class="intro-ciam"><span class="tag">CIAM with Laravel:</span> Laravel Sanctum/Passport handle token auth; for a Ping/Entra bearer token you add a middleware that verifies the RS256 JWT against the JWKS and sets the authenticated user, then gate routes with <code>->middleware("auth")</code> and policies (≈ <code>@PreAuthorize</code>) for role checks. <code>$request->validate()</code> rejects bad input with a 422 before the controller runs. Eloquent\'s relationships make a consent/user model expressive — <code>$user->consents()->where("granted", true)->get()</code> — and <code>->with()</code> avoids N+1 across scopes. The shared-nothing model means each request re-verifies the token independently, which suits stateless JWT auth.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the exact <code>User::create($data)</code> this page just showed you, one queue dispatch away from quietly forgetting what you told it</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You set a value on an Eloquent model, hand that same model to a queued job, and the job runs with a version of it that never heard about the value at all.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Your queued job doesn't know about the property you just set</div>
+  <p>Say a controller saves a user, then sets one more thing in memory before handing the model to a job: <code>$user->save(); $user->referral_bonus = 10; ProcessSignup::dispatch($user);</code>. <code>referral_bonus</code> isn't a column — it's a value you want the job to use while sending a welcome email. It looks completely safe: the job type-hints <code>User $user</code> in its constructor, and Laravel's queue system is built specifically to carry Eloquent models across the wire.</p>
+  <p>Here's what actually happens. Every queued job that holds an Eloquent model uses Laravel's <code>SerializesModels</code> trait, and that trait does not serialize the object you handed it. It serializes exactly two things: the model's class name and its primary key. When a queue worker — a separate PHP process, quite possibly on a separate machine, picked up seconds or minutes later — unserializes the job, it does not restore your in-memory object. It runs <code>User::find(42)</code> against the database, right then, and builds a brand-new model from whatever is actually in the row. <code>referral_bonus</code> was never a column, so it was never in that row, so the fresh model simply doesn't have it. Not an error — just gone.</p>
+  <div class="hf-scatter">
+    <span>job dispatched with the model ✓</span>
+    <span>property spelled correctly ✓</span>
+    <span>queue driver delivered the job ✓</span>
+    <span>the value was never saved to a column ⚠</span>
+  </div>
+  <p class="hf-foot">The job didn't lose your data. It never had it — all it was ever given was your user's id.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Persist it, or pass it separately — don't bolt it onto the model</div>
+  <div class="hf-ladder">
+    <b>Save the value first if it truly belongs on the model</b>
+    <i>&darr; the worker's fresh <code>User::find($id)</code> then includes it, because it's really a column value now, not a memory-only guess</i>
+    <b>Or pass it as its own constructor argument, not a property tacked onto the model</b>
+    <i>&darr; <code>ProcessSignup::dispatch($user, $bonus)</code> serializes <code>$bonus</code> by its actual value — a plain int survives the trip on its own, independent of the model</i>
+    <b>And re-load any relationship the job actually needs inside handle()</b>
+    <i>&darr; a <code>-&gt;load('orders')</code> you did before dispatch doesn't ride along either — the worker's re-fetch is a bare model, so eager-load again inside the job if it needs the relation</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A queued Eloquent model is a promise to re-fetch by id later, not a snapshot of the object you dispatched — anything that isn't already sitting in a database column by the time the worker runs simply does not make the trip.
+</div>
+
+<div class="hf-note">Queuing a model is like mailing someone your library card instead of the book. They don't get your dog-eared page or the note you scribbled in the margin — just the card. When they get to the library, they check out a fresh copy.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I set <code>$user-&gt;referral_bonus = 10</code> right before I dispatched the job — why does the job see <code>null</code>?</p></div>
+  <div class="hf-bub right"><span class="who">SerializesModels</span><p>I never touched <code>referral_bonus</code>. What I stored in the queue payload was <code>"App\Models\User"</code> and the number <code>42</code>. That's the entire package.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But the job ran on the same request, practically the same millisecond. Nothing could have changed in the database in that time.</p></div>
+  <div class="hf-bub right"><span class="who">Queue worker</span><p>I don't know that, and I don't assume it. I'm a separate PHP process — maybe even a separate server. All you gave me was an id, so I ran the query myself. Whatever wasn't saved by the time I ran it never existed, as far as I'm concerned.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow <code>$user</code> from the controller, through the queue, to the worker — and watch exactly which parts of it survive the trip.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Controller sets <code>$user-&gt;referral_bonus = 10</code> in memory, then calls <code>ProcessSignup::dispatch($user)</code></span><span class="tag">dispatch</span></li>
+    <li class="open"><span>The job's constructor stores <code>$user</code> as a public property; <code>SerializesModels</code> intercepts how that property gets serialized</span><span class="tag">intercept</span></li>
+    <li><span>Instead of the object graph, it records only <code>get_class($user)</code> and <code>$user-&gt;getKey()</code> — <code>42</code> — into the payload</span><span class="tag">id only</span></li>
+    <li class="open"><span>That small payload is pushed onto the queue driver (database, Redis, SQS). <code>referral_bonus</code> was never part of it</span><span class="tag">enqueued</span></li>
+    <li><span>A queue worker process — started later, maybe on a different box — pops the payload and unserializes the job</span><span class="tag">dequeue</span></li>
+    <li class="open"><span>Unserializing runs <code>User::find(42)</code> fresh against the database to rebuild <code>$this-&gt;user</code> — a real query, not a memory restore</span><span class="tag">refetched</span></li>
+  </ol>
+  <p class="hf-annot">Step 6 is where the assumption quietly breaks. "Unserialize" sounds like restoring exactly what you had — but for a queued Eloquent model it means running a brand-new <code>SELECT</code>. Whatever was true about <code>$user</code> only inside the controller's memory in step 1, and never reached a <code>save()</code> call, simply isn't part of that new row. There was nowhere for it to survive.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">Inside the job's <code>handle()</code>, you read <code>$this-&gt;user-&gt;referral_bonus</code><small>the exact property set right before dispatch</small></div>
+    <div class="arrow">what you actually get &rarr;</div>
+    <div class="opts">
+      <span>the value you set on the model right before dispatch()</span>
+      <span class="on">null — a value that was never written to the users table</span>
+      <span>a thrown exception, because the property doesn't exist</span>
+    </div>
+  </div>
+  <p class="hf-annot">Nothing in this path raises an error — not PHP, not Laravel. There's no exception because there's no missing column being demanded; the slot just resolves to whatever the fresh row actually holds, which for a value that was never saved is nothing. Silence, not failure, is exactly what makes this one easy to ship.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A controller does <code>$user-&gt;save()</code>, then sets <code>$user-&gt;last_login_ip = $request-&gt;ip()</code> (never a real column, never saved), then calls <code>ProcessLogin::dispatch($user)</code>. Inside the queued job's <code>handle()</code>, what does <code>$this-&gt;user-&gt;last_login_ip</code> contain?</p>
+  <button type="button">The IP address — the job receives the very same $user object the controller had.</button>
+  <button type="button">Nothing meaningful — the queued job re-fetches $user fresh from the database by id, and last_login_ip was never in that row.</button>
+  <button type="button">A SerializationException, because last_login_ip was never persisted.</button>
+  <p class="why" data-for="0">The job never receives the same PHP object. <code>SerializesModels</code> only records the model's class and primary key, not any in-memory state, so anything not already saved never crosses the queue boundary.</p>
+  <p class="why" data-for="1">Right. When the worker unserializes the job, it rebuilds <code>$user</code> by running a fresh <code>User::find($id)</code> query. Since <code>last_login_ip</code> was set only in memory and never saved, the fresh row simply doesn't have it — no error, just an absent value.</p>
+  <p class="why" data-for="2">Serialization doesn't fail here — it succeeds completely, just not the way you'd expect: it silently keeps only the model's identity and drops everything else. That quiet success, not a thrown exception, is exactly what lets this ship unnoticed.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A snapshot that quietly goes stale is the same shape of bug wearing a different costume, all over a CIAM stack.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A JWT's role claim, minted at login</h4>
+    <p>An access token bakes in the roles a user had at the moment it was <em>issued</em>. Promote that user to admin five minutes into their session and the token they're still using doesn't lie exactly — it's just describing a moment that has already passed. It stays wrong until it's refreshed or re-issued, the same way a queued model stays stuck on whatever the database said at dispatch time.</p>
+    <div class="hf-scatter"><span>a snapshot presented as if it were still live</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A detached JPA entity crossing an @Async boundary</h4>
+    <p>Pass a <code>@Transactional</code>-loaded entity into an <code>@Async</code> method and by the time that method's thread touches it, the persistence context that loaded it has already closed. The entity is detached: set a field on it afterward without an explicit <code>merge()</code> and you've changed an orphaned in-memory copy — the database never hears about it, exactly like the unsaved property that never reaches the queue worker's fresh copy.</p>
+    <div class="hf-scatter"><span>the same trap, one layer down in Spring's own persistence context</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A stale closure in a UI event handler</h4>
+    <p>An event handler built during one render captures whatever the surrounding values were <em>at that instant</em>. Change that value a moment later, before the user clicks, and the handler still acts on the number it closed over — because a closure is a snapshot taken once, not a live wire back to the variable's current state.</p>
+    <div class="hf-scatter"><span>a captured moment mistaken for a live connection</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a request flows through Laravel's kernel, middleware, and router to a controller, where Eloquent lets the model both hold data and query for it, guarded by FormRequest validation and shipped with Artisan tooling. <b>The one new sentence this block adds:</b> the instant any of that data crosses into a queued job, only what has already been saved as a real column survives the trip — everything else evaporates as if it had never been set.
+</div>
+
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="lvSeg">
@@ -256,6 +363,7 @@ DevHubCodeWalk.mount('#cw-lv',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

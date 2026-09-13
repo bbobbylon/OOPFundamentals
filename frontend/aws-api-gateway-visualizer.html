@@ -42,6 +42,106 @@
     <div class="intro-ciam"><span class="tag">The CIAM parallel:</span> a Lambda authorizer that validates a Bearer JWT and returns an IAM policy is doing exactly what this codebase's own <code>CustomAuthFilter</code> does inside the Spring Boot security filter chain — parsing and verifying a signed JWT before a request reaches a controller. The difference is where it runs: <code>CustomAuthFilter</code> runs inside the same JVM as the app; a Lambda authorizer runs as a separate, independently-scaled function in front of API Gateway, so an auth failure never even spins up your backend compute.</p></div>
   </div>
 
+  <p class="hf-deck">or, the clock that stops your Lambda before Lambda's own clock ever gets a vote</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You set your Lambda's timeout to 5 minutes so a slow downstream call has room to finish. It still dies at 29 seconds. Every single time.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">504 GATEWAY_TIMEOUT, and your function's own logs show it still running</div>
+  <p>A Lambda behind API Gateway occasionally calls out to a partner's OAuth token endpoint that's slow under load, plus makes a query against RDS through a VPC-attached ENI. On a bad day, the whole chain takes 40 seconds. The function's own <code>Timeout</code> is configured for 5 minutes, so — the reasoning goes — there's plenty of headroom.</p>
+  <p>The client still gets a <code>504</code> at almost exactly 29 seconds. CloudWatch Logs for the function show it kept executing well past that point and eventually finished successfully. Nothing about the Lambda failed. API Gateway's own integration timeout — the maximum time it will wait for ANY backend integration to respond, completely independent of what the backend's own timeout is set to — is hard-capped at 29 seconds, and that ceiling cannot be raised past it for either a REST API or an HTTP API. Lambda's 15-minute execution ceiling is real, but it is a second, later gate that a request routed through API Gateway never lives long enough to reach.</p>
+  <div class="hf-scatter">
+    <span>Lambda's own Timeout set generously ✓</span>
+    <span>the function itself completing successfully ✓</span>
+    <span>API Gateway's separate, lower, non-negotiable 29-second ceiling ⚠</span>
+  </div>
+  <p class="hf-foot">Two different services, two different timeouts, and the client only ever sees whichever one is shorter — which, through API Gateway, is always API Gateway's.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Stop routing genuinely slow work through a synchronous API Gateway call</div>
+  <div class="hf-ladder">
+    <b>Attack the actual slow dependency first — cache the partner OAuth token, move the Lambda out of the VPC (or add a warm connection pool) if the ENI path is what's slow</b>
+    <i>↓ shrinking the real work is the only fix that also improves the user's actual wait time, not just the error they see</i>
+    <b>If the work is genuinely long-running, switch the client interaction to async: return 202 Accepted immediately, do the work in the background, and let the client poll or receive a webhook/notification</b>
+    <i>↓ this sidesteps the 29-second ceiling entirely, because the client is no longer waiting on one synchronous HTTP round trip through the gateway</i>
+    <b>Reserve a direct Lambda Function URL (no API Gateway in front) only for the specific slow path, if you control the caller and don't need the gateway's auth/throttling features for it</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>API Gateway's integration timeout and your backend's own timeout are two unrelated ceilings, and the caller only ever experiences the lower one.</b> Raising Lambda's timeout does nothing to move API Gateway's — they are configured in different places, owned by different services, and API Gateway will cut the connection at 29 seconds even while your function keeps running to a successful, logged completion on the other side.
+</div>
+
+<div class="hf-note">Sticky note: <b>29 seconds is API Gateway's problem, not Lambda's</b> — no amount of turning Lambda's own timeout dial moves a completely different service's completely separate ceiling.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I set the Lambda timeout to 5 minutes. Why is this request still dying at 29 seconds?</p></div>
+  <div class="hf-bub right"><span class="who">API Gateway</span><p>Because that 5-minute number belongs to Lambda, not to me. I stop waiting for ANY backend — Lambda or otherwise — at 29 seconds, no matter what that backend's own timeout says.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Can I just raise your 29 seconds to match?</p></div>
+  <div class="hf-bub right"><span class="who">API Gateway</span><p>No — this one isn't a dial I expose. 29 seconds is the ceiling for every integration, on every API type, and it doesn't move.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Three completely different slow causes. Watch them all land on the exact same symptom.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Cause A: the partner's OAuth token endpoint takes 35 seconds under load</span><span class="tag">cause</span></li>
+    <li class="open"><span>Cause B: a cold JVM Lambda spends 20 seconds initializing before it even starts real work, then the work itself takes 12 more</span><span class="tag">cause</span></li>
+    <li><span>Cause C: an RDS query through a VPC-attached Lambda takes 33 seconds under lock contention</span><span class="tag">cause</span></li>
+    <li class="open"><span>All three requests are routed through the same API Gateway integration with the same 29-second ceiling</span><span class="tag">shared gate</span></li>
+    <li><span>API Gateway stops waiting at 29.000 seconds for all three, regardless of which cause, or how close each one was to finishing</span><span class="tag">cutoff</span></li>
+    <li class="open"><span>All three clients receive the identical 504 GATEWAY_TIMEOUT, with no indication of which of the three unrelated causes was responsible</span><span class="tag">same symptom</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the trap for whoever's on call: three engineers debugging three different incidents all end up staring at the same error code, and none of the three backend timeouts (Lambda's own 15-minute ceiling included) ever got a chance to matter.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>slow partner OAuth call (35s)</span><span>cold JVM init + work (32s)</span><span>slow RDS query in a VPC (33s)</span></div>
+    <div class="funnel">all exceed API Gateway's 29-second integration ceiling ↓</div>
+    <div class="instance">504 GATEWAY_TIMEOUT<small>one identical symptom, three completely unrelated root causes — and Lambda's own 15-minute timeout never even got the chance to fire</small></div>
+  </div>
+  <p class="hf-annot">Read this funnel backward from an incident: a 504 from API Gateway tells you almost nothing about WHERE the 29 seconds went. It only tells you that something, somewhere in the chain, was too slow — the actual cause still has to be found in the Lambda's own logs, which by definition kept running past the point the client already gave up.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A Lambda's own Timeout is set to 15 minutes (the platform maximum) to be safe. It sits behind an HTTP API. A request to it takes 45 seconds end to end and the Lambda itself completes successfully. What does the client actually receive?</p>
+  <button type="button">A 504 at 29 seconds — the client never sees the Lambda's eventual success</button>
+  <button type="button">The full successful response, just delayed by 45 seconds instead of a normal request</button>
+  <button type="button">A 500 Internal Server Error, since the mismatched timeouts count as a configuration error</button>
+  <p class="why" data-for="0">Correct. API Gateway's own 29-second integration ceiling applies to HTTP APIs exactly the same as REST APIs, and it is completely independent of Lambda's 15-minute maximum — the client's connection is cut at 29 seconds no matter how the Lambda's own Timeout is configured.</p>
+  <p class="why" data-for="1">Lambda's generous Timeout setting only controls how long LAMBDA is willing to keep running — it has no effect on how long API GATEWAY is willing to wait for Lambda to respond, which is the shorter of the two ceilings here.</p>
+  <p class="why" data-for="2">A timeout mismatch isn't flagged as a configuration error anywhere — both settings are independently valid. The failure only shows up at request time, as a 504, once the gateway's own clock runs out.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A caller's patience running out before the callee's work finishes is a shape that repeats everywhere two independent timeouts stack.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>An Angular HttpClient timeout vs. a Spring Boot controller that keeps processing</h4>
+    <p>If an Angular interceptor times out an HTTP call after 10 seconds while the Spring Boot backend takes 15 to actually finish the write, the frontend shows an error and the user retries — even though the original request eventually succeeded server-side. The frontend's shorter clock, not the backend's actual completion, decided the user's experience.</p>
+    <div class="hf-scatter"><span>the caller's shorter timeout always wins the user's perception, regardless of what the callee eventually does</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A load balancer's idle timeout ending a connection a healthy backend is still using</h4>
+    <p>An ALB's idle timeout (default 60 seconds) can close a connection a backend server would have kept serving on just fine — the load balancer's own, separately-configured ceiling is what actually terminates the exchange, not anything wrong with the backend.</p>
+    <div class="hf-scatter"><span>the middle service's timeout, not the origin's, decides when the connection actually dies</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An OAuth authorization code's short expiry outliving a slow consent screen</h4>
+    <p>If a user takes too long clicking "Allow" on a consent screen, the authorization code itself can expire (they're intentionally short-lived, often under a minute) even though the identity provider's session and the client app's own request timeout are both still perfectly valid — a third, unrelated, shorter clock decided the outcome.</p>
+    <div class="hf-scatter"><span>the shortest of several independent clocks is always the one that actually fires</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> API Gateway is the front door that authenticates, throttles, and reshapes a request before your compute ever runs, choosing between a REST API's richer feature set and an HTTP API's cheaper, leaner one. <b>The one new sentence this block adds:</b> API Gateway enforces its own 29-second integration ceiling on every backend call regardless of type, and that ceiling — not your Lambda's own timeout — is the one the client actually experiences.
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
@@ -250,6 +350,7 @@ DevHubCodeWalk.mount('#cw-ag',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

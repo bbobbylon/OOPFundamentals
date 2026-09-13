@@ -162,6 +162,128 @@ public class Main {
   </div>
 
 
+<p class="hf-deck">or, the defensive copy that guarantees your record can never equal another one</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The compact-constructor scenario below clones the array to make <code>DataPoint</code> properly immutable. That clone is correct, and it is also the reason two identical <code>DataPoint</code>s are not equal.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A record with an array component cannot be both immutable and comparable</div>
+  <p>Records generate <code>equals</code> component by component. For a reference-typed component that means <code>Objects.equals</code> — and <code>Objects.equals</code> on two arrays ends up at <code>Object.equals</code>, which is <b>reference identity</b>. Arrays in Java have never had a content-based <code>equals</code>; that is what <code>Arrays.equals</code> is for, and the generated method does not call it.</p>
+  <p>So take the page's own <code>DataPoint(String name, int[] values)</code> with <code>values = values.clone()</code> in the compact constructor, and build it twice from the same array. Each construction clones, so the two records hold two <i>different</i> arrays with identical contents — and <code>equals</code> returns <b><code>false</code></b>. Measured, not argued: <code>hashCode</code> differs too, and <code>set.contains(new DataPoint("s", raw))</code> comes back <code>false</code> on a set you just added an identical value to.</p>
+  <p>Now delete the clone. <code>equals</code> starts returning <code>true</code> — but only when both records happen to share the same array <i>instance</i>; build one from a fresh <code>{1, 2, 3}</code> and it is <code>false</code> again. And you have given up immutability, which is the whole reason the clone was there. <b>The two goals are genuinely in conflict: with an array component you can have deep immutability or value equality, never both</b>, and no amount of care in the compact constructor resolves it.</p>
+  <p>The tell is in <code>toString</code>, which nobody reads closely: <code>DataPoint[name=s, values=[I@49476842]</code>. That is an array's identity hash, printed where you expected <code>[1, 2, 3]</code> — the generated <code>toString</code> is telling you what the generated <code>equals</code> is comparing.</p>
+  <div class="hf-scatter">
+    <span>the record is genuinely immutable ✓</span>
+    <span>the defensive copy is correct ✓</span>
+    <span>every component is populated ✓</span>
+    <span><code>equals</code> compares the array by identity ⚠</span>
+    <span>a <code>HashSet</code> can never find it again ⚠</span>
+  </div>
+  <p class="hf-foot">A record is a nominal tuple of <i>values</i>. An array reference is not a value, so the tuple stops behaving like one.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Don't put an array in a record</div>
+  <div class="hf-ladder">
+    <b>Use <code>List.copyOf(values)</code> and declare the component as <code>List&lt;Integer&gt;</code></b>
+    <i>↓ <code>List.equals</code> is content-based and <code>List.copyOf</code> returns a genuinely unmodifiable copy, so one change buys you immutability <i>and</i> value equality — both goals, no conflict, and the generated <code>toString</code> prints the contents</i>
+    <b>If the component must be a primitive array for performance, override <code>equals</code>, <code>hashCode</code> and <code>toString</code> together</b>
+    <i>↓ records let you replace any generated member, so <code>Arrays.equals</code>, <code>Arrays.hashCode</code> and <code>Arrays.toString</code> restore the behaviour you meant — but write all three, because a record with two of them is worse than one with none</i>
+    <b>And before either: ask whether this type is ever a map key, a set element, or compared in a test</b>
+    <i>↓ if the answer is no, an array component is fine and the whole question is academic; if it is yes, the failure is silent — <code>contains</code> returns <code>false</code>, an assertion fails with two values that print identically, and nothing throws</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A generated <code>equals</code> is only as good as the <code>equals</code> of its parts, and Java has exactly one common type whose <code>equals</code> is identity: the array.</b> That is not a records problem — Lombok's <code>@EqualsAndHashCode</code>, IDE-generated methods, and Kotlin's <code>data class</code> all have the same hole, and each of them papers over it differently. What records add is the false reassurance of "the compiler wrote it, so it must be right". The compiler wrote exactly what it promised: component-wise comparison. It cannot know that you meant the contents.
+</div>
+
+<div class="hf-note"><b>Check <code>toString</code> first.</b> If a component prints as <code>[I@49476842</code>, the generated <code>equals</code> is comparing that same reference — the two methods are built from the same rule.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>Both records hold <code>{1, 2, 3}</code> and the same name. How are they not equal?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The generated <code>equals</code></span>
+    <p>I compare components. <code>name</code> with <code>String.equals</code> — those match. <code>values</code> with <code>Objects.equals</code>, which for two arrays is reference identity, and you handed me two different arrays. I never look inside an array; nothing in Java's <code>Object.equals</code> does.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The compact constructor</span>
+    <p>And I am why they are different arrays. You asked me to clone so nobody could mutate the record afterwards, and I did — every construction gets its own copy. I made the record immutable and, in the same line, made it impossible for two of them to be equal.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who"><code>List.copyOf</code></span>
+    <p>Worth pointing out that I solve both at once. I return an unmodifiable copy, so mutating the caller's list cannot reach the record — and <code>List.equals</code> compares element by element, so two records built from equal lists are equal. The conflict only exists because an array was chosen.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps, and the defensive copy everyone recommends is step 2.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>record DataPoint(String name, int[] values)</code> with <code>values = values.clone()</code> in the compact constructor</span><span class="tag">textbook-correct</span></li>
+    <li class="open"><span><code>new DataPoint("s", raw)</code> — the record now holds clone #1, independent of <code>raw</code></span><span class="tag">immutability achieved</span></li>
+    <li><span><code>new DataPoint("s", raw)</code> again — same name, same source array, and now clone #2, a different object</span><span class="tag">two arrays, one content</span></li>
+    <li class="open"><span>The generated <code>equals</code> compares the two <code>int[]</code> references with <code>Objects.equals</code>, which is identity. Result: <code>false</code></span><span class="tag">equal values, unequal records</span></li>
+    <li><span><code>hashCode</code> is built the same way, so the two also land in different buckets</span><span class="tag">consistent, and consistently wrong</span></li>
+    <li class="open"><span><code>set.add(a); set.contains(b)</code> returns <code>false</code>. No exception. The set simply never finds what you put in it</span><span class="tag">silent</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the part that makes this dangerous rather than merely annoying: <code>equals</code> and <code>hashCode</code> stay <i>consistent</i> with each other, so the object obeys the <code>hashCode</code> contract perfectly and every collection behaves exactly as specified. <b>There is no broken invariant for a tool to detect</b> — a linter cannot flag it, a hash-based collection cannot notice it, and the object is a well-behaved member of any set that happens to contain only one of it. The bug lives entirely in the gap between "equal by the rule the compiler applied" and "equal by the rule you had in mind", and the only place that gap is visible is a test that builds the same value twice.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">one <code>int[]</code> component in a record<small>chosen because the data really is a fixed-size numeric buffer</small></div>
+    <div class="fan">everything the compiler generates from it ↓</div>
+    <div class="obs">
+      <span><code>equals</code> — compares the reference, so two records with identical contents are not equal</span>
+      <span><code>hashCode</code> — derived from the array's identity hash, so it differs between two equal values</span>
+      <span><code>toString</code> — prints <code>[I@49476842</code> instead of <code>[1, 2, 3]</code>, which is the visible symptom</span>
+      <span class="new">and the accessor <code>values()</code> hands back the live array, so the record is only immutable if you cloned on the way <i>out</i> as well</span>
+    </div>
+  </div>
+  <p class="hf-annot">The last one is the half that even careful code misses: a defensive copy in the compact constructor protects the record from the <i>caller's</i> array, and does nothing about the array the accessor returns. <code>dp.values()[0] = 99</code> mutates the record's own state, from outside, through a generated method you cannot see. <b>True immutability with an array component needs a copy in both directions</b> — and at that point you have written more code than the <code>List&lt;Integer&gt;</code> version, with worse equality, for a micro-optimisation nobody measured. The array is almost never worth it; it just looks like the obvious type for a row of numbers.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q"><code>record DataPoint(String name, int[] values)</code> with <code>values = values.clone()</code> in the compact constructor. You build it twice from the same <code>int[] raw = {1,2,3}</code> with the same name. What does <code>a.equals(b)</code> return?</p>
+  <button type="button"><code>true</code> — the generated <code>equals</code> compares components, and both records hold arrays with identical contents and an identical name</button>
+  <button type="button"><code>false</code> — reference-typed components are compared with <code>Objects.equals</code>, which for arrays is identity, and the clone gave each record its own array</button>
+  <button type="button"><code>true</code>, but <code>hashCode</code> differs — the generated <code>equals</code> special-cases arrays with <code>Arrays.equals</code> while <code>hashCode</code> uses the identity hash</button>
+  <p class="why" data-for="0">This is what "compares components" sounds like it means, and it is right for every component type except one. Arrays have no content-based <code>equals</code> in Java — <code>Objects.equals</code> on two arrays falls through to <code>Object.equals</code>, which compares references.</p>
+  <p class="why" data-for="1">Correct, and note that removing the clone does not fix it — it only makes the records equal when they happen to share the same array instance. Declare the component as <code>List&lt;Integer&gt;</code> with <code>List.copyOf</code>, or override <code>equals</code>, <code>hashCode</code> and <code>toString</code> together.</p>
+  <p class="why" data-for="2">The generated methods are never inconsistent with each other — both are built from the same component-wise rule, so <code>equals</code> and <code>hashCode</code> always agree. That consistency is exactly why no tool can detect this: the object obeys the <code>hashCode</code> contract perfectly while meaning something you did not intend.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Generated equality, and the component that quietly does not participate.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A record with a <code>double</code> component</h4>
+    <p>The generated <code>equals</code> compares doubles the way <code>Double.compare</code> does, not the way <code>==</code> does. So <code>new P(Double.NaN).equals(new P(Double.NaN))</code> is <b>true</b> — while <code>NaN == NaN</code> is false — and <code>new P(0.0).equals(new P(-0.0))</code> is <b>false</b>, while <code>0.0 == -0.0</code> is true. Both verified; both surprise people in opposite directions.</p>
+    <div class="hf-scatter"><span>record equality is not <code>==</code></span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Lombok's <code>@EqualsAndHashCode</code></h4>
+    <p>Same generation, same hole — except Lombok does special-case arrays, calling <code>Arrays.deepEquals</code>. So porting a Lombok <code>@Value</code> to a record can silently change equality semantics on exactly the component you were not thinking about.</p>
+    <div class="hf-scatter"><span>two generators, two rules</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A JPA entity keyed on a generated id</h4>
+    <p>Before the insert the id is <code>null</code>, after it is a number, so an entity's <code>hashCode</code> changes while it sits in a <code>HashSet</code> — and the set can no longer find it. <b>Any object whose identity is not stable for its whole life will be lost by a hash-based collection, quietly.</b></p>
+    <div class="hf-scatter"><span>identity must not move</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a record is a transparent carrier for its components — final fields, a canonical constructor, accessors, <code>equals</code>, <code>hashCode</code> and <code>toString</code>, all generated; sealed types close a hierarchy so <code>switch</code> can be checked for exhaustiveness, and the two together give you algebraic data types in Java. The sentence worth adding: <b>an array component breaks the generated <code>equals</code></b>, because arrays compare by identity — so the defensive copy that makes the record immutable also guarantees no two of them are ever equal; use <code>List.copyOf</code> instead.
+</div>
+
   <div class="panel">
     <h3>▶ Does the compiler let this switch through? — watch a sealed hierarchy get checked</h3>
     <div class="rt-ctlbar">
@@ -1091,6 +1213,7 @@ function updateVerdict(){
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

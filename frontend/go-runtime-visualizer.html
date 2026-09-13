@@ -58,7 +58,111 @@
     <div class="intro-ciam"><span class="tag">CIAM context:</span> This is why a Go auth gateway shrugs off 10k+ simultaneous connections — a goroutine-per-connection at ~2KB is feasible where a thread-per-request model (classic Spring MVC at ~1MB/thread) would exhaust memory. For predictable token-validation p99, set <code>GOMEMLIMIT</code> to the container's memory and consider a higher <code>GOGC</code> to trade RAM for fewer GC cycles. Cutting per-request heap allocations (reuse buffers, avoid pointers that escape) directly shrinks GC pauses under load.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">Or: the most harmless-looking log line in your handler is also its biggest allocator.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Nobody took the address of that int. It escapes to the heap anyway.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A hot path that allocates on every request, from a log line nobody suspects</div>
+  <p>A token-validation handler is otherwise allocation-free — no pointers escape, everything's plain ints and strings staying on the stack, exactly per the escape-analysis advice earlier on this page. Then someone adds one debug line: <code>log.Printf("validated user %d in %v", userID, elapsed)</code>.</p>
+  <p><code>go build -gcflags=-m</code> now reports <code>userID escapes to heap</code> and <code>elapsed escapes to heap</code> — for two plain, unaddressed local values that are only ever read, never pointed to. Under load, pprof shows thousands of small heap allocations per second, all traced back to that one log line, and GC pause time climbs to match.</p>
+  <div class="hf-scatter">
+    <span>no explicit pointers anywhere in the handler ✓</span>
+    <span>userID and elapsed never addressed with &amp; ✓</span>
+    <span>both passed to a ...any parameter ⚠</span>
+  </div>
+  <p class="hf-foot">Passing an argument to an interface parameter almost always forces it to escape, because the interface has to carry a type descriptor plus a pointer to the value, and the compiler can't prove how long that interface might live.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Keep hot-path logging typed, not interface-boxed</div>
+  <div class="hf-ladder">
+    <b>Reach for a structured logger with typed field constructors (zap.Int, zap.Duration) instead of %v</b>
+    <i>↓ a typed field API can often avoid the interface conversion entirely on the hot path — that's the whole reason those APIs exist</i>
+    <b>Gate expensive Printf-style debug logging behind a level check</b>
+    <i>↓ <code>if logger.Enabled(Debug) { log.Printf(...) }</code> means the allocation only happens when the line actually prints</i>
+    <b>And verify with go build -gcflags=-m or a benchmark's -benchmem, not intuition</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Boxing into an interface — not taking an address — is escape analysis's other trigger.</b> The page's earlier examples (returning &amp;User{}) are the obvious case: a pointer visibly escapes. Converting a plain value to interface{}/any is the invisible case: no &amp; appears anywhere in your source, yet the compiler must still heap-allocate so the interface's type-and-pointer pair has something stable to point at.
+</div>
+
+<div class="hf-note">An interface value is a claim ticket, not the coat. Handing fmt.Println a plain int is like checking your coat at a counter that only accepts claim tickets — the counter can't hold the coat directly, so it has to put YOUR coat on a hook somewhere (the heap) and hand back a ticket (the interface) pointing at it, even if you were only ever going to glance at it and walk away.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>userID is just an int. I never wrote &amp;userID anywhere. Why does it escape?</p></div>
+  <div class="hf-bub right"><span class="who">Go's escape analysis</span><p>You didn't take its address — I did, on your behalf, the moment you passed it to a parameter typed ...any. An interface value has to carry a pointer to the underlying data alongside its type descriptor. There's no "boxed int, no pointer" representation for me to use.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Couldn't you just keep the pointer on the stack, since the call returns right away?</p></div>
+  <div class="hf-bub right"><span class="who">Go's escape analysis</span><p>Sometimes I can, for small, provably-short-lived cases I can see all the way through. But log.Printf and fmt.Println are ordinary function calls, and variadic ...any slices in particular are one of the cases I conservatively push to the heap.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one int from "clearly stack-safe" to "heap allocation" with nothing but a log line in between.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>func handle(userID int) { ... }</code> — userID is a plain value parameter</span><span class="tag">stack candidate</span></li>
+    <li class="open"><span><code>validate(userID)</code> — a typed function call, no interface involved</span><span class="tag">still on stack</span></li>
+    <li><span><code>log.Printf("user %d ok", userID)</code> — Printf's signature is (format string, args ...any)</span><span class="tag">any parameter</span></li>
+    <li class="open"><span>The compiler must convert userID into an any to build that variadic slice</span><span class="tag">boxing required</span></li>
+    <li><span>That any needs a type descriptor + a pointer to the int's value — a stack address won't do</span><span class="tag">needs a stable address</span></li>
+    <li class="open"><span><code>go build -gcflags=-m</code>: "userID escapes to heap" — one log line changed where it lives</span><span class="tag">heap allocation</span></li>
+  </ol>
+  <p class="hf-annot">Nothing structural changed about userID between steps 2 and 3 — it's the exact same int. Only its DESTINATION changed, from a typed parameter to a variadic ...any slot, and that alone is what flips the compiler's decision from stack to heap.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">log.Printf("...%d...", userID) looks like a read-only call</span>
+      <div class="ring"><span class="lbl">userID is converted to any to build the ...args slice</span>
+        <div class="ring"><span class="lbl">that any needs a type descriptor + a pointer to the value</span>
+          <div class="core">userID escapes to the heap<small>even though nothing in the source ever wrote &amp;userID</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Peel the log line back one layer at a time and the heap allocation is at the center the whole time — just never visible from the outside, because every layer around it looks like ordinary, harmless value-passing.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A hot-path handler is allocation-free per -gcflags=-m until someone adds <code>log.Printf("lat=%v", elapsed)</code> where elapsed is a plain time.Duration local variable, never addressed with &amp;. What does escape analysis do with elapsed now?</p>
+  <button type="button">Nothing changes — only values passed with &amp; can ever escape to the heap.</button>
+  <button type="button">elapsed now escapes to the heap, because Printf's ...any parameter requires boxing it into an interface value.</button>
+  <button type="button">elapsed stays on the stack, but the format STRING itself moves to the heap instead.</button>
+  <p class="why" data-for="0">That's the rule for the OTHER, more obvious escape trigger (returning or storing a pointer) — but it's not the only one. Converting a value to an interface parameter is a second, separate trigger that needs no &amp; anywhere in the source.</p>
+  <p class="why" data-for="1">Printf's signature ends in ...any. Building that variadic slice means converting elapsed into an interface{} value, which needs a type descriptor plus a pointer to elapsed's data — a pointer the compiler can't safely leave on the stack, so elapsed moves to the heap.</p>
+  <p class="why" data-for="2">String literals are typically placed in read-only data at compile time, not the heap, and that's not what changes here anyway — the argument being boxed into the interface is what escapes, not the format string.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Boxing a value forces it off the fast path" is a cost that shows up wherever a language erases a concrete type into a generic one.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's autoboxing into Object</h4>
+    <p>Passing an int to a method expecting Object (or into a pre-generics Collection) autoboxes it into an Integer on the heap — the same "concrete value forced into a generic box that needs heap-backed identity" cost, just with the JVM doing the boxing instead of the Go compiler.</p>
+    <div class="hf-scatter"><span>same cost, different compiler doing the boxing</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>C#'s value types boxed into object</h4>
+    <p>A struct or int passed where object is expected gets heap-boxed in .NET too — .NET's own docs use the word "boxing" for this and recommend generic methods over object-typed ones for exactly this reason, the same fix idiomatic Go reaches for with typed logging fields.</p>
+    <div class="hf-scatter"><span>the vocabulary ("boxing") even matches across languages</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Python's everything-is-an-object model</h4>
+    <p>Python sidesteps this specific surprise by making everything heap-allocated from the start — there's no stack-resident int to escape, because Python never offered the fast path Go and Java are giving up here.</p>
+    <div class="hf-scatter"><span>you can't lose a fast path a language never gave you</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> the GMP scheduler multiplexes many goroutines onto a few OS threads via work-stealing, goroutine stacks start tiny and grow by copying, the GC is a concurrent low-pause collector tuned by GOGC/GOMEMLIMIT, and escape analysis decides stack vs heap per value. <b>The one new sentence this block adds:</b> passing a value to an interface parameter — as every Printf-style log call does — forces it to escape to the heap all by itself, with no pointer or &amp; anywhere in sight, which is the real reason zero-allocation loggers hand-write typed field constructors instead of formatting strings.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="grtSeg">
@@ -267,6 +371,7 @@ DevHubCodeWalk.mount('#cw-gort',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

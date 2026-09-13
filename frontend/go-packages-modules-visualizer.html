@@ -58,7 +58,114 @@
     <div class="intro-ciam"><span class="tag">CIAM context:</span> Lay out an auth service as one module <code>github.com/acme/ciam-gateway</code> with <code>internal/token</code>, <code>internal/idm</code>, <code>internal/store</code> — the <code>internal/</code> rule makes those compiler-enforced private, so no other team can couple to your token internals; the binary lives in <code>cmd/gateway</code>. Pin the JWT lib exactly (<code>jwt/v5 v5.2.1</code>) and let <code>go.sum</code> guarantee the bytes never change — supply-chain hygiene for a security-critical dependency. A breaking v2 of a shared SDK imports as <code>.../sdk/v2</code> so consumers upgrade deliberately.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the init() ordering rule that has nothing to do with imports, edits, or declarations — just filenames, sorted alphabetically</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Multiple files in the same package don't run their init() functions in the order you wrote them, imported them, or last touched them. They run in the order cmd/go happens to hand the files to the compiler — alphabetically, by filename.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Adding a new file silently changes which init() "wins"</div>
+  <p>A metrics package registers exporters by name, and two files each try to claim the same key during startup:</p>
+  <div class="code-block" style="font-family:monospace;font-size:12.5px;color:#e2e8f0;background:#0b1426;border-left:3px solid #00acd7;border-radius:0 6px 6px 0;padding:12px 16px;overflow-x:auto;margin:10px 0"><span style="color:#a78bfa">// exporters.go</span><br>func init() { registry["default"] = jsonExporter{} }<br><br><span style="color:#a78bfa">// prometheus.go</span><br>func init() { registry["default"] = prometheusExporter{} }</div>
+  <p>Neither file imports the other; neither declares any dependency between them. A developer reading top-to-bottom assumes declaration order, or import order in <code>main.go</code>, or maybe "whichever file was edited most recently" decides which <code>init()</code> runs last and therefore wins the <code>"default"</code> key. None of those are the actual rule. The Go spec is explicit: within a package, <code>cmd/go</code> presents multiple source files to the compiler in <strong>lexical (alphabetical) filename order</strong>, and package-level variable initialization plus <code>init()</code> functions across files run in that same order when there's no explicit dependency forcing otherwise. <code>exporters.go</code> sorts before <code>prometheus.go</code>, so <code>prometheus.go</code>'s <code>init()</code> runs second and silently overwrites the <code>"default"</code> entry.</p>
+  <p>Six months later, someone adds a third exporter and, out of habit, names the file <code>zz_datadog.go</code> so it "sorts to the bottom, out of the way." That single filename choice — nothing about the code inside it — makes the Datadog exporter win <code>"default"</code> instead of Prometheus, with no import changed and no line of existing code touched.</p>
+  <div class="hf-scatter">
+    <span>no import cycle, no explicit dependency between the files ✓</span>
+    <span>both init() functions compile and run correctly ✓</span>
+    <span>which one "wins" depends only on filename sort order ⚠</span>
+    <span>adding zz_datadog.go changes the winner with zero code review flag ⚠</span>
+  </div>
+  <p class="hf-foot">Nothing here is a bug in either file — it's a bug in the assumption that anything other than alphabetical filename order was ever deciding the outcome.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make the ordering explicit instead of leaning on filenames</div>
+  <div class="hf-ladder">
+    <b>Never let two init() functions race for the same side effect</b>
+    <i>&darr; if two files can both write registry["default"], that's a design smell independent of which one currently wins — make the registration itself detect and reject the collision</i>
+    <b>Prefer an explicit registration call from main(), in a visible order, over implicit init() magic</b>
+    <i>&darr; RegisterExporter("prometheus", prometheusExporter{}) called deliberately from main.go makes the order a line of code you can read, not a filename you have to alphabetize in your head</i>
+    <b>If init() order truly matters, say so with a comment AND a naming convention you enforce on purpose</b>
+    <i>&darr; treat filename-driven ordering as something you're choosing deliberately (and documenting), not something that fell out of whatever you happened to name the file</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Without an explicit dependency between them, multiple files' package-level init() functions run in alphabetical-by-filename order — not import order, not edit order, not the order they appear in your editor's file tree.
+</div>
+
+<div class="hf-note">Two init() functions racing for the same key is like two people writing on the same whiteboard slot, in an order decided entirely by the alphabetical position of their name tags — not who spoke first, not who has seniority, just spelling.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I added zz_datadog.go as a new exporter file and now the "default" exporter changed from Prometheus to Datadog. I didn't touch either existing file.</p></div>
+  <div class="hf-bub right"><span class="who">cmd/go</span><p>I hand your package's files to the compiler in alphabetical filename order, and init() functions with no explicit dependency between them run in that same order. "zz_datadog.go" sorts after "prometheus.go" — so its init() runs last and overwrites the key.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>I named it zz_ specifically so it would be out of the way!</p></div>
+  <div class="hf-bub right"><span class="who">cmd/go</span><p>"Out of the way" in a file tree and "last to run its init()" are the same fact, from my point of view. I don't know what any of these files mean to you — I just sort their names.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one package from three source files on disk to one line deciding which init() runs last.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Package metrics/ contains exporters.go, prometheus.go, and (later) zz_datadog.go</span><span class="tag">files</span></li>
+    <li class="open"><span>go build invokes cmd/go, which lists this package's files in lexical (alphabetical) filename order: exporters.go, prometheus.go, zz_datadog.go</span><span class="tag">sorted</span></li>
+    <li><span>The compiler processes package-level variable initializers and init() functions across these files in that exact sorted order, since none of them declares a dependency on another</span><span class="tag">in order</span></li>
+    <li class="open"><span>exporters.go's init() runs first, setting registry["default"] = jsonExporter{}</span><span class="tag">1st</span></li>
+    <li><span>prometheus.go's init() runs second, overwriting registry["default"] = prometheusExporter{}</span><span class="tag">2nd</span></li>
+    <li class="open"><span>zz_datadog.go's init() runs last, overwriting registry["default"] a third time — purely because "zz_" sorts last, not because Datadog is somehow the "final" or "most important" exporter</span><span class="tag">3rd, wins</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is the entire mechanism, and it happens before a single line of your code executes — the file order is decided by cmd/go reading directory entries and sorting names, a step most Go developers never learn exists because it almost never matters, right up until two init() functions quietly disagree about the same piece of state.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">Package directory: metrics/ — three .go files, no explicit dependency declared between them</span>
+      <div class="ring"><span class="lbl">cmd/go sorts the filenames lexically before handing them to the compiler: exporters.go, prometheus.go, zz_datadog.go</span>
+        <div class="core">init() functions run in that exact sorted order<small>whichever file's name sorts LAST has the final, winning write to any shared state — invisibly, with no build warning</small></div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Reading inward: the outer ring is just files sitting in a folder, indistinguishable in importance; the middle ring is the one invisible step — a plain alphabetical sort — that most Go code never needs to know exists; the core is where that sort quietly becomes a business decision, deciding which exporter, which config default, which registered handler "wins."</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">Package <code>metrics</code> has two files, <code>exporters.go</code> and <code>prometheus.go</code>, each with an <code>init()</code> that writes to <code>registry["default"]</code>. Neither file imports the other or declares any dependency between them. What determines which one's write wins?</p>
+  <button type="button">Alphabetical filename order — cmd/go presents files to the compiler in lexical order, and exporters.go sorts before prometheus.go, so prometheus.go's init() runs second and wins.</button>
+  <button type="button">Declaration order inside each file — whichever init() function is physically written closer to the top of its file runs first across the whole package.</button>
+  <button type="button">Import order in main.go — whichever package-level symbol main.go references first from that package causes that file's init() to run first.</button>
+  <p class="why" data-for="0">Right. With no explicit dependency between the files, the Go spec has cmd/go hand them to the compiler in lexical filename order, and init() functions run in that same order — exporters.go first, prometheus.go second and therefore last-write-wins on the shared key.</p>
+  <p class="why" data-for="1">Declaration position only controls order WITHIN a single file — multiple init() functions in the same file do run top-to-bottom. Across separate files, filename order is what governs it, not where each function sits inside its own file.</p>
+  <p class="why" data-for="2">Which symbol main.go happens to reference first has no effect on init() ordering between sibling files in the same package — imports control which packages get initialized before which, not the file order inside one package.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"An invisible sort step decides execution order, until two things collide" shows up anywhere a language or tool discovers files instead of being told their order explicitly.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>CSS load order for colliding selectors</h4>
+    <p>Two stylesheet <code>&lt;link&gt;</code> tags with equal specificity resolve a conflicting rule by whichever one appears LAST in the compiled HTML — often decided by a bundler's own file-discovery order, not by which rule a developer intended to "win." A renamed file, sorted differently by the bundler, can flip which style applies with no visual diff in either file's own contents.</p>
+    <div class="hf-scatter"><span>the same last-one-wins collision, in the browser's cascade</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Python's __init__.py import side effects across a package</h4>
+    <p>When a Python package's submodules each register a plugin via a module-level side effect, and nothing pins their import order explicitly, the actual order can hinge on directory listing order or import-statement placement — an implicit ordering rule most developers never examine until two plugins claim the same registry key.</p>
+    <div class="hf-scatter"><span>the same implicit-discovery-order trap, one ecosystem over</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Spring's component scan with ambiguous bean priority</h4>
+    <p>Two <code>@Component</code> classes both implementing the same interface, with no explicit <code>@Primary</code> or <code>@Order</code>, get a winner decided by Spring's own internal bean-definition ordering — effectively classpath scan order — rather than anything a developer wrote on purpose. It compiles fine right up until a new class is added and the "wrong" bean becomes primary.</p>
+    <div class="hf-scatter"><span>the identical shape in your own day-job framework</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a package groups files sharing one import path, go.mod pins the module's own path and Go version, go.sum locks every dependency to a verified checksum, and semantic-import-versioning puts a v2+ major version right into the import path itself. <b>The one new sentence this block adds:</b> when multiple files in the same package have no explicit dependency between them, their init() functions run in alphabetical filename order — a fact that stays invisible until two of them write to the same piece of shared state, and a new filename silently decides which one wins.
+</div>
+
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="gpmSeg">
@@ -268,6 +375,7 @@ DevHubCodeWalk.mount('#cw-gomod',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -63,7 +63,107 @@
     <div class="intro-ciam"><span class="tag">CIAM angle:</span> Adaptive authentication risk-scoring is a real supervised-learning classification problem — features like device fingerprint, IP reputation, and login velocity map to a labeled outcome (<code>was_fraudulent</code>), and the exact train/validation/test discipline on this page is what stops a fraud model from reporting inflated accuracy that falls apart in production. Ping's CIAM &amp; Adaptive Auth page covers the policy side of this same idea.</div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, why a random train/test split can be the one bug the accuracy number can't show you</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The exact split code taught earlier on this page can secretly hand your model the future — and every metric will agree it's doing great.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">92% validation accuracy on a model that's actually worthless</div>
+  <p>You take the <code>train_test_split(X, y, test_size=0.3, random_state=42)</code> pattern from earlier on this page and run it on daily data — say, <code>will_customer_churn_next_week</code> computed from a rolling window of activity. <code>train_test_split</code> shuffles by default (<code>shuffle=True</code>), so rows land in train and test in random order, completely ignoring the date each row came from.</p>
+  <p>Validation accuracy comes back at 92%. Cross-validation across five different random splits agrees — every fold reports something in the 88-94% range. Every step of this page's own workflow was followed correctly: train fits, validation tunes, test is touched exactly once. And the number is still a lie.</p>
+  <div class="hf-scatter">
+    <span>train/val/test kept strictly separate ✓</span>
+    <span>test touched exactly once ✓</span>
+    <span>the split never checked WHEN each row happened relative to the others ⚠</span>
+  </div>
+  <p class="hf-foot">The model isn't predicting the future. It's interpolating between two nearly-identical days that a random shuffle happened to put on opposite sides of the split.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Split on the calendar, not on a coin flip</div>
+  <div class="hf-ladder">
+    <b>Sort the data by timestamp before splitting</b>
+    <i>↓ this turns "the future" into a concrete, checkable boundary instead of an abstract idea</i>
+    <b>Put the earliest rows in train and the latest rows in test — never shuffle across that boundary</b>
+    <i>↓ this forces the model to predict rows it genuinely could not have seen at training time, exactly like production will demand</i>
+    <b>Use scikit-learn's TimeSeriesSplit for cross-validation instead of KFold</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A random split is only an honest test of generalization when every row is independent of every other row; the moment that stops being true — because today's price predicts tomorrow's, or last week's login pattern predicts this week's — a shuffle stops testing "does this generalize" and starts testing "can this interpolate," which is a far easier and far less useful question.
+</div>
+
+<div class="hf-note">If your rows carry a date, ask one question before calling <code>train_test_split</code>: <b>could this row have possibly happened before that row's outcome was even known?</b> If the honest answer is "they're basically simultaneous," a random shuffle just built you a model that time-travels.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>My churn model gets 92% validation accuracy. Why does it fall apart the week I actually ship it?</p></div>
+  <div class="hf-bub right"><span class="who">train_test_split, personified</span><p>Because I never asked what a date column was. You handed me rows in random order, and I split them the same way — some of your "future" test rows sat right next to their "past" twins in training.</p></div>
+  <div class="hf-bub"><span class="who">Tuesday's row</span><p>Wednesday's row and I are basically the same customer, one day apart. If one of us lands in training and the other in test, the model didn't predict me — it just remembered my neighbor.</p></div>
+  <div class="hf-bub right"><span class="who">TimeSeriesSplit</span><p>Which is why I never let a training fold contain anything that happened after its own validation fold. Boring rule, but it's the one that matches how deployment actually works.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Nothing about the split call is broken — it's doing exactly what shuffle=True promises.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>1,000 rows are effectively ordered by date (day 1 through day 1000) before train_test_split ever sees them</span><span class="tag">RAW ORDER</span></li>
+    <li class="open"><span>shuffle=True — the default — scrambles that order completely before slicing off 30% for test</span><span class="tag">SHUFFLE</span></li>
+    <li><span>A test row from day 512 can now sit right next to a training row from day 511 or day 513 — one calendar day away, not the 700-row gap the split percentage implies</span><span class="tag">NEIGHBORS</span></li>
+    <li class="open"><span>Time-adjacent rows share almost everything that matters — the same recent trend, the same season, sometimes the same underlying event — so the model doesn't need to generalize, just interpolate</span><span class="tag">THE SHORTCUT</span></li>
+    <li><span>Validation and cross-validation both report a great score, because both were computed from the same scrambled, leak-friendly order</span><span class="tag">FALSE CONFIDENCE</span></li>
+    <li class="open"><span>In production, day 1001 has no day-1000-and-a-half neighbor already sitting in the training set — the shortcut disappears, and so does the accuracy</span><span class="tag">REALITY</span></li>
+  </ol>
+  <p class="hf-annot">Steps 3 and 4 are the ones to sit with: the 70/15/15 split percentages describe how many rows land where, not how far apart in TIME they are. A random shuffle can place a test row and its closest possible training neighbor one calendar day apart, no matter how large the dataset is.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>cross-validation score is stable across folds</span><span>validation accuracy is high</span><span>test accuracy nearly matches validation</span></div>
+    <div class="funnel">all three point to the same underlying shortcut ↓</div>
+    <div class="instance">the model is interpolating between time-adjacent neighbors, not generalizing to the future<small>one real cause behind three reassuring-looking metrics</small></div>
+  </div>
+  <p class="hf-annot">Every metric this page teaches you to trust — validation score, cross-validation stability, a held-out test number — is designed to catch overfitting to the training rows. None of them were designed to catch a split that leaks time-adjacent neighbors across the train/test boundary, because that leak happens before any of those metrics ever get computed.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">You build a <code>will_price_go_up_tomorrow</code> classifier from three years of daily data using <code>train_test_split(X, y, test_size=0.3, random_state=42)</code>, exactly as shown earlier on this page. Cross-validation and the held-out test set both agree: roughly 90% accuracy. The following month in production, accuracy drops to barely above a coin flip. What's the most likely explanation?</p>
+  <button type="button">The production data distribution shifted since training, unrelated to how the split was done</button>
+  <button type="button">90% was overfitting to the training set's noise, and stronger regularization would have caught it</button>
+  <button type="button">The random shuffle put time-adjacent rows on both sides of the split, so the model learned to interpolate between neighbors instead of forecast forward</button>
+  <p class="why" data-for="0">Distribution shift is real and does happen, but it doesn't explain why validation and cross-validation independently agreed at 90% beforehand — a genuine shift isn't something any split strategy would have caught in advance. The specific symptom here — several independent-looking checks agreeing, then collapsing hard on genuinely forward-in-time data — is the signature of a split-level leak, not drift.</p>
+  <p class="why" data-for="1">Overfitting usually shows up as a gap BETWEEN training accuracy and validation/test accuracy, with validation and test agreeing with each other at a lower, honest number. Here validation and test agree closely with each other at a high number — both were computed the same leaky way, which points at the split, not at the model's capacity.</p>
+  <p class="why" data-for="2">Right. Shuffling before splitting placed test rows next to their nearest same-week (sometimes literally adjacent-day) training rows. The model learned to interpolate between correlated neighbors rather than truly forecast forward — a shortcut that disappears the moment production data has no such neighbor already sitting in training.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Letting a random function decide something that has a real-world order shows up constantly outside data science.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A test suite that randomizes execution order</h4>
+    <p>A CI suite that randomizes test order for speed can hide a test quietly depending on state left behind by another test that happened to run first. It passes every time on your machine, because your machine always happens to land on a compatible order — until CI's parallel runner picks a different one and the "flaky" failure shows up nowhere you'd think to look.</p>
+    <div class="hf-scatter"><span>shuffling something with a hidden required order swaps "works" for "works by luck"</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A risk model validated on shuffled login sessions</h4>
+    <p>A risk-based auth model validated by randomly shuffling historical login sessions ignores that one user's sessions are correlated across time — the same device fingerprint and IP show up on both sides of the split because they're literally the same person's earlier and later logins, separated by chance rather than by a real boundary. The model looks like it detects fraud; it's mostly recognizing repeat visitors.</p>
+    <div class="hf-scatter"><span>the same identity on both sides of a split isn't generalization, it's memorization wearing a disguise</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Replaying a write-ahead log out of order</h4>
+    <p>A backup-restore tool that replays write-ahead-log segments "in parallel for speed" looks fine against a low-write test database and corrupts real state on a busy one — because no entry in that log was ever independent of the one before it. Order wasn't an optimization detail; it was the actual meaning of the data.</p>
+    <div class="hf-scatter"><span>data that has an order encodes part of its meaning IN that order</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> supervised vs unsupervised, the train/validation/test split, and the bias-variance tradeoff are the mental model the rest of this track builds on. <b>The one new sentence this block adds:</b> train_test_split's default shuffle assumes every row is independent of every other row, and the day your data carries a timestamp, that assumption is the first thing you need to validate — before the model.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -359,6 +459,7 @@ DevHubCodeWalk.mount('#cw-mlfund',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

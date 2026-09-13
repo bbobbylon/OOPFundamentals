@@ -111,7 +111,108 @@
     <div class="intro-ciam"><span class="tag">CIAM local dev stack:</span> A full <code>compose.yaml</code>: postgres + redis + ciam-auth (your Spring app) + ping-server + keycloak/mock-oauth for testing Entra flows. Spring reads DB creds from env vars (same names as the K8s Secret keys — Compose uses plaintext, prod uses real secrets), and <code>depends_on: postgres: condition: service_healthy</code> stops Flyway running before Postgres accepts connections. For remote debugging, an override adds <code>JAVA_TOOL_OPTIONS: "-agentlib:jdwp=...,address=*:5005"</code> and exposes 5005 — attach IntelliJ and set breakpoints.</div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, why your node_modules disappeared the moment you added one line for hot-reload</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">A bind mount doesn't add a folder to a container. It replaces one — and whatever the image built there goes dark.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Cannot find module 'express' — in an image that built successfully</div>
+  <p>Your Dockerfile does <code>COPY package*.json .</code> and <code>RUN npm install</code>, baking a real <code>node_modules</code> into <code>/app</code> inside the image. Plain <code>docker run</code> works fine. Then, purely for local hot-reload, you add one line to <code>compose.yaml</code>: <code>volumes: - .:/app</code> — so edits on your laptop show up instantly without a rebuild.</p>
+  <p>The container now crashes on start with <code>Error: Cannot find module 'express'</code>. A bind mount doesn't overlay or merge with whatever the image already put at that path — it <b>replaces the entire directory</b> with your host folder, for as long as the mount is active. Your host checkout has no <code>node_modules</code> — it's gitignored, only ever installed inside the image — so the instant the mount takes effect, <code>/app</code> becomes your host folder, missing dependencies and all.</p>
+  <div class="hf-scatter">
+    <span>the image built correctly ✓</span>
+    <span>npm install ran, dependencies exist ✓</span>
+    <span>the Dockerfile is fine ✓</span>
+    <span>the bind mount replaced the whole directory ⚠</span>
+  </div>
+  <p class="hf-foot">Every earlier step did its job — the shadow happens after the image is built, the instant the container starts.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Carve the dependency directory out of the mount</div>
+  <div class="hf-ladder">
+    <b>Keep the bind mount for the code you actually want live</b>
+    <i>↓ <code>volumes: - .:/app</code> still gets you instant reloads for the files you're editing — the mount itself isn't the mistake</i>
+    <b>Add a second, more specific volume entry over just the built directory</b>
+    <i>↓ <code>- /app/node_modules</code> (an anonymous volume, no host path) — Docker resolves the more specific mount path last, so it wins over the broader <code>.:/app</code> bind mount for that one subdirectory only</i>
+    <b>Confirm inside the running container with <code>docker compose exec ciam-auth ls node_modules</code> — not just in the build log</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A bind mount is a replacement, not a merge.</b> Whatever exists on the host at that path becomes the entire contents of that path in the container — nothing from the image bleeds through underneath it. The only way to keep an image-built subdirectory visible is to mount something else, something more specific, directly over that one subdirectory so it takes precedence over the broader mount around it.
+</div>
+
+<div class="hf-note">A bind mount doesn't hand you a merged apartment — it hands you new locks. Mounting your laptop's folder over <code>/app</code> is like a new tenant moving in with their own furniture: <b>whatever the previous tenant (the image) left behind is still legally somewhere, just not reachable through this door anymore.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>The build log clearly says "added 74 packages." The dependencies exist. Why is the app acting like they don't?</p></div>
+  <div class="hf-bub right"><span class="who">Compose, personified</span><p>They do exist — inside the image. You never asked to run the image as-is; the moment you added <code>volumes: - .:/app</code>, you asked me to swap that whole folder out first.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>I only wanted my source edits to show up without rebuilding. I didn't think a mount "swap" would touch anything else in there.</p></div>
+  <div class="hf-bub right"><span class="who">Docker's mount system</span><p>I don't know which files you meant to share and which ones you meant to leave alone. You gave me a directory. I mounted a directory. Everything under it, including things you didn't mention, came from the same source: your host.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Two mounts can target the same parent path — Compose just needs the more specific one to win.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Image build runs RUN npm install, writing real files into /app/node_modules inside the image layer</span><span class="tag">build time</span></li>
+    <li class="open"><span>Container starts; Docker applies volumes: - .:/app first, replacing /app's view entirely with your host checkout</span><span class="tag">mount #1</span></li>
+    <li><span>Your host checkout has no node_modules — it was never installed there, only inside the image</span><span class="tag">host reality</span></li>
+    <li class="open"><span>Docker also applies the second, narrower mount: - /app/node_modules (an anonymous volume) targeting exactly that one subdirectory</span><span class="tag">mount #2</span></li>
+    <li><span>Docker resolves mounts from least to most specific, so the narrower node_modules mount layers on top of, not lost inside, the broader one</span><span class="tag">mount precedence</span></li>
+    <li class="open"><span>An empty named or anonymous volume is pre-populated from whatever the image already has at that path on first use — so node_modules reappears</span><span class="tag">pre-populate</span></li>
+  </ol>
+  <p class="hf-annot">The step worth staring at is the last one: an anonymous or named volume gets seeded from the image's own content the FIRST time it's created — but a plain bind mount never does that seeding, ever. That one-way asymmetry is the entire fix, and the entire trap.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>Node's node_modules</span><span>Maven's target/</span><span>a Python venv</span></div>
+    <div class="funnel">same underlying mechanism ↓</div>
+    <div class="instance">The bind mount replaces the directory, silently<small>one symptom, three unrelated-looking stacks</small></div>
+  </div>
+  <p class="hf-annot">Whichever ecosystem, whichever build tool, the failure mode is identical because it was never about npm or Maven at all — it's about how Docker mounts work, full stop.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">Your ciam-auth image runs RUN npm install during the build, baking node_modules into /app. Your compose.yaml then adds this for local hot-reload: volumes: - ./:/app — nothing else. You run docker compose up and the container immediately crashes with Error: Cannot find module 'express'. What's going on?</p>
+  <button type="button">The bind mount replaced the whole /app directory with your host folder — and your host folder has no node_modules, since it's gitignored, so the image's install never makes it into the running container.</button>
+  <button type="button">npm install must have failed during the image build — check the build logs for a network error.</button>
+  <button type="button">The container is using a stale, previously-cached image layer from before you added express as a dependency — a full docker compose build --no-cache will fix it.</button>
+  <p class="why" data-for="0">Right — and notice compose.yaml has only ONE volume line here, nothing carving out node_modules, so nothing protects it from the shadow. Add <code>- /app/node_modules</code> as a second mount to fix it.</p>
+  <p class="why" data-for="1">If npm install had failed, the image build itself would have failed, and docker compose up would never produce a running container at all — you wouldn't get one that starts and then crashes on a specific missing module. A crash after a clean build points at what changed at run time, not build time.</p>
+  <p class="why" data-for="2">A stale layer would give you an OLD version of express, or a missing package you added in the last five minutes — not a total absence of a module that install clearly reported adding. --no-cache rebuilds a perfectly good image; it does nothing about what a bind mount hides from it at runtime.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Anything layered has this exact failure mode: the last thing applied wins, and it doesn't ask what it's covering up.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>CSS z-index / stacking</h4>
+    <p>An absolutely-positioned element with a high z-index doesn't merge with what's underneath — it fully obscures it, click targets and all, even though the covered element is still sitting in the DOM.</p>
+    <div class="hf-scatter"><span>last-applied wins, nothing merges</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Java classloader shadowing</h4>
+    <p>Two JARs on the classpath with the same fully-qualified class name don't get combined — whichever the classloader resolves first wins outright, and the other version's code is simply never reached, no error, no warning.</p>
+    <div class="hf-scatter"><span>resolution order decides everything, silently</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Kubernetes ConfigMap volume mount</h4>
+    <p>Mounting a ConfigMap as a volume at a path that already has files in the container image replaces that directory's contents with only the ConfigMap's keys — any file the image shipped there that isn't also a ConfigMap key simply isn't present anymore.</p>
+    <div class="hf-scatter"><span>same replace-don't-merge rule, one layer up</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Compose turns a pile of docker run flags into one declarative file, wires services together on an auto-created network, and waits on health rather than just process start. <b>The one new sentence this block adds:</b> the volumes: line that makes local development pleasant is also the one line that can make a perfectly-built image behave as if half of it never existed.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -518,6 +619,7 @@ function showSection(id) {
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -58,7 +58,116 @@
     <div class="intro-ciam"><span class="tag">CIAM context:</span> An auth gateway threads one <code>ctx</code> from the inbound request through token validation → JWKS fetch → user-lookup query. A 3s <code>WithTimeout</code> stops a slow IdP piling up goroutines; if the client disconnects, <code>ctx.Done()</code> closes and the in-flight DB query is cancelled — no wasted work. The principal and a trace ID ride along via <code>WithValue</code>, reaching every layer without a thread-local — the Go equivalent of a Spring request scope + <code>@Transactional(timeout=3)</code>, made explicit.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the ctx.Done() that fires the instant your handler returns — not when the client gives up</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You launch a "fire and forget" goroutine from inside an HTTP handler using r.Context(), and the moment the handler function returns, that context is already cancelled — whether or not the goroutine finished.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Your background audit-log write dies mid-query, every time</div>
+  <p>A signup handler creates the user, writes the 201 immediately so the client isn't stuck waiting, and fires off an audit-log write in the background so it doesn't block the response:</p>
+  <div class="code-block" style="font-family:monospace;font-size:12.5px;color:#e2e8f0;background:#0b1426;border-left:3px solid #00acd7;border-radius:0 6px 6px 0;padding:12px 16px;overflow-x:auto;margin:10px 0">func SignupHandler(w http.ResponseWriter, r *http.Request) {<br>&nbsp;&nbsp;user := createUser(r)<br>&nbsp;&nbsp;w.WriteHeader(http.StatusCreated)<br>&nbsp;&nbsp;go func() {<br>&nbsp;&nbsp;&nbsp;&nbsp;auditLog(r.Context(), user)&nbsp;&nbsp;<span style="color:#a78bfa">// "fire and forget"</span><br>&nbsp;&nbsp;}()<br>}</div>
+  <p>This looks like exactly what the page above teaches: <code>ctx</code> first, and <code>auditLog</code> selects on <code>ctx.Done()</code> like a well-behaved function should. It even feels extra safe — reusing <code>r.Context()</code> means the background write inherits the request's own cancellation semantics.</p>
+  <p>Go's own <code>net/http</code> documentation says, plainly: for an incoming server request, the context is canceled when the client's connection closes, when the request is canceled (HTTP/2), <strong>or when the ServeHTTP method returns</strong>. <code>SignupHandler</code>'s function body — and therefore its call to <code>ServeHTTP</code> — returns the instant the goroutine is launched; Go doesn't wait around for goroutines you didn't explicitly join. The moment that happens, <code>r.Context()</code>'s <code>Done()</code> channel closes, <code>auditLog</code>'s own <code>select</code> fires, and the write aborts — often mid-query, regardless of the client's connection, which is still perfectly open the whole time.</p>
+  <div class="hf-scatter">
+    <span>ctx passed as the first parameter, exactly as taught ✓</span>
+    <span>auditLog respects ctx.Done() like a well-behaved function should ✓</span>
+    <span>the 201 response reached the client instantly ✓</span>
+    <span>the handler returning ALSO tore down the context the goroutine depends on ⚠</span>
+  </div>
+  <p class="hf-foot">The goroutine didn't ignore cancellation — it obeyed it perfectly. The request context was simply never meant to outlive the handler call that received it, and <code>go func(){...}()</code> doesn't change that.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Detach background work from the request's context on purpose</div>
+  <div class="hf-ladder">
+    <b>Strip the cancellation, keep the values, for work that must outlive the handler</b>
+    <i>&darr; <code>context.WithoutCancel(r.Context())</code> (Go 1.21+) keeps request-scoped values like a trace id but drops the parent's cancellation, so ServeHTTP returning no longer kills it</i>
+    <b>Or start truly detached work from context.Background() with its own timeout</b>
+    <i>&darr; <code>context.WithTimeout(context.Background(), 5*time.Second)</code> gives the background task an independent budget that has nothing to do with the request's lifetime</i>
+    <b>And never assume "go func" means "keeps running after the handler" without checking whose context it holds</b>
+    <i>&darr; the goroutine itself keeps running as far as the Go runtime is concerned — anything inside it selecting on the REQUEST's ctx.Done() will still see it close the instant ServeHTTP returns</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A request's <code>context.Context</code> is scoped to the handler call, not to any goroutine you happen to launch from inside it — the instant <code>ServeHTTP</code> returns, that context is cancelled, whether or not anything you started with it has finished.
+</div>
+
+<div class="hf-note">The request context is like a rental car returned the moment you walk into the airport terminal. Anyone still driving it thirty seconds later, because they hopped out for a coffee first, is driving a car that's already been reported returned.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I passed r.Context() into my background goroutine, and it respects Done() exactly like the page said to. Why does it abort partway through, every single time?</p></div>
+  <div class="hf-bub right"><span class="who">net/http</span><p>Because I close that context's Done() channel the instant your handler function returns. I never promised it would live any longer than that call — launching a goroutine from inside the handler doesn't tell me to wait for it.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But the goroutine is still actively running when the handler returns!</p></div>
+  <div class="hf-bub right"><span class="who">net/http</span><p>I don't track your goroutines — I only track the one thing I own, which is the request's lifecycle. The moment ServeHTTP returns, the request is over from my point of view, and its context ends right along with it.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow the request context from the moment the handler receives it to the moment it closes underneath a goroutine that's still working.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>SignupHandler receives r with a live request context tied to this one HTTP request</span><span class="tag">request ctx</span></li>
+    <li class="open"><span>It writes the 201 response, then launches go func() { auditLog(r.Context(), user) }()</span><span class="tag">launch</span></li>
+    <li><span>Go schedules the goroutine to run concurrently — SignupHandler does NOT block waiting for it</span><span class="tag">concurrent</span></li>
+    <li class="open"><span>SignupHandler's function body finishes, which means the ServeHTTP call itself returns</span><span class="tag">handler returns</span></li>
+    <li><span>net/http's server, per its own documented contract, closes r.Context()'s Done() channel at that exact moment</span><span class="tag">ctx closes</span></li>
+    <li class="open"><span>auditLog's own select on ctx.Done() fires — often mid-query — and it aborts with context.Canceled, whatever work was left undone</span><span class="tag">aborted</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the one line of documentation almost nobody reads until it bites them. "Canceled ... when the ServeHTTP method returns" sits right next to "when the client's connection closes" in the net/http docs, worded as if they were two equally rare edge cases. Tutorials fixate on the client-disconnect case; the handler-returns case is the one that actually fires on every single request that spawns background work.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">r.Context() closing the instant ServeHTTP returns<small>net/http's documented contract, not a bug</small></div>
+    <div class="fan">everything still holding that ctx reacts &darr;</div>
+    <div class="obs">
+      <span>the response already written and flushed to the client (unaffected — it's already gone out)</span>
+      <span class="new">the surprising reactor: the "fire and forget" goroutine launched moments earlier, using that same context</span>
+      <span>a deferred db.Close() inside the handler (unaffected — it never depended on ctx)</span>
+    </div>
+  </div>
+  <p class="hf-annot">The response and the deferred cleanup were never watching <code>ctx.Done()</code> — they finish and unwind entirely on their own, so the cancellation passes them by. The one thing that reacts badly is the one piece of code that took the page's own advice the most literally: it threaded <code>ctx</code> through exactly as taught, into work that was never actually going to outlive the function that created it.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">An HTTP handler writes its response, then launches <code>go func() { longRunningAudit(r.Context()) }()</code> to run in the background without making the client wait. <code>longRunningAudit</code> selects on <code>ctx.Done()</code> like a well-behaved Go function should. What actually determines whether it finishes?</p>
+  <button type="button">Whether the ServeHTTP method (the handler function itself) has already returned — not whether the client is still connected.</button>
+  <button type="button">Whether the client's TCP connection is still open.</button>
+  <button type="button">Whether the context was created with context.WithTimeout instead of being taken directly from the request.</button>
+  <p class="why" data-for="0">Right. net/http's documented contract cancels a request's context when ServeHTTP returns, independently of the client's connection state. The handler returns almost immediately after launching the goroutine, so that's what ends it.</p>
+  <p class="why" data-for="1">Client disconnects are a real way ctx.Done() fires, and the case most tutorials focus on — but it isn't what ends this particular goroutine. The handler already returned and the response was already written long before the client's connection state changes at all.</p>
+  <p class="why" data-for="2">A timeout would add one more way for the context to end, but it isn't necessary here. Even with no timeout attached, the plain request context from r.Context() is cancelled automatically the instant ServeHTTP returns — that behavior doesn't depend on how the context was derived.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Anything scoped to "this function call" or "this component" will end on schedule, whether or not something you started from inside it is done.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A React AbortController tied to unmount</h4>
+    <p>A component's <code>useEffect</code> often ties its <code>fetch</code> calls to an <code>AbortController</code> that aborts on unmount — which is exactly correct for requests owned by that component. The same shape turns into a bug the moment a "fire and forget" analytics call reuses that same controller, expecting it to survive after the user has already navigated away and the component is long gone.</p>
+    <div class="hf-scatter"><span>the frontend's version of a scope ending on schedule</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Flask/Django request-scoped DB session</h4>
+    <p>Frameworks that open a database session per request and close it in a teardown handler will close that session the moment the view function returns — including out from under a background thread spawned inside the view that's still mid-query against that same session, which then fails with something like "session is closed" for a query that looked completely correct a moment earlier.</p>
+    <div class="hf-scatter"><span>the same request-scope trapdoor in Python's web frameworks</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A disposed resource inside a C# using block</h4>
+    <p>A <code>using (var db = new DbContext())</code> block disposes <code>db</code> the instant execution leaves the block — including when a fire-and-forget <code>Task.Run(() =&gt; db.SaveChanges())</code> was started inside it and hasn't finished. The task keeps running, discovers its <code>DbContext</code> was disposed out from under it, and throws an <code>ObjectDisposedException</code> for code that compiled and looked fine.</p>
+    <div class="hf-scatter"><span>.NET's version of the identical scoping trap</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a context.Context threads cancellation, deadlines, and request-scoped values down a call tree, with Done() closing to signal "stop," Err() explaining why, and errgroup propagating one failure to every sibling goroutine. <b>The one new sentence this block adds:</b> an HTTP handler's own request context dies the instant the handler function returns, regardless of the client's connection — so any background work that must outlive the handler needs a context of its own, not r.Context() borrowed on the way out the door.
+</div>
+
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="gctxSeg">
@@ -267,6 +376,7 @@ DevHubCodeWalk.mount('#cw-goctx',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

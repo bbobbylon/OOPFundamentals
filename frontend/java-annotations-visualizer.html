@@ -163,7 +163,112 @@ public class Main {
   </div>
 
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, the annotation that was there the whole time — on the wrong object</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You put <code>@Transactional</code> exactly where it belongs. Spring still never opened a transaction.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The rollback that never happens</div>
+  <p><code>AccountService</code> is an interface. Its <code>closeAccount()</code> method is annotated <code>@Transactional</code> — that feels like the right place to document "this operation is transactional," once, on the contract everyone codes against. <code>AccountServiceImpl</code> implements it, with no annotations of its own. Spring Boot proxies the bean the default way: <code>spring.aop.proxy-target-class=true</code>, which means CGLIB, which means the proxy is a <b>subclass of <code>AccountServiceImpl</code></b> — not a stand-in for the interface.</p>
+  <p>A caller invokes <code>closeAccount()</code>. It runs. It even returns the right value. Then a partial failure halfway through leaves the account half-closed, because there was never a transaction to roll back. No exception was thrown for the missing annotation — there's no such exception. Spring's transaction advisor asked the proxy's own method for a <code>@Transactional</code> annotation, got <code>null</code>, and quietly decided this method needed no wrapping at all.</p>
+  <div class="hf-scatter">
+    <span>compiles clean ✓</span>
+    <span>starts up clean ✓</span>
+    <span>the annotation is invisible to the proxy ⚠</span>
+  </div>
+  <p class="hf-foot">Every step you took was correct Java. The bug is that overriding a method never inherits the annotations of the method it overrides — from a superclass OR an interface — and nothing tells you that at compile time.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Put the annotation where the proxy actually looks</div>
+  <div class="hf-ladder">
+    <b>Move (or copy) the annotation onto the implementation's method</b>
+    <i>↓ CGLIB's generated subclass overrides methods declared on the concrete class — that's the only <code>Method</code> object reflection will ever ask</i>
+    <b>If the interface should still document intent, annotate both</b>
+    <i>↓ annotations never cascade from an interface to a class that implements it, no matter what the annotation itself says about being <code>@Inherited</code></i>
+    <b>Or drop back to JDK dynamic proxies for that bean if you truly need interface-level annotations honored</b>
+    <i>↓ a JDK proxy IS an implementation of the interface at runtime — its <code>Method</code> objects are the interface's own, so annotations declared there are the ones reflection finds</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> An annotation belongs to the exact declaration you wrote it on, not to every place that declaration gets fulfilled. A method that overrides or implements another method gets a fresh <code>Method</code> object with its own, separate, usually-empty set of annotations — the JVM never copies them across.
+</div>
+
+<div class="hf-note">Java's <b>default methods are inherited, but annotations never are</b> — the same interface can hand a class a working method body, and hand it absolutely nothing of that method's <code>@Something</code> metadata. Behavior travels down the hierarchy. Metadata doesn't.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I put @Transactional right on the interface method. Why is my rollback not happening?</p></div>
+  <div class="hf-bub right"><span class="who">The CGLIB proxy</span><p>I'm not a stand-in for your interface — I'm a generated subclass of <code>AccountServiceImpl</code>. I only look at methods declared where I actually descend from.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So the annotation is just... gone, as far as you're concerned?</p></div>
+  <div class="hf-bub right"><span class="who">Reflection, on your proxy's method</span><p>I never had it. <code>getAnnotation()</code> only reports what's declared on the exact <code>Method</code> you hand me — and this one belongs to your class, not your interface.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one call to <code>closeAccount()</code> from the annotation's point of view.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>You write <code>@Transactional</code> on <code>AccountService.closeAccount()</code>, the interface method</span><span class="tag">source</span></li>
+    <li class="open"><span><code>AccountServiceImpl.closeAccount()</code> is written with no annotations of its own</span><span class="tag">impl</span></li>
+    <li><span>Spring Boot registers the bean and wraps it in a proxy — CGLIB, by default</span><span class="tag">proxy-target-class</span></li>
+    <li class="open"><span>The generated proxy class <code>extends AccountServiceImpl</code>, overriding <code>closeAccount()</code></span><span class="tag">subclass</span></li>
+    <li><span>The transaction advisor calls <code>method.getAnnotation(Transactional.class)</code> on the proxy's own overriding method</span><span class="tag">reflection</span></li>
+    <li class="open"><span>It returns <code>null</code> — no transaction is opened, no error is raised, the call proceeds uninterrupted</span><span class="tag">silent miss</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the whole bug. The advisor never asks "does the interface this class implements say anything about this method?" — it only has the concrete method in hand, and that method's own annotation array is empty. Everything upstream of that step looked completely ordinary: correct annotation, correct method name, a proxy Spring created exactly the way Spring Boot is documented to create it.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">reflection on the proxy's <code>closeAccount()</code> method — does it see <code>@Transactional</code>?<small>the question the transaction advisor actually asks</small></div>
+    <div class="arrow">what actually happens →</div>
+    <div class="opts">
+      <span>yes — Spring merges annotations from every interface a bean implements</span>
+      <span class="on">no — only an annotation on the concrete class's own method counts</span>
+      <span>no — CGLIB proxies can never see any annotation, on the class or the interface</span>
+    </div>
+  </div>
+  <p class="hf-annot">The middle option is the only one that survives contact with how Java reflection actually works: a <code>Method</code> object's annotations come from exactly where that method was declared. The interface's <code>closeAccount()</code> and the impl's <code>closeAccount()</code> are two different declarations that happen to share a signature — reflection treats them as two different sources of metadata, and only one of them is the one CGLIB's subclass overrides.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">Your <code>AccountService</code> interface declares <code>@Transactional</code> on <code>closeAccount()</code>. <code>AccountServiceImpl</code> implements it with no annotations of its own, and Spring Boot proxies the bean the default way. What happens when a caller invokes <code>closeAccount()</code>?</p>
+  <button type="button">It runs with NO transaction — the proxy's reflection never sees an annotation that only lives on the interface.</button>
+  <button type="button">It runs inside a transaction — Spring merges annotations from every interface the bean implements.</button>
+  <button type="button">Spring Boot fails to start, refusing to wire a bean whose interface-only annotation it cannot honor.</button>
+  <p class="why" data-for="0">Exactly this. CGLIB's proxy subclasses the concrete class, and Java never copies a method's annotations onto the method that overrides or implements it — from a superclass or an interface. The advisor looks at the impl's own <code>Method</code>, finds nothing, and wraps nothing. The only symptom is a bug report about a write that didn't roll back.</p>
+  <p class="why" data-for="1">Spring does read class-level stereotype annotations like <code>@Service</code> during component scanning, which makes this feel plausible — but method-level annotations behind a proxy work differently. The interface's <code>Method</code> object and the impl's <code>Method</code> object are separate, and only the impl's is ever consulted here.</p>
+  <p class="why" data-for="2">There's no such startup check. Spring has no way to know your intent was "this should be transactional" versus "I forgot the annotation entirely" — both look identical to the container, so it wires the bean and moves on. That's exactly what makes this bug expensive: it's silent, not loud.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Metadata doesn't travel with the contract" shows up anywhere annotations meet inheritance.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring Method Security on a CIAM service interface</h4>
+    <p>Put <code>@PreAuthorize("hasAuthority('DELETE:USER')")</code> on a <code>UserAdminService</code> interface method instead of the impl, and the exact same silence hits — except now it's an authorization check, not a transaction, that never runs. The endpoint stays reachable with no permission enforced at all, and nothing in your logs says so.</p>
+    <div class="hf-scatter"><span>the security check you can see in the diff isn't the one that executes</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>TypeScript decorators and interfaces</h4>
+    <p>Angular's <code>@Injectable()</code> and <code>@Component()</code> only ever attach to classes, never to <code>interface</code> declarations — because a TypeScript interface is erased completely at compile time. There's no runtime object left for metadata to travel with, so the language doesn't even offer the footgun Java does here.</p>
+    <div class="hf-scatter"><span>if the contract vanishes at compile time, metadata never had anywhere to ride along</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>.NET attributes on interface members</h4>
+    <p><code>type.GetMethod("Foo").GetCustomAttribute&lt;T&gt;()</code> on a class implementing an interface member decorated with <code>[T]</code> also returns null unless you specifically query the interface map instead of the class's own method. Same rule, unrelated language — this isn't a Java quirk, it's how reflection-based metadata works almost everywhere.</p>
+    <div class="hf-scatter"><span>the pattern outlives any one framework or language</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> annotations are inert metadata that the compiler, the JVM, or a framework reading them via reflection chooses to act on, and <code>@Retention</code>/<code>@Target</code>/<code>@Inherited</code> decide where that metadata lives and how far it travels through a class hierarchy. <b>The one new sentence this block adds:</b> it never travels from an interface to the class implementing it, and a CGLIB proxy — a subclass of that class, never of the interface — is exactly where the gap between "where you wrote it" and "where Spring looks for it" turns into a production bug.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -1019,6 +1124,7 @@ rebuildCode();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

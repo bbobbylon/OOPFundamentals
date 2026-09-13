@@ -104,7 +104,111 @@
     </div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, the CVE patch that compiled clean and shipped the vulnerable version anyway</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You add one &lt;properties&gt; line, straight out of this page's own playbook, mvn package succeeds, and the vulnerable version ships anyway.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The version override Maven quietly ignored</div>
+  <p>A CVE lands in a library your project pulls transitively. This page's own Parent &amp; BOM section says the fix is exactly one <code>&lt;properties&gt;</code> entry — "the BOM uses properties internally, so your override wins." You add <code>&lt;log4j2.version&gt;2.24.1&lt;/log4j2.version&gt;</code>, run <code>mvn package</code>, get <code>BUILD SUCCESS</code>, and close the ticket.</p>
+  <p><code>spring-boot-dependencies</code> exposes per-artifact override properties for many libraries — but not every one. Some of its <code>&lt;dependencyManagement&gt;</code> entries are hardcoded literal versions, and others share a single property across a whole family of artifacts instead of one property per module. If the specific artifact you're touching was never wired to the exact property name you guessed, Maven treats your entry as precisely what it looks like syntactically: an unused variable. There's no "unreferenced property" error — nothing changes, and nothing tells you nothing changed.</p>
+  <div class="hf-scatter">
+    <span>mvn package: BUILD SUCCESS ✓</span>
+    <span>ticket closed, CVE marked patched ✓</span>
+    <span>mvn dependency:tree still shows the old version ⚠</span>
+  </div>
+  <p class="hf-foot">A property nobody reads is just a comment that happens to be valid XML.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Verify the override took — don't trust the build log</div>
+  <div class="hf-ladder">
+    <b>Run mvn dependency:tree -Dincludes=... (or mvn help:evaluate -Dexpression=your.property) right after adding the override</b>
+    <i>↓ a successful build only proves your XML was well-formed and something compiled — it says nothing about which property actually fed which dependency</i>
+    <b>If the tree still shows the old version, stop guessing property names and pin the dependency directly in your own dependencyManagement</b>
+    <i>↓ an explicit dependencyManagement entry in YOUR pom always wins over the parent BOM, whether or not the BOM ever exposed a property for that artifact</i>
+    <b>And re-run dependency:tree once more to confirm the new version is actually there before you close the ticket</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>An unreferenced property is invisible to Maven, not an error.</b> Maven properties are plain string substitution — nothing validates that a &lt;properties&gt; entry you invent actually gets used anywhere in the effective POM. Guessing a property name and getting a clean build tells you your XML parsed; it tells you nothing about whether that value reached the dependency you meant to patch.
+</div>
+
+<div class="hf-note">Sticky note: <b>"BUILD SUCCESS" only means nothing threw — it's not Maven's way of saying "yes, that's the version you asked for."</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I added &lt;log4j2.version&gt; to properties, just like the docs said. Why does dependency:tree still show the old one?</p></div>
+  <div class="hf-bub right"><span class="who">spring-boot-dependencies</span><p>I manage that artifact's version a different way than a per-artifact property. Your property name never pointed at anything of mine.</p></div>
+  <div class="hf-bub"><span class="who">Your &lt;properties&gt; entry</span><p>I exist. I have a value. Nobody in the entire effective POM ever asked what that value is.</p></div>
+  <div class="hf-bub right"><span class="who">mvn package</span><p>I only check that the code compiles and tests pass. I have no idea what version you meant to end up with — I just build whatever actually resolved.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Trace what a &lt;properties&gt; override actually has to connect to in order to do anything at all.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>spring-boot-dependencies' dependencyManagement pins hundreds of artifact versions</span><span class="tag">BOM</span></li>
+    <li class="open"><span>for artifacts its authors wired up, the version tag reads a property placeholder instead of a literal</span><span class="tag">wired</span></li>
+    <li><span>your child pom declares &lt;properties&gt;&lt;log4j2.version&gt;2.24.1&lt;/log4j2.version&gt;&lt;/properties&gt;</span><span class="tag">your override</span></li>
+    <li class="open"><span>Maven substitutes that property everywhere it's REFERENCED in the effective POM, your child's value winning over the parent's default</span><span class="tag">substitution</span></li>
+    <li><span>if that specific artifact's entry was never written with that placeholder — a hardcoded literal, or a differently-named shared property — nothing in the whole tree points at your property</span><span class="tag">no reference</span></li>
+    <li class="open"><span>your property sits in the effective POM, fully valid, completely unused; the dependency keeps whatever version the BOM's own literal or property already gave it</span><span class="tag">silent no-op</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is invisible from your own pom.xml. You can't tell by reading your file whether the name you picked is wired to anything — that information only lives inside spring-boot-dependencies' pom, which you didn't write and probably haven't opened.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">you add &lt;log4j2.version&gt;2.24.1&lt;/log4j2.version&gt; to &lt;properties&gt;, hoping to patch a CVE<small>the exact trick this page's own BOM section recommends</small></div>
+    <div class="arrow">what the BOM actually does with that property name →</div>
+    <div class="opts">
+      <span>clean override, new version wins</span>
+      <span class="on">no artifact in the BOM references that property — silently ignored, old version stays</span>
+      <span>Maven fails the build with an unknown-property error</span>
+    </div>
+  </div>
+  <p class="hf-annot">There's no fourth option where Maven tells you which of these happened. All three scenarios print the exact same BUILD SUCCESS.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">You add <code>&lt;jackson-databind.version&gt;2.18.1&lt;/jackson-databind.version&gt;</code> to your Spring Boot project's &lt;properties&gt; to patch a CVE. <code>mvn package</code> succeeds. What should you do before closing the ticket?</p>
+  <button type="button">Nothing else — a successful build with that property present means the patched version is now on the classpath</button>
+  <button type="button">Bump the spring-boot-starter-parent version instead, since only the parent version itself can change managed dependency versions</button>
+  <button type="button">Run mvn dependency:tree (or mvn help:evaluate) and confirm jackson-databind actually resolves to 2.18.1, since the BOM may not expose a property with that exact name</button>
+  <p class="why" data-for="0">A successful build only proves the POM parsed and the code compiled — it doesn't tell you whether your property was ever read by anything. Spring often pins related versions through one shared, BOM-wide property rather than one per module, so your specific name may point at nothing.</p>
+  <p class="why" data-for="1">Bumping the whole parent version changes hundreds of managed versions at once — more disruptive than needed, and it still doesn't tell you whether your original property-override approach would have worked. It sidesteps the question instead of answering it.</p>
+  <p class="why" data-for="2">Right. The only way to know whether a property override actually reached the dependency is to check the resolved tree directly — a clean build tells you nothing about which version won.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Valid, present, and completely disconnected from anything that reads it" is not a Maven-only trick.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring multi-document application.yml</h4>
+    <p>You add a fix inside a <code>---</code> document gated with <code>spring.config.activate.on-profile: prod</code>, but the app is actually running with the <code>dev</code> profile active. The YAML is perfectly valid and the property is perfectly real — it's just inert for every run that isn't prod.</p>
+    <div class="hf-scatter"><span>valid YAML, wrong profile active</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An untyped Angular @Input binding</h4>
+    <p>Write <code>[foo]="bar"</code> in a template before the child component declares <code>@Input() foo</code>, and without strict template checking Angular doesn't error — it just treats <code>foo</code> as a plain, unbound DOM attribute. <code>bar</code>'s value goes nowhere near your component logic.</p>
+    <div class="hf-scatter"><span>no error, no binding, no data</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Auto Scaling Group tag propagation</h4>
+    <p>Tag an AWS Auto Scaling Group without setting <code>propagate_at_launch</code> on that tag, and the tag applies to the group resource only — every EC2 instance it launches comes up untagged. The tag block is valid, applies cleanly, and simply never reaches the resource you expected it on.</p>
+    <div class="hf-scatter"><span>declared once, propagated nowhere</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a POM is groupId/artifactId/version identity plus dependencies, build config, and properties, inherited down a parent → BOM chain that supplies most of your version numbers for free — <b>and overriding one of those versions only works if the BOM actually wired that specific artifact to the property name you guessed, otherwise your override is perfectly valid, perfectly ignored XML.</b>
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -470,6 +574,7 @@ function showSection(id) {
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

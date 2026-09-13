@@ -99,7 +99,115 @@ print(handle({"type": "scroll"}))
   </div>
 
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">You already know the bare-name capture trap. This one is sneakier: it only shows up when your patterns are all perfectly correct literals.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Two case clauses, both spelled exactly right, no bare-name capture in sight — and the wrong one still wins, because Python compares some literals differently than others.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">An MFA check that silently treats "verified" as "legacy"</div>
+  <p>Your IdP mostly sends <code>mfa_verified</code> as a real JSON boolean, but a legacy sync job still writes the field as the integer <code>1</code>/<code>0</code> from years ago. You handle both, oldest case first, the way you'd order any "specific to general" match:</p>
+  <p><code>match claims.get("mfa_verified"):</code><br>
+  <code>&nbsp;&nbsp;case 1:</code><br>
+  <code>&nbsp;&nbsp;&nbsp;&nbsp;log.info("legacy int flag")</code><br>
+  <code>&nbsp;&nbsp;case True:</code><br>
+  <code>&nbsp;&nbsp;&nbsp;&nbsp;log.info("modern boolean flag")</code></p>
+  <p>This looks harmless while both branches do the same thing — until someone adds a THIRD case above <code>case True:</code> for "legacy int, needs a re-sync warning," expecting it to only ever catch the literal integer. It also silently catches every modern boolean <code>True</code>, because <code>case 1:</code> tests <code>subject == 1</code>, and in Python <code>True == 1</code>. <code>case True:</code> below it never even runs for a boolean subject — <code>case 1:</code> already claimed it.</p>
+  <div class="hf-scatter">
+    <span>case 1: spelled correctly ✓</span>
+    <span>case True: spelled correctly ✓</span>
+    <span>which comparison operator each one secretly uses ⚠</span>
+  </div>
+  <p class="hf-foot">Neither pattern is wrong. Their comparison rules just aren't the same rule.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Put the singleton patterns first, or check the type explicitly</div>
+  <div class="hf-ladder">
+    <b>List case True: / case False: / case None: before any numeric literal case</b>
+    <i>↓ is-based patterns matched first can't be shadowed by a later ==-based one</i>
+    <b>Or guard the numeric case: case 1 if isinstance(subject, int) and not isinstance(subject, bool):</b>
+    <i>↓ makes the "actual integer, not a bool" requirement explicit instead of implicit</i>
+    <b>Best: normalize the claim to one type (always bool) before it ever reaches match</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Literal patterns don't all use the same comparison.</b> Python's match statement uses <code>is</code> specifically for the three singleton patterns — <code>None</code>, <code>True</code>, <code>False</code> — and <code>==</code> for every other literal (numbers, strings). The <code>is</code> rule exists so that <code>case True:</code> can never be confused with numeric equality; it says nothing about protecting a numeric pattern from a boolean subject, because <code>bool</code> is a subclass of <code>int</code> in Python and <code>True == 1</code> has always been true.
+</div>
+
+<div class="hf-note">Think of <code>case True:</code> as a bouncer checking a photo ID, and <code>case 1:</code> as a bouncer just checking a number written on a wristband. <code>True</code>'s wristband happens to say "1" — so <b>the numeric bouncer waves it through without ever glancing at the photo</b> the identity-based bouncer further down the line would have caught.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I put my int case above my bool case because ints felt more "specific." Why did the bool value get swallowed by the int case?</p></div>
+  <div class="hf-bub right"><span class="who">The match statement</span><p><code>case 1:</code> isn't a singleton pattern, so I compare with <code>==</code>. Your subject was <code>True</code>, and <code>True == 1</code> — that's just how Python's <code>bool</code> works, it's a subclass of <code>int</code>. I matched, so I never even looked at your <code>case True:</code>.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But you use is for True elsewhere — why not protect me here too?</p></div>
+  <div class="hf-bub right"><span class="who">The match statement</span><p>The <code>is</code> rule protects <code>case True:</code> itself from matching an unrelated <code>1</code> — it guarantees that pattern only fires for the real singleton. It was never designed to stop a numeric pattern from matching a boolean subject; that's <code>==</code> doing exactly what <code>==</code> has always done in Python.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch the same subject hit the two case orderings and get two different outcomes.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Subject is the boolean <code>True</code> (a real JSON boolean from a modern IdP)</span><span class="tag">subject</span></li>
+    <li class="open"><span><code>case 1:</code> is not <code>None</code>/<code>True</code>/<code>False</code>, so Python tests <code>True == 1</code></span><span class="tag">== path</span></li>
+    <li><span><code>bool</code> is a subclass of <code>int</code>; <code>True == 1</code> evaluates to <code>True</code></span><span class="tag">matches</span></li>
+    <li class="open"><span>First match wins — <code>case 1:</code>'s body runs, no fall-through to later cases</span><span class="tag">first match wins</span></li>
+    <li><span><code>case True:</code> below is never reached for this subject at all</span><span class="tag">dead for booleans</span></li>
+    <li class="open"><span>Reorder so <code>case True:</code> comes first: Python tests <code>True is True</code> — matches immediately, correctly, every time</span><span class="tag">the fix</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the only fact you need to memorize: <code>bool</code> being an <code>int</code> subclass isn't a match-statement quirk, it's ordinary Python that's been true since <code>bool</code> was added to the language — <code>match</code> just inherits it because <code>==</code>-based literal patterns are, underneath, exactly the equality you already know.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">case 1: listed first</span>
+      <span class="go"><em>subject True arrives</em> <span class="arrow">→</span> True == 1, matches — wrong branch for a real boolean</span></div>
+    <div class="stt"><span class="nm">case True: listed first</span>
+      <span class="go"><em>subject True arrives</em> <span class="arrow">→</span> True is True, matches — correct</span></div>
+    <div class="stt"><span class="nm">case True: listed first</span>
+      <span class="go"><em>subject 1 arrives</em> <span class="arrow">→</span> 1 is True is False, falls through to case 1 — also correct</span></div>
+  </div>
+  <p class="hf-annot">Putting the identity-based pattern first costs you nothing: an actual integer subject still correctly falls through to the numeric case, because <code>is</code> is stricter than <code>==</code>, never looser. The only ordering that loses information is numeric-before-boolean.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q"><code>match value:</code><br><code>&nbsp;&nbsp;case 0: return "zero"</code><br><code>&nbsp;&nbsp;case False: return "false"</code><br>Called with <code>value = False</code>, this returns:</p>
+  <button type="button"><code>"false"</code>, because <code>case False:</code> is checked before any numeric pattern regardless of order</button>
+  <button type="button">Neither — Python raises <code>TypeError</code> because <code>0</code> and <code>False</code> both attempt to claim the same subject</button>
+  <button type="button"><code>"zero"</code>, because <code>case 0:</code> uses <code>==</code>, <code>False == 0</code> is <code>True</code>, and it's listed first — <code>case False:</code> never runs</button>
+  <p class="why" data-for="0">Order isn't automatic here — patterns are still tried top to bottom exactly as written. There's no special reordering that promotes singleton patterns above numeric ones.</p>
+  <p class="why" data-for="1">match never raises for two patterns that could both apply — it just takes the first one that matches and stops looking. No ambiguity error exists in the language.</p>
+  <p class="why" data-for="2">Exactly — <code>case 0:</code> isn't a singleton pattern so it compares with <code>==</code>, and <code>False == 0</code> is <code>True</code> in Python. First match wins, so <code>"zero"</code> is returned and <code>case False:</code> is dead code for this input.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Two comparison rules living under one operator" trips people up well beyond match statements.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>SQL's = TRUE vs a bit column</h4>
+    <p>Databases that store booleans as TINYINT/BIT have the same collision — <code>WHERE flag = 1</code> and <code>WHERE flag = TRUE</code> can silently mean the same query on some engines and different ones on others, for the identical "boolean is secretly a number" reason.</p>
+    <div class="hf-scatter"><span>a boolean that's really a number underneath</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>JavaScript's == vs ===</h4>
+    <p><code>1 == true</code> is <code>true</code> in JS for the same underlying reason — a loose equality that coerces types — while <code>1 === true</code> is <code>false</code>. Python's match doesn't have a "strict operator" toggle per case; the strictness is baked into which literal you wrote.</p>
+    <div class="hf-scatter"><span>loose vs strict equality, same trap, no toggle in Python</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Java's Integer.equals(Boolean) — always false, but for the opposite reason</h4>
+    <p>Java refuses to let unrelated boxed types compare equal, which is the safety net Python's <code>bool</code>-is-an-<code>int</code> design deliberately doesn't have — the price of Python's convenience is exactly this kind of silent cross-type match.</p>
+    <div class="hf-scatter"><span>the safety net one language has and the other trades away</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> match/case destructures and dispatches on shape — literals, captures (careful, bare names always bind!), sequences, mappings, and class patterns, with guards for anything structural can't express. <b>The one new sentence this block adds:</b> only None/True/False patterns use identity comparison — every numeric literal pattern still uses ==, so a numeric case listed above a boolean case will silently steal every boolean subject.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="pymatchSeg">
@@ -190,10 +298,6 @@ print(handle({"type": "scroll"}))
     </div>
     <div class="key-insight"><strong>Use <code>match</code> for structure, <code>if/elif</code> for plain conditions.</strong> When you're destructuring nested data or dispatching on type+shape (parsers, ASTs, event routers, claim mappers), <code>match</code> is dramatically clearer than nested <code>isinstance</code>/index checks. For a single value compared a few ways, or rich boolean logic, a plain <code>if/elif</code> (or a dict dispatch) is the better tool.</div>
   </section>
-</div>
-
-<!-- ── Code Walkthrough: Python Pattern Matching ── -->
-<parameter name="new_string">  </section>
 </div>
 
 <!-- ── Code Walkthrough: Python Pattern Matching ── -->
@@ -319,6 +423,7 @@ DevHubCodeWalk.mount('#cw-pymatch',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

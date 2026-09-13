@@ -105,6 +105,107 @@
     <div class="intro-ciam"><span class="tag">In CIAM / Context:</span> The core auth API (login, token exchange, userinfo) runs on ECS Fargate — always-on, fast, Spring Boot. Lambda handles async/batch jobs: nightly user export, bulk provisioning from CSV, welcome emails, scheduled Ping client-secret rotation. These fit Lambda because they're infrequent, short and cost-sensitive — and the 15-minute timeout is plenty for a 10,000-user CSV import.</div>
   </div>
 
+<p class="hf-deck">or, the 2019 fix solved the SLOW part of VPC networking, not the FINITE part</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Your VPC-attached Lambda hasn't had a slow cold start in years — which is exactly why nobody thought to check the subnet.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Cold starts got fast. Concurrency still got refused.</div>
+  <p>You attached your CIAM webhook Lambda to a VPC back in 2021 so it could reach a private Ping IDM endpoint over a site-to-site VPN — nothing reachable from the public internet. Someone, at the time, carved out a tidy little /28 subnet just for it: 16 addresses, plenty for "a couple of Lambdas," nobody was going to argue about handing a background job a bigger CIDR block than that.</p>
+  <p>Everything in the AWS documentation is on your side here. Hyperplane ENIs mean VPC attachment stopped adding seconds to cold start back in 2019 — the network interface is created when you save the function's VPC configuration, not invented fresh on every cold invocation. So when Ping has a rough afternoon and your retry logic sends concurrency past 400, cold starts are the last thing on your mind. Then new invocations start getting refused outright — not slow, <b>refused</b> — while the ones already running finish just fine.</p>
+  <div class="hf-scatter">
+    <span>Hyperplane ENI already provisioned ✓</span>
+    <span>warm containers reused instantly ✓</span>
+    <span>the subnet's 11 usable addresses ⚠</span>
+  </div>
+  <p class="hf-foot">AWS fixed the SLOW part of VPC networking in 2019. It never promised the subnet was infinite.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Size the subnet for concurrency, not for the number of functions sitting in it</div>
+  <div class="hf-ladder">
+    <b>Check how many IPs a VPC-attached function's subnet can actually offer</b>
+    <i>↓ AWS reserves 5 addresses in every subnet regardless of size — a /28 has 16 total but only 11 usable, and that's the entire concurrency ceiling for every Hyperplane ENI sharing it</i>
+    <b>Give Lambda subnets dedicated to it real room — a /24 or larger, not a leftover sliver</b>
+    <i>↓ every additional Hyperplane ENI Lambda creates under load takes one more address from the same pool; more room means more headroom before a burst throttles instead of scales</i>
+    <b>Watch for the specific signal: throttling under a real concurrency spike with no error that names "IP"</b>
+    <i>↓ nothing in the Lambda error message says "subnet" for you — you have to already know this failure mode exists to go looking for it</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A shared fix is not a shared-forever resource.</b> Hyperplane ENIs mean VPC-attached Lambda functions using the same subnet and security group SHARE network interfaces instead of each one minting its own at cold start — that's what killed the multi-second VPC cold start in 2019. But a shared resource is not an unlimited one: every ENI, shared or not, still draws one real IP address from one real, finite subnet CIDR block, and AWS creates you MORE of them as concurrency and connections grow, never fewer.
+</div>
+
+<div class="hf-note">The subnet is the ENI's landlord, and the building only has so many apartments. Hyperplane just means <b>roommates now share a lease instead of each function renting its own floor</b> — it never added units to the building.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>We fixed this in 2019, right? VPC Lambdas don't have the slow cold start problem anymore.</p></div>
+  <div class="hf-bub right"><span class="who">The Hyperplane ENI</span><p>Correct — I'm already built the moment your function's VPC config is saved. Cold start doesn't wait on me anymore.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Great. So nothing about VPC networking can throttle us under load.</p></div>
+  <div class="hf-bub right"><span class="who">The subnet's CIDR block</span><p>That part isn't my colleague's department, it's mine. I hand out IP addresses, and this subnet has exactly eleven of them. When Hyperplane needs a twelfth ENI to keep up with your concurrency, it has to ask me first — and I'm fresh out.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Walk the exact path Ping's bad afternoon triggers, one IP address at a time.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Your Lambda function's VPC config — this subnet, this security group — is saved</span><span class="tag">config time</span></li>
+    <li class="open"><span>Lambda provisions a Hyperplane ENI in that subnet — one IP address spent, before any invocation happens</span><span class="tag">one-time</span></li>
+    <li><span>Invocations arrive; warm containers reuse the existing ENI — no per-invoke networking cost at all</span><span class="tag">steady state</span></li>
+    <li class="open"><span>Ping's outage triggers a retry storm; concurrent executions climb past a few hundred</span><span class="tag">the trigger</span></li>
+    <li><span>One Hyperplane ENI supports up to 65,000 connections — past that, Lambda automatically creates MORE ENIs to keep up</span><span class="tag">auto-scale</span></li>
+    <li class="open"><span>Each new ENI needs its own IP from the same 11-address subnet — the pool empties, and the next one Lambda tries to create simply can't be</span><span class="tag">the wall</span></li>
+  </ol>
+  <p class="hf-annot">Step five is the one almost nobody knows exists at all: AWS doesn't just reuse one ENI forever no matter how much concurrency you throw at it — it grows the NUMBER of ENIs to keep up, silently and correctly. That growth is exactly what turns a small subnet from "plenty" into "gone" the first time real load shows up.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>Function A, warm reuse</span><span>Function B, fresh cold containers</span><span>Function C, burst to 400+ concurrent</span></div>
+    <div class="funnel">every Hyperplane ENI still needs one real IP address ↓</div>
+    <div class="instance">The subnet's CIDR block runs dry<small>Lambda can't create the next ENI — scale-out throttles, mid-burst, with no error that mentions "IP address"</small></div>
+  </div>
+  <p class="hf-annot">Every one of those is a legitimate, correct reason for Lambda to want another IP address — and every one draws from the exact same eleven-address pool. The subnet doesn't care which function or which reason asked; it just runs out, and the throttle that results looks identical to a dozen unrelated Lambda problems until you check the one metric that actually explains it.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Your CIAM webhook Lambda is VPC-attached to reach a private Ping IDM endpoint, sitting in a /28 subnet someone carved out years ago "just for a couple of Lambdas" — no reserved concurrency configured, still the account default. Ping has a rough afternoon and retries pile up: your function's concurrency spikes past 400. New invocations start failing outright with a throttle, while already-running ones finish normally. Cold starts haven't been the slow, ENI-creating kind in years. What's actually throttling it?</p>
+  <button type="button">The account-wide 1,000 concurrent execution limit was hit</button>
+  <button type="button">A Hyperplane ENI can only ever be created once per function, so scale-out has nowhere to go</button>
+  <button type="button">The subnet's tiny CIDR block ran out of free IP addresses, and every Hyperplane ENI — existing or newly needed — has to have one</button>
+  <p class="why" data-for="0">400 concurrent executions is well under the shared 1,000-per-region default — that ceiling isn't close to being the problem here, though it's a real and common cause of this exact symptom in other cases, which is exactly why it's worth ruling out by the numbers instead of assuming.</p>
+  <p class="why" data-for="1">Not true, and it's worth knowing why: Hyperplane ENIs scale automatically as traffic grows — each one supports up to 65,000 connections, and Lambda creates additional ENIs on its own once that's not enough. The mechanism isn't "one ENI forever," it's "one ENI, then more as needed" — which is precisely what runs the subnet's address pool dry.</p>
+  <p class="why" data-for="2">Right. Every Hyperplane ENI, whether it's the original one or the fifth one Lambda auto-created to handle rising concurrency, consumes a real IP address from that subnet's CIDR block. An 11-usable-address /28 can only ever back a handful of ENIs — past that, Lambda has nowhere to put the next network interface, and new invocations that need one are throttled, not slowed.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A shared resource that scales fine right up until its OWN ceiling appears is not a new shape of bug.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Connection pool exhaustion in Spring</h4>
+    <p>A HikariCP pool sized for the app's original load doesn't fail loudly when traffic grows — it just queues new requests behind whichever connection frees up next. The database is fine the whole time; the pool in front of it is the wall.</p>
+    <div class="hf-scatter"><span>the resource that scales fine, until it doesn't</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>DHCP scope exhaustion on an office network</h4>
+    <p>New laptops stop getting an IP address not because Wi-Fi is down, but because the DHCP scope handed out its entire range and nobody planned for 200 new starters this quarter. The network is healthy; the address pool behind it isn't.</p>
+    <div class="hf-scatter"><span>same wall, different building</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Kubernetes pods stuck Pending on IP allocation</h4>
+    <p>A cluster autoscaler that can add nodes all day long still fails to schedule new pods once the CNI's own per-subnet IP allocation runs out — compute capacity and address capacity are two completely different limits, and autoscaling only ever covers the first one.</p>
+    <div class="hf-scatter"><span>scaling the wrong dimension</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Lambda scales concurrency instantly, cold starts are no longer the multi-second tax they used to be, and VPC attachment costs almost nothing at invoke time today. <b>The one new sentence this block adds:</b> that entire story runs on Hyperplane ENIs sharing a subnet's IP addresses, and a subnet sized for "a couple of Lambdas" can throttle a real concurrency spike stone dead, with an error that never once says the word "IP."
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -527,6 +628,7 @@ DevHubCodeWalk.mount('#cw-lambda',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

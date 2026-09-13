@@ -101,7 +101,119 @@ run_tests(globals())
   </div>
 
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">Scope controls how OFTEN a fixture is rebuilt. It says nothing about what happens if a test changes the thing it was handed — and that's where the bodies are buried.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Your test suite passes when you run it alone, fails when you run the whole file, and passes again if you run just the "failing" test by itself — and every individual test still looks completely correct.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A roles fixture that remembers what the last test did to it</div>
+  <p>You write a session-scoped fixture so an expensive-feeling setup only happens once, exactly like this page recommends for a real DB or IdP connection:</p>
+  <p><code>@pytest.fixture(scope="session")</code><br>
+  <code>def base_claims():</code><br>
+  <code>&nbsp;&nbsp;return {"sub": "alice", "roles": ["user"]}</code><br><br>
+  <code>def test_grant_admin_role(base_claims):</code><br>
+  <code>&nbsp;&nbsp;base_claims["roles"].append("admin")&nbsp;&nbsp;# convenient, feels local</code><br>
+  <code>&nbsp;&nbsp;assert "admin" in base_claims["roles"]</code><br><br>
+  <code>def test_default_user_has_no_admin(base_claims):</code><br>
+  <code>&nbsp;&nbsp;assert "admin" not in base_claims["roles"]&nbsp;&nbsp;# fails!</code></p>
+  <p>Run <code>test_default_user_has_no_admin</code> by itself and it passes — fresh session, fresh dict. Run the whole file and it fails, because both tests requested <code>base_claims</code> in the <em>same</em> session, and pytest built that dict exactly once and handed the identical object to both. The first test's <code>.append("admin")</code> is still sitting there when the second test runs.</p>
+  <div class="hf-scatter">
+    <span>each test in isolation ✓</span>
+    <span>the fixture's setup code ✓</span>
+    <span>one dict, reused by reference ⚠</span>
+  </div>
+  <p class="hf-foot">Neither test is wrong on its own. Together, they're sharing a desk drawer and both think it's private.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Give mutable fixtures a fresh copy per test, on purpose</div>
+  <div class="hf-ladder">
+    <b>Default to function scope for anything a test might mutate</b>
+    <i>↓ function scope rebuilds the fixture for every test — nothing to inherit</i>
+    <b>If you need session/module scope for cost reasons, return an immutable value or a fresh copy</b>
+    <i>↓ e.g. return copy.deepcopy(_SHARED), or hand back a frozen dataclass instead of a dict</i>
+    <b>Or make a cheap function-scoped fixture that copies from an expensive session-scoped one</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A fixture's scope controls reuse of the OBJECT, not protection from mutation.</b> pytest builds a scoped fixture once and caches the return value for the lifetime of that scope — every test requesting it in that window gets the identical Python object, by reference. Nothing about "session" or "module" scope implies read-only; that's a property you have to design in yourself if the fixture's value is mutable.
+</div>
+
+<div class="hf-note">A session-scoped fixture is a <b>shared hotel room, not a shared hotel</b>. Every guest (test) that "checks in" during that session gets handed the exact same key to the exact same room — if one guest rearranges the furniture, the next guest walks into whatever was left behind, not a freshly cleaned room.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I ran this exact test alone and it passed. Why does it fail in the full suite?</p></div>
+  <div class="hf-bub right"><span class="who">pytest's fixture cache</span><p>Scope determines how long I keep a fixture's value alive, not who's allowed to touch it. In the full run, another test asked for <code>base_claims</code> first, in the same session, and mutated the dict I handed it. You got that same, now-modified dict — I never rebuilt it, because scope said I didn't have to.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So test order determines whether my test passes?</p></div>
+  <div class="hf-bub right"><span class="who">pytest's fixture cache</span><p>For a mutable fixture at broader-than-function scope, yes — and that's precisely the smell. The moment a test's result depends on which test ran before it, a shared mutable fixture is usually why.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Here's the exact sequence pytest runs across the two tests in that file.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>pytest collects <code>test_grant_admin_role</code>, sees it needs <code>base_claims</code></span><span class="tag">collection</span></li>
+    <li class="open"><span>No session-scoped <code>base_claims</code> exists yet — pytest calls the fixture function once and caches the dict it returns</span><span class="tag">build + cache</span></li>
+    <li><span><code>test_grant_admin_role</code> runs, mutates the cached dict in place with <code>.append</code></span><span class="tag">mutation</span></li>
+    <li class="open"><span>pytest moves to <code>test_default_user_has_no_admin</code>, which also needs <code>base_claims</code></span><span class="tag">next test</span></li>
+    <li><span>A session-scoped <code>base_claims</code> is already cached — pytest hands back the SAME object, not a new call to the fixture function</span><span class="tag">cache hit</span></li>
+    <li class="open"><span>The assertion checks a dict that still has "admin" in it from step 3, and fails</span><span class="tag">leaked state</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the one to internalize: "cache hit" for a fixture means literally the same object in memory, not an equivalent fresh one. Every test that shares a scope with a mutated fixture inherits every mutation every earlier test in that scope made.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">base_claims (one dict, session scope)<small>built once, cached for the whole session</small></div>
+    <div class="fan">every test that requests it ↓</div>
+    <div class="obs">
+      <span>test_grant_admin_role (mutates it)</span>
+      <span class="new">test_default_user_has_no_admin (inherits the mutation)</span>
+      <span>any later test using base_claims</span>
+    </div>
+  </div>
+  <p class="hf-annot">Only one test in this picture did anything "wrong," but every test downstream of it in the same scope is now a reactor to that mutation, whether its author knew the fixture was shared or not — and test collection order, not test logic, decides who gets burned.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A <code>conftest.py</code> defines <code>@pytest.fixture(scope="module") def scopes(): return ["read:profile"]</code>. Test A does <code>scopes.append("write:profile")</code>. Test B, later in the same file, asserts <code>scopes == ["read:profile"]</code>. Running the whole file:</p>
+  <button type="button">Test B passes — pytest reruns the fixture function for every test by default, so B gets a fresh list</button>
+  <button type="button">Test B fails — module scope means one list object is built once and shared by reference across every test in that file</button>
+  <button type="button">pytest raises an error at collection time because a fixture's return value was mutated</button>
+  <p class="why" data-for="0">That's function scope's behavior, not module scope's. You have to opt into "rebuild every test" — module scope specifically opts OUT of it.</p>
+  <p class="why" data-for="1">Right. Module scope caches the fixture's return value for every test in that file; Test A's mutation is still there when Test B reads the same list object.</p>
+  <p class="why" data-for="2">pytest has no such check. Mutating a fixture's return value is completely legal Python — nothing detects or flags it, which is exactly why the bug ships.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"One cached object, handed out by reference, mutated by an unsuspecting borrower" is an old story with a new fixture-shaped hat.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>The mutable-default-argument bug, one page over</h4>
+    <p>This page's own dataclasses lesson shows @dataclass refusing a bare <code>roles: list = []</code> for exactly this reason — one shared list leaking across every instance. A broad-scoped mutable fixture is the identical bug, just leaking across tests instead of across objects.</p>
+    <div class="hf-scatter"><span>same root cause, different host</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Spring singleton bean holding mutable state</h4>
+    <p><code>@Scope("singleton")</code> (Spring's default) hands every caller the same bean instance — a mutable field on it is shared application-wide, the same "one cached object, many unsuspecting readers" shape as a session-scoped fixture.</p>
+    <div class="hf-scatter"><span>singleton scope + mutable state = shared state</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A memoized function that returns a cached list</h4>
+    <p><code>functools.lru_cache</code> on a function returning a list has the identical trap: every caller gets the same cached list object, and one caller's <code>.append</code> is visible to every other caller forever.</p>
+    <div class="hf-scatter"><span>memoization caches the reference, not a promise of immutability</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> pytest's zero-ceremony discovery, dependency-injected fixtures, parametrize's table-driven cases, and monkeypatch's auto-undone fakes are what make it low-friction to write a lot of tests fast. <b>The one new sentence this block adds:</b> a fixture broader than function scope hands out the SAME mutable object to every test in that scope, so one test's in-place mutation becomes every later test's starting state.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="pytSeg">
@@ -304,6 +416,7 @@ DevHubCodeWalk.mount('#cw-pypytest',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -219,7 +219,112 @@ try {
   </div>
 
 
-    <!-- ── EXTREME-VIZ HERO ── -->
+    <p class="hf-deck">or: you wrote the recursion in perfect tail form specifically so it wouldn't blow the stack — and it blew the stack.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You rewrote a recursive sum in textbook tail-call form — nothing happens after the recursive call returns — expecting the JVM to collapse it into a loop the way you learned it should. It doesn't. It never has.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A tail-recursive sum over 50,000 longs throws StackOverflowError</div>
+  <p>You write <code>static long sumTail(long[] arr, int i, long acc) { return i == arr.length ? acc : sumTail(arr, i + 1, acc + arr[i]); }</code> specifically to avoid building up work on the stack — the recursive call is the literal last thing the method does, textbook tail position.</p>
+  <p>You call <code>sumTail(arr, 0, 0)</code> on a 50,000-element array. Somewhere around the low tens of thousands of frames (the exact depth depends on <code>-Xss</code> and how fat the frame is), the thread's stack runs out and you get <code>java.lang.StackOverflowError</code> — thrown from inside <code>sumTail</code> itself, not from any bounds check.</p>
+  <div class="hf-scatter">
+    <span>base case is correct ✓</span>
+    <span>nothing happens after the recursive call — genuinely tail form ✓</span>
+    <span>JVM still pushes a full new frame per call ⚠</span>
+  </div>
+  <p class="hf-foot">The code is tail-recursive by every academic definition. Java doesn't check the definition — it never eliminates tail calls, for any method, under any circumstances.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Stop trusting the shape of the code to save the stack</div>
+  <div class="hf-ladder">
+    <b>Rewrite it as an explicit loop</b>
+    <i>↓ the only guaranteed fix — javac never turns recursion back into iteration for you, no matter how it's shaped</i>
+    <b>Or use a trampoline (return "the next call" as a value and loop over it in a driver)</b>
+    <i>↓ still bounded by the heap instead of the call stack, and once you write the driver once every future tail-recursive method can reuse it instead of being hand-converted</i>
+    <b>And if you genuinely need deep native recursion, raise the stack on purpose</b>
+    <i>↓ <code>new Thread(null, task, "deep-walk", 8 * 1024 * 1024)</code> runs that one recursion on a thread with an explicit 8MB stack — a documented technique, not a hack, used by recursive-descent parsers on deeply nested input</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Tail position is a property of your source code; tail-call elimination is a property of your runtime — and the JVM doesn't have one.</b> Scheme's spec mandates it. Scala's compiler can rewrite a genuine self tail-call into a loop, but only when you mark the method <code>@tailrec</code> and only for a direct call to itself. The JVM's bytecode has no instruction for "reuse the caller's frame instead of pushing a new one" — javac and the JIT leave every call, tail or not, as a real <code>invoke</code> that allocates a real frame. Writing textbook-clean recursive style doesn't opt you into a guarantee your platform was never built to offer.
+</div>
+
+<div class="hf-note">Looking like a loop and running like a loop are two different features — and the JVM only shipped one of them. <b>Tail-call elimination is a promise your language makes, not a shape your code takes.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I made the recursive call the very last thing my method does. Isn't that the whole point of tail-call optimization?</p></div>
+  <div class="hf-bub right"><span class="who">javac</span><p>It's the whole point of tail-call optimization existing as an idea, sure. Nobody ever asked me to implement it.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So what did my clean tail call actually compile into?</p></div>
+  <div class="hf-bub right"><span class="who">the JVM</span><p>An <code>invokestatic</code> and a brand-new frame, identical to the one I'd push for any other call. I don't look ahead to see whether you're about to return immediately after — I just execute the call I was handed.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Trace what actually happens to the stack when "nothing left to do" still means "push a frame."</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>sumTail(arr, 0, 0)</code> is called — frame #1 is pushed, holding i=0, acc=0, and a return address</span><span class="tag">call 1</span></li>
+    <li class="open"><span>It immediately calls <code>sumTail(arr, 1, arr[0])</code> — this is the tail call, the literal last expression in the method</span><span class="tag">tail call</span></li>
+    <li><span>Frame #2 is pushed on top of frame #1 — frame #1 is still fully allocated, just waiting</span><span class="tag">stacking up</span></li>
+    <li class="open"><span>This repeats: frame #3 waits on frame #2, frame #4 waits on frame #3 — one live frame per element processed so far</span><span class="tag">repeat</span></li>
+    <li><span>Somewhere in the low tens of thousands of frames, the thread's fixed-size stack (default roughly 512KB-1MB) runs out of room</span><span class="tag">exhaustion</span></li>
+    <li class="open"><span><code>StackOverflowError</code> is thrown from inside <code>sumTail</code> itself — not from any bounds check, not from the array, from stack exhaustion alone</span><span class="tag">the crash</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the whole gotcha. In a language with real tail-call elimination, frame #1 would be discarded the instant it made the call — there's nothing left in it worth keeping. The JVM keeps it anyway, because "discard my own frame before jumping to the next call" isn't an instruction that exists in JVM bytecode.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">What does the JVM do with a perfectly tail-recursive call?<small>the call is genuinely the method's last action</small></div>
+    <div class="arrow">what actually happens →</div>
+    <div class="opts">
+      <span>collapses it into a loop, the way Scheme guarantees</span>
+      <span class="on">pushes a brand-new frame anyway — same as any other call</span>
+      <span>defers it into a lazy thunk, the way Haskell would</span>
+    </div>
+  </div>
+  <p class="hf-annot">Only the middle option is what the JVM does. The other two are real, documented behaviors of real platforms — just not this one. Assuming your runtime behaves like the one from a functional-programming book is exactly how a clean tail call still ends in StackOverflowError.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">You convert a recursive <code>factorial(n)</code> to strict tail form with an accumulator, specifically so it can handle <code>factorial(200000)</code> without blowing the JVM stack. What happens when you run it?</p>
+  <button type="button">It works — tail form is exactly what the JVM needs to run this in constant stack space</button>
+  <button type="button">It works, but only because long silently overflows around n=21 and the recursion never really reaches 200,000 meaningful frames</button>
+  <button type="button">It still throws StackOverflowError — tail form changes nothing about how many stack frames the JVM allocates</button>
+  <p class="why" data-for="0">Wrong — this is exactly the assumption that trips people coming from Scheme, Elixir, or a functional-programming course. The JVM performs no tail-call elimination for any method, tail-recursive or not.</p>
+  <p class="why" data-for="1">Wrong, but built on a real fact: <code>long</code> genuinely does overflow around 21! (20! already exceeds a signed 64-bit long). Overflowing silently just hands back a wrong number — it doesn't stop the recursion from continuing to push a frame per call all the way toward 200,000, and StackOverflowError arrives long before the arithmetic would.</p>
+  <p class="why" data-for="2">Right — tail position is a property of the source code; frame allocation is a property of the JVM, and the JVM allocates one frame per call no matter what shape that call takes.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Recursion in tail form is free" turns out to be a claim about the runtime, not the code — and runtimes disagree.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Scala's @tailrec — the same story, with a compiler that checks</h4>
+    <p><code>@tailrec</code> forces the compiler to verify a method's recursive call is a genuine self tail-call and rewrite it into a loop at compile time. If it can't — mutual recursion, a call inside a try, a call through an overridable method — compilation fails outright instead of silently shipping unoptimized recursion.</p>
+    <div class="hf-scatter"><span>same JVM, an opt-in guarantee instead of a silent gap</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>V8 declined the same feature your Angular app runs on</h4>
+    <p>ES2015 mandates proper tail calls in the JavaScript spec. Safari's JavaScriptCore shipped it. V8 — the engine behind Chrome and Node, and therefore most of what serves your Angular app — deliberately never did, over debuggability and compatibility concerns.</p>
+    <div class="hf-scatter"><span>the spec promised it; the engine you ship to didn't keep the promise</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Jackson bounds recursion depth for the same reason you should</h4>
+    <p>A recursive-descent JSON parser with no nesting limit can be StackOverflowed by a request body that's just 50,000 empty nested arrays deep. That's why Jackson ships <code>StreamReadConstraints</code> with a configurable max nesting depth today — an attacker's deeply nested payload and your own tail-recursive helper fail the exact same way, for the exact same reason.</p>
+    <div class="hf-scatter"><span>unbounded recursion depth is a DoS surface, not just a style choice</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> recursion trades an explicit loop for a call that mirrors the problem's structure — clean to write, and every call pays for a stack frame while it waits for its children to return. <b>The one new sentence this block adds:</b> writing that call in tail position doesn't change the second half of that sentence on the JVM — it still waits, still holds its frame, and can still run out of stack exactly as if you'd never bothered.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
     <div style="margin:0 0 28px">
       <div class="rt-ctlbar">
         <span class="lbl">Scenario</span>
@@ -745,6 +850,7 @@ DevHubCodeWalk.mount('#cw-recur',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

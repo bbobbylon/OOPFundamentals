@@ -93,6 +93,196 @@
     <div class="intro-ciam"><span class="tag">CIAM debug workflow:</span> A JWT 401 on staging but not locally — first <code>GET /actuator/env/spring.security.oauth2.resourceserver.jwt.issuer-uri</code> to confirm the issuer is the staging Ping URL (a missing K8s env var falls back to <code>application.yml</code>). If correct, <code>POST /actuator/loggers/org.springframework.security.oauth2 {"configuredLevel":"DEBUG"}</code>, reproduce, and read whether it's expired, wrong audience, or a bad signature — one minute instead of a 30-minute redeploy.</div>
   </div>
 
+<p class="hf-deck">or, you turned on DEBUG in production and then watched the wrong pod</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The <code>POST</code> returned 204. You reproduced the bug four times. The logs are empty.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">DEBUG was on the whole time — on one of six replicas</div>
+  <p>Staging is fine, prod throws an intermittent 401 on token refresh. You do the smart thing
+  instead of the slow thing: no redeploy, no PR, just
+  <code>POST https://api.contoso.com/actuator/loggers/org.springframework.security.oauth2</code>
+  with <code>{"configuredLevel":"DEBUG"}</code>. Back comes <b>204 No Content</b>. Applied.</p>
+  <p>You reproduce the failing refresh four times, then open the log aggregator and filter to the
+  last ten minutes. Nothing. Not a single <code>DEBUG</code> line. So you assume the level didn't
+  take, POST it again, get another 204, try again, still nothing — and start doubting whether the
+  endpoint works at all. It works perfectly. Your prod deployment runs six replicas behind an ALB
+  that resolves one hostname to six targets. The <code>POST</code> mutated the logger inside
+  <b>one</b> JVM's memory, and the load balancer had no reason to send any of your four refresh
+  requests back to that same one.</p>
+  <div class="hf-scatter">
+    <span>endpoint exposed and reachable ✓</span>
+    <span>204 No Content, level applied ✓</span>
+    <span>package name spelled correctly ✓</span>
+    <span>5 of 6 replicas never heard about it ⚠</span>
+  </div>
+  <p class="hf-foot">The assumption underneath: that "the running app" is a thing. Behind one
+  hostname there are six of it, and Actuator only ever talks to whichever one answered the phone.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Talk to a named instance, not to a hostname</div>
+  <div class="hf-ladder">
+    <b>curl -X POST https://api.contoso.com/actuator/loggers/…</b>
+    <i>↓ a hostname is a lottery ticket — you changed one replica and you don't know which</i>
+    <b>kubectl port-forward pod/api-7d9f-4kx2 8081:8081, then POST to localhost:8081</b>
+    <i>↓ now you know exactly which JVM is verbose, and can reproduce against that same pod (or read its logs specifically)</i>
+    <b>Or fan the change across every replica — and write down that it evaporates on the next restart, because nothing about it is persisted</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Every Actuator write lands on exactly one JVM's memory — the one that happened to receive the
+  HTTP request.</b> The <code>loggers</code> endpoint calls
+  <code>LoggingSystem.setLogLevel()</code> on the instance handling the call; nothing is written to
+  a file, nothing is broadcast to siblings, nothing survives a restart. That makes it the right
+  tool the moment you can address a single instance, and a coin-flip the moment you can't. It is
+  also why the read side is your friend: <code>GET /actuator/loggers/com.contoso.ciam</code> on a
+  second replica coming back with <code>"configuredLevel": null</code> is not a bug report, it is
+  the proof that your change only ever went one place.
+</div>
+
+<div class="hf-note">You walked into a six-room office, turned up the thermostat in room 3, then went
+and sat in room 5 complaining that nothing got warmer. <b>You changed one JVM's memory, not the
+deployment.</b> The building has one address and six thermostats.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I POSTed DEBUG and got a 204. Why is there nothing in the logs?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The load balancer</span>
+    <p>Because I sent that POST to whichever target was next in rotation — one of six. Your four
+    repro requests got balanced across all six the same way. If one in six of them produced DEBUG
+    output, that's me working exactly as designed, not Actuator failing.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">LoggersEndpoint</span>
+    <p>And I did what you asked, in the process that received the request: I handed
+    <code>setLogLevel("org.springframework.security.oauth2", DEBUG)</code> to the
+    <code>LoggingSystem</code> and returned 204. I have no channel to the other five. I don't write
+    your change anywhere either — ask me again after a restart and I'll tell you
+    <code>configuredLevel: null</code>.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Logback's LoggerContext</span>
+    <p>From my side it's a field on one logger object on one heap. The next rolling deploy builds a
+    fresh me from <code>application.yml</code>, and the level you set is simply not part of that
+    story.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One curl, six pods, and the ten minutes you spend blaming the wrong thing.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Your <code>POST</code> hits <code>api.contoso.com</code> — one DNS name in front of an ALB with six healthy targets</span><span class="tag">one name, six apps</span></li>
+    <li class="open"><span>The balancer picks a target the same way it picks one for any request: round-robin, least-connections, whatever's configured. Nothing about "this is a config change" pins it anywhere</span><span class="tag">it's just traffic</span></li>
+    <li><span><code>LoggersEndpoint</code> on <b>pod-4</b> calls <code>LoggingSystem.setLogLevel(...)</code>, Logback flips one logger's level in the heap, and you get <b>204 No Content</b></span><span class="tag">applied — here</span></li>
+    <li class="open"><span>No file is written, no sibling is notified, no config source is updated. The change exists in exactly one process's memory and nowhere else on earth</span><span class="tag">memory only</span></li>
+    <li><span>You reproduce the bug four times. Statistically about one of those requests lands on pod-4 — and if your aggregator's filter or timestamp window is even slightly off, you miss the one line that did appear</span><span class="tag">1-in-6 odds, not a bug</span></li>
+    <li class="open"><span>Twenty minutes later a deploy rolls pod-4 out. The new container starts from <code>application.yml</code> at <code>INFO</code>, and the level is gone with no trace it ever existed</span><span class="tag">and now it's INFO again</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the one to carry with you, because it generalises past logging.
+  Everything Actuator lets you <i>change</i> — the logger level, a
+  <code>/actuator/refresh</code> on a <code>@RefreshScope</code> bean, resetting a metric — is a
+  mutation of one live process, not an edit to your deployment. Everything it lets you
+  <i>read</i> — <code>/env</code>, <code>/conditions</code>, <code>/beans</code>,
+  <code>/mappings</code> — is a report about one live process too, which is exactly how "but
+  <code>/env</code> says the issuer-uri is right!" survives alongside a pod that was started before
+  you fixed the env var.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">one POST /actuator/loggers<small>{"configuredLevel":"DEBUG"} → 204 No Content</small></div>
+    <div class="fan">which replicas actually changed ↓</div>
+    <div class="obs">
+      <span>pod-1 · still INFO</span>
+      <span>pod-2 · still INFO</span>
+      <span class="new">pod-4 · DEBUG — the one that answered</span>
+      <span>pod-5 · still INFO</span>
+      <span>pod-6 · still INFO</span>
+    </div>
+  </div>
+  <p class="hf-annot">Five of these six pods have never heard of your change and never will. That
+  is the whole bug in one picture — and it also tells you the shape of the fix, which is not "find
+  a better endpoint" but "stop addressing six things through one name." Port-forward to a pod and
+  the picture collapses to one box, where Actuator is precise, immediate and exactly as good as its
+  reputation.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">Prod runs six replicas. You <code>POST /actuator/loggers/com.contoso.ciam</code>
+  with <code>{"configuredLevel":"DEBUG"}</code> through the public hostname and get <b>204</b>. You
+  reproduce the failing login three times and see no <code>DEBUG</code> lines at all. What is
+  actually going on?</p>
+  <button type="button">The level was set on the single replica that served your POST; all three logins were routed to other replicas, still at INFO</button>
+  <button type="button">The change was rejected — <code>management.endpoint.loggers.enabled</code> defaults to false, and the endpoint returns 204 either way</button>
+  <button type="button">Package-level DEBUG can't take effect while the root logger is at INFO — levels filter downward from root</button>
+  <p class="why" data-for="0">Right, and the 204 is what makes it so convincing: it is a genuine
+  success response, it just means "applied here." The deeper point is that this is true of every
+  Actuator write, not just loggers — <code>/actuator/refresh</code>, a metric reset, a cache evict
+  — which is precisely why Spring Cloud Bus exists to broadcast refreshes across instances instead
+  of leaving you to curl each one. Address a single pod (port-forward, or the pod IP directly) and
+  the endpoint becomes exact again.</p>
+  <p class="why" data-for="1">A tempting shape of explanation — "the write silently no-op'd" —
+  but neither half holds. The <code>loggers</code> endpoint is enabled by default; what you have to
+  opt into is <i>exposure</i> (<code>management.endpoints.web.exposure.include</code>), and a
+  non-exposed or disabled endpoint answers <b>404</b>, not 204. So the 204 is real evidence: on
+  whichever JVM handled it, the level genuinely changed. It just wasn't the JVM you were watching.</p>
+  <p class="why" data-for="2">This inverts how logger hierarchies work. A logger's effective level
+  comes from the nearest ancestor that has one explicitly set, so
+  <code>com.contoso.ciam = DEBUG</code> overrides a root at <code>INFO</code> for that branch —
+  that's the entire point of targeting a narrow package instead of turning the whole app into a
+  firehose. There <i>is</i> a real version of this worth knowing, though: an <b>appender</b> with
+  its own threshold filter (or a JSON encoder configured to drop below INFO) can swallow DEBUG
+  events after the logger happily emitted them. If a single pod is verbose in its container log but
+  nothing reaches your aggregator, look at the appender, not the level.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Three other times you changed something on one instance and called it a deployment.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>POST /actuator/refresh with @RefreshScope</h4>
+    <p>Spring Cloud's refresh endpoint re-binds configuration properties — on the instance you
+    called. Hit it once behind a load balancer and your new feature flag is live for a sixth of
+    your traffic. That single limitation is the reason Spring Cloud Bus exists at all: a message
+    broker whose entire job is fanning one refresh out to every instance.</p>
+    <div class="hf-scatter"><span>one call ≠ one fleet</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A rate limiter in a ConcurrentHashMap</h4>
+    <p>"100 requests per minute per user," enforced by an in-memory bucket. Scale to six pods and
+    the real limit is 600 per minute, wobbling as the balancer spreads the caller around. Same
+    error, different endpoint: per-JVM state described as if it were per-application state.</p>
+    <div class="hf-scatter"><span>per-instance state, fleet-wide promise</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>kubectl exec, then edit a file</h4>
+    <p>You shell into a pod at 2am, patch a config file, and the incident clears. Then the
+    deployment scales, or the node drains, or someone pushes an unrelated commit — and your fix is
+    gone with the container, having never existed in git. The Actuator version of this is friendlier
+    only because it's easier to undo.</p>
+    <div class="hf-scatter"><span>containers are cattle; your change was a pet</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> before you attach a debugger, interrogate the running app over
+  HTTP — <code>/health</code> for what's down, <code>/env</code> for the effective value and which
+  source won it, <code>/conditions</code> for why a bean didn't load, <code>/mappings</code> for
+  whether the endpoint exists at all — and <code>POST /loggers/{package}</code> to raise a level
+  live without a redeploy. <b>The new sentence: "the running app" is one JVM among N, so an
+  Actuator write changes that one instance's memory only — it doesn't fan out to its siblings and
+  it doesn't survive the next restart.</b>
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -398,6 +588,7 @@ answer();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

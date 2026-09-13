@@ -128,7 +128,112 @@ console.log("\nheight:", height(root));
   </div>
 
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or: your TreeSet just quietly threw away a dollar's worth of precision, and returned no error at all.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You store BigDecimal amounts in a TreeSet to keep them sorted and unique — and 1.0 and 1.00 collapse into a single entry, even though calling .equals() on those exact objects yourself says they're different.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A TreeSet&lt;BigDecimal&gt; meant to hold two amounts holds one</div>
+  <p>You're deduping incoming ledger amounts before reconciliation: <code>TreeSet&lt;BigDecimal&gt; amounts = new TreeSet&lt;&gt;(); amounts.add(new BigDecimal("1.0")); amounts.add(new BigDecimal("1.00"));</code>. Every tree operation on this page — insert, search, the whole left-less-than-right invariant — runs on one primitive: comparing two keys.</p>
+  <p><code>amounts.size()</code> comes back <code>1</code>. Not because equals() thinks they match — <code>new BigDecimal("1.0").equals(new BigDecimal("1.00"))</code> is <code>false</code>, because equals() also compares scale. TreeSet never calls equals() at all. It calls compareTo(), and BigDecimal's compareTo() treats 1.0 and 1.00 as numerically identical, so the second add() looks like inserting a duplicate key and silently does nothing.</p>
+  <div class="hf-scatter">
+    <span>the BST invariant (left &lt; node &lt; right) is working exactly as designed ✓</span>
+    <span>BigDecimal.equals() correctly distinguishes the two by scale ✓</span>
+    <span>TreeSet decides "same key" using compareTo(), not equals() ⚠</span>
+  </div>
+  <p class="hf-foot">Every sorted collection in the JDK — TreeSet, TreeMap, anything you hand a Comparator to — defines "same key" as compareTo() == 0. It never once asks equals(). For most types the two never disagree. BigDecimal is the JDK's own documented exception.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make ordering and equality agree, or stop asking a sorted collection to do this job</div>
+  <div class="hf-ladder">
+    <b>Normalize scale before a value ever reaches the tree</b>
+    <i>↓ <code>amount.stripTrailingZeros()</code>, or a fixed <code>setScale(2, RoundingMode.HALF_UP)</code> for currency, makes 1.0 and 1.00 the literal same BigDecimal before either is inserted</i>
+    <b>Or supply a Comparator that breaks the tie the way you actually want</b>
+    <i>↓ <code>Comparator.comparing(BigDecimal::unscaledValue).thenComparing(BigDecimal::scale)</code> makes 1.0 and 1.00 sort as distinct keys, restoring one-to-one with equals()</i>
+    <b>Or use a HashSet/HashMap when you need real equals() semantics, and sort only at output time</b>
+    <i>↓ hashCode()/equals() is where BigDecimal's scale-sensitive comparison actually lives — build a List view and sort it right before you display or serialize</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A sorted collection's idea of "the same key" is compareTo() == 0, full stop — equals() never gets a vote.</b> The JDK documents this explicitly for BigDecimal precisely because the two disagree there: equals() treats scale as part of a value's identity (1.0 and 1.00 represent different precision), while compareTo() only cares about numeric magnitude. Every BST-based structure — TreeSet, TreeMap, or a hand-rolled BST like the search()/insert() code earlier on this page — inherits this rule automatically, because comparison is the only operation a binary search tree knows how to perform.
+</div>
+
+<div class="hf-note">In a sorted tree, compareTo() IS the identity check. <b>equals() is just a method that happens to also exist on the object</b> — the tree never once dials that number.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I called equals() myself and got false. Why does the set act like these are duplicates?</p></div>
+  <div class="hf-bub right"><span class="who">TreeSet</span><p>I never called equals(). I don't have an equals-shaped opinion about your keys — all I know how to ask is "which one is smaller," and I use that same answer for everything, including "are these the same."</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Fine. What does compareTo() actually say about 1.0 and 1.00?</p></div>
+  <div class="hf-bub right"><span class="who">BigDecimal.compareTo()</span><p>Zero. Numerically they're the same amount, and magnitude is the only thing I'm asked to determine — scale was never part of the question you sent me.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow the exact call TreeSet makes, instead of the one you assumed it made.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>amounts.add(new BigDecimal("1.0"))</code> — the tree is empty, so this becomes the root; no comparison happens yet</span><span class="tag">first add</span></li>
+    <li class="open"><span><code>amounts.add(new BigDecimal("1.00"))</code> — TreeSet walks from the root looking for where the new key belongs</span><span class="tag">second add</span></li>
+    <li><span>It calls <code>root.compareTo(newValue)</code> exactly once — this is BigDecimal.compareTo(), never equals()</span><span class="tag">the call</span></li>
+    <li class="open"><span>compareTo() compares unscaled value scaled to a common exponent: 1.0 (unscaled 10, scale 1) and 1.00 (unscaled 100, scale 2) resolve to the same number — result: 0</span><span class="tag">the verdict</span></li>
+    <li><span>TreeSet's insertion logic treats a compareTo() result of 0 as "this key already exists"</span><span class="tag">the rule</span></li>
+    <li class="open"><span>The new BigDecimal is discarded. size() stays 1. No exception, no warning, nothing in the return value flags what happened</span><span class="tag">the silence</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the one line of logic responsible for the whole surprise, and it isn't a bug — every sorted-collection implementation in the JDK treats compareTo()==0 as equality by contract. BigDecimal's own Javadoc warns about this directly: its natural ordering is "inconsistent with equals." The gotcha isn't hidden; it's just filed under a class most people never open the Javadoc page for.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">compareTo() says 1.0 and 1.00 are the same value<small>BigDecimal's natural ordering ignores scale entirely</small></div>
+    <div class="fan">everything a sorted collection does trusts that one verdict ↓</div>
+    <div class="obs">
+      <span>iteration order</span>
+      <span class="new">add() silently treats the second one as a duplicate</span>
+      <span>contains() / floor() / ceiling() lookups</span>
+    </div>
+  </div>
+  <p class="hf-annot">Iteration order and lookups following compareTo() is expected — that's the whole point of a sorted tree. The surprising reactor is duplicate detection: nothing about "insert this key in sorted position" obviously implies "and refuse it if another key sorts identically" — until you remember that's exactly what a binary search tree has to do to stay a set.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">You build <code>TreeMap&lt;BigDecimal, String&gt; notes = new TreeMap&lt;&gt;();</code> and run <code>notes.put(new BigDecimal("2.5"), "first"); notes.put(new BigDecimal("2.50"), "second");</code>. What does <code>notes.get(new BigDecimal("2.5"))</code> return?</p>
+  <button type="button">"first" — the original entry is preserved and the second put() is ignored</button>
+  <button type="button">"second" — the second put() overwrote the first, because TreeMap treated the two keys as the same one</button>
+  <button type="button">null — a TreeMap can't hold two BigDecimal keys with different scale, so the second put() throws</button>
+  <p class="why" data-for="0">Wrong direction — a Map doesn't skip a value the way a Set skips a duplicate element. TreeMap.put() on a key that already compares equal explicitly stores the new value in place of the old one — same compareTo()-based identity as TreeSet, opposite behavior on collision.</p>
+  <p class="why" data-for="1">Right — same root cause as TreeSet: compareTo() says these two BigDecimal keys are equal, so the second put() replaces the value stored under the first, exactly the way inserting the same Integer key twice would.</p>
+  <p class="why" data-for="2">Wrong — nothing about a matching key throws in a TreeMap; a repeated key is completely ordinary map behavior. What's unusual here is only that "repeated" is decided by compareTo(), which treats 2.5 and 2.50 as the same key even though their scales differ.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The uniqueness key quietly ignores something equals() cares about" is a shape that shows up far outside Java's tree collections.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Hibernate's SortedSet-mapped collections carry the identical warning</h4>
+    <p>When you map a persistent collection as a <code>SortedSet</code>, Hibernate's own documentation warns that the comparator must be consistent with equals — because it uses exactly the same compareTo()-only identity a plain TreeSet does. Get that comparator wrong on an @Entity collection and rows silently vanish from what should be a set of them.</p>
+    <div class="hf-scatter"><span>the same warning, one layer up, in the ORM you already use</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>C++'s std::set defines equivalence the same way, on purpose</h4>
+    <p>cppreference states it outright: two elements of a <code>std::set</code> or <code>std::map</code> are considered equivalent purely by the comparator — never by <code>operator==</code>. It's not a Java accident; it's how the C++ standard specifies sorted associative containers, independently arrived at.</p>
+    <div class="hf-scatter"><span>a different language, the identical rule in the spec</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A case-insensitive email uniqueness check in your own CIAM tables</h4>
+    <p>A unique index on <code>LOWER(email)</code> treats "Bob@x.com" and "bob@x.com" as the same row candidate at insert time, even though a plain Java String.equals() on those two values says they differ. It's the identical pattern: the field used to decide "is this a duplicate" isn't the same comparison equals() would make.</p>
+    <div class="hf-scatter"><span>the same shape, straight out of an identity provider's user table</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> trees keep O(log n) operations by using one comparison — less-than or greater-than — to decide where every key lives, all the way through insert, delete, and every traversal. <b>The one new sentence this block adds:</b> that same comparison decides identity too, not just placement, and the JDK ships at least one type, BigDecimal, where "same value" by that comparison and "same object" by equals() are documented to disagree.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -686,6 +791,7 @@ bstDraw();document.getElementById('bstLog').textContent='Default BST loaded. Try
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

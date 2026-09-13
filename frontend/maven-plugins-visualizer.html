@@ -107,7 +107,107 @@
     </div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, why your coverage badge has been lying to you since March</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You fix an OOM-killed test run, the build stays green, and coverage quietly drops to zero — with no error anywhere.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The coverage gate that always passes because it measures nothing</div>
+  <p>Your CI box keeps OOM-killing the test JVM, so you add a fix straight to <code>maven-surefire-plugin</code>: <code>&lt;argLine&gt;-Xmx1536m&lt;/argLine&gt;</code> in its <code>&lt;configuration&gt;</code>. Tests stop crashing. <code>mvn verify</code> goes green. Nobody looks twice.</p>
+  <p><code>jacoco-maven-plugin</code>'s <code>prepare-agent</code> execution runs earlier in the build and writes a <code>-javaagent:...jacocoagent.jar=...</code> string into that same <code>argLine</code> property, specifically so surefire will fork its test JVM wrapped in the coverage agent. Maven doesn't merge two values written to one property — whichever plugin's configuration surefire actually reads wins outright. Your literal string replaces JaCoCo's, the forked JVM never loads the agent, <code>target/jacoco.exec</code> still gets written (almost empty), and <code>target/site/jacoco/index.html</code> quietly reports coverage near 0%.</p>
+  <div class="hf-scatter">
+    <span>Java version pinned to 21 ✓</span>
+    <span>surefire pinned to 3.x for JUnit 5 ✓</span>
+    <span>a literal &lt;argLine&gt; instead of ${argLine} ⚠</span>
+  </div>
+  <p class="hf-foot">The build is green because nothing failed — it just stopped measuring anything.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Always chain argLine through the placeholder</div>
+  <div class="hf-ladder">
+    <b>Confirm prepare-agent runs before surefire</b>
+    <i>↓ its default phase is initialize, well before test — if it hasn't run yet there's no argLine to inherit at all</i>
+    <b>Write your own argLine as ${argLine} plus your flags, never a bare literal</b>
+    <i>↓ ${argLine} pulls in whatever prepare-agent already set — that's concatenation, not replacement, so the agent and your heap flag both survive</i>
+    <b>And re-check the actual HTML report, not just the build's exit code</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Configuration that looks additive can be silently replacing.</b> Any Maven property one plugin writes and another reads — <code>argLine</code>, <code>skip</code>, <code>testFailureIgnore</code> — is really a shared variable, not a merged list. The last plugin to set it wins unless you deliberately reference the old value. Treat it exactly like overwriting a shared global in code, because that is exactly what it is.
+</div>
+
+<div class="hf-note">Sticky note: <b>${argLine} isn't decoration — it's the only thing standing between "green build" and "nothing was ever measured."</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I only added a heap flag to surefire. Why did our coverage badge drop to 2%?</p></div>
+  <div class="hf-bub right"><span class="who">jacoco-maven-plugin</span><p>I set the javaagent flag into argLine back during initialize, specifically so surefire would launch your tests wrapped in me.</p></div>
+  <div class="hf-bub"><span class="who">maven-surefire-plugin</span><p>I forked the test JVM with whatever argLine held at that moment. Yours was the last write — I don't know or care who wrote before you.</p></div>
+  <div class="hf-bub right"><span class="who">The argLine property</span><p>There's only one of me. I don't merge — I hold exactly one string, and I hand it to whoever asks last.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Trace who actually owns the argLine property, in order, across one mvn verify run.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>initialize phase begins</span><span class="tag">phase</span></li>
+    <li class="open"><span>jacoco-maven-plugin:prepare-agent runs, writes -javaagent:...=target/jacoco.exec into the argLine property</span><span class="tag">sets argLine</span></li>
+    <li><span>compile, test-compile phases run normally, untouched</span><span class="tag">phase</span></li>
+    <li class="open"><span>test phase begins; surefire reads its own &lt;configuration&gt;&lt;argLine&gt;</span><span class="tag">reads config</span></li>
+    <li><span>if that value is a literal string with no ${argLine}, it's what forks the JVM — JaCoCo's agent flag is simply gone</span><span class="tag">overwrite</span></li>
+    <li class="open"><span>verify phase runs jacoco:report against a near-empty jacoco.exec and writes a near-zero report — nothing threw, so the build stays green</span><span class="tag">silent</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the entire bug. Maven never prints "argLine was replaced" — as far as its plugin engine is concerned, you configured surefire's argLine correctly. It has no idea a second plugin wanted a say in that same property.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>tuning heap size</span><span>opening JPMS modules for reflection</span><span>disabling assertions</span></div>
+    <div class="funnel">each is a literal &lt;argLine&gt; that replaces instead of appends ↓</div>
+    <div class="instance">JaCoCo's javaagent flag silently vanishes<small>coverage reports near-zero, build stays green</small></div>
+  </div>
+  <p class="hf-annot">Three unrelated reasons to touch argLine, one identical failure. The fix isn't "never touch argLine" — it's that argLine is a single shared slot, and every plugin writing to it needs to know it isn't the only writer.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">Your team adds <code>&lt;argLine&gt;-Xmx2g&lt;/argLine&gt;</code> to maven-surefire-plugin to stop OOM-killed test runs. <code>mvn verify</code> is green and the JaCoCo HTML report exists. What's actually wrong?</p>
+  <button type="button">Coverage is near 0% — the literal argLine overwrote JaCoCo's javaagent flag, so surefire never ran instrumented</button>
+  <button type="button">Nothing — the report exists and the build passed, so coverage is being measured correctly, maybe just lower than expected</button>
+  <button type="button">JaCoCo failed silently because -Xmx2g exceeds the coverage agent's own memory budget</button>
+  <p class="why" data-for="0">Right. The literal argLine replaced the property JaCoCo's prepare-agent had already set. Surefire forked a completely un-instrumented JVM; the report is real, it's just reporting almost nothing.</p>
+  <p class="why" data-for="1">A passing build and an existing report only prove jacoco:report ran and surefire didn't crash — neither step verifies the exec file has real samples in it. Green means "nothing threw," not "coverage was measured."</p>
+  <p class="why" data-for="2">The coverage agent doesn't have a separate memory budget that -Xmx could exceed — it just instruments bytecode as classes load. It isn't failing at all here; it's simply absent from the JVM that ran your tests.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Last write wins on a shared slot" shows up anywhere config from two sources lands in the same place.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring Boot profile YAML</h4>
+    <p><code>application-prod.yml</code> setting a list property doesn't merge with the base <code>application.yml</code>'s list for that same key — it replaces it wholesale. Scalars override cleanly; lists don't append, they vanish and get swapped.</p>
+    <div class="hf-scatter"><span>one shared slot, last writer wins</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Angular DI tokens without multi: true</h4>
+    <p>Register a second provider for <code>HTTP_INTERCEPTORS</code> and forget <code>multi: true</code>, and Angular doesn't append it to the interceptor chain — it silently replaces the earlier provider for that token. No error, just one interceptor that mysteriously stopped firing.</p>
+    <div class="hf-scatter"><span>same trap, no error either time</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>JwtAuthenticationConverter in Spring Security</h4>
+    <p>Call <code>setJwtGrantedAuthoritiesConverter</code> to pull custom claims into authorities, and you fully replace the default converter that reads the <code>scope</code>/<code>scp</code> claim — your users keep their custom roles and silently lose every scope-based authority unless you re-add it yourself.</p>
+    <div class="hf-scatter"><span>explicit merge or silent loss</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> plugins are the workers, goals are their specific jobs, and phases are the fixed slots those jobs plug into — <b>and when two jobs share one configuration property, the second to run replaces the first instead of joining it, with nothing telling you it happened.</b>
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -543,6 +643,7 @@ DevHubCodeWalk.mount('#cw-mvnplugs',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -61,7 +61,112 @@
     <div class="intro-ciam"><span class="tag">The CIAM stack in focus:</span> a customer identity app is the canonical SPA + API stack — an Angular SPA served from a CDN, login delegated to an OIDC provider (Entra External ID / Ping) via Authorization Code + PKCE, and every API call to Spring Boot carrying a bearer JWT that the Spring Security filter chain validates against the provider's JWKS before any controller runs. The frontend guards are UX; the Spring <code>@PreAuthorize</code> checks are the real gate. The data layer (Postgres) never trusts the client. Knowing the <em>whole</em> path — who renders, where the token is verified, which layer is authoritative — is what lets you debug a 401 vs a 403 vs a CORS failure in seconds.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the "immune to CSRF" line in the CodeWalk above — and the much easier attack it trades that risk for</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Ditching cookies for a bearer JWT really does kill CSRF. It also means your token is one XSS bug away from sitting in an attacker's browser tab.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Your "CSRF-immune" token is one localStorage.getItem() away from an attacker</div>
+  <p>Following the CodeWalk above, your Angular interceptor reads a JWT and attaches it as <code>Authorization: Bearer ${token}</code>. To survive a page refresh, <code>token</code> has to come from somewhere — the standard, extremely common pattern is <code>localStorage.setItem('access_token', token)</code> right after login, then <code>localStorage.getItem('access_token')</code> inside the interceptor. The page's claim above is completely correct: a forged cross-site form or <code>&lt;img&gt;</code> tag cannot set a custom <code>Authorization</code> header, so classic CSRF genuinely cannot steal or replay this token.</p>
+  <p>But <code>localStorage</code> has no origin-internal access control. Every script running on your page — including a malicious one — can read it with one line: <code>localStorage.getItem('access_token')</code>. A vulnerable npm dependency, an unsanitized comment field rendered without escaping, a compromised third-party analytics snippet — any single XSS foothold reads the token directly and ships it to an attacker's server with a plain <code>fetch()</code> call. An HttpOnly cookie holding a session id is invisible to JavaScript entirely, even to a successful XSS payload; <code>localStorage</code> has no equivalent protection at all.</p>
+  <div class="hf-scatter">
+    <span>CSRF genuinely can't touch this token ✓</span>
+    <span>Authorization header attached correctly on every request ✓</span>
+    <span>token sitting somewhere any injected script can read it ⚠</span>
+  </div>
+  <p class="hf-foot">You didn't remove a vulnerability by switching from cookies to bearer tokens — you traded CSRF for XSS-based token theft, and XSS is usually the easier bug to find.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Stop letting JavaScript-readable storage hold the raw token</div>
+  <div class="hf-ladder">
+    <b>Never persist the raw token in localStorage or sessionStorage if you can avoid it</b>
+    <i>↓ both are just JS-readable key/value stores with zero built-in protection against script access — exactly the surface an XSS payload targets first</i>
+    <b>Keep the access token in memory only, and re-authenticate silently on reload</b>
+    <i>↓ a variable inside an Angular service (never persisted) disappears on refresh; pair it with a silent OIDC re-authentication so the user doesn't have to log in again, without ever writing the token to disk</i>
+    <b>Or move to the Backend-for-Frontend pattern entirely</b>
+    <i>↓ the browser never sees the raw JWT at all — your own backend holds it server-side and issues an HttpOnly, Secure, SameSite cookie instead, so even a successful XSS payload has nothing to steal</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> "Bearer token, not a cookie" answers the CSRF question, not the security question — anywhere your own JavaScript can read the token to attach it, any other JavaScript that ends up running on your page can read it too.
+</div>
+
+<div class="hf-note">A key you keep in your own pocket instead of leaving in the mailbox is safe from the mailman — it's not safe from someone who's already <b>inside your house</b>.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I moved my JWT out of a cookie into a Bearer header specifically to kill CSRF. Did I just fix my token security?</p></div>
+  <div class="hf-bub right"><span class="who">Bearer token</span><p>You fixed CSRF. Nobody can forge a request that includes me anymore without running JavaScript on your page.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Running JavaScript on my page — like an XSS bug would?</p></div>
+  <div class="hf-bub right"><span class="who">Bearer token</span><p>Exactly like that. And unlike an HttpOnly cookie, I never had a setting that hides me from JavaScript in the first place — if a script can read localStorage, it can read me.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one XSS payload as it walks straight past every CSRF defense you just built.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>An unsanitized comment field renders a &lt;script&gt; tag verbatim on your page — the classic stored-XSS entry point</span><span class="tag">xss injected</span></li>
+    <li class="open"><span>That script runs with the exact same JS privileges as your Angular app — same origin, same DOM, same storage</span><span class="tag">same origin</span></li>
+    <li><span>It calls localStorage.getItem('access_token') — one line, no special permission needed</span><span class="tag">token read</span></li>
+    <li class="open"><span>The script POSTs that value to an attacker-controlled endpoint over a normal fetch() call</span><span class="tag">exfiltrated</span></li>
+    <li><span>The attacker now holds a valid, unexpired bearer token and can call your API as you, from anywhere</span><span class="tag">impersonation</span></li>
+    <li class="open"><span>None of this touched a cookie, a form, or cross-site request forgery at any point — CSRF defenses were never even in the picture</span><span class="tag">csrf irrelevant</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the whole trap. Your interceptor, your Authorization header, your Spring filter chain — every piece from the CodeWalk above works exactly as designed. The attacker didn't break any of it; they just read the token off the shelf before your own code ever got to use it.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">What actually stops an XSS payload from reading your access token?<small>after CSRF is already fixed</small></div>
+    <div class="arrow">what actually works →</div>
+    <div class="opts">
+      <span>a SameSite cookie attribute</span>
+      <span>a CSRF token on every form</span>
+      <span class="on">never letting JavaScript-readable storage hold the raw token at all</span>
+    </div>
+  </div>
+  <p class="hf-annot">SameSite and CSRF tokens are the right tool for a cookie-based session — they have nothing to say about a value sitting in localStorage. The only real defense against this attack is keeping the token somewhere a script can't casually reach, or not letting the browser hold the raw token at all.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">You move your app's JWT from a cookie to an Authorization: Bearer header specifically to eliminate CSRF, and store it in localStorage so an Angular interceptor can attach it on every request. What have you actually achieved?</p>
+  <button type="button">Full protection — bearer tokens can't be stolen or forged, since CSRF was the only realistic attack on a client-side JWT.</button>
+  <button type="button">Nothing — bearer tokens and cookies have the exact same exposure to every browser-based attack.</button>
+  <button type="button">You've eliminated CSRF, but the token is now readable by any JavaScript that runs on your page — including an XSS payload, which can read and exfiltrate it in one line.</button>
+  <p class="why" data-for="0">CSRF really is fixed, but that was never the only attack on a client-side token. XSS-based theft through localStorage is a separate, still wide-open door — arguably easier to exploit than CSRF ever was.</p>
+  <p class="why" data-for="1">They don't have identical exposure — CSRF specifically abuses credentials the browser attaches automatically (cookies). A bearer token in a header isn't attached automatically, so CSRF genuinely can't reach it. The tradeoff is real; it's just incomplete.</p>
+  <p class="why" data-for="2">Right. The CSRF fix is genuine, but nothing about moving to a Bearer header protects the token from a script that's already running on your page — and localStorage hands that script the token in one line.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Fixing one attack surface can open a different one" is a lesson worth hearing from more than one direction.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>OWASP and the OAuth-for-browsers guidance say the same thing</h4>
+    <p>Industry guidance for OAuth 2.0 in browser-based apps explicitly recommends against persisting tokens in localStorage and instead recommends the Backend-for-Frontend pattern — the browser gets an HttpOnly session cookie, and the actual access token never leaves the server. The fix above isn't a personal opinion; it's the standard answer the identity industry has already converged on.</p>
+    <div class="hf-scatter"><span>the same lesson, as a published standard</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Angular's own sanitizer is the safety net you have to defeat first</h4>
+    <p>Angular auto-escapes interpolated bindings (<code>{{ userComment }}</code>) by default — this class of vulnerability usually requires a developer to explicitly bypass that protection, most often via an <code>[innerHTML]</code> binding fed unsanitized content, or <code>bypassSecurityTrustHtml()</code>. The same framework holding your token in a service is also the one whose guardrail has to be actively defeated to open the door in the first place.</p>
+    <div class="hf-scatter"><span>the framework you already use, both the risk and the guardrail</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Third-party script tags are functionally identical to an XSS payload</h4>
+    <p>Any third-party <code>&lt;script&gt;</code> loaded onto your page — an analytics SDK, an ad script, a chat widget — executes with the exact same origin privileges as your own app code, with no sandboxing by default. A compromised or malicious third-party script can read <code>localStorage</code> just as easily as an injected payload can. Adding a customer-facing SDK to a CIAM app is adding code with full read access to anything your app stored there.</p>
+    <div class="hf-scatter"><span>the same gap, opened by a vendor instead of an attacker</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> every stack — SPA + API, MERN, a server-rendered monolith, a compiled Go/Rust API — is a variation on the same client → frontend → auth → backend → data skeleton, and the one architectural fork that matters is simply where the HTML gets rendered. <b>The one new sentence this block adds:</b> swapping a session cookie for a bearer JWT genuinely kills CSRF, but wherever your own JavaScript needs to read that token to attach it, any other JavaScript running on your page — including a single XSS bug — can read it too, and that's usually the easier attack to pull off.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">stack:</span>
       <span class="userseg" id="wsSeg">
@@ -286,6 +391,7 @@ DevHubCodeWalk.mount('#cw-ws',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

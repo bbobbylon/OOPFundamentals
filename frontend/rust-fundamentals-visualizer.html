@@ -57,7 +57,112 @@
     <div class="intro-ciam"><span class="tag">Rust in a CIAM world:</span> Rust shows up where identity infrastructure needs to be fast and bulletproof — token-introspection services, high-throughput JWT verification gateways, crypto-heavy auth proxies. <code>Option</code>/<code>Result</code> force you to handle "claim missing" and "signature invalid" explicitly: a forgotten case is a compile error, not a production 500. The borrow checker rules out the data races that plague concurrent session stores. And because there is no GC, latency is predictable — valuable for an auth service on the hot path of every request. The Rust web page (next) builds an Axum API where these guarantees carry into typed request handling.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, why renaming a test user from "Sam" to "Sam Åström" just paged your team at 2am</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">A slice that type-checks as a valid <code>usize</code> range is not the same thing as a valid place to cut a string — and Rust will panic rather than let you cut it wrong.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Your avatar-initial function passes every test, then panics on a real customer</div>
+  <p>You write a one-liner for a profile-avatar service: <code>fn initial(s: &amp;str) -&gt; &amp;str { &amp;s[0..1] }</code>. You test it against <code>"Bob"</code>, <code>"Alice"</code>, and <code>"Sam"</code> — three green runs, ship it.</p>
+  <p>In production, a customer named <code>"Émile"</code> logs in. <code>&amp;s[0..1]</code> panics at runtime: <code>byte index 1 is not a char boundary; it is inside 'É' (bytes 0..2)</code>. Nothing about the code looked wrong — <code>0..1</code> is a perfectly valid range for a <code>usize</code>.</p>
+  <div class="hf-scatter">
+    <span>compiles clean ✓</span>
+    <span>passes on "Bob", "Alice", "Sam" ✓</span>
+    <span>panics at 2am on "Émile" ⚠</span>
+  </div>
+  <p class="hf-foot">The bug was never in your logic. It was in treating a UTF-8 byte string like a fixed-width array of characters.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Slice by character, not by byte offset</div>
+  <div class="hf-ladder">
+    <b>Call <code>s.chars().next()</code> instead of indexing bytes</b>
+    <i>↓ <code>chars()</code> decodes the underlying UTF-8 bytes into full Unicode scalar values, so it can never stop in the middle of one</i>
+    <b>Handle the <code>Option</code> it returns</b>
+    <i>↓ an empty string has no first character — <code>chars().next()</code> gives you <code>None</code> instead of panicking, so the empty case is a branch you write, not a crash you debug</i>
+    <b>And if you truly need a byte range, guard it first</b>
+    <i>↓ <code>s.is_char_boundary(i)</code> tells you, before you slice, whether byte offset <code>i</code> is safe to cut at</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A Rust <code>String</code>/<code>&amp;str</code>'s <code>.len()</code> is a count of bytes, not characters, and <code>s[a..b]</code> panics unless both <code>a</code> and <code>b</code> land exactly on a UTF-8 character boundary. Any byte range you did not derive from <code>.char_indices()</code>, <code>.chars()</code>, or <code>.is_char_boundary()</code> should be treated as untrusted — even when the numbers came from <code>usize</code> arithmetic that looks perfectly reasonable.
+</div>
+
+<div class="hf-note">A Rust <code>str</code> is a sealed jar of raw UTF-8 bytes with a lid that only opens at pre-marked notches. Reach in between two notches and the <b>jar shatters</b> instead of handing you half a byte of a character — Rust would rather crash loudly than let a broken string leak out.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p><code>s.len()</code> said 5, and <code>&amp;s[0..5]</code> worked fine. Why did <code>&amp;s[0..4]</code> blow up on that exact same string?</p></div>
+  <div class="hf-bub right"><span class="who">str, personified</span><p>Because 5 was the full byte length — the end of the string is always a valid boundary. 4 landed inside the last character's multi-byte encoding. I don't hand out partial characters.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But <code>s.chars().count()</code> said this string has 4 characters. Doesn't <code>[0..4]</code> mean "the first four characters"?</p></div>
+  <div class="hf-bub right"><span class="who">str, personified</span><p>No — I never index by character, only by byte offset. If you want characters, call <code>chars()</code>. That's the one method on me that actually walks codepoints instead of raw bytes.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Here's the actual byte layout behind <code>"café"</code>, and why <code>0..4</code> lands mid-character instead of after the fourth letter.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>You write <code>let name = "café"; &amp;name[0..4]</code></span><span class="tag">looks right</span></li>
+    <li class="open"><span><code>c</code>, <code>a</code>, <code>f</code> are ASCII — one byte each, at byte offsets 0, 1, 2</span><span class="tag">3 bytes so far</span></li>
+    <li><span><code>é</code> is not ASCII — Rust stores it as the 2-byte UTF-8 sequence <code>0xC3 0xA9</code>, spanning byte offsets 3 and 4</span><span class="tag">multi-byte</span></li>
+    <li class="open"><span>Your range <code>0..4</code> asks for bytes 0, 1, 2, 3 — that's <code>c</code>, <code>a</code>, <code>f</code>, and only the FIRST of <code>é</code>'s two bytes</span><span class="tag">boundary crossed</span></li>
+    <li><span>Every slicing operation on a <code>str</code> checks both ends of the range against <code>is_char_boundary()</code> before it returns anything</span><span class="tag">runtime check</span></li>
+    <li class="open"><span>Byte 4 fails that check → <code>panic!("byte index 4 is not a char boundary; it is inside 'é' (bytes 3..5)")</code></span><span class="tag">panic, not garbage</span></li>
+  </ol>
+  <p class="hf-annot">Step five is the one to sit with: that boundary check runs in <em>every build</em>, release included. It isn't a debug-only assertion the way an unchecked array index sometimes is in other languages — Rust always pays this small cost so that a <code>&amp;str</code> can never become invalid UTF-8 by accident. The panic is the language protecting an invariant, not a missing safeguard.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">the question: is <code>&amp;s[0..1]</code> on <code>"É"</code> (bytes <code>0xC3 0x89</code>) safe?<small>0 is a boundary; 1 is inside the character</small></div>
+    <div class="arrow">what actually happens →</div>
+    <div class="opts">
+      <span>returns the first raw byte as a one-byte <code>&amp;str</code></span>
+      <span class="on">panics: "byte index 1 is not a char boundary"</span>
+      <span>silently returns an empty string</span>
+    </div>
+  </div>
+  <p class="hf-annot">Only one of those three outcomes is real, and it's the one that feels the least convenient: Rust refuses to manufacture a <code>&amp;str</code> that isn't valid UTF-8, so an in-between byte index can't return anything at all — it has to stop the program instead.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">Your CIAM display-name truncator does <code>fn short(s: &amp;str) -&gt; &amp;str { &amp;s[0..8] }</code>. It panics in production for a customer named "Sören Åström" but never once in a test suite full of "John Smith" and "Jane Doe" fixtures. What's actually going on?</p>
+  <button type="button">Byte offset 8 lands inside a multi-byte UTF-8 character in that name, which isn't a char boundary</button>
+  <button type="button">The name is too long for a fixed-size <code>u8</code> buffer inside <code>String</code></button>
+  <button type="button"><code>&amp;str</code> slicing only accepts ASCII input and throws a Unicode error on anything else</button>
+  <p class="why" data-for="0">Right. Every test fixture happened to be pure ASCII, where every byte offset is automatically a char boundary — so the bug was invisible until a name with an accented or non-Latin character reached byte offset 8 mid-character. This is exactly why "works on my test data" means nothing here: the risk scales with how international your real user base is, and CIAM systems see every alphabet on Earth.</p>
+  <p class="why" data-for="1"><code>String</code> isn't backed by a fixed-size buffer — it's a heap-allocated, growable <code>Vec&lt;u8&gt;</code> under the hood, so length was never the constraint. The panic is about where you cut, not how much you're holding.</p>
+  <p class="why" data-for="2">There's no "Unicode error" and no ASCII-only restriction in Rust — <code>&amp;str</code> is UTF-8 end to end and can be sliced correctly at any real character boundary. The failure is specifically about landing between two bytes of the same character, not about which characters are present.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"An index that looks numerically fine actually isn't" is not a Rust-only disease — every language that lets you slice text by position has some version of it.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's String.substring() and the split emoji</h4>
+    <p>Java strings are sequences of UTF-16 code units, and a character outside the Basic Multilingual Plane — most emoji, some CJK extensions — is stored as a <em>surrogate pair</em>, two code units for one visible character. <code>s.substring(0, 1)</code> on a string starting with such an emoji doesn't panic; it just hands back half of the surrogate pair, an invalid UTF-16 sequence that renders as a replacement glyph or breaks whatever reads it next.</p>
+    <div class="hf-scatter"><span>same numeric-index trap, but it fails silently instead of loudly</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Angular's .slice() has the identical trap, in your browser</h4>
+    <p>JavaScript and TypeScript strings are UTF-16 too, so <code>"😀".length === 2</code>. A profile display-name truncator in an Angular component — <code>name.slice(0, 10)</code> — can slice through the same kind of surrogate pair or combining-mark sequence and nothing throws. You just render mojibake in the UI for a user with an emoji or an accented name, and QA on English test accounts will never catch it.</p>
+    <div class="hf-scatter"><span>the identical UTF-16 trap, one framework hop away from this page</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Rust token-introspection service logging a claim</h4>
+    <p>This page's own intro flags Rust for JWT-verification and token-introspection services on the auth hot path. If that service truncates a decoded <code>name</code> or <code>given_name</code> claim for a structured log line with <code>&amp;claim[0..40]</code>, a real customer's accented or CJK name panics the logging code — not the authentication logic, but a crash all the same. The fix is the identical pattern from this block: <code>claim.chars().take(40).collect::&lt;String&gt;()</code>.</p>
+    <div class="hf-scatter"><span>chars().take(n), never a raw byte range, for anything a user typed</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> ownership and borrowing make Rust memory-safe at compile time, and <code>Option</code>/<code>Result</code> make missing values and errors impossible to silently ignore. <b>The one new sentence this block adds:</b> none of that protects a byte range you compute yourself — <code>str</code> slicing is checked at <em>runtime</em>, and it panics on purpose rather than ever hand you a corrupted string.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="ruSeg">
@@ -254,6 +359,7 @@ DevHubCodeWalk.mount('#cw-ru',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

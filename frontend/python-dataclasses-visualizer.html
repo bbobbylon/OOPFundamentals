@@ -111,7 +111,117 @@ print("asdict:", asdict(a))
   </div>
 
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">The generated __eq__ up above compares "all fields" — but it has a second, unwritten requirement that only shows up the day you subclass.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Two dataclasses can have every single field equal to every single field, and still fail ==, because @dataclass checks something you never told it to check.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A cache lookup that always misses for one specific claim type</div>
+  <p>You model an access token's claims as a frozen dataclass, then add a narrower subtype for refresh-token claims that happens to carry the exact same fields — inheritance felt free, so why not:</p>
+  <p><code>@dataclass(frozen=True)</code><br>
+  <code>class AccessTokenClaims:</code><br>
+  <code>&nbsp;&nbsp;sub: str; exp: int</code><br><br>
+  <code>@dataclass(frozen=True)</code><br>
+  <code>class RefreshTokenClaims(AccessTokenClaims):</code><br>
+  <code>&nbsp;&nbsp;pass&nbsp;&nbsp;# same fields, just a distinct type for the type checker</code></p>
+  <p>Later, a token cache does <code>if claims in seen_claims_set: return cached</code> to dedupe identical claims regardless of which class built them. <code>AccessTokenClaims("alice", 999)</code> and <code>RefreshTokenClaims("alice", 999)</code> have <em>identical</em> <code>sub</code> and <code>exp</code> — and <code>==</code> between them returns <code>False</code>, every time, so the cache never hits for refresh claims.</p>
+  <div class="hf-scatter">
+    <span>sub matches ✓</span>
+    <span>exp matches ✓</span>
+    <span>the generated __eq__'s class check ⚠</span>
+  </div>
+  <p class="hf-foot">Every field you can see is equal. The object still says no.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Know what the generated __eq__ actually checks before you subclass</div>
+  <div class="hf-ladder">
+    <b>Read the field comparison as: (self.__class__ is other.__class__) AND (fields tuple == fields tuple)</b>
+    <i>↓ not isinstance, not "same shape" — the exact class object</i>
+    <b>If you need cross-subtype equality, write __eq__ yourself</b>
+    <i>↓ compare (self.sub, self.exp) == (other.sub, other.exp) explicitly, without a class check</i>
+    <b>Or, more often, don't subclass a dataclass just to rename it</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>@dataclass's __eq__ is a same-type check, not a same-shape check.</b> The Python docs are explicit about this: the generated method compares two instances as tuples of their fields, but "both instances in the comparison must be of the identical type" — a subclass, even one that adds nothing, is a different type. This is the same rule that already makes <code>NamedTuple</code> subclasses and most other generated-equality tools behave "strictly" — dataclasses just don't advertise it anywhere near the decorator.
+</div>
+
+<div class="hf-note">A dataclass's <code>__eq__</code> checks your ID card's <b>issuing office</b>, not just the photo. Two ID cards with your exact face and exact birthdate still don't "match" if one was printed by <code>AccessTokenClaims</code> and the other by <code>RefreshTokenClaims</code> — <b>same data, different office, no match.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>These two objects print identically and have the same sub and exp. Why is claims_a == claims_b False?</p></div>
+  <div class="hf-bub right"><span class="who">The generated __eq__</span><p>I don't just compare fields — the first thing I check is <code>other.__class__ is self.__class__</code>. Yours are <code>AccessTokenClaims</code> and <code>RefreshTokenClaims</code>. Different classes, so I return <code>NotImplemented</code> before I even look at <code>sub</code>.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But RefreshTokenClaims IS an AccessTokenClaims — isinstance says so!</p></div>
+  <div class="hf-bub right"><span class="who">The generated __eq__</span><p>isinstance and I disagree on purpose. I use <code>is</code> on the class object specifically so that unrelated classes that happen to share field names never accidentally compare equal. Inheritance doesn't buy you an exception.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Here's what actually executes when Python evaluates <code>claims_a == claims_b</code>.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>claims_a == claims_b</code> calls <code>AccessTokenClaims.__eq__(claims_a, claims_b)</code></span><span class="tag">dispatch</span></li>
+    <li class="open"><span>The generated method's first check: <code>other.__class__ is self.__class__</code></span><span class="tag">the hidden gate</span></li>
+    <li><span><code>RefreshTokenClaims is not AccessTokenClaims</code> — the check fails</span><span class="tag">fails</span></li>
+    <li class="open"><span>__eq__ returns <code>NotImplemented</code>, never touching <code>sub</code>/<code>exp</code> at all</span><span class="tag">short-circuits</span></li>
+    <li><span>Python falls back to <code>claims_b.__eq__(claims_a)</code> — same class check, same result</span><span class="tag">reflected try</span></li>
+    <li class="open"><span>Both sides gave up, so Python's default identity fallback applies: not equal</span><span class="tag">False</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is the one line nobody reads. It runs before any field is inspected, which is exactly why "but the fields match!" isn't a useful debugging instinct here — the function returns before it gets anywhere near your fields.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">AccessTokenClaims("alice", 999) == RefreshTokenClaims("alice", 999)<small>every field is identical</small></div>
+    <div class="arrow">what the generated __eq__ actually checks →</div>
+    <div class="opts">
+      <span>field values only</span>
+      <span class="on">exact class identity AND field values</span>
+      <span>isinstance relationship</span>
+    </div>
+  </div>
+  <p class="hf-annot">The slot that decides the outcome isn't "do the fields match" — it's a class-identity check you never wrote and can't see in the <code>@dataclass</code> line. Once you know it's there, "make a subclass with no new fields just for a clearer name" stops looking like a free move.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q"><code>@dataclass class Money: amount: int</code>, and <code>class USD(Money): pass</code> subclasses it with no new fields. <code>Money(5) == USD(5)</code> evaluates to:</p>
+  <button type="button"><code>True</code>, because <code>USD</code> inherits <code>Money</code>'s fields and <code>__eq__</code> unchanged</button>
+  <button type="button">A <code>TypeError</code>, because you can't compare a base class instance to a subclass instance</button>
+  <button type="button"><code>False</code>, because the generated <code>__eq__</code> requires <code>type(a) is type(b)</code>, and <code>Money is not USD</code></button>
+  <p class="why" data-for="0">Inheriting the method is exactly the trap — <code>USD</code> does inherit <code>Money.__eq__</code> unchanged, and that inherited method is precisely what checks <code>self.__class__ is other.__class__</code>, which fails here.</p>
+  <p class="why" data-for="1">No exception is raised. <code>__eq__</code> is allowed to return <code>NotImplemented</code> when it doesn't know how to compare, and Python quietly converts that into a plain <code>False</code> instead of erroring.</p>
+  <p class="why" data-for="2">Right — same fields, same values, different class objects. The generated <code>__eq__</code> was never told "or a subclass is fine too," so it isn't.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Looks equal, isn't equal" shows up anywhere a language auto-generates comparison logic.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java records and getClass() equality</h4>
+    <p>A Java <code>record</code>'s generated <code>equals()</code> also compares <code>getClass()</code>, not <code>instanceof</code> — the exact same "identical fields, different runtime class, not equal" shape, for the exact same reason: nobody wants unrelated types colliding on shared field names.</p>
+    <div class="hf-scatter"><span>getClass() over instanceof, on purpose</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Lombok's @EqualsAndHashCode and "canEqual"</h4>
+    <p>Lombok generates a <code>canEqual()</code> hook precisely because plain generated equality breaks under inheritance the same way — it's a widely-hit-enough problem in JVM land that a whole pattern exists just to opt back into cross-subclass equality on purpose.</p>
+    <div class="hf-scatter"><span>a whole pattern built to undo this default</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Hibernate entities compared before their ID is assigned</h4>
+    <p>Two unsaved JPA entities with identical field values, before either has a database ID, are a cousin of this bug — the equality contract has an extra hidden condition nobody reads until two "obviously equal" objects fail a <code>Set</code> membership check.</p>
+    <div class="hf-scatter"><span>an equality contract with a silent extra clause</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> @dataclass generates __init__/__repr__/__eq__ from your annotated fields, with field()/frozen/order/slots tuning the details, and Pydantic taking over the moment input needs real validation. <b>The one new sentence this block adds:</b> the generated __eq__ silently requires an exact class match, so a dataclass subclass with identical fields is never == to its parent — inheritance changes the answer even when nothing else does.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="pydcSeg">
@@ -319,6 +429,7 @@ DevHubCodeWalk.mount('#cw-pydcl',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

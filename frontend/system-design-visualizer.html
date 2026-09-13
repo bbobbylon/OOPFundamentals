@@ -114,7 +114,110 @@
       </div>
     </div>
 
-    <h2>From single server to global scale</h2>
+    <p class="hf-deck">or, the rate limiter that only fails you during the exact traffic spike it exists to survive</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Your token-bucket rate limiter passes every test you throw at it one request at a time — then a real burst hits and it lets through triple what it's configured for.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The rate limiter that only breaks under the load it's supposed to stop</div>
+  <p>You ship a token-bucket almost identical to the one further down this page: <code>redis.hgetall</code> reads the bucket, your app code computes the refill and compares <code>tokens &lt; 1</code>, then <code>redis.hset</code> writes the decremented count back. In a single-threaded load test — one client, one request at a time — it behaves exactly as documented: exactly N requests per second get through, the next one gets a 429.</p>
+  <p>You're running this behind the load balancer this very page tells you to add for horizontal scale — a dozen stateless app server instances. The moment real concurrent traffic arrives — a retry storm, a bot, a legitimate spike — several instances hit the exact same Redis key for the exact same user within microseconds of each other. Each runs its own independent GET-then-SET round trip. HGETALL and HSET are each atomic individually, but nothing stops two of those round trips from interleaving: both read <code>tokens=1</code> before either writes back, both compute "tokens &gt;= 1, allow," and both issue their own HSET. The bucket ends up looking like exactly one request happened when two, three, or a dozen actually got through — precisely during the burst the limiter exists to catch.</p>
+  <div class="hf-scatter">
+    <span>sequential load test: exactly N/sec ✓</span>
+    <span>429 fires correctly for one client ✓</span>
+    <span>GET-then-SET across two Redis round trips ⚠</span>
+  </div>
+  <p class="hf-foot">A rate limiter tested one request at a time can't see the race that only exists once requests overlap.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make the check-and-decrement one atomic operation, not two round trips</div>
+  <div class="hf-ladder">
+    <b>Move the whole read-compute-write sequence into a single Redis Lua script run with EVAL</b>
+    <i>↓ Redis runs a Lua script as one atomic unit — no other command from any client can interleave in the middle of it, so two concurrent requests can no longer both read the same "before" state</i>
+    <b>Or reach for a library that already solved this — Bucket4j with a distributed backend, Redisson's RateLimiter, or Redis's own redis-cell module</b>
+    <i>↓ this exact bug is common enough that mature rate-limiting libraries build the atomic script in for you; hand-rolled GET/SET pairs are the version everyone reinvents and everyone gets wrong the same way</i>
+    <b>And load test with CONCURRENT clients, not sequential ones, before trusting the limiter in production</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Read-then-write across two network round trips is never atomic, no matter how atomic each half is.</b> Redis guarantees each single command executes without interruption — it guarantees nothing about the gap between two commands issued from your application code. Any state you read, reason about, and write back later is a race waiting for concurrent traffic to find it.
+</div>
+
+<div class="hf-note">Sticky note: <b>the bug isn't in Redis, and it isn't in your math — it's in the silent gap between your GET and your SET, and that gap is exactly where two concurrent requests live.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>My rate limiter passed every test. Why did a 3-second burst let through 40 requests when the limit is 10?</p></div>
+  <div class="hf-bub right"><span class="who">App server #1</span><p>I read tokens=1, decided that was enough to allow the request, and wrote tokens=0 back.</p></div>
+  <div class="hf-bub"><span class="who">App server #2</span><p>I read tokens=1 too — a few microseconds before #1's write landed. I made the exact same correct decision off the exact same stale data.</p></div>
+  <div class="hf-bub right"><span class="who">Redis</span><p>Each of your commands ran perfectly atomically, in order. Nobody ever asked me to make GET-then-SET atomic together — that was never part of the deal.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch two concurrent requests race through the same read-modify-write window.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>request A arrives at app server #1; the bucket for this user currently holds 1 token</span><span class="tag">state</span></li>
+    <li class="open"><span>server #1 issues HGETALL, reads tokens=1</span><span class="tag">read A</span></li>
+    <li><span>microseconds later, request B arrives at app server #2 for the same user</span><span class="tag">concurrent</span></li>
+    <li class="open"><span>server #2 issues its own HGETALL — server #1 hasn't written anything back yet, so it also reads tokens=1</span><span class="tag">read B</span></li>
+    <li><span>both servers compute independently: tokens &gt;= 1, so both decide ALLOW and both prepare tokens=0</span><span class="tag">double allow</span></li>
+    <li class="open"><span>both issue HSET tokens=0; the second write simply overwrites the first — Redis has no idea two decisions were made from the same starting value</span><span class="tag">silent race</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the entire bug compressed into one line: server #2's read isn't wrong, it's just late relative to a write that hasn't happened yet. Nothing in the Redis protocol tells server #2 "someone else is mid-decision on this key right now."</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Bucket shows 1 token</span>
+      <span class="go"><em>two requests arrive microseconds apart</em> <span class="arrow">→</span> both run their own HGETALL before either writes back</span></div>
+    <div class="stt"><span class="nm">Both computed ALLOW</span>
+      <span class="go"><em>each independently sees tokens &gt;= 1</em> <span class="arrow">→</span> both prepare their own HSET tokens=0</span></div>
+    <div class="stt"><span class="nm">One write wins, one is invisible</span>
+      <span class="go"><em>the second HSET overwrites the first</em> <span class="arrow">→</span> bucket now reads 0, as if only ONE request had happened</span></div>
+  </div>
+  <p class="hf-annot">There's no fourth state where Redis notices two decisions were made from the same starting number. The cycle just repeats on the next burst, letting two, three, or a dozen requests through the same single-token gap every time concurrent traffic lines up.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your Redis-backed token-bucket limiter (HGETALL, compute, HSET) is set to 10 requests/second per user. Under a synthetic burst of 40 concurrent requests from one user, 23 get through instead of 10. What's the most likely cause?</p>
+  <button type="button">Redis's HSET command isn't truly atomic, so individual writes are getting corrupted under load</button>
+  <button type="button">Multiple concurrent requests are each reading the bucket's token count before any of them writes back, so several make the same "allow" decision off the same stale read</button>
+  <button type="button">The REFILL_RATE calculation is wrong, so the bucket is refilling faster than intended during the burst</button>
+  <p class="why" data-for="0">HSET and HGETALL are each individually atomic — Redis guarantees that. The corruption isn't inside either command; it's in the gap between one client's GET and its own later SET, during which other clients can freely read the same unmodified value.</p>
+  <p class="why" data-for="1">Right. Every extra admitted request corresponds to another concurrent reader that got in during that same read-modify-write gap. None of the individual reads or writes were wrong — the sequence of two separate round trips just wasn't atomic as a whole.</p>
+  <p class="why" data-for="2">A refill bug would show up consistently, burst or not, and would skew the limit by a predictable amount tied to elapsed time. A count that only balloons specifically under concurrent load, and looks fine run sequentially, is the signature of a race, not a formula error.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Read it, decide, write it back later" is a race the moment two callers can do it at once.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>The classic SQL lost update</h4>
+    <p><code>SELECT balance FROM accounts WHERE id = 42</code>, subtract in application code, then <code>UPDATE accounts SET balance = :new</code> — two concurrent withdrawals both read balance=100, both compute 100-60=40, and the second UPDATE clobbers the first. The fix is the same shape as the fix here: <code>SELECT ... FOR UPDATE</code>, an atomic <code>UPDATE ... SET balance = balance - :amt</code>, or optimistic locking with a version column.</p>
+    <div class="hf-scatter"><span>same race, SQL instead of Redis</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>containsKey-then-put in Java</h4>
+    <p><code>if (!map.containsKey(key)) map.put(key, value)</code> looks safe on a shared map, but two threads can both see <code>containsKey</code> return false before either calls <code>put</code>. <code>ConcurrentHashMap.putIfAbsent</code> exists specifically to collapse that check-then-act pair into one atomic call.</p>
+    <div class="hf-scatter"><span>containsKey-then-put is the same gap</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Idempotency keys on a webhook or payment retry</h4>
+    <p>"Check if this idempotency key exists; if not, process the charge and store the key" has the identical gap — a client's timeout-and-retry can arrive as two near-simultaneous requests that both pass the check before either insert lands, double-processing the same payment. A unique DB constraint (or an atomic <code>INSERT ... ON CONFLICT DO NOTHING</code>) closes it the same way a Lua script closes the rate limiter.</p>
+    <div class="hf-scatter"><span>check-then-insert lets a retry double-charge</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> every scaling lever — load balancers, caches, replicas, shards, queues, CDNs — trades some consistency or complexity for throughput, and horizontal scale is what makes all of them necessary — <b>and the instant you scale horizontally, any shared state that's read, reasoned about in your app code, and written back later becomes a race two servers can both win at once.</b>
+</div>
+
+<h2>From single server to global scale</h2>
     <div class="panel">
       <div class="controls">
         <button class="stage-btn active" data-stage="0">1. Single server</button>
@@ -735,6 +838,7 @@ DevHubCodeWalk.mount('#cw-sysdes',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

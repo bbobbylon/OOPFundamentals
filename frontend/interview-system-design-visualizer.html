@@ -117,6 +117,127 @@
     </div>
   </div>
 
+<p class="hf-deck">or, the write committed, the cache was invalidated, and the cache is still serving yesterday</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Cache-aside is four lines and everybody writes it the same way. The Key Concepts tab calls out its cold-start problem — here is the one that survives every test you will write.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A read that misses can overwrite an invalidation that has already happened</div>
+  <p>The pattern, exactly as it is always written. Read: check the cache; on a miss, read the database; put what you read into the cache. Write: update the database, then delete the key. Delete rather than update, because deleting is the safe one — everyone knows that much.</p>
+  <p>Now interleave two ordinary requests. A reader misses and starts a database read. While that read is in flight, a writer commits a new value and deletes the cache key — deleting nothing, because the key is still absent. Then the reader's database call returns, holding the value from <i>before</i> the write, and does the last thing cache-aside tells it to do: <code>cache.set(key, value)</code>. <b>The cache now holds the old value, written after the invalidation that was supposed to remove it.</b></p>
+  <p>Every component did its job. The database is correct and durable. The write was invalidated. The reader read a value that was genuinely current when it asked. Nothing timed out, nothing threw, and no log line anywhere says the word "stale" — and the cache will serve that old value to every reader until the entry expires. If the entry was set without a TTL, "until it expires" means <i>never</i>, and only the next write to that key will clear it.</p>
+  <div class="hf-scatter">
+    <span>the database is correct ✓</span>
+    <span>the write invalidated the key ✓</span>
+    <span>the reader read a real value ✓</span>
+    <span>the miss-populate landed after the delete ⚠</span>
+    <span>stale until TTL — or until someone writes again ⚠</span>
+  </div>
+  <p class="hf-foot">The window opens exactly when the database is slow, which is exactly when you most wanted the cache.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Bound it, then order it</div>
+  <div class="hf-ladder">
+    <b>Put a TTL on every entry, including the ones you invalidate explicitly</b>
+    <i>↓ this does not prevent the race — it caps it. A TTL is not a memory knob; it is the maximum length of time a bug you have not found yet is allowed to lie to your users, and it is the one line that turns "stale forever" into "stale for 60 seconds"</i>
+    <b>Make the populate conditional on nothing having changed since the miss</b>
+    <i>↓ memcached's <code>gets</code>/<code>cas</code> token, or a lease issued at miss time and voided by any delete, so a set carrying a token that is no longer valid is refused — the fix Facebook's memcache paper calls a <i>lease</i>, invented for this exact interleaving</i>
+    <b>Or stop inferring the order and read it from the database's own log</b>
+    <i>↓ invalidate from the replication stream (CDC) instead of from application code, and the invalidation is ordered with the commit by construction — no application-level interleaving can get in front of it</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Invalidating a cache is not an operation on the cache — it is a claim about the order of two systems that have no shared clock.</b> "Write the database, then delete the key" orders your writer against itself. It says nothing about a reader that sampled the database before your write and will publish what it saw afterwards. Cache coherence is the same problem CPUs solve in hardware, MESI protocol and all, and the reason distributed caches do not solve it for you is that they cannot see your database.
+</div>
+
+<div class="hf-note"><b>Delete-on-write orders your writer against itself, not against every reader in flight.</b> A reader that sampled the database before your commit can still publish what it saw after your delete.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I delete the key <i>after</i> the database commit. What's left to race?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The reader</span>
+    <p>Me. I missed the cache before your write even started, so I was already waiting on a database read when your commit landed. Your delete removed nothing — the key was gone. Then my read returned, and I populated the cache with the value I was handed.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The cache</span>
+    <p>And I have no way to tell those two apart. A <code>set</code> is a <code>set</code>. I cannot see your database, I do not know when that value was read, and I certainly do not know that a delete for the same key ran in between. Give me a token and I can refuse it — that is what a lease is.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">TTL</span>
+    <p>Worth being blunt about my role: I do not fix this and I never will. I decide how long it lasts. A 30-second TTL turns a permanent bug into a support ticket nobody files, which is why "the entry had no expiry" is the detail that turns this from a race into an incident.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps, two requests, and not one of them does anything the pattern did not tell it to do.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Reader <b>A</b> calls <code>cache.get("user:42")</code> — a miss, so it starts a database read</span><span class="tag">the window opens</span></li>
+    <li class="open"><span>The database returns the <i>current</i> row to A: <code>email = old@x.com</code>. A is now holding a value and about to cache it</span><span class="tag">correct when read</span></li>
+    <li><span>Writer <b>B</b> commits <code>email = new@x.com</code>. The database is now correct and durable</span><span class="tag">the write succeeds</span></li>
+    <li class="open"><span>B deletes <code>user:42</code> from the cache. The key is already absent, so the delete removes nothing and returns success</span><span class="tag">invalidating an empty slot</span></li>
+    <li><span>A's <code>cache.set("user:42", old@x.com)</code> finally lands — the last line of the read path, running as designed</span><span class="tag">the stale write</span></li>
+    <li class="open"><span>Every subsequent read is a cache <i>hit</i> returning <code>old@x.com</code>, for the rest of the TTL, while the database says <code>new@x.com</code></span><span class="tag">fast, and wrong</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the one that makes this hard to find, because it is the step where a human would have noticed. B's delete returns success while removing nothing — and "the key wasn't there" is indistinguishable from "the key was there and I removed it" in every client library and every metric you are likely to have. <b>An idempotent operation hides the difference between doing the work and finding it already done</b>, which is normally the point of idempotence and here is the loss of the one signal that would have told you a reader was mid-flight. Leases exist precisely to give that step something to say.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">one <code>cache.set()</code> that lands a few milliseconds after the delete<small>the last line of a read path that did nothing wrong</small></div>
+    <div class="fan">what everyone downstream experiences ↓</div>
+    <div class="obs">
+      <span>the user edits their profile, sees the change, refreshes, and watches it revert</span>
+      <span>support pulls the row and sees the new value — "works on my machine", from the database</span>
+      <span>a retry of the write appears to fix it, because the second delete now has something to delete</span>
+      <span class="new">every dashboard is green: the write succeeded, the delete succeeded, cache hit rate went <i>up</i></span>
+    </div>
+  </div>
+  <p class="hf-annot">The last one is the reason this reaches production and stays there. A stale cache entry raises your hit rate, shortens your latency, and lowers your database load — it looks like the cache doing its job, and by every operational metric you have, it is. <b>Correctness bugs that improve your performance graphs have no alarm attached to them</b>, so the only two things that will catch this are a TTL short enough to bound it and a user who noticed. Design your invalidation as if you will never get an alert, because you will not.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Cache-aside. Reader A misses and reads <code>v1</code> from the database. Before A's <code>cache.set</code> runs, Writer B commits <code>v2</code> and deletes the key. Then A's <code>set</code> lands. What do subsequent readers get?</p>
+  <button type="button"><code>v2</code> — the cache rejects A's write because the key was deleted after A's read began, so the next read misses and repopulates from the database</button>
+  <button type="button"><code>v1</code>, until the entry's TTL expires — and if it was written with no expiry, until someone writes to that key again</button>
+  <button type="button">A miss on the next read — B's delete removed the key, and A's <code>set</code> then failed because the key no longer existed to be updated</button>
+  <p class="why" data-for="0">This is what you get <i>after</i> you add leases or a CAS token — the cache refuses a set whose token was voided by an intervening delete. A plain <code>set</code> carries no such information: the cache cannot see when A read the database, or that a delete happened in between.</p>
+  <p class="why" data-for="1">Correct — and note the second half, which is what turns a millisecond race into a week-long bug. Set a TTL on every entry so a stale write expires on its own, then add a lease or CAS token if the staleness window itself is unacceptable.</p>
+  <p class="why" data-for="2"><code>set</code> creates the key; it does not require one to exist (that would be <code>replace</code>, or Redis's <code>SET … XX</code>). A's write succeeds and the key is now present, which is why the next read is a hit rather than the miss that would have repaired things.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Two copies of one fact, updated by two paths that cannot see each other.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Read-your-own-writes against a replica</h4>
+    <p>Write to the primary, redirect to a dashboard that reads a replica, and the user's own change is missing. Same shape without a cache: the copy you read from was not the copy you wrote to. The fixes rhyme too — pin the session to the primary for a few seconds, or carry the write's position with the read.</p>
+    <div class="hf-scatter"><span>which copy answered you?</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A CDN that caches a logged-in page</h4>
+    <p>Purging the edge does not help if a request already in flight repopulates the object afterwards, and the CDN has no idea the object is now wrong. It is the same interleaving at a scale where you cannot see either actor — which is why <code>Cache-Control</code> is a contract about staleness, not a switch.</p>
+    <div class="hf-scatter"><span>purge races the next fill</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Double-checked locking without <code>volatile</code></h4>
+    <p>The classic version of this in a single process: a second thread sees a non-null reference to an object whose fields are not yet visible to it. <b>Every one of these is two observers disagreeing about the order of two events, with no shared clock to settle it.</b> The scale changes; the argument does not.</p>
+    <div class="hf-scatter"><span>order is a claim, not a fact</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> drive the interview with the 6-step framework, size the system with the capacity numbers, then pick components against the read/write shape — cache, CDN, queue, shard key, and a CAP position you can defend. The sentence worth adding: <b>"update the database, then delete the key" orders the writer against itself, not against readers already in flight</b> — so put a TTL on every entry to bound the staleness, and reach for a lease, a CAS token or log-driven invalidation when that bound is not good enough.
+</div>
+
   <div class="panel">
     <h2>Pick the Pattern <span class="badge">Run It</span></h2>
     <p class="sub" style="margin-bottom:10px;font-size:13px">Every design prompt hides a signal pointing at one of a handful of patterns. Pick a scenario and watch what happens if you grab the wrong trade-off.</p>
@@ -157,6 +278,7 @@
       <span class="who-badge who-OUT">OUT</span> scales cleanly or breaks
     </div>
   </div>
+
 
   <div class="tabs">
     <div class="tab active" onclick="show('framework',this)">Interview Framework</div>
@@ -982,6 +1104,7 @@ DevHubCodeWalk.mount('#cw-sysdesign',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -42,7 +42,108 @@
     <div class="intro-ciam"><span class="tag">Copilot in a CIAM world:</span> a <code>copilot-instructions.md</code> that says "controllers return <code>ResponseEntity&lt;HttpResponse&gt;</code>, use constructor injection, never hand-roll JWT parsing" is exactly the kind of house rule this codebase's Spring Boot backend recipe encodes — it turns Copilot's suggestions (inline, chat, <em>or</em> agent-mode multi-file edits) toward the same `CustomAuthFilter` / permission-string / `NamedParameterJdbcTemplate` patterns used across this machine's projects, instead of generic JPA-and-`@PreAuthorize` boilerplate that would fight the existing security filter chain.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the ghost text that's still writing to an API Microsoft is retiring</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Ghost text finishes your line with total confidence. It has no idea the endpoint it just suggested is on its way out.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Autocomplete that quietly targets a sunset endpoint</div>
+  <p>You start typing a call to look up a user's group memberships in an Entra-backed app, and inline completion confidently finishes the line calling into the legacy Azure AD Graph API (<code>graph.windows.net</code>) — a real, once-standard Microsoft identity API. It types cleanly, matches the shape of thousands of real examples from its training data, and compiles or runs without complaint today.</p>
+  <p>Microsoft has been actively retiring Azure AD Graph in favor of Microsoft Graph (<code>graph.microsoft.com</code>), progressively blocking calls from apps still pointed at the legacy endpoint. Inline completion has no live connection to Microsoft's deprecation notices, no browsing, and no awareness of anything that happened after its training cutoff — it is pattern-matching your file's local context against what "a call like this" looked like when it was trained, and back then, that endpoint was still completely normal to suggest.</p>
+  <div class="hf-scatter">
+    <span>syntax valid, types check out ✓</span>
+    <span>matches real production code from its training data ✓</span>
+    <span>the endpoint itself is being sunset ⚠</span>
+  </div>
+  <p class="hf-foot">Nothing about the completion looks wrong until the day Microsoft finally blocks the call in production.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Treat a confident suggestion as a claim to verify, not a fact</div>
+  <div class="hf-ladder">
+    <b>Cross-check any suggested SDK or endpoint against the vendor's current docs before accepting</b>
+    <i>↓ ghost text has a training cutoff; Microsoft's, Ping's, or AWS's own docs page doesn't — the suggestion can only be as current as whatever it last saw during training</i>
+    <b>Put your target API/SDK version in <code>copilot-instructions.md</code></b>
+    <i>↓ "use Microsoft Graph, never Azure AD Graph" steers every future suggestion in this repo the same way this page's line-by-line walkthrough steers Spring Boot conventions — one file, applied silently to every request</i>
+    <b>Treat "it compiled" as necessary, not sufficient, for anything calling an external API</b>
+    <i>↓ a deprecated-but-not-yet-fully-blocked endpoint compiles and often still runs today — the failure shows up later, on Microsoft's timeline, not yours</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Inline completion is confident in proportion to how often it saw a pattern during training, not in proportion to whether that pattern is still true today — a deprecated API that was common right up until its training cutoff will be suggested exactly as fluently as a current one.
+</div>
+
+<div class="hf-note">Ghost text doesn't know what day it is — <b>it only knows what day training ended</b>, and every suggestion is dated whether or not the timestamp shows.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>Why did you suggest the Azure AD Graph endpoint? I thought that was retired.</p></div>
+  <div class="hf-bub right"><span class="who">Inline completion, personified</span><p>I saw that exact call pattern constantly in code written before my training cutoff. I don't have a way to know Microsoft's retirement timeline moved past that date.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Couldn't you tell from the deprecation warnings in the SDK?</p></div>
+  <div class="hf-bub right"><span class="who">Inline completion</span><p>Only if a deprecation warning happened to be in the file or nearby tabs I can already see. I'm not checking a live changelog before I finish your line.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one suggestion from keystroke to production incident.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>You type <code>const groups = await</code> in a Node service that talks to Entra ID</span><span class="tag">EDITOR</span></li>
+    <li class="open"><span>Inline completion reads the local file + nearby tabs, pattern-matches against training data, and finishes the call against <code>graph.windows.net</code></span><span class="tag">CONTEXT + MODEL</span></li>
+    <li><span>You accept with Tab — it's syntactically clean and matches how you've seen this done before</span><span class="tag">accepted</span></li>
+    <li class="open"><span>It works today: the legacy endpoint hasn't been fully blocked for your tenant yet</span><span class="tag">false confidence</span></li>
+    <li><span>Microsoft advances its retirement timeline for Azure AD Graph on its own schedule, not yours</span><span class="tag">outside your control</span></li>
+    <li class="open"><span>The call starts failing in production, on a day nobody touched this code — the root cause is a suggestion accepted months earlier</span><span class="tag">delayed failure</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is where the actual gap lives: the model isn't wrong about what code like this used to look like, it's simply unaware that "used to" is now the operative phrase. That gap is invisible at acceptance time and only shows up on someone else's deployment schedule.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>ghost text finishing a Graph API call from memory</span><span>a chat answer describing "the standard way" to query group membership</span><span>an agent-mode multi-file refactor touching the same identity client</span></div>
+    <div class="funnel">all three sourced from the same frozen, pre-cutoff training snapshot ↓</div>
+    <div class="instance">the legacy, being-retired endpoint, suggested with equal confidence every time<small>one root cause (a training cutoff), three completely different-looking surfaces</small></div>
+  </div>
+  <p class="hf-annot">Whether the deprecated call arrives via a one-line ghost-text completion, a chat answer, or an agent-mode diff across several files doesn't matter — all three modes draw on the same frozen knowledge, so all three can suggest the same stale API with identical, undifferentiated confidence.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Copilot's inline completion confidently finishes a call to an identity API endpoint that a vendor has since deprecated. The code compiles and runs fine today. What does that tell you, and what doesn't it tell you?</p>
+  <button type="button">It confirms the endpoint is still fully supported, since a deprecated endpoint would fail to compile or throw immediately at runtime.</button>
+  <button type="button">It means Copilot deliberately chose the deprecated endpoint because it's simpler to call than the current one, and will switch once you ask it to.</button>
+  <button type="button">It confirms only that the pattern was common in Copilot's training data and still technically works right now — it says nothing about whether the vendor has since started retiring that endpoint, because the model has no visibility past its training cutoff.</button>
+  <p class="why" data-for="0">A deprecated endpoint very often keeps compiling and running for a transition period before a hard cutoff — "it works today" and "it's still supported going forward" are different claims, and only the vendor's own current docs answer the second one.</p>
+  <p class="why" data-for="1">Ghost text isn't making a considered "simpler vs. current" tradeoff — it's pattern-matching the most common shape it saw during training, with no live comparison between the old and new endpoint's status.</p>
+  <p class="why" data-for="2">Right — a working completion tells you the pattern existed and worked as of training time, not that it still reflects the vendor's current recommendation. That gap is exactly why suggested calls to any external API are worth a docs check before accepting.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Anything trained on a snapshot is only ever as current as the snapshot.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A cached DNS record pointing at a decommissioned server</h4>
+    <p>A resolver serving a cached A record keeps answering with total confidence long after the server behind that IP has been retired — the cache isn't wrong about what it learned, it's just unaware the world moved on since it learned it.</p>
+    <div class="hf-scatter"><span>confident and stale at the same time</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A tutorial blog post pinned at the top of a search result</h4>
+    <p>A five-year-old "how to authenticate with our API" post still ranks well and still reads as authoritative, even though the auth flow it documents was replaced two major versions ago — popularity and currency are unrelated signals.</p>
+    <div class="hf-scatter"><span>authority signals don't expire on their own</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An Entra app registration still requesting a retired Azure AD Graph permission scope</h4>
+    <p>An app manifest that was correct the day it was created can keep requesting a permission scope tied to an API Microsoft is sunsetting, and it will keep working right up until the day Microsoft finally cuts it off — exactly the same "works until it suddenly doesn't" shape as the completion above.</p>
+    <div class="hf-scatter"><span>correct-when-written isn't the same as correct-now</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Copilot is really four tools under one name — inline completion, chat, an autonomous agent mode, and a silent instructions file steering all three toward your repo's conventions, each with its own blast radius. <b>The one new sentence this block adds: every one of those modes draws on a training cutoff, so a suggestion can be perfectly fluent and still be confidently wrong about what's true in the world today.</b>
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="ghSeg">
@@ -242,6 +343,7 @@ DevHubCodeWalk.mount('#cw-gh',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

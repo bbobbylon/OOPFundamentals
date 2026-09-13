@@ -58,7 +58,108 @@
     <div class="intro-ciam"><span class="tag">CIAM context:</span> Define design tokens once (<code>--color-primary</code>, <code>--space-*</code>, <code>--radius</code>) so the login screen, dashboard, and admin tables share one visual language — and dark mode is a <code>[data-theme="dark"]</code> block that re-sets those variables. Tailwind (mapped to your tokens) is the fast default and is RSC-friendly because it's just classes. If you adopt styled-components in an App Router app, prefer a <strong>zero-runtime</strong> option (vanilla-extract/Panda) — classic runtime CSS-in-JS fights Server Components.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">Or: how a perfectly correct styled-component quietly resets on every keystroke.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You wrapped a &lt;mark&gt; in <code>styled.mark</code> so its color could depend on a prop — and now that highlight's fade-in animation restarts every time the user types in the search box next to it.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The highlight that never finishes fading in</div>
+  <p>Inside <code>SearchBar</code>'s function body you write <code>const Highlight = styled.mark`color:${p=&gt;p.$active?'#f0b':'#9ab'};`;</code> — right there, because <code>$active</code> is only known inside <code>SearchBar</code>. Every keystroke updates <code>query</code> state, <code>SearchBar</code> re-renders, and the highlight reappears mid-fade instead of finishing it.</p>
+  <p>The generated CSS text is byte-for-byte identical to last render's. That's not the problem. <code>styled.mark`...`</code> is a function CALL, and every time <code>SearchBar</code>'s body runs, that call runs again — producing a brand-new component function, with a brand-new identity, that just happens to render the same styles. React's reconciler compares component <em>types</em> by reference, not by the markup or CSS they'd produce, so a new reference at the same tree position means: unmount the old DOM node, mount a new one.</p>
+  <div class="hf-scatter">
+    <span>className hashing ✓</span>
+    <span>CSS text unchanged ✓</span>
+    <span>the styled() call site ⚠</span>
+  </div>
+  <p class="hf-foot">The style survives the render. The DOM node underneath it doesn't.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Hoist the styled() call out of render</div>
+  <div class="hf-ladder">
+    <b>Move <code>const Highlight = styled.mark`...`</code> to module scope, above the component</b>
+    <i>↓ styled() now runs once, at import time, producing one component type for the life of the module</i>
+    <b>Feed it a transient prop instead of a new template per render: <code>&lt;Highlight $active={active}&gt;</code></b>
+    <i>↓ the CSS still varies by value, but through the SAME function reference every render — one type, reconciled, not replaced</i>
+    <b>If a style truly has no fixed shape, keep the component static and flip a CSS variable or class instead</b>
+    <i>↓ variables update the paint without ever touching what component type is mounted</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Call <code>styled()</code> (or <code>css</code>) at module scope, never inside a component's function body — a component that's defined once and reused is what gives React a stable type to reconcile against; one defined fresh every render is a stranger every render.
+</div>
+
+<div class="hf-note">Rename it in your head: <code>styled.div`...`</code> doesn't hand you a style, it hands you a <b>component definition</b> — the same category of thing as a <code>class</code> statement. You'd never write a new class inside another component's render function and expect the old class's instances to survive. Calling <code>styled()</code> mid-render is that exact mistake wearing a template-literal costume.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I only changed one CSS value. Why did the whole &lt;mark&gt; flash and lose its fade-in transition?</p></div>
+  <div class="hf-bub right"><span class="who">styled-components, personified</span><p>Because you called <code>styled.mark</code> again this render. As far as I'm concerned, that's a brand-new component. I have no idea it's "the same" highlight you meant a moment ago.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But the generated class name text is identical to last time!</p></div>
+  <div class="hf-bub right"><span class="who">React's reconciler</span><p>I don't diff CSS strings. I compare component types by reference. Two function objects with identical bodies are still two different types to me — one gets unmounted, one gets mounted.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch what actually happens between one keystroke and the next.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>You type a character into the search box</span><span class="tag">state update</span></li>
+    <li class="open"><span><code>setQuery</code> fires, <code>SearchBar</code> re-renders</span><span class="tag">render #2</span></li>
+    <li><span>The <code>styled.mark`...`</code> line inside the function body executes again</span><span class="tag">new call</span></li>
+    <li class="open"><span>styled-components returns a fresh component function — a different reference than render #1's</span><span class="tag">new type</span></li>
+    <li><span>React diffs the tree and sees the OLD <code>&lt;mark&gt;</code> type at this position replaced by a NEW type</span><span class="tag">reconcile</span></li>
+    <li class="open"><span>React unmounts the old DOM node (killing its transition and any focus) and mounts a fresh one</span><span class="tag">remount</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the one that fools people: the CSS coming out of that call is identical to last render's, so nothing about the visible style "changed." But <code>styled.mark`...`</code> doesn't return CSS — it returns a component, and calling the same-looking code twice still produces two different function objects. Same output, different reference, and reference is all React checks.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>a keystroke updates local state</span><span>a parent re-renders</span><span>a context value changes</span></div>
+    <div class="funnel">any re-render re-executes styled.mark`...` ↓</div>
+    <div class="instance">A brand-new component type<small>identical CSS text, different function reference — React remounts the DOM node under it</small></div>
+  </div>
+  <p class="hf-annot">It doesn't matter what triggered the re-render — a keystroke, a parent, a context change. The instant that <code>styled()</code> call executes again inside a function body, you get a new type. Hoist it out and none of those triggers matter anymore, because the line never runs a second time.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your team writes <code>const Card = styled.div`padding:${p=&gt;p.$pad}px;`</code> inside a <code>&lt;Dashboard&gt;</code> component so <code>$pad</code> can vary. A websocket tick re-renders <code>Dashboard</code> every 2 seconds, and every card inside it flashes, losing hover and focus state. What's the actual cause?</p>
+  <button type="button">styled-components recomputes every CSS property from scratch on each render, which is slow</button>
+  <button type="button">The styled.div call runs again each render, creating a new component type that React unmounts and remounts</button>
+  <button type="button">The websocket updates too frequently for React to batch efficiently</button>
+  <p class="why" data-for="0">The cost here isn't CSS math — the generated CSS text is often byte-identical between renders. The real cost is that React treats each render's Card as an entirely new component to mount, never an existing one to update.</p>
+  <p class="why" data-for="1">Exactly — the value returned by <code>styled.div</code> is a fresh function reference every time that line executes, so React can't tell this render's <code>Card</code> is "the same" node as last render's.</p>
+  <p class="why" data-for="2">Batching frequency doesn't create or destroy component types. Even a websocket update ticking once a minute would trigger the same remount if <code>Card</code> were defined inside the render body — the problem is where the call lives, not how often it fires.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Looks the same, but the framework can't tell" shows up everywhere identity matters more than appearance.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Angular *ngFor without trackBy</h4>
+    <p>Angular tears down and rebuilds every DOM node in a loop when it can't tell "this item" at render N is "the same item" at render N+1 — the identical trap as styled-components being unable to tell two calls apart. A <code>trackBy</code> function (here, hoisting <code>styled()</code> out of render) is what hands the framework a stable identity to diff against instead of guessing from position.</p>
+    <div class="hf-scatter"><span>no stable identity → full rebuild, not a diff</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Java: <code>==</code> on boxed integers outside the cache</h4>
+    <p>Two <code>Integer</code> objects both holding <code>200</code> print identically, but <code>Integer.valueOf(200) == Integer.valueOf(200)</code> is <code>false</code> — the JVM only guarantees reference equality for the cached <code>-128..127</code> range. React's reconciler is running the same kind of reference check on component types: "looks the same" was never "is the same."</p>
+    <div class="hf-scatter"><span>identity (==) vs equality (.equals) — same trap, different language</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Hibernate/JPA entities across two sessions</h4>
+    <p>Load the same row via two separate <code>Session</code>s and you get two distinct Java objects representing one database record — same primary key, different object identity. Code that compares them with <code>==</code> (instead of the entity's <code>equals()</code>) silently breaks, the same way code that assumes "same-looking <code>styled()</code> call" means "same component" silently breaks.</p>
+    <div class="hf-scatter"><span>same data, different reference — check equality, not identity</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> React has five ways to style a component — Tailwind, CSS Modules, classic CSS-in-JS, zero-runtime CSS-in-JS, and design tokens — and the industry is converging on build-time CSS because runtime CSS-in-JS costs bundle size and fights Server Components. <b>The one new sentence this block adds:</b> wherever you land, a <code>styled()</code> call is a component definition, not a style — call it once at module scope, or every render silently remounts whatever it wraps.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="rstyleSeg">
@@ -264,6 +365,7 @@ DevHubCodeWalk.mount('#cw-rstyle',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

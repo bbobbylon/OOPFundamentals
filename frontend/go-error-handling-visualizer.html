@@ -55,7 +55,111 @@
     <div class="intro-ciam"><span class="tag">CIAM Go service:</span> A handler maps wrapped errors to HTTP status: <code>if errors.As(err, &amp;idpErr) &amp;&amp; idpErr.Code == 409 { http.Error(w, "email taken", 409) }</code>, <code>errors.Is(err, ErrUnauthorized)</code> → 403, else log and 500. And a <code>Recovery</code> middleware (<code>defer func() { if err := recover(); err != nil { log.Printf("panic: %v", err); http.Error(w, "internal error", 500) } }()</code>) prevents one panicking request from crashing the server — the Go counterpart of Spring's <code>@ControllerAdvice</code> + a global error filter.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">Or: the recover() you wrote is watching the wrong goroutine.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Your panic middleware has caught a thousand panics. It will not catch this one.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The 500 that should have happened — and the crash that happened instead</div>
+  <p>You wrap every handler in a <code>Recovery</code> middleware: <code>defer func(){ if r := recover(); r != nil { ...; http.Error(w,"internal error",500) } }()</code>. It's tested, it works, panics in handlers become clean 500s.</p>
+  <p>One handler kicks off <code>go sendWelcomeEmail(user)</code> so the response doesn't wait on SMTP. <code>sendWelcomeEmail</code> panics on a nil pointer three months later, the first time a user has no email template configured. The middleware's <code>recover()</code> never fires — the panic unwinds a completely different goroutine's stack, one with no deferred recover anywhere on it, and the Go runtime kills the <strong>entire process</strong>, taking every in-flight request down with it, not just the one email.</p>
+  <div class="hf-scatter">
+    <span>Recovery middleware installed ✓</span>
+    <span>handler tested under panic ✓</span>
+    <span>the spawned goroutine's own stack has no recover ⚠</span>
+  </div>
+  <p class="hf-foot">recover() only ever intercepts a panic on the goroutine where it was deferred — not the process, not the caller, not a goroutine you happened to start.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Give every goroutine its own recover</div>
+  <div class="hf-ladder">
+    <b>Wrap the closure you pass to <code>go</code>, not just the handler</b>
+    <i>↓ a <code>go func(){ defer recoverAndLog(); sendWelcomeEmail(user) }()</code> gives THIS stack its own safety net</i>
+    <b>Log the recovered value and the stack, don't just swallow it</b>
+    <i>↓ <code>debug.Stack()</code> inside the recover is the only record you'll get — the goroutine that panicked is gone</i>
+    <b>And wrap it once, in a helper, used at every <code>go</code> call site</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>One process, N independently-crashing goroutines.</b> Every goroutine that can panic needs its OWN deferred recover — recover() is not a process-wide safety net, it is scoped to exactly the goroutine that deferred it. A single well-tested middleware protects exactly the requests that never leave the request goroutine; the moment you type <code>go</code>, you've left its jurisdiction.
+</div>
+
+<div class="hf-note">Think of recover() as a seatbelt, not an airbag for the whole car. It only protects the seat it's bolted to — the passenger you didn't buckle in (that background goroutine) goes through the windshield same as if the car had no seatbelts at all.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>My Recovery middleware is registered globally, on every route — why didn't it catch this?</p></div>
+  <div class="hf-bub right"><span class="who">The Go runtime</span><p>Your middleware's recover() is deferred on the request's goroutine. I ran your panic on a goroutine THAT goroutine started. Different stack, different defers, different rules — I only look for a recover on the exact goroutine that's unwinding.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So what happens if nothing recovers it?</p></div>
+  <div class="hf-bub right"><span class="who">The Go runtime</span><p>I print the panic and every goroutine's stack trace, and I terminate the whole binary. Not the request — the process. Every other in-flight request dies with it.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Walk the two goroutines side by side and watch where the safety net actually is.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>HTTP request arrives; net/http starts a goroutine to run your handler</span><span class="tag">goroutine A</span></li>
+    <li class="open"><span>Handler defers Recovery(): recover() is now armed — but only on goroutine A's stack</span><span class="tag">defer armed</span></li>
+    <li><span>Handler calls <code>go sendWelcomeEmail(user)</code> to avoid blocking the response</span><span class="tag">goroutine B spawned</span></li>
+    <li class="open"><span>Goroutine B has no defer of its own — nothing was written for it</span><span class="tag">unarmed</span></li>
+    <li><span>sendWelcomeEmail dereferences a nil template pointer → panic starts unwinding goroutine B</span><span class="tag">panic on B</span></li>
+    <li class="open"><span>Unwinding reaches the top of B's stack with no recover found → runtime kills the whole process</span><span class="tag">process dies</span></li>
+  </ol>
+  <p class="hf-annot">Steps 2 and 4 are the whole lesson side by side: goroutine A got a safety net because you wrote <code>defer</code> on ITS stack. Goroutine B got nothing, because a <code>go</code> statement starts a stack with a clean slate — no defers carry over from the goroutine that spawned it.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">Who catches the panic in <code>go sendWelcomeEmail(user)</code>?<small>the handler already has a working Recovery middleware</small></div>
+    <div class="arrow">what actually happens →</div>
+    <div class="opts">
+      <span>the handler's Recovery middleware</span>
+      <span>a top-level recover in main()</span>
+      <span class="on">nothing — the process crashes</span>
+    </div>
+  </div>
+  <p class="hf-annot">There is no such thing as a process-wide recover in Go. Every one of the three options sounds plausible if you think of "error handling" as one big safety net over your whole binary — but Go's model is per-goroutine, all the way down, and the diagram's answer is the only one that's true unless you wrote a defer on goroutine B yourself.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A CIAM Go service's <code>/register</code> handler is wrapped in a tested Recovery middleware. It also does <code>go auditLog.Record(event)</code> right after writing the 201 response. <code>auditLog.Record</code> panics on a malformed event three weeks later in production. What happens to the request that triggered it?</p>
+  <button type="button">The Recovery middleware catches the panic and the client still gets 201.</button>
+  <button type="button">The 201 response already went out — but the panic still takes the whole process down, killing every other in-flight request too.</button>
+  <button type="button">Nothing happens to that request specifically, but the audit log silently loses that one entry and the process keeps running fine.</button>
+  <p class="why" data-for="0">The Recovery middleware's recover() lives on the request handler's goroutine. auditLog.Record is running on a different goroutine that go created — that recover is out of scope for it entirely, tested or not.</p>
+  <p class="why" data-for="1">Right — an HTTP response, once written, isn't undone by a later crash. But an unrecovered panic in ANY goroutine kills the whole Go process, so every other request being served at that moment goes down too. One malformed audit event becomes a full outage.</p>
+  <p class="why" data-for="2">A dropped log entry would be the good outcome. In reality Go does not silently drop an unrecovered panic — it terminates the entire binary, which is why this is worth guarding against, not shrugging off.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Per-goroutine error scoping shows up anywhere a runtime hands you independent stacks.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's try/catch and thread pools</h4>
+    <p>A try/catch in your controller method does not catch an exception thrown inside a <code>Runnable</code> submitted to an <code>ExecutorService</code> — that runs on a pool thread with its own call stack, so the exception ends up in an <code>UncaughtExceptionHandler</code> (or is silently lost if nobody calls <code>Future.get()</code>) instead of your catch block.</p>
+    <div class="hf-scatter"><span>catch scoped to a stack, not a program</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>JavaScript's try/catch and setTimeout</h4>
+    <p>Wrapping <code>setTimeout(fn, 0)</code> in a try/catch does nothing for errors <code>fn</code> throws later — by the time <code>fn</code> actually runs, the try block has already exited. Async callbacks need their own error handling, not the enclosing scope's.</p>
+    <div class="hf-scatter"><span>the enclosing scope is long gone by the time the callback runs</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Kubernetes pod restarts vs. sidecar crashes</h4>
+    <p>A liveness probe restarting your main container doesn't rescue a crashed sidecar, and vice versa — each container is its own supervised process; a safety net on one buys nothing for the other.</p>
+    <div class="hf-scatter"><span>isolation cuts both ways: fault AND recovery stay local</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Go reports failure as values you check (err), reserving panic/recover for programmer bugs and fatal startup, with a Recovery middleware turning handler panics into clean 500s. <b>The one new sentence this block adds:</b> that middleware only watches the goroutine it was deferred on, so any panic in a goroutine you spawn yourself needs its own recover or it takes the whole process down with it.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="geSeg">
@@ -273,6 +377,7 @@ DevHubCodeWalk.mount('#cw-goerr',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

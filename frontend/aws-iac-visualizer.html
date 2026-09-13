@@ -45,7 +45,108 @@
     <div class="intro-ciam"><span class="tag">The CIAM parallel:</span> a CDK <code>Stack</code> that provisions a Cognito user pool, an API Gateway with a JWT authorizer, and the Lambda functions behind it is the AWS-native version of provisioning this codebase's own identity infrastructure — the same "app registration, secrets, redirect URIs" concerns from <a href="devops-iac-terraform-visualizer.html">the Terraform page's CIAM note</a>, just expressed as real code with type-checked resource references instead of HCL string interpolation.</p></div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the change set said "Replace" and everyone nodded — nobody asked what happens to the old one</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Knowing a resource is about to be replaced is only half the warning. Whether the resource losing that identity gets deleted or kept is a completely separate decision, made somewhere else entirely.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The DynamoDB table that vanished during an "expected" replace</div>
+  <p>The team needs to change a DynamoDB table's partition key — <code>UserSessions</code> moves from a plain <code>sessionId</code> key to a composite key. They already know the rule this page's own intro warns about: a partition key is immutable, so this will be a <code>Replace</code>, not a <code>Modify</code>. They open the change set, see <code>Replace</code> next to <code>UserSessions</code>, recognize exactly what that means, and approve it.</p>
+  <p>CloudFormation creates the new table first, the application gets repointed at its ARN — and then CloudFormation deletes the OLD <code>UserSessions</code> table, instantly, along with every session record that hadn't yet been migrated into the new one. Nobody had ever added an <code>UpdateReplacePolicy</code> to that resource, and when none is set, CloudFormation's documented default is to delete the old resource the moment the replacement succeeds.</p>
+  <div class="hf-scatter">
+    <span>recognized "Replace" ahead of time ✓</span>
+    <span>reviewed the change set before executing ✓</span>
+    <span>UpdateReplacePolicy left unset ⚠</span>
+  </div>
+  <p class="hf-foot">Knowing a resource will be replaced tells you nothing about what happens to the one it's replacing — that's a second, separate setting, and its default is gone.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Set UpdateReplacePolicy wherever Replace is possible</div>
+  <div class="hf-ladder">
+    <b>On any resource where a change set might ever say Replace, add an explicit UpdateReplacePolicy</b>
+    <i>↓ without it, CloudFormation silently assumes Delete — there's no extra warning at execute time beyond the word "Replace" you already saw</i>
+    <b>Set it to Retain, or Snapshot where the resource type supports it</b>
+    <i>↓ Retain keeps the old physical resource alive in your account, orphaned from the stack but not destroyed — the same idea as DeletionPolicy on a full stack deletion</i>
+    <b>Re-check the change set for "Replacement: True" alongside your intended policy before executing</b>
+    <i>↓ this is the last checkpoint — the change set can tell you what policy it sees, but only if you look for it instead of stopping at the word Replace</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A change set's <code>Replace</code> flag answers "will this resource's physical identity change" — it says nothing about what happens to the resource whose identity is changing, and that second question belongs entirely to <code>UpdateReplacePolicy</code>. That attribute defaults to <code>Delete</code> on every resource type that doesn't explicitly override it, and it lives nowhere near the change-set review that told you Replace was coming, which is exactly why a team can correctly understand one fact and still never learn the other.
+</div>
+
+<div class="hf-note">Replace tells you WHO's changing. <b>UpdateReplacePolicy tells you what happens to the one left behind.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>The change set already told us this table would be replaced. We reviewed it. What else was there to catch?</p></div>
+  <div class="hf-bub right"><span class="who">The change set</span><p>I told you the identity would change. I never said anything about what happens to the resource losing that identity — that's not my column.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So who decides that?</p></div>
+  <div class="hf-bub right"><span class="who">UpdateReplacePolicy</span><p>I do. And if nobody ever writes me into the template, my answer is always the same one: delete it.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Here's the actual order of operations for a Replace update, and the exact step with no confirmation dialog attached to it.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A partition-key change is submitted; the change set computes UserSessions: Replace</span><span class="tag">change set</span></li>
+    <li class="open"><span>The team reviews the change set, recognizes Replace, and approves it — exactly the check this page recommends</span><span class="tag">review</span></li>
+    <li><span>CloudFormation creates the NEW UserSessions table first, under a new physical ID</span><span class="tag">create-first</span></li>
+    <li class="open"><span>The application's connection is repointed to the new table's ARN</span><span class="tag">cutover</span></li>
+    <li><span>CloudFormation checks the OLD table's UpdateReplacePolicy attribute — none was ever set</span><span class="tag">the missing setting</span></li>
+    <li class="open"><span>The default applies: the old table, and every item still sitting in it, is deleted</span><span class="tag">gone</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the one worth sitting with — there is no UI equivalent to step 2's change-set review for it. No dialog pops up asking "delete the old table too?" The policy, or the absence of one, was already baked into the template long before anyone opened a change set for this particular update.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>template written before this table ever needed replacing</span><span>resource block copied from an old example template</span><span>assumed "surely deleting data isn't the default"</span></div>
+    <div class="funnel">no UpdateReplacePolicy in the template ↓</div>
+    <div class="instance">The old resource gets deleted<small>one outcome, three unrelated-looking causes</small></div>
+  </div>
+  <p class="hf-annot">None of these three paths involves anyone actually deciding "yes, delete the old table." Each one just never got around to deciding anything at all — and CloudFormation's default fills that silence with the most destructive option it has available.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A change set shows <code>UserSessions (DynamoDB table): Replace</code> after a partition-key change. The team has reviewed change sets before and understands Replace means a new physical resource gets created. They approve it. What actually determines whether the OLD table survives the update?</p>
+  <button type="button">Whether the change set shows Modify instead of Replace for that resource</button>
+  <button type="button">Whether someone clicks "Retain resource" in a follow-up confirmation dialog during execution</button>
+  <button type="button">Whatever the DynamoDB table's UpdateReplacePolicy attribute was set to in the template — Delete if it was never set</button>
+  <p class="why" data-for="0">The scenario already establishes this resource shows Replace, not Modify — and Modify vs Replace is a different axis entirely (whether the identity changes at all), not what happens to the resource once it has.</p>
+  <p class="why" data-for="1">There is no such follow-up dialog. It would be reasonable to expect one, given how other AWS destructive actions gate behind confirmations, but CloudFormation makes this decision from whatever the template already says — there's no safety-net prompt at execute time to catch a template that never set one.</p>
+  <p class="why" data-for="2">Correct. UpdateReplacePolicy is the only thing governing the old resource's fate during a Replace update, and its documented default — when the attribute is absent — is to delete the old resource as soon as the replacement succeeds.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The destructive thing already happened; whether it took your data with it was decided somewhere else" shows up constantly once you start looking for it.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>ON DELETE CASCADE on a users table</h4>
+    <p>A CIAM schema migration swaps the <code>users</code> table's primary key from a Long ID to a UUID — an immutable-style change that forces dropping and recreating the table. Every <code>sessions</code>, <code>refresh_tokens</code>, and <code>audit_log</code> row with a foreign key configured <code>ON DELETE CASCADE</code> against that old table vanishes the instant it's dropped, because the cascade behavior was decided in the schema, months earlier, not at migration time.</p>
+    <div class="hf-scatter"><span>the cascade was already decided</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Terraform's prevent_destroy</h4>
+    <p>A resource forced to replace because of an immutable attribute change can still be blocked from actually being destroyed — but only if a <code>lifecycle { prevent_destroy = true }</code> block was added to that resource ahead of time. It's the exact same shape as UpdateReplacePolicy: a separate, easy-to-skip setting that has to exist before the triggering change ever shows up in a plan.</p>
+    <div class="hf-scatter"><span>same idea, different IaC engine</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Kubernetes PersistentVolume reclaimPolicy</h4>
+    <p>Delete a PersistentVolumeClaim and whether the underlying storage volume is actually destroyed or kept around depends on the StorageClass's <code>reclaimPolicy</code> — Delete or Retain — a setting chosen when the StorageClass was created, possibly years before anyone ran the <code>kubectl delete</code> that triggered it.</p>
+    <div class="hf-scatter"><span>the policy predates the trigger</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> CloudFormation is AWS's native IaC engine — templates become stacks, change sets preview create/modify/replace before anything executes, drift detection flags out-of-band edits, and CDK lets you write real code that synthesizes down to the same templates and the same change sets. <b>The one new sentence this block adds:</b> seeing "Replace" in a change set only tells you a resource's identity is about to change — whether the resource losing that identity survives or gets deleted is <code>UpdateReplacePolicy</code>'s call alone, and it defaults to deleting it.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="icSeg">
@@ -257,6 +358,7 @@ DevHubCodeWalk.mount('#cw-ic',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

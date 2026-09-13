@@ -134,6 +134,109 @@ console.log("rgb sum:", rgb[0] + rgb[1] + rgb[2]);
   </div>
 
 
+<p class="hf-deck">or, why TypeScript un-narrows a variable for no reason you can see</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The fix for an annoying inference error is usually the fix for the exact bug that error was warning you about.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">session.expiresAt compiles fine outside a setTimeout, and refuses to compile inside one</div>
+  <p>You've got <code>let session: Session | undefined;</code>, set once by an async auth check. Inside <code>startAutoLogoutTimer()</code>, <code>if (session) { console.log(session.expiresAt); }</code> compiles clean — TypeScript narrowed <code>session</code> to <code>Session</code> inside the <code>if</code>. Move that exact same line inside a <code>setTimeout(() =&gt; { ... })</code> callback, and TypeScript suddenly complains: "'session' is possibly 'undefined'."</p>
+  <p>Nothing about <code>session</code> changed. What changed is that somewhere else in the same file, <code>clearSession()</code> sets <code>session = undefined</code>. TypeScript's control-flow narrowing can't prove that <code>clearSession()</code> won't run between the <code>if</code> check and the moment the <code>setTimeout</code> callback actually fires — so inside any closure, it widens <code>session</code> right back to <code>Session | undefined</code>, on purpose. Annoyed, you write <code>session!.expiresAt</code> to make the error go away.</p>
+  <div class="hf-scatter">
+    <span>outside the closure, narrowing holds fine ✓</span>
+    <span>session! silences the compiler ✓</span>
+    <span>a real logout-in-another-tab race hits exactly this window ⚠</span>
+  </div>
+  <p class="hf-foot">TypeScript wasn't being paranoid. It was describing a real race, and the fix deleted the warning instead of the race.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Freeze the value before the closure, don't silence the compiler</div>
+  <div class="hf-ladder">
+    <b>Copy the narrowed value to a const right inside the if: <code>if (session) { const active = session; setTimeout(() =&gt; active.expiresAt); }</code></b>
+    <i>↓ a const can never be reassigned, so TypeScript knows the closure will see the exact same value forever</i>
+    <b>Read from active inside the closure, never from session</b>
+    <i>↓ this is the value as it was at the moment you checked it — exactly what you actually wanted</i>
+    <b>If the session can genuinely change before the timer fires, re-check inside the callback instead of assuming — that's the real bug the compiler found</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>TypeScript's closure-narrowing rule isn't a compiler limitation — it's describing a real race between "when I checked" and "when this code actually runs."</b> A <code>let</code> variable's narrowing only holds inside the same synchronous stretch of code where TypeScript can see every place it might be reassigned. The instant your read moves into a callback that could fire later — a <code>setTimeout</code>, a promise <code>.then</code>, an event handler — anything else in the file that reassigns that variable becomes a real possibility by the time the closure runs, and TypeScript refuses to pretend otherwise.
+</div>
+
+<div class="hf-note">A <code>let</code> narrowed inside a closure is a <b>coat-check ticket for a coat someone else is still allowed to walk off with</b> — you confirmed it was there when you got the ticket; nobody promised it'd still be on the hook when you come back for it.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>session.expiresAt worked fine one line above — why does the exact same read fail inside setTimeout?</p></div>
+  <div class="hf-bub right"><span class="who">TypeScript, personified</span><p>Above, I can see every line between your check and your read — nobody touches session in between, so I trust the narrowing. Inside that callback, I have no idea what runs before it fires.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>clearSession() isn't even called anywhere near this function though.</p></div>
+  <div class="hf-bub right"><span class="who">TypeScript, personified</span><p>It's called somewhere in this file, on a variable that isn't const. That's enough uncertainty for me to stop vouching for it.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch the exact same narrowing hold, then quietly get revoked, the moment a closure is involved.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>let session: Session | undefined;</code> is set once by an async auth check</span><span class="tag">declaration</span></li>
+    <li class="open"><span><code>if (session) { session.expiresAt }</code> — synchronous, no closures — narrowing holds, compiles clean</span><span class="tag">narrows fine</span></li>
+    <li><span>Somewhere else in the file, <code>clearSession() { session = undefined; }</code> exists</span><span class="tag">a reassignment exists</span></li>
+    <li class="open"><span><code>if (session) { setTimeout(() =&gt; session.expiresAt) }</code> — the read now happens inside a closure</span><span class="tag">closure boundary</span></li>
+    <li><span>TypeScript can't prove clearSession() won't run before the timeout fires — it widens session back to Session | undefined inside that closure</span><span class="tag">narrowing revoked</span></li>
+    <li class="open"><span>Copying to <code>const active = session;</code> first freezes a value the closure can never see reassigned — narrowing holds again</span><span class="tag">the fix</span></li>
+  </ol>
+  <p class="hf-annot">Step five is the rule, stated plainly: a closure's view of a <code>let</code> variable is treated as "whatever it might be by the time this runs," not "whatever it was when I wrote this line." <code>const</code> is the one guarantee TypeScript trusts across that gap.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">session read inside if (session) { }</span>
+      <span class="go"><em>same synchronous block as the check</em> <span class="arrow">→</span> narrowing holds, session.expiresAt compiles clean</span></div>
+    <div class="stt"><span class="nm">session read inside setTimeout(() =&gt; ...)</span>
+      <span class="go"><em>a reassignment exists elsewhere in the file</em> <span class="arrow">→</span> TS widens back to Session | undefined inside the closure</span></div>
+    <div class="stt"><span class="nm">session! read inside the same closure</span>
+      <span class="go"><em>a non-null assertion silences the error</em> <span class="arrow">→</span> compiles clean again, and the real race is now unguarded</span></div>
+  </div>
+  <p class="hf-annot">Reading the cycle back: the second state is TypeScript doing its job. The third state is where the actual production bug lives — nothing changed about the underlying race, only whether anything was still watching for it.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q"><code>let session: Session | undefined</code> is read inside a setTimeout callback as <code>session!.expiresAt</code>, after TypeScript's narrowing error was silenced with <code>!</code>. Elsewhere in the file, <code>clearSession()</code> sets <code>session = undefined</code>. A user logs out in another tab right before the timer fires. What happens?</p>
+  <button type="button">Nothing — session! guarantees TypeScript re-checks the value at the moment the closure actually runs</button>
+  <button type="button">TypeScript's original narrowing still applies at runtime, so session is guaranteed non-undefined here</button>
+  <button type="button">The callback throws — session is now undefined, and ! only ever silenced the compiler</button>
+  <p class="why" data-for="0">No — <code>!</code> never re-checks anything, at any moment. It's erased at compile time exactly like every other type annotation; nothing about it survives into the running code.</p>
+  <p class="why" data-for="1">No — TypeScript's narrowing is a compile-time-only conclusion about what should be true if nothing else in the file reassigns the variable in the meantime. It is not a runtime guarantee, and clearSession() reassigning it mid-flight breaks exactly that assumption.</p>
+  <p class="why" data-for="2">Right. <code>session!</code> is a promise to the compiler, not a check. The moment clearSession() runs before the timer fires, session really is undefined, and <code>.expiresAt</code> throws — the exact race the original error was warning about.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Trusting that a value hasn't changed by the time an async callback runs is a decades-old bug wearing new syntax.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's effectively-final capture rule</h4>
+    <p>Java won't even let you write a lambda that reads <code>session</code> unless <code>session</code> is final or effectively final — it forces exactly the copy-to-a-fixed-value discipline that <code>const active = session</code> gives you voluntarily in TypeScript. Java refuses to compile the risky version at all; TypeScript just warns you, and lets you assert your way past it.</p>
+    <div class="hf-scatter"><span>one language refuses outright, the other lets you override the warning</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Stale closures in React effects and RxJS subscriptions</h4>
+    <p>A React <code>useEffect</code> callback or an RxJS subscription that captures a variable from an outer scope and reads it later has the identical race — the value the closure sees is whatever it was when the closure was created, not necessarily current state. It's exactly why React's docs insist every captured value goes in the dependency array.</p>
+    <div class="hf-scatter"><span>closures everywhere capture a moment in time, not a live value</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Optimistic locking in a Spring/JPA update</h4>
+    <p>An entity loaded, checked, and updated later in a longer-running request has exactly this window — something else could update the same row in between. <code>@Version</code> optimistic locking exists purely to catch that race at commit time, instead of silently overwriting a change nobody knew happened.</p>
+    <div class="hf-scatter"><span>the gap between check and use is where every one of these bugs actually lives</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> TypeScript infers types from initializers, widens <code>let</code> but not <code>const</code>, keeps narrow literal types with <code>as const</code> and <code>satisfies</code>, and narrows callback parameters inward from context. <b>The one new sentence this block adds:</b> narrowing has a lifespan — it survives only as far as TypeScript can see every place a <code>let</code> variable might be reassigned, and a closure that outlives that visibility gets the wide type back, for a genuinely good reason.
+</div>
+
   <!-- ── HERO: animated inference walk · inferred-type chip + live "where the type came from" inspector ── -->
   <div class="card" style="border:1px solid #5fa9ff;margin-bottom:18px">
     <h2 id="hero-viz" style="margin-top:0;color:#5fa9ff">▶ Watch TypeScript work out a type you didn't write</h2>
@@ -668,6 +771,7 @@ methods. inference protects you here.`},
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

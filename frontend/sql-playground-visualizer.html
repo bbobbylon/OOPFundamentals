@@ -138,7 +138,108 @@
     </div>
   </div>
 
-  <div class="sp-boot" id="boot"></div>
+  <p class="hf-deck">or, the WHERE clause that quietly undoes your LEFT JOIN</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You add one innocent WHERE clause to a report that's supposed to include everyone, and the LEFT JOIN you wrote turns into an INNER JOIN without a single error, warning, or line of red text.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The "PAID only" filter that deletes users with zero orders</div>
+  <p>Paste this into the editor above: <code>LEFT JOIN orders o ON o.user_id = u.id</code> — you used LEFT specifically so users with no orders still show up, their order columns just coming back NULL. Then someone asks: "can we only count orders that are actually PAID?" You add <code>WHERE o.status = 'PAID'</code> and run it again.</p>
+  <p>The user list shrinks. Ada, who has never placed an order, is gone. So is anyone whose only order was REFUNDED. SQLite did not misbehave: for a user with no matching order row, <code>o.status</code> is NULL, and <code>NULL = 'PAID'</code> is never true — so WHERE throws that row out before the result set ever reaches you. The join attached the row correctly; WHERE deleted it one step later.</p>
+  <div class="hf-scatter">
+    <span>the LEFT JOIN syntax ✓</span>
+    <span>the join condition o.user_id = u.id ✓</span>
+    <span>the WHERE clause touching the joined table ⚠</span>
+  </div>
+  <p class="hf-foot">A LEFT JOIN only survives a WHERE clause that never tests a column from the joined table.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Move the filter onto the ON clause, not WHERE</div>
+  <div class="hf-ladder">
+    <b>Rewrite the condition into the join itself</b>
+    <i>↓ <code>LEFT JOIN orders o ON o.user_id = u.id AND o.status = 'PAID'</code> decides which order rows attach, before any NULL-filling happens</i>
+    <b>Compare row counts against the unfiltered LEFT JOIN</b>
+    <i>↓ the same number of users coming back both times proves nobody got silently dropped</i>
+    <b>And if you genuinely need a WHERE test on the joined table, pair it with <code>OR o.id IS NULL</code></b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Any WHERE condition that names a column from the LEFT-joined table can only ever be true for rows that matched, so it deletes precisely the NULL-filled rows the LEFT JOIN existed to protect — move that condition into the ON clause instead, and WHERE will only ever filter the table you started from.
+</div>
+
+<div class="hf-note">Think of LEFT JOIN as a promise: "show every row from the left table, matched or not." A WHERE clause on the joined table asks a question only a matched row can answer, and <b>NULL never says yes</b>.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I used LEFT JOIN so users with no orders would still show up. Why did they disappear the moment I added a filter?</p></div>
+  <div class="hf-bub right"><span class="who">WHERE clause</span><p>I don't know what a "match" is. I check every row after the join finishes: is <code>o.status</code> equal to <code>'PAID'</code>? For your NULL rows that comparison is never true, so I remove them.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But LEFT JOIN is right there in the query — doesn't that protect them?</p></div>
+  <div class="hf-bub right"><span class="who">The JOIN clause</span><p>I did my job — I attached NULL for every user with no order. What happens to that row next is WHERE's decision, not mine.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Here is the order SQLite actually evaluates your clauses in — and why WHERE only ever sees what the join already produced.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>FROM users u</code> — start with every user row</span><span class="tag">base table</span></li>
+    <li class="open"><span><code>LEFT JOIN orders o ON o.user_id = u.id</code> — attach matching orders; NULL-fill users with none</span><span class="tag">the join</span></li>
+    <li><span>Result so far: every user, some with real order columns, some entirely NULL</span><span class="tag">intermediate rows</span></li>
+    <li class="open"><span><code>WHERE o.status = 'PAID'</code> — test every row's <code>o.status</code>, NULL rows included</span><span class="tag">the filter</span></li>
+    <li><span><code>NULL = 'PAID'</code> evaluates to NULL — not true, not false — so the row is discarded</span><span class="tag">three-valued logic</span></li>
+    <li class="open"><span>What survives looks exactly like an INNER JOIN result, because every surviving row happened to have a real match</span><span class="tag">the illusion</span></li>
+  </ol>
+  <p class="hf-annot">Step five is the whole gotcha. SQL comparisons don't resolve to just true or false — they can resolve to NULL, and only "true" gets a row past WHERE. A NULL-filled row can never make a real-value comparison true, so WHERE erases it — the same erasure an INNER JOIN would have done, just one clause later and far less visibly.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>WHERE o.status = 'PAID'</span><span>WHERE o.amount &gt; 0</span><span>WHERE o.refunded = 0</span></div>
+    <div class="funnel">any condition on the joined table's columns ↓</div>
+    <div class="instance">LEFT JOIN quietly becomes an INNER JOIN<small>one symptom — unmatched rows vanish — from any filter on the right-hand table</small></div>
+  </div>
+  <p class="hf-annot">It doesn't matter which column you filter on, or why — order status, amount, a refund flag. The moment a WHERE clause tests a column that only exists because of the join, NULL rows fail that test and disappear. Three different business questions, the same accidental INNER JOIN.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your <code>users LEFT JOIN sessions</code> report is supposed to list every user, showing their most recent session if they have one. You add <code>WHERE sessions.created_at &gt; date('now','-30 days')</code> to only show recent activity, and now every user who has never logged in has vanished from the report entirely. What is actually happening?</p>
+  <button type="button">LEFT JOIN only preserves unmatched rows for the first 30 days after a table is created, so the window expired</button>
+  <button type="button">WHERE tests <code>sessions.created_at</code> on every row, and NULL (no session) never satisfies a date comparison, so those rows get dropped — the LEFT JOIN is now behaving like an INNER JOIN</button>
+  <button type="button"><code>sessions.created_at</code> needs an index, or SQLite falls back to treating the join as an INNER JOIN</button>
+  <p class="why" data-for="0">SQLite has no such thing as a join that "expires" — LEFT JOIN semantics never change based on when a table was created. That mixes a real symptom with an invented cause.</p>
+  <p class="why" data-for="1">Exactly. <code>NULL &gt; date(...)</code> is never true, so WHERE removes every user whose join produced NULL columns — precisely the users the LEFT JOIN was supposed to protect. This has nothing to do with indexing or timing.</p>
+  <p class="why" data-for="2">A missing index changes the query plan — SCAN versus SEARCH — and how fast the query runs, never which rows come back or which join type SQLite uses.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">This exact shape — a later filter silently cancelling an earlier "include everyone" guarantee — shows up well outside SQL.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring Data JPA's LEFT JOIN FETCH</h4>
+    <p>Write <code>@Query("SELECT u FROM User u LEFT JOIN FETCH u.roles r WHERE r.name = :role")</code> hoping to list every user with their roles, and users with zero roles vanish for the identical reason: Hibernate compiles that WHERE straight into SQL, and it filters on the NULL-joined <code>r.name</code> exactly like sql.js just did. The fix is the same one — move the condition into the join's <code>ON</code>/<code>WITH</code> clause.</p>
+    <div class="hf-scatter"><span>an ORM hides the SQL syntax, never the row semantics underneath it</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>pandas' left merge plus a boolean filter</h4>
+    <p><code>df.merge(orders, how='left')</code> then <code>df[df.status == 'PAID']</code> is the same trap in Python: unmatched rows get <code>NaN</code> in the merged columns, and <code>NaN == 'PAID'</code> is <code>False</code>, so the boolean mask drops rows the left merge was written to keep.</p>
+    <div class="hf-scatter"><span>NaN plays the same role NULL just played</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>LINQ's GroupJoin + DefaultIfEmpty</h4>
+    <p>.NET's left-outer-join idiom produces default (null-ish) values for unmatched items on purpose. Chain a <code>.Where(x => x.Order.Status == "Paid")</code> after it and the defaults fail the test, quietly turning the "left join" back into an inner one — a long-running complaint in the LINQ community for exactly this reason.</p>
+    <div class="hf-scatter"><span>same bug, third language, same root cause</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> SQL is declarative — you describe the rows you want and SQLite's planner decides how to fetch them, running clauses in an order (FROM → JOIN → WHERE → GROUP BY → HAVING → SELECT → ORDER BY) different from the order you typed them.
+  <b>The one new sentence this block adds:</b> that same "WHERE runs after the join" ordering is exactly why a LEFT JOIN can look perfectly correct in your editor and behave like an INNER JOIN the instant you filter on the table it was supposed to make optional.
+</div>
+
+<div class="sp-boot" id="boot"></div>
   <div class="sp-offline" id="offline">
     <b>Offline / blocked.</b> The SQLite WebAssembly engine couldn't be fetched from the CDN
     (<code>cdn.jsdelivr.net</code>). The rest of the page still explains everything; reconnect and reload to run queries.
@@ -521,6 +622,7 @@
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

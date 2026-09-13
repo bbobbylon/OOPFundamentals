@@ -138,6 +138,110 @@ console.log(render({ status: "error", code: 500, message: "boom" }));
   </div>
 
 
+<p class="hf-deck">or, the narrowing you already proved gets thrown away one array method later</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You already checked <code>status === 'success'</code>. TypeScript makes you prove it again anyway.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">requests.filter(r =&gt; r.status === 'success').map(r =&gt; r.data) — 'data' does not exist</div>
+  <p>You've got <code>RequestState&lt;User&gt;[]</code> and you want just the successful ones: <code>const successes = requests.filter(r =&gt; r.status === 'success');</code>. Every element that survives clearly has <code>.data</code> — you just checked <code>status === 'success'</code> to get there.</p>
+  <p><code>successes</code> is still typed <code>RequestState&lt;User&gt;[]</code>, not the narrowed success variant. <code>successes[0].data</code> is a compile error: "Property 'data' does not exist on type 'RequestState&lt;User&gt;'." <code>Array.prototype.filter</code>'s ordinary overload takes a predicate that returns a plain <code>boolean</code> — TypeScript has no way to connect that boolean back to which union member survived, so it hands back the exact same array type you started with.</p>
+  <div class="hf-scatter">
+    <span>the filter callback runs correctly at runtime ✓</span>
+    <span>only success states actually remain in the array ✓</span>
+    <span>successes[0].data doesn't type-check ⚠</span>
+  </div>
+  <p class="hf-foot">You already did the narrowing work. TypeScript just never saw it as narrowing.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Write the predicate as a type guard, not a boolean</div>
+  <div class="hf-ladder">
+    <b>Give the filter callback an explicit return type: <code>(r): r is Extract&lt;RequestState&lt;User&gt;, {status:'success'}&gt; =&gt; r.status === 'success'</code></b>
+    <i>↓ "x is T" is a type predicate — the one signal TypeScript's filter overload actually looks for</i>
+    <b>TypeScript now picks filter's other overload — the one that returns S[] instead of T[]</b>
+    <i>↓ the exact same boolean check, now declared as a real narrowing operation</i>
+    <b>successes is now SuccessState&lt;User&gt;[], and .data type-checks with zero further narrowing</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Narrowing only propagates through code TypeScript recognizes as a type guard — not through code that merely behaves like one.</b> <code>r.status === 'success'</code> narrows <code>r</code> beautifully inside an <code>if</code>, because the compiler evaluates that exact comparison right there. Hand the same comparison to <code>.filter()</code> as an ordinary boolean-returning function, and the compiler only sees "a function that returns boolean" — it never re-derives that the boolean happened to correlate with a discriminant. Only a declared <code>x is T</code> predicate carries that information across the function boundary.
+</div>
+
+<div class="hf-note">A <code>.filter()</code> callback that returns a plain boolean is a <b>bouncer who checks IDs at the door but never radios upstairs</b> — the wrong people definitely didn't get in, but nobody past the door was ever told who's actually inside.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I already checked r.status === 'success' inside the filter. Why does TypeScript make me check it again after?</p></div>
+  <div class="hf-bub right"><span class="who">Array.prototype.filter, personified</span><p>I only see a function that takes an element and returns true or false. I have no idea WHY it returned true — I just know some elements passed.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So how does if (r.status === 'success') know, then?</p></div>
+  <div class="hf-bub right"><span class="who">The if statement, personified</span><p>I inspect that exact comparison directly, right where it's written. filter() never shows me the comparison — it only ever shows me the boolean it produced.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch the exact same check narrow inside an if and fail to narrow inside filter.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>requests: RequestState&lt;User&gt;[]</code> — a union of idle/loading/success/error</span><span class="tag">start</span></li>
+    <li class="open"><span><code>if (requests[0].status === 'success') { requests[0].data }</code> compiles fine — narrowed inline</span><span class="tag">if: narrows</span></li>
+    <li><span><code>requests.filter(r =&gt; r.status === 'success')</code> — same comparison, now inside an arrow passed to filter</span><span class="tag">filter: plain predicate</span></li>
+    <li class="open"><span>The arrow function's inferred return type is just <code>boolean</code> — no type-predicate signature attached</span><span class="tag">no signal</span></li>
+    <li><span>filter() picks its non-narrowing overload: input type in, same type out — <code>RequestState&lt;User&gt;[]</code></span><span class="tag">overload chosen</span></li>
+    <li class="open"><span>Add <code>: r is Extract&lt;RequestState&lt;User&gt;, {status:'success'}&gt;</code> to the same arrow, and filter's OTHER overload narrows the output</span><span class="tag">the fix</span></li>
+  </ol>
+  <p class="hf-annot">Step four is the whole story: TypeScript doesn't analyze what a function's body does before deciding narrowing — it only looks at the function's declared type. A type predicate is the only declared type that says "trust me: if I return true, the input was actually this narrower thing."</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">r.status === 'success'<small>the exact same boolean comparison, written once</small></div>
+    <div class="fan">where you use it changes what TypeScript does with it ↓</div>
+    <div class="obs">
+      <span>inside if (...) { } — narrows r immediately</span>
+      <span class="new">inside .filter(r =&gt; ...) — does NOT narrow the output array</span>
+      <span>inside .filter((r): r is Success =&gt; ...) — narrows the output array</span>
+    </div>
+  </div>
+  <p class="hf-annot">The middle reactor is the surprising one — same comparison, same runtime result, and TypeScript treats it completely differently, because a plain arrow function never declares what its "true" actually means.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q"><code>const successes = requests.filter(r =&gt; r.status === 'success');</code> where <code>requests: RequestState&lt;User&gt;[]</code>. What is the type of <code>successes</code>, and can you read <code>successes[0].data</code> without further narrowing?</p>
+  <button type="button">successes: SuccessState&lt;User&gt;[] — .data is directly accessible, because filter already proved every element succeeded</button>
+  <button type="button">successes: RequestState&lt;User&gt;[] — .data is still a compile error, because the arrow returns boolean, not a type predicate</button>
+  <button type="button">successes: (RequestState&lt;User&gt; | undefined)[] — .data requires an undefined check first</button>
+  <p class="why" data-for="0">No — filter only narrows its output when the predicate itself is declared as a type predicate (<code>x is T</code>). A plain arrow returning <code>r.status === 'success'</code> is just a boolean-returning function to the type system, whatever it actually checks at runtime.</p>
+  <p class="why" data-for="1">Right. TypeScript's ordinary filter overload preserves the input element type unless the callback's return type says <code>x is S</code>. The comparison is real and correct at runtime; it's simply invisible to the type checker as a narrowing operation.</p>
+  <p class="why" data-for="2">No — filter never introduces <code>undefined</code> into its results. That's <code>Array.prototype.find</code>'s behavior on a no-match, not filter's behavior on a match.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A safety check that only counts if you tell the tool it was a safety check shows up constantly.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>RxJS's filter() operator has the identical overload trick</h4>
+    <p><code>source$.pipe(filter(x =&gt; x.status === 'success'))</code> hits the exact same wall — the emitted type stays the union unless you write <code>filter((x): x is Success =&gt; x.status === 'success')</code>. Same library shape, same fix, straight out of your Angular observable pipelines.</p>
+    <div class="hf-scatter"><span>the sibling API has the sibling gotcha</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Java Streams' filter() never narrows either</h4>
+    <p><code>list.stream().filter(x -&gt; x instanceof Success)</code> still returns a <code>Stream&lt;Base&gt;</code> — Java has no type-predicate mechanism at all here, so you always follow it with an explicit cast, typically <code>.map(Success.class::cast)</code>, to get anything more specific.</p>
+    <div class="hf-scatter"><span>filtering by type and narrowing the static type are two separate steps in both languages</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Spring Security's @PreAuthorize vs. an equivalent if</h4>
+    <p>Writing <code>if (user.hasRole("ADMIN"))</code> inside a service method protects nothing that Spring's AOP proxy can see — only a declared <code>@PreAuthorize("hasRole('ADMIN')")</code> registers as a security boundary the framework enforces from outside. An inline check and a declared guard can express the identical rule and mean completely different things to the system around them.</p>
+    <div class="hf-scatter"><span>the framework only reacts to the declared form, never to equivalent logic</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a discriminated union — a shared literal tag, per-variant fields, and exhaustive switches guarded by the <code>never</code> trick — turns "impossible states" into compile errors instead of runtime surprises. <b>The one new sentence this block adds:</b> that safety only travels as far as TypeScript's own narrowing analysis can see, and <code>.filter()</code> with a plain boolean predicate sits just outside that reach until you declare the check as a real <code>x is T</code> type predicate.
+</div>
+
   <!-- ── HERO: animated DU modeling walk · state chip + live "what's representable" inspector ── -->
   <div class="card" style="border:1px solid #5fa9ff;margin-bottom:18px">
     <h2 id="hero-viz" style="margin-top:0;color:#5fa9ff">▶ Model an async request — and make impossible states impossible</h2>
@@ -726,6 +830,7 @@ DU + exhaustiveness = refactor with confidence.`},
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

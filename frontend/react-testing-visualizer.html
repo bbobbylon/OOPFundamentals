@@ -58,6 +58,120 @@
     <div class="intro-ciam"><span class="tag">CIAM context:</span> Test the login form by <em>typing credentials and clicking submit</em>, then asserting the token was stored / the user redirected — the real journey. For role-gated UI, render as an admin and assert <code>getByRole('link', {name:/users/i})</code> exists, then render as a normal user and assert <code>queryBy…not.toBeInTheDocument()</code>. Use <strong>MSW</strong> to stub <code>POST /api/auth/login</code> so the component's real fetch runs without a backend — and add a <code>401</code> handler to cover the error path.</div>
   </div>
 
+<p class="hf-deck">or, the click that works perfectly in the browser and hangs forever in the test runner</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You mock the clock to skip a five-minute countdown, then <code>await user.click(...)</code> — and the <code>await</code> never comes back.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The test that hangs on line 12, forever</div>
+  <p>Your component counts down a session timer with <code>setInterval</code>, so your test calls <code>vi.useFakeTimers()</code> in <code>beforeEach</code> to skip past the wait instead of sitting through five real minutes. Then it does the normal thing: <code>const user = userEvent.setup(); await user.click(screen.getByRole('button', {name:/refresh/i}))</code>.</p>
+  <p>The render works. The query finds the button. The click even shows up fine in a browser you drive by hand. In the test runner, the <code>await</code> just never resolves — Vitest kills it at the default timeout with no assertion failure and no stack trace pointing at your code.</p>
+  <div class="hf-scatter">
+    <span>render + getByRole found the button ✓</span>
+    <span>the click physically fires in jsdom ✓</span>
+    <span>userEvent's OWN internal timer never fires ⚠</span>
+  </div>
+  <p class="hf-foot">Every one of your assertions is still waiting on a clock you personally froze.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">The fix: tell userEvent about the fake clock too</div>
+  <div class="hf-ladder">
+    <b>Pass <code>advanceTimers</code> when you call <code>setup()</code></b>
+    <i>↓ <code>userEvent.setup({ advanceTimers: vi.advanceTimersByTime })</code></i>
+    <b>Or skip the realism entirely with <code>delay: null</code></b>
+    <i>↓ <code>userEvent.setup({ delay: null })</code> — no per-keystroke/per-click wait at all</i>
+    <b>And keep <code>vi.useRealTimers()</code> in an <code>afterEach</code></b>
+    <i>↓ so a fake clock from one test can never leak into the next test's userEvent calls</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A fake clock is global, not scoped to your assertions.</b> <code>vi.useFakeTimers()</code> replaces
+  <code>setTimeout</code> for the entire process, and <code>userEvent</code> uses that exact same
+  <code>setTimeout</code> internally to pace out realistic keystroke and pointer sequences. You didn't
+  just freeze the countdown you meant to skip — you froze the library's own plumbing, and it has no
+  way to know you're the one who's supposed to move the clock forward for it.
+</div>
+
+<div class="hf-note">Freezing time doesn't pause your code — it pauses <b>every setTimeout in the
+building</b>, including the ones running inside a library you never knew was using one.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I froze the clock to skip a countdown, and now a totally unrelated click never resolves. I didn't even touch userEvent's internals.</p></div>
+  <div class="hf-bub right"><span class="who">userEvent</span><p>I don't touch the DOM instantly — I schedule a short setTimeout between pointerdown and pointerup to act like a real hand. That's the same setTimeout you just froze.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So tell it to fire.</p></div>
+  <div class="hf-bub right"><span class="who">vi.advanceTimersByTime</span><p>Only if userEvent knows to call me. Pass me in as advanceTimers at setup, and I'll nudge the fake clock forward exactly when it's waiting on me.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Trace what actually happens between the click and the timeout.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>beforeEach</code> runs <code>vi.useFakeTimers()</code></span><span class="tag">global swap</span></li>
+    <li class="open"><span>Every <code>setTimeout</code> in the process — yours AND every library's — now waits on the fake clock</span><span class="tag">process-wide</span></li>
+    <li><span><code>await user.click(button)</code> begins: pointerdown fires</span><span class="tag">real DOM event</span></li>
+    <li class="open"><span>Before pointerup, userEvent schedules its own tiny delay via that same <code>setTimeout</code></span><span class="tag">internal pacing</span></li>
+    <li><span>Nothing ever calls <code>vi.advanceTimersByTime</code> for it</span><span class="tag">clock frozen</span></li>
+    <li class="open"><span>The scheduled callback never runs, so the Promise <code>click()</code> returned never settles</span><span class="tag">hang → timeout</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the whole bug: userEvent's realism (a small gap between pointerdown and pointerup so it behaves like an actual hand) depends on a timer firing on its own. A real clock does that for free; a fake one only moves when something explicitly tells it to.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">why doesn't await user.click() resolve?<small>fake timers are active, nothing else looks wrong</small></div>
+    <div class="arrow">what actually happens →</div>
+    <div class="opts">
+      <span>a real network request silently failed</span>
+      <span class="on">userEvent's own internal setTimeout is frozen with everyone else's</span>
+      <span>React batches the click into the next real animation frame</span>
+    </div>
+  </div>
+  <p class="hf-annot">There's no network call and no animation frame here — it's plain DOM plus a Promise. The only clock in the building is the one you froze, and userEvent quietly depends on it like everything else does.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A test calls <code>vi.useFakeTimers()</code> in <code>beforeEach</code> to skip a 5-minute session-refresh interval, then does <code>await user.click(screen.getByRole('button', {name:/refresh/i}))</code>. The test hangs until Vitest's timeout kills it, even though the identical test passes instantly with real timers. What's actually going on?</p>
+  <button type="button">userEvent's internal per-action delay uses setTimeout, and with fake timers active but never advanced, that scheduled callback never fires — so the click's Promise never resolves</button>
+  <button type="button">userEvent.click() needs a real network round-trip to resolve, and the fake clock blocked the request from ever completing</button>
+  <button type="button">vi.useFakeTimers() pauses all React state updates until vi.runAllTimers() is called, so the click handler itself never runs</button>
+  <p class="why" data-for="0">Right — and it's exactly the mechanism every fake-timer library shares: freezing time freezes EVERY setTimeout in the process, not just the one you meant to skip past. userEvent's own pacing timer is one of them.</p>
+  <p class="why" data-for="1">Nothing here touches the network — the click is a synchronous DOM event inside jsdom. The delay is userEvent's own internal pacing timer, not an outstanding request.</p>
+  <p class="why" data-for="2">Fake timers only intercept timer-based APIs (setTimeout/setInterval/dates); the click handler itself fires immediately and normally — it's the realistic gap userEvent inserts AFTER the event that never advances.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"I froze time and something unrelated stopped working" shows up anywhere a virtual clock and a real dependency share the same clock.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Angular's <code>fakeAsync</code> + <code>tick()</code></h4>
+    <p>Angular's test zone virtualizes time the same way — a <code>setTimeout</code> or Promise microtask inside <code>fakeAsync</code> just sits there until you call <code>tick()</code> to move the virtual clock, or <code>whenStable()</code> hangs the same way your click did.</p>
+    <div class="hf-scatter"><span>a virtual clock only moves when something explicitly moves it</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A retry-with-backoff library under fake timers</h4>
+    <p>Any library that schedules its own retries with <code>setTimeout</code> — an HTTP client's exponential backoff, a websocket reconnect — freezes the exact same way the moment your test mocks the global clock, because it never asked your permission to use it.</p>
+    <div class="hf-scatter"><span>mocking a global affects every consumer of that global, not just yours</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A deadlock over a shared resource</h4>
+    <p>Two independent-looking pieces of code (your assertion, userEvent's pacing) both quietly depend on the same shared resource — the process clock. Starve it for one purpose and you starve every other consumer you didn't know existed — the classic shape of a deadlock.</p>
+    <div class="hf-scatter"><span>the surprising dependency is always the shared, invisible one</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Testing Library queries by role, interacts with real event
+  sequences via userEvent, and mocks the network at the MSW layer instead of stubbing fetch. <b>New:
+  mocking the CLOCK isn't scoped to your assertion — it freezes userEvent's own internal timer too, so
+  a click can hang forever unless you pass advanceTimers (or delay: null) into
+  userEvent.setup().</b>
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -257,6 +371,7 @@ DevHubCodeWalk.mount('#cw-rtest',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

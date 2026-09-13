@@ -61,7 +61,112 @@
     <div class="intro-ciam"><span class="tag">CIAM Go API:</span> A Gin service validating Ping/Entra tokens puts a JWT middleware on the <code>/api</code> group: it reads the Bearer token, verifies the RS256 signature against the cached JWKS, and stores claims with <code>c.Set("user", claims)</code>; handlers read <code>c.MustGet("user")</code> and <code>c.AbortWithStatus(403)</code> when a role is missing. Binding tags validate request bodies in one line (<code>c.ShouldBindJSON</code>), and route groups keep public health checks separate from the token-gated API — the same structure as a Spring security config, expressed as explicit middleware.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the request body that belonged to somebody else's request</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You did the responsible thing — handed slow work to a goroutine instead of blocking the response — and Fiber handed your goroutine a payload that wasn't even yours anymore.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A webhook payload that turned into a different request under load</div>
+  <p>Your Fiber handler receives a webhook, needs to do some slow signature-verification work on the body, and you don't want to block the response: <code>body := c.Body(); go func() { verify(body) }()</code>, then <code>return c.SendStatus(202)</code>. It works perfectly in dev. Under real concurrent traffic it starts intermittently failing signature checks on payloads that look nothing like what was actually sent — sometimes truncated, sometimes belonging to an entirely different webhook.</p>
+  <p>Fiber is built on <code>fasthttp</code>, and fasthttp pools its request/response objects for speed instead of allocating fresh ones per request. The moment your handler returns, fasthttp is free to recycle that <code>*fiber.Ctx</code> — and the byte buffer backing <code>c.Body()</code> — for the very next incoming connection. Your goroutine kept a reference to that buffer, not a copy of it, so by the time <code>verify()</code> actually reads it, it may already have been overwritten with someone else's request.</p>
+  <div class="hf-scatter">
+    <span>moving slow work off the response path ✓</span>
+    <span>the 202 you returned immediately ✓</span>
+    <span>keeping a reference to <code>c.Body()</code> past the handler's return ⚠</span>
+  </div>
+  <p class="hf-foot">The handler did exactly what it looked like it did. The bytes underneath it didn't stay put.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Copy what you need before the handler returns</div>
+  <div class="hf-ladder">
+    <b>Convert to a string before handing it to the goroutine: <code>body := string(c.Body())</code></b>
+    <i>↓ a Go string-from-bytes conversion always copies the underlying bytes — the goroutine now owns data fasthttp can't touch</i>
+    <b>Or explicitly copy: <code>body := append([]byte(nil), c.Body()...)</code></b>
+    <i>↓ same idea for cases where you need a real <code>[]byte</code> rather than a string</i>
+    <b>Never pass <code>c</code> itself into a goroutine or store it beyond the handler</b>
+    <i>↓ every value <code>c</code> exposes — params, headers, the body — rides on the same pooled, reused memory, not just <code>Body()</code></i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Zero-allocation and zero-lifetime are the same trade.</b> Fiber's speed comes from reusing buffers instead of allocating fresh ones for every request — which means anything it hands you is only guaranteed valid for as long as your handler is still running. The instant you return, or hand a value to another goroutine, you're relying on memory fasthttp considers free to reuse.
+</div>
+
+<div class="hf-note">Think of <code>c.Body()</code> as a <b>library book you didn't check out</b> — you can read it at the table, but the moment you walk away, the library reshelves it and hands it to the next person. Take a photocopy (<code>string(...)</code>) if you need it after you leave.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I moved the slow work into a goroutine specifically so it wouldn't block the response. Why is that the bug?</p></div>
+  <div class="hf-bub right"><span class="who">fasthttp's ctx pool</span><p>Moving the WORK off the response path was correct. Moving a raw pointer into your byte slice off the response path was not — I don't know your goroutine still needs it. As far as I'm concerned, your handler returned, so this memory is mine again.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Couldn't you just... wait until nobody's using it?</p></div>
+  <div class="hf-bub right"><span class="who">fasthttp's ctx pool</span><p>That's exactly the allocation-per-request cost Fiber exists to avoid. I reuse buffers aggressively because tracking "is anyone still reading this" would cost you the performance you chose me for.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow the same byte buffer across two consecutive requests on a busy server.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Request A arrives; fasthttp pulls a <code>*fiber.Ctx</code> from its pool and reads A's body into its buffer</span><span class="tag">pool out</span></li>
+    <li class="open"><span>Your handler runs: <code>body := c.Body()</code> — <code>body</code> is a slice POINTING AT that same buffer, not a copy</span><span class="tag">reference, not copy</span></li>
+    <li><span>The handler starts <code>go func(){ verify(body) }()</code> and immediately returns <code>202</code></span><span class="tag">fire-and-forget</span></li>
+    <li class="open"><span>Fasthttp sees the handler returned and puts the <code>*fiber.Ctx</code> — and its buffer — back in the pool for reuse</span><span class="tag">pool in</span></li>
+    <li><span>Request B arrives milliseconds later; fasthttp pulls that SAME ctx from the pool and overwrites the buffer with B's body</span><span class="tag">reused</span></li>
+    <li class="open"><span>Your still-running goroutine finally gets scheduled and reads <code>body</code> — which now holds request B's bytes, or a half-overwritten mix</span><span class="tag">corrupted read</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is the entire bug in one line: <code>c.Body()</code> hands you a window into fasthttp's buffer, not a box you now own. Everything after step 3 is just fasthttp doing its normal, documented job of recycling that window for someone else.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">fasthttp's ctx pool (reused across ALL requests)</span>
+      <div class="ring"><span class="lbl">one <code>*fiber.Ctx</code>, checked out per request</span>
+        <div class="ring"><span class="lbl">its Request object</span>
+          <div class="core">the raw body byte buffer<small>recycled the instant your handler returns — not when your goroutine is done with it</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Every layer of this nesting is pooled for the same reason: allocating fresh memory per request is what a "normal" framework does and what Fiber/fasthttp specifically avoids. The cost of that speed is that nothing at any layer is yours past the handler's return — only the outermost pool decides when memory comes back.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A Fiber handler does <code>id := c.Params("id")</code>, then calls <code>go func(){ auditLog(id) }()</code> before returning. Under sustained concurrent load, what's the realistic outcome?</p>
+  <button type="button">Nothing to worry about — <code>c.Params</code> returns a plain Go string, and strings in Go are always safe to share across goroutines.</button>
+  <button type="button"><code>id</code> can end up holding a different request's path parameter, or garbage, because it may still reference fasthttp's reused buffer.</button>
+  <button type="button">The program panics immediately with a data-race error the moment the second request reuses the ctx.</button>
+  <p class="why" data-for="0">Not in Fiber specifically — while a real Go string is normally safe to share, several of <code>fiber.Ctx</code>'s zero-allocation accessors (including, in some versions, <code>Params</code>) hand back a string-typed view still backed by the same reused byte buffer rather than a freshly allocated one. Fiber's own docs flag exactly this: copy any value you need to keep past the handler.</p>
+  <p class="why" data-for="1">This is the real risk — a zero-allocation string can still be an unsafe view over memory fasthttp intends to recycle, so a goroutine that outlives the handler can read a completely different request's value.</p>
+  <p class="why" data-for="2">This unsynchronized access could well be flagged by <code>go run -race</code> in a test that reproduces it — but almost nobody runs the race detector in production because of its overhead. Out there, you just get silently wrong data: no panic, no crash, no automatic signal that anything went wrong.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Fast because it's reused, dangerous the moment you hold onto it" is the buffer-pooling trade-off, and it shows up anywhere a framework chases zero-allocation performance.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's Netty <code>ByteBuf</code> reference counting</h4>
+    <p>Netty pools and reuses <code>ByteBuf</code>s for the same reason fasthttp pools its buffers — allocation is the enemy of throughput. Forget to <code>retain()</code> a buffer before handing it to an async handler (or forget to <code>release()</code> when you're done) and you get corrupted reads or a leak, the exact same family of bug wearing a reference-count instead of a pool-reuse costume.</p>
+    <div class="hf-scatter"><span>pooled buffers demand an explicit "I still need this" signal</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Spring <code>@RequestBody InputStream</code> read after the request scope ends</h4>
+    <p>Servlet containers can reuse the underlying request object across pooled worker threads once a request completes; stashing the raw <code>HttpServletRequest</code> (rather than data copied out of it) into an async task is the same "outlived its lender" mistake, just with a servlet container as the librarian instead of fasthttp.</p>
+    <div class="hf-scatter"><span>container-managed request objects aren't yours to keep either</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Reusing a <code>sync.Pool</code> object across goroutines in plain Go</h4>
+    <p>Any <code>sync.Pool</code> you write yourself has this exact contract: <code>Get()</code> lends you an object, and the moment you <code>Put()</code> it back (which a framework can do on your behalf, like fasthttp does), anyone else can receive that same memory next. Fiber/fasthttp is this pattern, just hidden a layer beneath the API you call directly.</p>
+    <div class="hf-scatter"><span>sync.Pool's whole contract is "borrowed, not given"</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Gin, Echo, and Fiber are thin layers over <code>net/http</code> (or, for Fiber, <code>fasthttp</code>) adding a fast router, a request Context, struct-tag binding, and middleware groups — ergonomics on top of Go's already-complete HTTP story. <b>The one new sentence this block adds:</b> Fiber's extra speed comes from reusing its Context and buffers across requests, so anything you read off <code>c</code> is only safe for the lifetime of the handler — hand it to a goroutine without copying, and you're reading someone else's request.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="gwSeg">
@@ -273,6 +378,7 @@ DevHubCodeWalk.mount('#cw-gw',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

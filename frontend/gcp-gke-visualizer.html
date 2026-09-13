@@ -58,7 +58,111 @@
     <div class="intro-ciam"><span class="tag">CIAM in production:</span> Workload Identity is the whole ballgame here — a pod that needs to read a secret from Secret Manager or write an audit event to BigQuery authenticates as <strong>itself</strong>, via a token the metadata server issues and rotates automatically, never as a static key sitting in a Kubernetes Secret that someone could <code>kubectl get secret -o yaml</code> and exfiltrate. Combined with Artifact Registry's IAM-gated pulls (node service accounts hold <code>artifactregistry.reader</code>, nothing more), the entire path from "image built" to "pod calling a GCP API" never touches a long-lived credential.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the upgrade you never clicked can still take your API down</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Your Deployment survives node failures, auto-heals, and scales fine — then a routine node-pool upgrade takes all three replicas down at once, and nothing in your manifests was wrong.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The upgrade that emptied a node with all three pods on it</div>
+  <p>You run <code>shop-api</code> as 3 replicas on <code>web-standard-pool</code> (Standard mode). GKE schedules a routine node upgrade — or you trigger one yourself before a maintenance window: <code>gcloud container clusters upgrade shop-cluster --node-pool web-standard-pool</code>. To upgrade a node, GKE cordons it, drains it, and replaces it with a node running the patched version.</p>
+  <p>Draining calls the Kubernetes Eviction API, which only refuses an eviction when a <strong>PodDisruptionBudget</strong> says it must. You never wrote one for <code>shop-api</code>, so nothing stops the drain from evicting every pod on that node in one pass — and because all 3 replicas happened to be scheduled onto that single node (nothing scheduled them apart on purpose), the upgrade takes all three down in the same few seconds, before the ReplicaSet controller can boot replacements elsewhere.</p>
+  <div class="hf-scatter">
+    <span>Deployment spec ✓</span>
+    <span>readiness/liveness probes ✓</span>
+    <span>no PodDisruptionBudget ⚠</span>
+  </div>
+  <p class="hf-foot">Every YAML you wrote was correct. The thing missing was a rule telling the drain "not all of them, not at once."</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Define a PodDisruptionBudget before the next upgrade, not after</div>
+  <div class="hf-ladder">
+    <b>Write a PodDisruptionBudget for shop-api</b>
+    <i>↓ <code>minAvailable: 2</code> tells the Eviction API the floor it must respect</i>
+    <b>Apply it before any node-pool upgrade or scale-down</b>
+    <i>↓ the drain now evicts pods one at a time, waiting for a replacement to become Ready first</i>
+    <b>Spread replicas with anti-affinity or topology spread constraints</b>
+    <i>↓ so one draining node was never going to hold all three replicas in the first place</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A PodDisruptionBudget is the only thing standing between Kubernetes' idea of a "voluntary disruption" — an upgrade, a drain, a scale-down — and your Deployment's actual availability; without one, the scheduler and the drain both behave correctly while your API goes to zero replicas.
+</div>
+
+<div class="hf-note">A node-pool upgrade is a landlord doing "routine" repairs on your building. Without a PodDisruptionBudget on file, that landlord has no lease clause promising to leave you a working exit at all times — <b>no PDB means Kubernetes assumes you don't mind losing every replica at once</b>, because nothing told it otherwise.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>GKE surely doesn't just kill all my pods during a routine upgrade, right?</p></div>
+  <div class="hf-bub right"><span class="who">GKE control plane</span><p>I cordon the node so nothing new lands there, then I call the Eviction API on every pod that's on it. That's the whole contract.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>And if all three replicas happen to be on that one node?</p></div>
+  <div class="hf-bub right"><span class="who">The Eviction API</span><p>I check for a PodDisruptionBudget covering those pods. None exists for shop-api, so there's no floor to protect — I approve every eviction I'm asked for.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Here's what a node-pool upgrade actually does to a pod, step by step.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>GKE marks the node pool for upgrade — auto-upgrade schedule or a manual command</span><span class="tag">trigger</span></li>
+    <li class="open"><span>The target node is cordoned: SchedulingDisabled, no new pods land there</span><span class="tag">cordon</span></li>
+    <li><span>GKE calls the Kubernetes Eviction API for every pod running on the node</span><span class="tag">evict</span></li>
+    <li class="open"><span>The API checks for a matching PodDisruptionBudget's minAvailable / maxUnavailable</span><span class="tag">PDB check</span></li>
+    <li><span>With no PDB, every eviction is approved immediately — nothing throttles it</span><span class="tag">no floor</span></li>
+    <li class="open"><span>The node drains and is replaced; the ReplicaSet reschedules pods elsewhere — after they were already gone</span><span class="tag">reschedule</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the one line of defense in this whole flow, and it only exists if you wrote it. Kubernetes doesn't ship a default PodDisruptionBudget for you — no PDB doesn't mean "be careful," it means "there is no rule to check," so step 5 approves everything in one breath.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Ready</span>
+      <span class="go"><em>upgrade scheduled</em> <span class="arrow">→</span> node is cordoned</span></div>
+    <div class="stt"><span class="nm">Cordoned</span>
+      <span class="go"><em>drain begins</em> <span class="arrow">→</span> Eviction API called per pod</span></div>
+    <div class="stt"><span class="nm">Draining</span>
+      <span class="go"><em>no PodDisruptionBudget</em> <span class="arrow">→</span> all matched pods evicted at once</span></div>
+  </div>
+  <p class="hf-annot">Read this loop as what happens to ONE node, not your whole cluster — but if all your replicas sit on that one node, "this node's drain" and "your Deployment's entire uptime" are, for a few seconds, the same event.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">shop-api runs 3 replicas on GKE Standard, no PodDisruptionBudget defined. GKE begins a scheduled node-pool upgrade and all 3 pods happen to be on the node being drained. What happens?</p>
+  <button type="button">The Eviction API approves evicting all 3 pods with nothing to slow it down, since no PDB exists to enforce a minimum available count</button>
+  <button type="button">GKE automatically pauses the upgrade because it detects a Deployment would drop to zero replicas</button>
+  <button type="button">The node refuses to drain until at least one pod's liveness probe fails</button>
+  <p class="why" data-for="0">Right — draining calls the Eviction API pod by pod, and the API only refuses an eviction when it would violate a PodDisruptionBudget's minAvailable/maxUnavailable. No PDB means no refusal is possible, so all three evictions succeed back to back.</p>
+  <p class="why" data-for="1">GKE has no such safety net built in — "don't drop a Deployment to zero" is exactly what a PodDisruptionBudget exists to express, and Kubernetes doesn't assume one on your behalf.</p>
+  <p class="why" data-for="2">Liveness probes are unrelated to eviction — a perfectly healthy pod gets evicted just as readily as a failing one; eviction is about scheduling for maintenance, not pod health.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"No guardrail, so the platform did exactly what it was told" — you've met that shape in the rest of the stack too.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring Boot's graceful shutdown with no drain timeout configured</h4>
+    <p>In-flight requests during a rolling pod restart get cut off unless <code>server.shutdown=graceful</code> and a matching <code>spring.lifecycle.timeout-per-shutdown-phase</code> are both set — the same "nothing told the platform to wait" shape as a missing PDB.</p>
+    <div class="hf-scatter"><span>no guardrail set = no guardrail enforced</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An Angular HTTP interceptor chain with no explicit ordering enforced</h4>
+    <p>Interceptors run in the order they're provided, and nothing stops a security interceptor from landing after a logging one if you assumed an order you never actually configured — same silent gap between "I assumed a rule" and "a rule exists."</p>
+    <div class="hf-scatter"><span>assumed order ≠ enforced order</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Kafka consumer group rebalance without a cooperative-sticky assignor</h4>
+    <p>With the default eager assignor, one consumer joining or leaving the group revokes ALL partitions from ALL members before reassigning — a full stop-the-world event, because nothing was configured to make it gradual instead.</p>
+    <div class="hf-scatter"><span>one membership change, every partition disrupted</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> GKE fully manages your control plane in both modes, and the real decision is who owns node capacity (Autopilot vs Standard) plus how images and identity reach a pod safely via Artifact Registry and Workload Identity. <b>The one new sentence this block adds:</b> none of that protects a Deployment's uptime during a routine node upgrade — that guarantee only exists if you write a PodDisruptionBudget yourself.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="gkeSeg">
@@ -260,6 +364,7 @@ DevHubCodeWalk.mount('#cw-gke',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

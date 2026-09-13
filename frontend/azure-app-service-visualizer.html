@@ -59,7 +59,112 @@
     <div class="intro-ciam"><span class="tag">CIAM in production:</span> give the web app a <strong>managed identity</strong> (one toggle) and it can fetch secrets from Key Vault or call your APIs with an Entra token — no client secret in any app setting. App Service can also do <strong>Easy Auth</strong>: a built-in auth layer that validates Entra ID tokens <em>before</em> requests reach your code, handy for internal tools. For your Spring APIs you will usually keep validation in the app (resource server + JWKS, as in <code>spring-boot-idm-oauth2-deep-visualizer.html</code>), but knowing the platform can do it is an AZ-204 staple.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, why your load test only ever seems to hit one instance</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You scale shop-api from 2 instances to 6 to survive a flash sale, watch the metrics, and one instance does nearly all the work while the other five idle.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Six healthy instances, one instance doing the work</div>
+  <p>Autoscale fires right on schedule — CPU crosses 70%, the plan grows from 2 workers to 6, the front end confirms all 6 are healthy. You point a load-test tool at <code>https://shop-api.azurewebsites.net</code> from a single client machine to watch throughput improve.</p>
+  <p>It doesn't improve much. Every request from that client keeps landing on the same worker. Nothing is broken: App Service's front end issues an <code>ARRAffinity</code> cookie on a client's first response, and by default <strong>Client Affinity</strong> is turned ON — every later request that carries that cookie routes back to the exact same instance for as long as the cookie lives. Your load tester (and any real client that keeps cookies, including a Spring service reusing a pooled HTTP client) never actually gets balanced across the new capacity; it's pinned.</p>
+  <div class="hf-scatter">
+    <span>autoscale rule fired ✓</span>
+    <span>6 healthy instances ✓</span>
+    <span>ARR client affinity ⚠</span>
+  </div>
+  <p class="hf-foot">You scaled the plan correctly. The front end just never told your one test client about the other five.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Turn off Client Affinity for stateless HTTP APIs</div>
+  <div class="hf-ladder">
+    <b>Check Configuration → General settings → ARR affinity</b>
+    <i>↓ it's ON by default the moment you create the app</i>
+    <b>Turn it OFF for any app that's genuinely stateless</b>
+    <i>↓ now every request is free to land on any healthy instance, the way autoscale intends</i>
+    <b>Keep it ON only for apps still relying on in-process session state</b>
+    <i>↓ but the real fix there is moving that state to a shared store like Redis, not leaning on affinity</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Client Affinity is a sticky-session feature bolted onto every App Service app by default, whether or not the app needs it, so scaling out doesn't automatically mean traffic gets spread out — it means new clients get spread out, while any client that already has a cookie stays exactly where it was.
+</div>
+
+<div class="hf-note">Scaling the plan and load-balancing the traffic are two different promises. <b>More instances is a promise about capacity; affinity is a promise about routing</b> — only one of those two changed when you clicked autoscale.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I have 6 instances now, so my traffic must be spread across all 6, right?</p></div>
+  <div class="hf-bub right"><span class="who">The App Service front end</span><p>Only for clients I haven't already pinned. If your client carries my ARRAffinity cookie, I'm sending it back to the same worker every time — that's Client Affinity, and I turn it on for every app unless you tell me not to.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Even though the app never asked for that?</p></div>
+  <div class="hf-bub right"><span class="who">The front end</span><p>The app never had to ask. Most session-based sites want this, and I don't know which kind of app you built until you tell me.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Here's what actually decides which instance answers the next request.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A client sends the very first request to shop-api.azurewebsites.net</span><span class="tag">first hit</span></li>
+    <li class="open"><span>The front end picks any healthy instance and returns the response with an ARRAffinity cookie set</span><span class="tag">cookie issued</span></li>
+    <li><span>The client's cookie jar stores that cookie automatically</span><span class="tag">stored</span></li>
+    <li class="open"><span>Every later request from that client includes the cookie</span><span class="tag">cookie sent back</span></li>
+    <li><span>The front end reads the cookie and routes straight back to the same instance, skipping the load-balancing decision entirely</span><span class="tag">pinned</span></li>
+    <li class="open"><span>New clients with no cookie yet get freely load-balanced across all instances</span><span class="tag">only new clients spread</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the whole gotcha in one line: the routing decision isn't "which instance is least busy" — it's "does this request already carry a cookie telling me where it went last time." A busy pinned instance stays busy; an idle new instance only gets picked by clients who haven't been pinned yet.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">a request arrives with an ARRAffinity cookie already set<small>the client hit shop-api once before</small></div>
+    <div class="arrow">what actually happens →</div>
+    <div class="opts">
+      <span>round-robin to whichever instance is least loaded</span>
+      <span class="on">routed back to the exact instance named in the cookie</span>
+      <span>rejected until the pinned instance is healthy again</span>
+    </div>
+  </div>
+  <p class="hf-annot">Only the middle option is real. There's no load-based override once a cookie names an instance — even an idle new instance sitting right next to an overloaded one doesn't get considered.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">shop-api is scaled to 6 instances with Client Affinity left at its default. A Spring Boot service calls it repeatedly using a single long-lived WebClient instance that keeps cookies between calls. Which instance answers most of those calls?</p>
+  <button type="button">A different one each time — WebClient always opens a fresh connection per request, so affinity never applies</button>
+  <button type="button">Whichever instance currently reports the lowest CPU, since Azure's front end load-balances on live metrics</button>
+  <button type="button">The same one that answered the very first call — the ARRAffinity cookie from that first response gets sent on every later call and pins the client there</button>
+  <p class="why" data-for="0">A fresh TCP connection per request doesn't matter here — affinity is cookie-based, not connection-based, and an HTTP client that respects cookies (the default for most clients) will keep sending the ARRAffinity cookie it received.</p>
+  <p class="why" data-for="1">Azure's front end has live health data, but Client Affinity routing checks the cookie first — it doesn't consult load metrics to override a pin that's already in place.</p>
+  <p class="why" data-for="2">Right — the first response set the cookie, and every subsequent call from that same client carries it back, pinning all of them to that one instance regardless of the other five sitting idle.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A default that quietly narrows your options down to one path — you've met this exact shape elsewhere.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A cached access token used past the moment its context has changed</h4>
+    <p>The client keeps presenting the same token it was handed once, trusting it's still the right choice, long after the situation it was issued for — which instance is free, which roles still apply — has moved on.</p>
+    <div class="hf-scatter"><span>still using the FIRST answer, not the current one</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Spring RestTemplate backed by a pooled HTTP client talking through a plain TCP load balancer</h4>
+    <p>Once the pool hands a thread a live, keep-alive connection to one specific backend replica, that connection is reused for the next several calls before it recycles — new replicas added to the pool don't get any of that already-open traffic until the connection cycles.</p>
+    <div class="hf-scatter"><span>an open connection pins you too, no cookie required</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A CDN edge node serving the same cached response until its TTL expires</h4>
+    <p>Whatever the edge cached on the first request is what every subsequent visitor gets, regardless of how much the origin has since changed — the cache doesn't know to reconsider until the clock, not the content, tells it to.</p>
+    <div class="hf-scatter"><span>the first answer sticks until something explicitly expires it</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> an App Service plan supplies the compute, deployment slots give you a zero-downtime swap by repointing routing (mind which settings are slot-sticky), and app settings are env vars that restart the app on change. <b>The one new sentence this block adds:</b> the front end also pins each client to one instance by default via Client Affinity, so scaling out only spreads load across clients that haven't been routed anywhere yet.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="aasSeg">
@@ -263,6 +368,7 @@ DevHubCodeWalk.mount('#cw-aas',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

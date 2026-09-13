@@ -58,7 +58,134 @@
     <div class="intro-ciam"><span class="tag">CIAM with Axum:</span> a JWT-verifying API gateway is a natural fit — a tower middleware (or a custom extractor like <code>AuthUser</code>) verifies the RS256 token against the IdP's JWKS and rejects with 401 before the handler runs; an extractor that checks a claim/scope can reject with 403. Because extraction is type-driven, a handler that needs an authenticated admin simply takes an <code>AdminUser</code> argument — if the request can't satisfy it, Axum returns the rejection and the handler body is unreachable (the compiler guarantees you handled it). Tokio's non-blocking I/O keeps token introspection and JWKS fetches off the worker threads, and Rust's no-GC determinism keeps auth-hot-path latency predictable.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the synchronous function call sitting quietly inside an async fn, waiting to freeze your whole server</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Tokio only ever gets a chance to switch tasks at an <code>.await</code> point — write a function with no <code>.await</code> in it anywhere, and the runtime has no way to know you're even still running.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Your login endpoint's password check froze every other request on the server</div>
+  <p>A <code>POST /login</code> handler checks the password with <code>bcrypt::verify(password, &amp;stored_hash)</code> — a plain, synchronous Rust function. There's no <code>.await</code> inside it because there's nothing to await: bcrypt's work is pure CPU (deliberately expensive hashing), not I/O. It compiles cleanly, uses the exact extractor pattern this page already showed you, and returns the right answer every time you test it.</p>
+  <p>Tokio's default runtime spins up one worker thread per CPU core — say 4, on a 4-core box. Four
+  login attempts land at once, one task per worker thread. Every one of those threads now runs
+  <code>bcrypt::verify</code>'s hashing loop to completion — deliberately slow, around 250ms at a
+  realistic cost factor — and none of them can do anything else until it finishes, because nothing in
+  that call ever yields. A fifth request for something totally unrelated, <code>GET /health</code>,
+  gets spawned as a task at the same moment — and there is no free worker thread anywhere to poll it
+  on. It queues behind all four logins for the same 250ms, even though its own handler never touches
+  bcrypt, a database, or anything slow at all.</p>
+  <div class="hf-scatter">
+    <span>handler signature and extractors ✓</span>
+    <span>bcrypt verifies the password correctly ✓</span>
+    <span>compiles clean, returns 200 with no errors ✓</span>
+    <span>the CPU-bound call never yields its thread ⚠</span>
+  </div>
+  <p class="hf-foot">Async Rust doesn't preempt tasks the way an OS scheduler preempts threads — it cooperates. A task that never says <code>.await</code> never gives anyone else a turn.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Move CPU-bound work off Tokio's worker threads entirely</div>
+  <div class="hf-ladder">
+    <b>Wrap it in <code>tokio::task::spawn_blocking</code></b>
+    <i>↓ this hands the closure to a SEPARATE thread pool built exactly for blocking work, so it can take as long as it needs without starving the async worker threads everything else depends on</i>
+    <b>Await the <code>JoinHandle</code> it returns</b>
+    <i>↓ your handler still reads as ordinary async code — awaiting the spawned task IS a real yield point, so the worker thread is freed the instant the blocking pool takes over</i>
+    <b>Reserve plain <code>.await</code> calls for real I/O — <code>sqlx</code>, <code>reqwest</code>, <code>tokio::fs</code></b>
+    <i>↓ those already yield correctly, because their internals are built on Tokio's non-blocking I/O primitives; the fix only applies to work that's CPU-bound or wraps a blocking library, never to a database or network call made through an async driver</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Tokio's whole speed advantage — a handful of threads serving thousands
+  of requests — depends on every task voluntarily yielding at an <code>.await</code>; one synchronous,
+  CPU-heavy call inside an <code>async fn</code> breaks that promise for every other task sharing its
+  thread, and the compiler has no way to warn you, because the code is perfectly valid Rust.
+</div>
+
+<div class="hf-note">Picture a waiter who isn't allowed to leave a table until that table has
+completely finished eating — not to bring water, not to take a new order, nothing. <b>One slow eater,
+and every other table just sits there</b>, and it has nothing to do with how good a waiter they are.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>My bcrypt::verify call has no .await in it anywhere — how could it possibly block anything?</p></div>
+  <div class="hf-bub right"><span class="who">The worker thread</span><p>You never asked me to switch away. I only ever change tasks at a spot you mark with .await, and there isn't one anywhere inside that function.</p></div>
+  <div class="hf-bub"><span class="who">GET /health, waiting</span><p>I've been queued for 250 milliseconds and I haven't even started running. My handler doesn't touch bcrypt, or a database, or anything slow.</p></div>
+  <div class="hf-bub right"><span class="who">tokio::task::spawn_blocking</span><p>Hand it to me next time. I keep a whole separate pool of threads that exist for exactly this — nobody else's request is depending on THEM the way it's depending on yours.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow four login attempts landing at the same instant, and watch a fifth, completely unrelated request get stuck behind all of them.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Server starts with Tokio's default runtime — 4 worker threads on a 4-core machine</span><span class="tag">baseline</span></li>
+    <li class="open"><span>Four <code>POST /login</code> requests arrive within the same millisecond; Tokio spawns 4 tasks, one per worker thread</span><span class="tag">fan-out</span></li>
+    <li><span>Each task calls <code>bcrypt::verify(password, hash)</code> — synchronous, pure CPU, no <code>.await</code> inside it</span><span class="tag">no yield point</span></li>
+    <li class="open"><span>Every worker thread now runs bcrypt's hashing loop to completion; none can be reused until its ~250ms of CPU work finishes</span><span class="tag">all 4 threads pinned</span></li>
+    <li><span>A fifth request, <code>GET /health</code>, is spawned as a task — but there is no free worker thread anywhere to poll it on</span><span class="tag">nowhere to run</span></li>
+    <li class="open"><span><code>/health</code> sits queued for the same ~250ms, even though its own handler never touches bcrypt, a database, or anything slow</span><span class="tag">collateral stall</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the one that surprises people. There is nothing expensive or wrong about
+  <code>GET /health</code> — it is being punished for a decision made inside a completely different
+  handler. Tokio's cooperative model has no concept of "this task is more urgent" or "let the cheap
+  one cut in line"; it only has "is a worker thread free right now," and for 250ms, the honest answer
+  is no.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>bcrypt::verify (password hashing)</span><span>std::fs::read (blocking file I/O)</span><span>an in-memory sort of 50,000 rows</span></div>
+    <div class="funnel">none of them contain an .await, so none of them ever yield ↓</div>
+    <div class="instance">The worker thread is unavailable to Tokio for the whole call<small>every other task queued on that thread waits it out, no matter how unrelated it is</small></div>
+  </div>
+  <p class="hf-annot">Three completely different-looking calls — a crypto function, a file read, a sort
+  — collapse into the identical outcome, because the runtime doesn't care WHY a thread is busy, only
+  THAT it is. Any synchronous, CPU-bound work dropped into an async fn produces this same funnel; the
+  fix (<code>spawn_blocking</code>) is the same regardless of which one of these caused it.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Your Axum handler for <code>POST /login</code> calls the synchronous <code>bcrypt::verify(password, hash)</code> directly, with no <code>.await</code> anywhere in it. Four login requests arrive at the same instant on a server with 4 worker threads. A fifth, unrelated <code>GET /health</code> request arrives a moment later. What happens to it?</p>
+  <button type="button">Nothing — Tokio always runs <code>/health</code> immediately on a fresh thread, since it's unrelated to the four login tasks.</button>
+  <button type="button">Tokio pauses the bcrypt calls partway through so <code>/health</code> can run, then resumes them afterward.</button>
+  <button type="button">It queues behind all four login tasks, because every worker thread is pinned running bcrypt to completion and Tokio can't preempt a task that never yields at an <code>.await</code>.</button>
+  <p class="why" data-for="0">Tokio doesn't spin up a new thread on demand for an equal-priority task — it runs a fixed worker pool (commonly one thread per CPU core), and every one of those four was already claimed by a bcrypt call with no point at which to yield it back.</p>
+  <p class="why" data-for="1">That would require preemption — the runtime forcibly interrupting a task mid-execution. Tokio doesn't do that; it's cooperative, meaning it can only switch tasks at a spot the running code itself marks with <code>.await</code>. A plain synchronous function call has no such spot.</p>
+  <p class="why" data-for="2">Right. All four worker threads are occupied running bcrypt to completion, and since <code>bcrypt::verify</code> never awaits anything, Tokio never gets an opportunity to interrupt it. <code>/health</code> has nowhere to run until one of the four finishes.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"A cooperative scheduler only switches where the code lets it" is the same trap in every event-loop-shaped runtime, not just Tokio.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Node's single-threaded event loop</h4>
+    <p>A synchronous <code>JSON.parse</code> on a huge payload, or a tight uninterrupted <code>for</code> loop, blocks Node's ONE event-loop thread — every other pending request, timer, and promise callback on the entire process waits until that call returns. Same cooperative trap, just with one thread instead of a small pool of them.</p>
+    <div class="hf-scatter"><span>the JS version, one thread instead of four</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Spring WebFlux's own Reactor threads</h4>
+    <p>This page's intro compares Tokio to WebFlux's reactor in general — here's the specific failure mode: calling a blocking JDBC driver, or <code>Mono.block()</code>, from inside a reactive pipeline running on <code>Schedulers.parallel()</code>'s small event-loop pool starves every other in-flight reactive stream sharing that thread, exactly like bcrypt starves Tokio's workers.</p>
+    <div class="hf-scatter"><span>the JVM's reactive stack, hitting the identical wall</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Android's "Application Not Responding"</h4>
+    <p>Android's main/UI thread is a single cooperative loop that must keep processing input and redraw events. Run a heavy synchronous computation on it and the whole UI freezes — after about 5 seconds the OS itself throws up an ANR dialog. It's the same one-thread-does-too-much shape, just with a user staring at a frozen screen instead of a queued HTTP request.</p>
+    <div class="hf-scatter"><span>the mobile-UI version of the same starvation</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Tokio multiplexes many async tasks onto a small thread pool,
+  yielding at every <code>.await</code> so Axum's router → extractors → handler → <code>IntoResponse</code>
+  pipeline can serve huge numbers of concurrent connections cheaply and type-safely. <b>The one new
+  sentence this block adds:</b> that entire model depends on every task actually yielding, so one
+  synchronous, CPU-bound call with no <code>.await</code> inside an <code>async fn</code> can freeze
+  every other request sharing its worker thread — and nothing in the type system stops you from
+  writing exactly that.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="rwSeg">
@@ -256,6 +383,7 @@ DevHubCodeWalk.mount('#cw-rw',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

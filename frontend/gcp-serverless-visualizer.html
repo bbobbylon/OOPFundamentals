@@ -59,7 +59,111 @@
     <div class="intro-ciam"><span class="tag">CIAM in production:</span> Cloud Run's default IAM-gated invocation (<code>roles/run.invoker</code>) means a service is private-by-default — the same posture as requiring a valid Bearer token on a Spring resource server, just enforced one layer lower, before your code even runs. For a public-facing API, front it with API Gateway or Cloud Armor and validate an OIDC/JWT token in your own middleware exactly as you would on Angular → Spring; for service-to-service calls (a Cloud Function invoking a private Cloud Run API), attach a service account to the caller and let IAM do the identity check with zero shared secrets.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the receipt email that "ran" for six minutes and never sent</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You return the response, then keep working in the background the way you would on any normal server — except Cloud Run just quietly took away almost all of your CPU.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The "respond now, email after" handler that stops emailing</div>
+  <p>Your handler does the real work, sends the response, then — to keep the response fast — fires off unawaited calls to log an analytics event and send a receipt email: <code>res.send(order); logAnalyticsEvent(order); sendReceiptEmail(order);</code>, both async and deliberately not awaited so the client isn't kept waiting. Locally, and in a load test where traffic never stops, this looks completely fine — the event lands and the email sends, all within a second or two after the response.</p>
+  <p>In production, on a service that gets occasional, spaced-out traffic, the receipt emails stop arriving. Nothing throws an error. What actually happened: the instant <code>res.send()</code> returns, Cloud Run's default CPU allocation mode treats the request as finished and throttles that instance's CPU down toward zero — because from the platform's point of view, if no request is in flight, the instance has nothing left to compute. Your background email call is still technically alive, but it's getting a sliver of CPU, if any, until the next real request happens to wake the instance back up — which might be seconds, minutes, or never before the instance is recycled.</p>
+  <div class="hf-scatter">
+    <span>the response returning correctly and fast ✓</span>
+    <span>the analytics/email calls succeeding under constant load-test traffic ✓</span>
+    <span>any work started after the response, on a quiet service ⚠</span>
+  </div>
+  <p class="hf-foot">Cloud Run only guarantees your code CPU time while it's actively serving a request — after that, by default, you're not promised to keep running at all.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Await it, hand it off, or explicitly pay for always-on CPU</div>
+  <div class="hf-ladder">
+    <b>Await the background work before responding, if it truly must run</b>
+    <i>↓ the extra latency is honest cost the client actually experiences, instead of invisible work that might never finish</i>
+    <b>Or hand it off to Cloud Tasks / Pub/Sub and let a follow-up invocation process it</b>
+    <i>↓ that follow-up invocation is its own real, billed request, so it gets full CPU allocation for its entire duration</i>
+    <b>And if you genuinely need code running between requests — a connection-pool warmer, a background poller — set CPU allocation to "always allocated" and pay the standing cost on purpose</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> "The response was sent" is not the same event as "the request is over" from your code's point of view, but under Cloud Run's default CPU-allocation setting it is exactly the same event from the platform's point of view — so any work you start after responding is racing a throttle you can't see happen.
+</div>
+
+<div class="hf-note">Default Cloud Run CPU allocation behaves like a taxi meter that stops the second the passenger gets out. The driver hasn't vanished — but nobody's paying to move the car, so <b>don't expect it to arrive anywhere</b>.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>My code after res.send() runs every single time in my tests. Why does it disappear in production?</p></div>
+  <div class="hf-bub right"><span class="who">The Cloud Run instance</span><p>I only promise you CPU while a request is actively in flight. The moment you call send, I treat you as done and throttle myself down — your background code is still there, it's just nearly frozen.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But it worked in my load test!</p></div>
+  <div class="hf-bub right"><span class="who">The Cloud Run instance</span><p>Your load test kept requests arriving constantly, so I never got a chance to throttle down between them. A quiet production service gives me plenty of idle gaps — exactly when your unattended background code gets starved.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Here's the exact moment the rug gets pulled out from under "fire and forget" code.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A request arrives at a Cloud Run instance</span><span class="tag">request start</span></li>
+    <li class="open"><span>CPU is fully allocated to the instance for the duration of the request</span><span class="tag">full CPU</span></li>
+    <li><span>Your handler calls res.send(order) — the response leaves for the client</span><span class="tag">response sent</span></li>
+    <li class="open"><span>By default ("CPU allocated only during requests"), Cloud Run considers the request complete and begins throttling the instance's CPU</span><span class="tag">the switch flips</span></li>
+    <li><span>Any code still executing — an unawaited promise, a background thread — now competes for a tiny CPU allowance</span><span class="tag">starved code</span></li>
+    <li class="open"><span>If no new request arrives before Cloud Run scales the instance down, that background work is abandoned mid-execution, silently</span><span class="tag">the disappearance</span></li>
+  </ol>
+  <p class="hf-annot">Step four is the crux: this isn't a bug, it's a documented, deliberate cost-saving default. Cloud Run allocates (and bills for) CPU around request-processing time, and code that outlives the request is, by definition, outside that window unless you explicitly tell Cloud Run otherwise.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Serving a request</span>
+      <span class="go"><em>request arrives</em> <span class="arrow">→</span> CPU fully allocated, your handler runs at full native speed</span></div>
+    <div class="stt"><span class="nm">Response already sent</span>
+      <span class="go"><em>res.send() returns</em> <span class="arrow">→</span> CPU is throttled toward zero, by default</span></div>
+    <div class="stt"><span class="nm">"Background" work still executing</span>
+      <span class="go"><em>your unawaited async call</em> <span class="arrow">→</span> starved of CPU cycles, it may take minutes or simply freeze mid-task</span></div>
+  </div>
+  <p class="hf-annot">Read the cycle clockwise: full CPU only exists inside the top state. Anything your code tries to do after crossing into "response already sent" is gambling on how quickly the throttle bites, and whether another request happens to rescue it before that.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A Cloud Run service handles a webhook: it validates the payload, responds <code>200 OK</code> immediately so the caller doesn't retry, then spends roughly 4 more seconds doing image processing in the background before uploading the result to Cloud Storage. In staging, with constant test traffic, it always finishes. In production, with sporadic real traffic, the processed image is frequently missing. What actually fixes this?</p>
+  <button type="button">Do the image processing before responding — or hand it off to Cloud Tasks so it runs as its own billed request — instead of relying on execution after the response, since CPU is throttled once the response is sent</button>
+  <button type="button">Increase the Cloud Run service's memory allocation, since more memory always comes with a proportionally larger CPU share for background tasks</button>
+  <button type="button">Switch the webhook to use WebSockets instead of a plain HTTP response, since a WebSocket connection keeps the instance's CPU allocated indefinitely</button>
+  <p class="why" data-for="0">Right — CPU throttling after the response is the real cause, so the fix has to either keep the work inside the request (await it) or make the follow-up work its own real, billed request via Cloud Tasks or Pub/Sub, which gets full CPU allocation for its own duration.</p>
+  <p class="why" data-for="1">Memory and CPU are configured together on Cloud Run, but a larger memory allocation doesn't change WHEN CPU is throttled — it only changes how much CPU you get while it IS allocated. This never touches the actual cause.</p>
+  <p class="why" data-for="2">Keeping a connection open doesn't change Cloud Run's CPU allocation policy — throttling is about whether a request is actively being processed, not about the transport protocol. WebSockets bring their own entirely separate considerations on Cloud Run.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The container is still running" and "the container is still allowed to do work" turning out to be two different promises shows up outside Cloud Run too.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring's @Async "send the welcome email" after registration</h4>
+    <p>Fire an <code>@Async</code> method to send a welcome email right after a registration endpoint returns <code>201 Created</code>, and you're making the identical bet Cloud Run's default CPU mode punishes: that the environment keeps running your code after the response has already left. Spring's own documentation is explicit that <code>@Async</code> tasks run against whichever executor you configure, and that executor's lifecycle — including its behavior on shutdown — is something you own, not something Spring quietly guarantees away for you.</p>
+    <div class="hf-scatter"><span>"fire and forget" always means someone else now owns "forget"</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>AWS Lambda freezing the execution environment after the response</h4>
+    <p>AWS's own Lambda documentation warns that background work started before a handler returns can be frozen mid-flight the instant the response is sent, and may only resume — if it resumes at all — the next time that same execution environment happens to be reused for an unrelated invocation. Same "response sent ≠ work finished" assumption, enforced even more abruptly than Cloud Run's throttle.</p>
+    <div class="hf-scatter"><span>the platform reclaims the environment on its own schedule, not yours</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A beforeunload analytics call the browser never finishes sending</h4>
+    <p>Fire a plain <code>fetch()</code> to log an analytics event as a user navigates away, and the browser can tear the page down — cancelling the in-flight request — before it completes. This exact failure mode is why <code>navigator.sendBeacon()</code> exists: a purpose-built API for handing a small payload to the browser to deliver after the page that fired it is already gone.</p>
+    <div class="hf-scatter"><span>the runtime you were relying on can disappear before your callback does</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Cloud Run and Cloud Functions turn "any container" or "any event handler" into a request/event-driven, autoscaling, scale-to-zero service, with revisions and traffic splitting standing in for a separate load balancer and canary system.
+  <b>The one new sentence this block adds:</b> scaling to zero when idle and throttling CPU between requests are the same underlying mechanism, so any work your code starts after the response leaves is running on borrowed time you never actually asked to borrow.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="gsvSeg">
@@ -265,6 +369,7 @@
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

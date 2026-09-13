@@ -62,7 +62,110 @@
     <div class="intro-ciam"><span class="tag">CIAM angle:</span> Adaptive/risk-based authentication (the kind Ping's CIAM platform does — see <a href="ping-ciam-patterns-deep-visualizer.html">CIAM &amp; Adaptive Auth</a>) scores a login attempt using exactly this machinery: a model trained on historical login sequences (device, geo, typing cadence over time — sequence data, RNN-shaped) outputs a fraud/risk score that a policy engine turns into "allow / step-up MFA / deny." The model training loop underneath is the same forward → loss → backward → step cycle covered here.</div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, why your model's predictions change every time you call it on the exact same input</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The forward pass runs. The output looks like a normal number. And it's a different normal number every single time you ask.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Same image, same model, three different predictions</div>
+  <p>You finish training, save the checkpoint, and load it back up for a quick sanity check: <code>outputs = model(single_test_image)</code>. You run that exact line three times in a row on the exact same tensor and get three visibly different logits — not a rounding difference, enough to flip the predicted class.</p>
+  <p>The forward pass has no bug in it. <code>model(x)</code> calls <code>forward()</code> exactly the way it's supposed to. The problem is that the model is still sitting in the same mode it was in the moment training finished — <code>nn.Module</code> defaults to (and <code>.train()</code> explicitly sets) training mode, and nothing in a plain inference script ever tells it otherwise.</p>
+  <div class="hf-scatter">
+    <span>forward() runs without error ✓</span>
+    <span>the architecture is unchanged from training ✓</span>
+    <span>Dropout is still randomly zeroing activations on every call ⚠</span>
+  </div>
+  <p class="hf-foot">You didn't build a randomized model. You just never told it the difference between practicing and performing.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Call model.eval() before every single inference</div>
+  <div class="hf-ladder">
+    <b>Call model.eval() immediately before validation, testing, or deployment inference</b>
+    <i>↓ this flips every Dropout layer to pass activations through unchanged, and every BatchNorm layer to use its learned running statistics instead of the current batch's</i>
+    <b>Wrap the inference call in with torch.no_grad():</b>
+    <i>↓ this isn't what fixes the randomness, but it belongs in the same habit — it stops autograd from tracking a graph you were never going to call .backward() on anyway</i>
+    <b>Call model.train() again before resuming training on the next epoch</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> <code>nn.Module</code> has exactly two behavioral modes, train and eval, and it never switches between them on its own — a model left in train mode at inference time is still running the same random-dropping, current-batch-normalizing code path it used while learning, just now producing predictions instead of gradients.
+</div>
+
+<div class="hf-note">If the SAME input produces a DIFFERENT output twice in a row with no code change in between, <b>check <code>model.training</code> before you check anything else</b> — <code>True</code> means you're still in practice mode.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I called the model on the same picture three times and got three different answers. Is my GPU broken?</p></div>
+  <div class="hf-bub right"><span class="who">Dropout, personified</span><p>Nothing's broken — I'm doing exactly what I did on every training step: randomly zeroing out some of my inputs. Nobody told me we were done practicing.</p></div>
+  <div class="hf-bub"><span class="who">BatchNorm</span><p>And I've been normalizing using whatever's in THIS batch, not the running average I built up across your whole training set. Feed me one image at a time and my statistics get genuinely strange.</p></div>
+  <div class="hf-bub right"><span class="who">model.eval()</span><p>Which is the one call that tells both of you the answer is actually being graded now. Forget me, and every layer just keeps behaving like it's still rehearsal.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Two completely different layer types break for two completely different reasons, and one missing call fixes both.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Training finishes; the model object is still sitting in train mode — nothing automatically flips it</span><span class="tag">STILL TRAINING?</span></li>
+    <li class="open"><span>You call model(image) for a quick check, without calling .eval() first</span><span class="tag">THE FORWARD PASS</span></li>
+    <li><span>Dropout layers roll their usual random mask and zero out roughly 20-50% of activations, exactly like every training step</span><span class="tag">DROPOUT FIRES</span></li>
+    <li class="open"><span>BatchNorm layers compute mean/variance from THIS SPECIFIC batch instead of using the running averages accumulated across training</span><span class="tag">BATCHNORM SWITCHES SOURCE</span></li>
+    <li><span>With a batch size of 1 — a very normal thing at inference time — a single example's "batch variance" is a degenerate, near-meaningless number</span><span class="tag">BATCH SIZE 1 IS WORST CASE</span></li>
+    <li class="open"><span>Every one of these effects is legal, intentional PyTorch behavior — nothing throws, nothing warns, and identical input can genuinely produce a different answer each call</span><span class="tag">BY DESIGN, NOT A BUG</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the one to sit with: BatchNorm isn't malfunctioning when this happens — it's doing precisely what it was built to do during training. The only thing that changed is that nobody told it training was over. That's why <code>.eval()</code> isn't a performance flag; it's the one line that tells two entirely separate layer types "use what you learned, not what you're looking at right now."</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt"><span class="nm">model.train()</span>
+      <span class="go"><em>construction, or called explicitly</em> <span class="arrow">→</span> Dropout randomizes activations; BatchNorm normalizes with THIS batch's stats and updates its running average</span></div>
+    <div class="stt on"><span class="nm">Stuck in train mode</span>
+      <span class="go"><em>inference code never calls .eval()</em> <span class="arrow">→</span> the exact same random-dropping, per-batch-normalizing behavior keeps running — now on predictions, not gradients</span></div>
+    <div class="stt"><span class="nm">model.eval()</span>
+      <span class="go"><em>called explicitly before inference</em> <span class="arrow">→</span> Dropout passes activations through unchanged; BatchNorm uses its learned running mean/variance — output becomes deterministic</span></div>
+  </div>
+  <p class="hf-annot">Read the highlighted middle state as the one nobody wrote code for: there's no explicit "stay in train mode" instruction anywhere in an inference script that skips <code>.eval()</code> — it's simply the state you're already in by default, and PyTorch has no reason to assume you meant to leave it.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">You call <code>model(image)</code> on the exact same tensor three times in a row after loading a trained checkpoint, and get three different sets of logits — sometimes flipping the predicted class. <code>forward()</code> throws no errors and the architecture hasn't changed. What's most likely happening?</p>
+  <button type="button">The model was never switched out of training mode, so Dropout is still randomly zeroing activations on every call</button>
+  <button type="button">The checkpoint file is corrupted and loading slightly different weights each time</button>
+  <button type="button">optimizer.zero_grad() was never called, so leftover gradients are affecting the forward pass</button>
+  <p class="why" data-for="0">Right. Nothing switches a freshly loaded model out of train mode automatically — Dropout keeps randomly zeroing activations and BatchNorm keeps normalizing per-batch instead of using its learned running statistics, so identical input can produce different output on every call until <code>.eval()</code> is called.</p>
+  <p class="why" data-for="1">A corrupted checkpoint would load once and then behave consistently (consistently wrong, or it would fail to load at all) — the weights aren't being reloaded between these three back-to-back calls, so a loading problem can't explain output changing call to call on the same loaded model.</p>
+  <p class="why" data-for="2">Gradients live in <code>.grad</code> and are only ever read by <code>optimizer.step()</code> during training. The forward pass computes outputs purely from the model's weights and the input tensor — it never touches <code>.grad</code> at all, so whether zero_grad() was called has zero effect on what <code>model(x)</code> returns.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A component behaving correctly for the phase it THINKS it's in — just the wrong phase — is a bug shape that reaches far past PyTorch.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A feature flag left on in production</h4>
+    <p>A feature-flagged "staging test mode" that force-returns fake payment responses works exactly as designed, right up until someone forgets to flip it off before a production deploy. The code isn't broken — it's still correctly answering the question it thinks it's being asked.</p>
+    <div class="hf-scatter"><span>correct behavior for the wrong phase looks exactly like a bug from the outside</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Spring profile left on "dev"</h4>
+    <p>A Spring Boot service running with <code>spring.profiles.active=dev</code> in production keeps using an in-memory user store and a permissive CORS policy that were perfectly reasonable for local development. Every line of security config is working exactly as written — for the environment it thinks it's running in.</p>
+    <div class="hf-scatter"><span>the same object behaves correctly for its OWN idea of the current mode, not necessarily yours</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Debug logging gated behind isDevMode()</h4>
+    <p>Console output gated behind Angular's <code>isDevMode()</code> looks harmless in the source — until a build accidentally ships with the dev environment file bundled, and every one of those checks keeps returning true, flooding a production user's browser console with internal state.</p>
+    <div class="hf-scatter"><span>a mode check only helps if the mode itself actually flipped when you thought it did</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> CNNs exploit spatial locality, RNNs carry a hidden state through a sequence, and PyTorch's autograd turns a five-line loop into automatic backpropagation for either one. <b>The one new sentence this block adds:</b> nn.Module has a training mode and an eval mode, it never switches between them for you, and leaving a model in the wrong one produces plausible-looking, wrong, sometimes literally non-reproducible predictions without a single error.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -341,6 +444,7 @@ DevHubCodeWalk.mount('#cw-dlpt',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

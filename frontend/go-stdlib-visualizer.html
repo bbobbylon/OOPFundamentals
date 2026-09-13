@@ -58,7 +58,107 @@
     <div class="intro-ciam"><span class="tag">CIAM context:</span> <code>encoding/json</code> (un)marshals token claims and every API DTO; stream a JWKS response through a <code>json.Decoder</code> on <code>resp.Body</code> (an <code>io.Reader</code>) instead of buffering. <code>time</code> is the backbone of token security — <code>exp</code>/<code>iat</code>/<code>nbf</code> comparisons with a clock-skew leeway (<code>time.Now().Add(-30*time.Second)</code>). And <code>strings.TrimPrefix(h, "Bearer ")</code> parses the <code>Authorization</code> header while <code>fmt</code> builds structured log lines.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">Or: the "obviously correct" error-check order that eats your last chunk of data.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Go trains you to check err before you touch anything else. For io.Reader, that habit throws away real bytes.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The response body that's always missing its last few bytes</div>
+  <p>You stream a webhook payload with the pattern every other Go error check taught you: <code>n, err := r.Read(buf); if err != nil { return err }; process(buf[:n])</code>. It works in every manual test — small payloads, local files, no surprises.</p>
+  <p>In production, against a real network stream, some responses come back truncated by exactly the last chunk. The cause: <code>io.Reader.Read</code> is documented to sometimes return <code>n &gt; 0</code> bytes AND a non-nil error (often io.EOF) from the SAME call — the final read of a stream can carry both "here are your last 12 bytes" and "and there's nothing after them" at once. Checking <code>err != nil</code> first and returning immediately means <code>process(buf[:n])</code> never runs for that final, valid chunk.</p>
+  <div class="hf-scatter">
+    <span>error-first checking ✓ everywhere else in Go</span>
+    <span>works against small local files ✓</span>
+    <span>the LAST Read() call of a stream ⚠</span>
+  </div>
+  <p class="hf-foot">io.Reader's own doc comment says it outright: "callers should always process the n &gt; 0 bytes returned before considering the error err." Not sometimes — always.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Process n before you branch on err</div>
+  <div class="hf-ladder">
+    <b>Always run process(buf[:n]) first, unconditionally, whenever n &gt; 0</b>
+    <i>↓ those bytes are valid and yours whether or not err is also set</i>
+    <b>THEN check err — io.EOF means "stop looping," any other error means "something broke"</b>
+    <i>↓ EOF is not a failure, it's the stream's normal "no more data" signal</i>
+    <b>Or skip hand-rolled loops entirely — io.ReadAll / io.Copy already get this order right</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Read() is the one common Go API where err != nil does not mean "ignore everything else in this return."</b> Most idiomatic Go functions promise zero-value results when they error, which is exactly why <code>if err != nil { return err }</code> is safe almost everywhere. io.Reader is the documented exception: a non-nil error can arrive bundled with real, valid, non-zero data in the very same call.
+</div>
+
+<div class="hf-note">Most Go functions are "all or nothing": error means the other return values are garbage, ignore them. io.Reader is "some, then done": it can hand you real bytes and its resignation letter in the same envelope. Read the letter after you've counted the bytes, not instead of counting them.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>Isn't "check err immediately" THE Go idiom? Every table in this lesson teaches that.</p></div>
+  <div class="hf-bub right"><span class="who">io.Reader</span><p>For almost every function, yes — please keep doing that everywhere else. I'm the documented exception: my own doc comment tells implementers they're allowed to return n &gt; 0 and a non-nil error together, and tells callers to handle n first.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Why would you even do that instead of returning the error cleanly on the next call?</p></div>
+  <div class="hf-bub right"><span class="who">io.Reader</span><p>Because the underlying data often ends exactly at a chunk boundary — the same read that hits the end of the file or socket is frequently the read that also returns the last few bytes. Splitting that into two separate calls would just move the same complexity somewhere else.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Trace one Read() call against a stream that ends exactly here.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>buf := make([]byte, 4096); n, err := r.Read(buf)</code> — reading a chunked HTTP body</span><span class="tag">call Read</span></li>
+    <li class="open"><span>The underlying socket has exactly 12 bytes left, then closes</span><span class="tag">12 bytes remain</span></li>
+    <li><span>Read copies those 12 bytes into buf and sets n = 12</span><span class="tag">n = 12</span></li>
+    <li class="open"><span>Read also detects end-of-stream on this same call and sets err = io.EOF</span><span class="tag">err = io.EOF, same call</span></li>
+    <li><span><code>if err != nil { return err }</code> fires here — before buf[:12] is ever touched</span><span class="tag">early return</span></li>
+    <li class="open"><span>Those 12 real bytes are gone: never processed, never logged, no error mentions them</span><span class="tag">silently dropped</span></li>
+  </ol>
+  <p class="hf-annot">Steps 3 and 4 happening on the SAME call is the entire mechanism — there's no separate "final data" call and "EOF" call to reorder around. Both facts arrive together, in one (n, err) pair, and it's on the caller to unpack them in the right order.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>reading a gzip-compressed response</span><span>a TCP socket closing mid-chunk</span><span>a chunked HTTP body's final segment</span></div>
+    <div class="funnel">Read() returns n &gt; 0 and a non-nil err together ↓</div>
+    <div class="instance">the last chunk silently vanishes<small>one root cause, three unrelated-looking bug reports</small></div>
+  </div>
+  <p class="hf-annot">Three bug reports that look nothing alike in a ticket queue — "gzip output is truncated," "the last websocket frame is missing," "file upload is 12 bytes short" — often trace back to this exact same one-line mistake at three different call sites.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q"><code>n, err := r.Read(buf)</code> returns n = 8 and err = io.EOF in the same call, on a stream with exactly 8 bytes left. Following io.Reader's own documented guidance, what should the caller do?</p>
+  <button type="button">Process buf[:8] first — those 8 bytes are valid — then treat io.EOF as "stop reading," not as a failure.</button>
+  <button type="button">Discard buf[:8] since err is non-nil, and treat io.EOF as a fatal error to report to the caller.</button>
+  <button type="button">Call Read() one more time to get the "real" final chunk before doing anything with n or err.</button>
+  <p class="why" data-for="0">This is exactly what the io.Reader doc comment recommends: process the n bytes you got, unconditionally, then look at err — and io.EOF specifically means the stream ended cleanly, a signal to stop looping, not an error to bubble up.</p>
+  <p class="why" data-for="1">err != nil does NOT mean "the data is garbage" for Read() the way it does for almost every other Go function — that's precisely the trap. And io.EOF is the normal, expected end-of-stream signal, not a failure worth reporting as one.</p>
+  <p class="why" data-for="2">There is no "real" final chunk waiting in a later call — those 8 bytes ARE the final chunk, delivered together with the EOF signal in this exact call. Calling Read() again on an already-exhausted reader typically just returns (0, io.EOF) with nothing new.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The last item and the end-signal arrive in the same message" shows up anywhere something streams to completion.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's InputStream.read() splits it into two calls</h4>
+    <p>Java's InputStream keeps "last real bytes" and "end of stream" as two separate calls — a read returning the final bytes, then a LATER read returning -1. Go collapsing them into one call is a genuine design difference, and porting Java-shaped stream-reading habits into Go reproduces exactly this bug.</p>
+    <div class="hf-scatter"><span>the two ecosystems split this differently — check which one you're in</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>SQL cursors: the last fetch and "no more rows"</h4>
+    <p>Some database drivers signal "this is the last row" as a flag alongside the row itself, rather than as a separate empty fetch — code that checks "are there more rows?" before reading the current one can skip the final row the same way.</p>
+    <div class="hf-scatter"><span>end-of-data bundled with the last real item, not sent separately</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Kafka consumer's last record in a poll batch</h4>
+    <p>A poll() call can return a batch where the final record coincides with the consumer reaching the end of an assigned partition — code that checks "is this partition done?" before processing every record in the batch can drop that last one, the same shape as ignoring Read()'s n on an EOF call.</p>
+    <div class="hf-scatter"><span>batch-plus-status-flag APIs hide this same ordering trap</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> encoding/json is tag-driven, io.Reader/Writer are tiny composable interfaces that io.Copy streams in constant memory, time gives type-safe Durations and the reference-date layout, and strings/strconv/fmt round out text handling. <b>The one new sentence this block adds:</b> Read can hand back real, valid bytes and a non-nil error in the very same call, so the idiomatic "check err first" habit that's correct everywhere else in Go is exactly backwards here — process n before you branch on err.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="gstdSeg">
@@ -263,6 +363,7 @@ DevHubCodeWalk.mount('#cw-gostdlib',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

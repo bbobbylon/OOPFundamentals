@@ -119,7 +119,111 @@
     <div class="intro-ciam"><span class="tag">CIAM container management:</span> Daily workflow: <code>docker logs ciam-auth -f</code> (follow while testing), <code>docker exec -it ciam-auth sh</code> (shell in to check env / curl Ping), <code>docker stats</code> (JVM footprint). Best practices: run non-root (<code>USER 1000</code>), <code>-XX:MaxRAMPercentage=75</code>, and <code>-XX:+ExitOnOutOfMemoryError</code> so the JVM exits (and K8s restarts it) instead of hanging. Never tag <code>:latest</code> in prod — use <code>:$(Build.BuildId)</code> so you know the exact commit running, and verify secrets via <code>docker inspect … | jq '.[0].Config.Env'</code> (sanitize before sharing).</div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, the volume flag that quietly abandons your data on every restart</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You did exactly what Section 4 above warns you to do — add a volume. It's the wrong shape of volume, and nothing tells you that.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle"><code>docker volume ls</code> shows 12 volumes and you can't identify a single one</div>
+  <p>You've internalized the warning: never run a stateful container without a volume. You add one — <code>docker run -d --name pgtest -v /var/lib/postgresql/data postgres:16</code>. It works. Later, <code>docker rm pgtest</code> doesn't wipe your data. The volume survived, exactly as promised.</p>
+  <p>Three months and a handful of "let me upgrade the postgres image and recreate the container" cycles later, <code>docker volume ls</code> shows a dozen volumes with names like <code>a3f9c2e1b8d47f6e...</code> — 64-character hex strings, no labels, no way to tell which one, if any, is the database that actually matters. Every recreation quietly made a new one and orphaned the last.</p>
+  <div class="hf-scatter">
+    <span>docker run succeeded ✓</span>
+    <span>the -v flag was present ✓</span>
+    <span>which volume is "the" data ⚠</span>
+  </div>
+  <p class="hf-foot">A bare container path after <code>-v</code> is a real volume — it's just a nameless one, and nameless means unfindable the next time you need it.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Name the volume — don't just attach one</div>
+  <div class="hf-ladder">
+    <b>Always give a volume an explicit name, never just a container path</b>
+    <i>↓ <code>-v pgdata:/var/lib/postgresql/data</code> (name:path) creates ONE volume called <code>pgdata</code> that every future run referencing that name reuses; <code>-v /var/lib/postgresql/data</code> (path only) creates a fresh, randomly-named one every single time</i>
+    <b>Audit what already exists before assuming you're starting clean</b>
+    <i>↓ <code>docker volume ls</code> and <code>docker system df -v</code> list every volume and its size — an unlabeled 64-character hex name is almost always an orphaned anonymous volume from a past container</i>
+    <b>Prune deliberately, never by habit</b>
+    <i>↓ <code>docker volume prune</code> deletes every volume no container currently references — safe for genuine orphans, catastrophic if one of those anonymous ones was quietly still holding data nobody had migrated off yet</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A volume needs a name to be found again, not just to exist.</b> <code>-v /container/path</code> and <code>-v name:/container/path</code> both create real, persistent volumes that survive <code>docker rm</code> — the difference is entirely about whether a FUTURE container can ask for that same storage back by name. Without a name, every fresh <code>docker run</code> gets its own new anonymous volume, and the one from last time just sits there, unreferenced, until someone notices or prunes it away.
+</div>
+
+<div class="hf-note">An anonymous volume is a storage unit rented under a made-up name. It's real, it's yours, it's still sitting there next month — but <b>you wrote the name on a napkin you threw away</b>, so good luck finding which unit was yours.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I added a -v flag exactly like the warning said. Why do I have a dozen volumes now and no idea which one has my data?</p></div>
+  <div class="hf-bub right"><span class="who">-v /path (no name)</span><p>You gave me a destination, not a name. Every time you run me fresh, I make up a brand-new random one — I never remember last time.</p></div>
+  <div class="hf-bub"><span class="who">-v name:/path</span><p>I'm the one that actually remembers. Give me the same name twice, and I hand you back the exact same storage, every time, guaranteed.</p></div>
+  <div class="hf-bub right"><span class="who">docker volume ls</span><p>I'll happily list every volume you've got. I just can't tell you which unlabeled one you actually meant to keep.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one bare-path volume flag through several honest, well-intentioned container recreations.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>docker run -v /var/lib/postgresql/data postgres:16</code> — a bare container path, no host-side name</span><span class="tag">anonymous, not named</span></li>
+    <li class="open"><span>Docker generates a random 64-character hex ID and creates a brand-new volume under it</span><span class="tag">auto-generated identity</span></li>
+    <li><span>Postgres writes real data into that anonymous volume for weeks — everything works</span><span class="tag">genuinely persisted</span></li>
+    <li class="open"><span><code>docker rm pgtest</code> removes the container; the anonymous volume is left untouched</span><span class="tag">survives, as promised</span></li>
+    <li><span>The container is recreated later (a redeploy, an image upgrade) with the SAME bare-path <code>-v</code> flag</span><span class="tag">same command, new volume</span></li>
+    <li class="open"><span>Docker has no name to look up, so it creates a SECOND anonymous volume — the first is now orphaned and invisible unless you go looking</span><span class="tag">orphan #1, and counting</span></li>
+  </ol>
+  <p class="hf-annot">Step 6 is the one that costs people real money and real panic: nothing about it looks like a mistake. The container starts, the app connects, everything behaves normally — it's just quietly writing into empty storage while last month's actual data sits orphaned three volumes back, still on disk, still technically "safe," and completely unfindable without knowing to look.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">First docker run</span>
+      <span class="go"><em>docker run -v /var/lib/postgresql/data postgres:16</em> <span class="arrow">→</span> creates anonymous volume A; Postgres writes real data into it</span></div>
+    <div class="stt"><span class="nm">Container recreated</span>
+      <span class="go"><em>docker rm + docker run again, e.g. an image upgrade</em> <span class="arrow">→</span> volume A is now unreferenced; a brand-new empty anonymous volume B is created and mounted</span></div>
+    <div class="stt"><span class="nm">Someone checks disk usage, months later</span>
+      <span class="go"><em>docker system df / docker volume ls</em> <span class="arrow">→</span> a pile of unlabeled volumes, no way to tell which one, if any, is the real data</span></div>
+  </div>
+  <p class="hf-annot">This loop repeats every single time the container gets recreated without a change to the volume flag — which means the "fix" from the bad card above (just add a -v flag) actively makes the long-run mess worse, one orphan at a time, unless the flag names the volume.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">You add a volume flag to your Postgres container: <code>docker run -v /var/lib/postgresql/data postgres:16</code>. <code>docker rm</code> later doesn't wipe the data, so the volume clearly worked. Six months and several container recreations later, <code>docker volume ls</code> shows a dozen unlabeled volumes with no obvious way to tell which one is the real database. Why?</p>
+  <button type="button">Postgres itself creates a new internal snapshot volume on every restart as part of its WAL archiving process</button>
+  <button type="button">The <code>-v /var/lib/postgresql/data</code> flag has no host-side name, so Docker creates a brand-new anonymous volume every time the container is recreated — each recreation orphans the previous one instead of reusing it</button>
+  <button type="button"><code>docker rm</code> without <code>-f</code> leaves behind a duplicate volume as a safety backup, which accumulates over multiple removals</button>
+  <p class="why" data-for="0">Postgres has no such built-in behavior — its WAL archiving writes inside its own data directory, not into separate Docker volumes, and nothing about it creates new Docker-level objects on restart. The extra volumes are a Docker naming issue, not a Postgres internals issue.</p>
+  <p class="why" data-for="1">Right. A bare container path after <code>-v</code> has no name for Docker to look up next time, so every fresh <code>docker run</code> gets a brand-new randomly-named anonymous volume, orphaning whichever one came before it. Naming the volume (<code>-v pgdata:/var/lib/postgresql/data</code>) is what makes it findable and reusable.</p>
+  <p class="why" data-for="2">Docker's <code>rm</code> command never creates backup volumes under any circumstances, with or without <code>-f</code> — it only ever removes the container's own writable layer. The pile of volumes traces back to how the container was originally started, not how it was removed.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Nothing remembered the name, so nothing can find it again" shows up anywhere something gets auto-named.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Cloud resources with auto-generated names</h4>
+    <p>An S3 bucket or IAM role created by infrastructure-as-code without an explicit name gets one auto-generated by the provider on every stack apply. Tear the stack down and reapply it, and you get a NEW auto-named resource — the old one, if the teardown missed it, keeps existing and keeps getting billed, invisible unless someone audits the account.</p>
+    <div class="hf-scatter"><span>the same orphan shape, at cloud-billing scale</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Temp files from mktemp</h4>
+    <p><code>mktemp</code> deliberately generates a random filename specifically so nothing collides — which also means nothing but the process that created it ever knows that name. If that process crashes before its own cleanup step runs, the temp file sits in <code>/tmp</code> forever, findable only by manually scanning for old files.</p>
+    <div class="hf-scatter"><span>a name nobody else was ever told</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Browser storage under a generated key</h4>
+    <p>A caching library that opens an IndexedDB database with a name like <code>cache-${Date.now()}</code> instead of a fixed string creates a brand-new database on every page load that hits that code path — the previous one is never reopened, never cleared, and just accumulates in the browser's storage quota until the user clears site data.</p>
+    <div class="hf-scatter"><span>the client-side version of the identical mistake</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> This page is the full images-vs-containers mental model — layers stacked into an image, the create → start → stop → rm lifecycle, and volumes versus bind mounts for surviving <code>docker rm</code>. <b>The one new sentence this block adds:</b> a volume flag with no name genuinely persists data, but it hands Docker a brand-new random identity on every container recreation instead of reusing the last one — "I added a volume" and "my data is actually findable next time" turn out to be two different promises.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -570,6 +674,7 @@ setLifecycle(0);
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

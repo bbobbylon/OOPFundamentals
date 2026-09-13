@@ -56,7 +56,111 @@
     <div class="intro-ciam"><span class="tag">In your CIAM app:</span> the React profile/registration form. Seed it from <code>/api/profile</code>, keep every field in state, and PUT it back. The same rule applies as everywhere: the client validation is UX only — the server (and IdP) is the real gate, so always handle the <code>!res.ok</code> path and surface a server <code>409</code>/<code>400</code> on the right field. For the access token, send it in the <code>Authorization</code> header of the <code>fetch</code> (or via a wrapper/interceptor); see the <code>node-auth</code> and <code>aspnet-auth</code> pages for the API side, and the password-complexity recipe for the password field.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the one field your API returns as null is quietly running a different rulebook than every other field in your form.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Your name and email inputs behave perfectly. Your new phone input works for most users and logs a scary warning for some &mdash; using the exact same code.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The input that's controlled for some users and not others</div>
+  <p>You extend this page's recipe with a new optional field, <code>phone</code>. You copy the pattern exactly &mdash; the load effect fetches the record, <code>setForm(user)</code> seeds state, and <code>&lt;input value={form.phone} onChange={...}&gt;</code> renders it. For most users this works exactly like <code>name</code> and <code>email</code> do.</p>
+  <p>Then a support ticket comes in about one specific user, and DevTools console is full of: "Warning: A component is changing an uncontrolled input to be controlled." You check the API response for that user &mdash; <code>phone</code> came back as <code>null</code>, because they never set one. React treats <code>value={null}</code> exactly like NO value prop at all: the input starts UNCONTROLLED (the browser owns its text) for every user whose <code>phone</code> is null, and the moment they type one character, your onChange calls setForm with a real string &mdash; flipping that same input to controlled mid-lifetime. <code>name</code> and <code>email</code> never hit this because your <code>useState({ name: '', email: '' })</code> seeded them with empty STRINGS, never null.</p>
+  <div class="hf-scatter">
+    <span>the onChange handler is correct ✓</span>
+    <span>the fetch and JSON parsing are correct ✓</span>
+    <span>one nullable field, on some records, starts as null ⚠</span>
+  </div>
+  <p class="hf-foot">Same component, same code path, two different input lifecycles &mdash; depending entirely on what the server happened to send for that one user.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Coalesce every field to its controlled default &mdash; right where you read it</div>
+  <div class="hf-ladder">
+    <b>Default nullable fields the moment they enter state: setForm({ ...user, phone: user.phone ?? '' })</b>
+    <i>&darr; React never even sees a null value prop, so every input is controlled from its very first render, for every user</i>
+    <b>Or default at the input itself: value={form.phone ?? ''}</b>
+    <i>&darr; a cheaper one-line guard if you don't want to touch the seeding logic &mdash; either place works as long as value is never null</i>
+    <b>And step three: add this to your form-recipe checklist for every optional field, not just the one that happened to break</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> React decides whether an input is controlled or uncontrolled by checking <code>value != null</code> on that exact render &mdash; not once, not for the component, but for that one input, every single render &mdash; so a field that's a real string most of the time and null for one record is controlled for most users and uncontrolled for that one, and the mode-switch warning fires the instant null becomes a string.
+</div>
+
+<div class="hf-note">This bug is a chameleon: invisible in your own testing (your test user has a phone number), invisible in code review (the diff looks identical to name and email), and only visible for the specific real records where an optional field was never filled in. Always coalesce nullable API fields the moment they become form state.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>My phone input works in my testing but a user reported a console warning about "uncontrolled to controlled." I didn't touch that code path any differently from email.</p></div>
+  <div class="hf-bub right"><span class="who">The phone field, personified</span><p>You didn't touch me differently &mdash; the server did. For most users I arrive as a string. For this one user, nobody ever set a phone number, so I arrive as null.</p></div>
+  <div class="hf-bub"><span class="who">React's input reconciler</span><p>I don't know your intent. I only check one thing on every render: is value null or undefined? If yes, I hand control of the DOM node's text back to the browser. If no, I own it.</p></div>
+  <div class="hf-bub right"><span class="who">The empty string, ''</span><p>I'm the value you actually wanted the whole time &mdash; controlled, visibly empty, and never null. Coalesce to me and this entire bug class disappears.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one user's phone field from fetch to first keystroke.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>GET /api/users/42 resolves; that user's record has phone: null (never set)</span><span class="tag">fetch</span></li>
+    <li class="open"><span>setForm(user) seeds state with phone literally equal to null</span><span class="tag">seeded null</span></li>
+    <li><span>&lt;input value={form.phone}&gt; renders with value={null} &mdash; React treats this as NO value prop</span><span class="tag">uncontrolled</span></li>
+    <li class="open"><span>The browser now owns this input's text directly, same as a plain HTML input with no value attribute</span><span class="tag">browser-owned</span></li>
+    <li><span>User types "s" &mdash; onChange fires and calls setForm(f =&gt; ({...f, phone: 's'}))</span><span class="tag">first keystroke</span></li>
+    <li class="open"><span>Next render: value="s" is a real string &mdash; React now treats the SAME input as controlled, and logs the mode-switch warning</span><span class="tag">the warning</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the moment the bug is born, and it happens completely silently &mdash; no warning fires yet, nothing looks wrong, the input just renders empty exactly like it's supposed to. The warning doesn't appear until step 6, one keystroke later, which is exactly why this class of bug reads as "random" instead of "obviously my seeding logic" the first time you see it.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">setForm(user) &mdash; the fetched record lands in state<small>one setState call, every controlled input re-renders off it</small></div>
+    <div class="fan">every input reads its slice of form &darr;</div>
+    <div class="obs">
+      <span>name input &mdash; fine, API always sends a string</span>
+      <span class="new">phone input &mdash; null for users who never set one</span>
+      <span>email input &mdash; fine, API always sends a string</span>
+    </div>
+  </div>
+  <p class="hf-annot">One setForm(user) call feeds every controlled input in the form from the same object, and three inputs read it in exactly the same way: value={form.&lt;field&gt;}. Two of them are fine every time because their field is never null in the API's response shape. The third reacts differently under exactly one condition the code never checks for &mdash; which is why it's the surprising reactor in the diagram and not the other two.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Your ProfileForm seeds state with setForm(user) straight from the fetch response. user.email is always a non-empty string from the API; user.middleName is null for any user who never set one. For users WITH a middle name, does &lt;input value={form.middleName}&gt; behave any differently than &lt;input value={form.email}&gt;?</p>
+  <button type="button">Yes &mdash; middleName is optional in the schema, so React always treats optional fields as uncontrolled regardless of their actual value</button>
+  <button type="button">Yes &mdash; React caches the very first value it ever saw for a field, so middleName is permanently uncontrolled once any record returns null for it</button>
+  <button type="button">No &mdash; for a user whose middleName IS a string, value is never null on any render, so that input is controlled from the start, exactly like email; only records where the field is actually null hit the uncontrolled-then-controlled switch</button>
+  <p class="why" data-for="0">React doesn't know or care whether a field is "optional" in your schema &mdash; it only looks at the actual value passed to value on that specific render. A schema-optional field that happens to always resolve to a string behaves identically to a required one.</p>
+  <p class="why" data-for="1">React re-evaluates value != null fresh on every single render for every instance of the input &mdash; it isn't cached per-field or per-component. Two different users' ProfileForm instances can behave completely differently for the same field, based only on what their own record contains.</p>
+  <p class="why" data-for="2">Exactly &mdash; the bug is per-record, not per-field-name. Whatever value form.middleName actually holds on a given render is what decides controlled-vs-uncontrolled for THAT render; a user with a real middle name never triggers it, and a user with null triggers it every time.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Absent" and "empty" keep getting treated as the same thing, right up until they aren't.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Angular Reactive Forms + patchValue</h4>
+    <p><code>this.form.patchValue(user)</code> has the same soft spot: if <code>user.middleName</code> is null, the FormControl genuinely holds null &mdash; Angular doesn't silently coerce it to an empty string for you either. The visible symptom differs (no console warning, just a control whose value is null where template code might expect a string), but the root cause &mdash; an API's null meeting form code that assumed a string &mdash; is identical.</p>
+    <div class="hf-scatter"><span>null from the API meeting code that assumed a string</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>SQL NULL vs empty string</h4>
+    <p>A database column can hold NULL (unknown/absent) or '' (a deliberately empty value) as two genuinely different things, and code that does <code>if (name == '')</code> silently mishandles every row where name is actually NULL. Your JSON API inherited the same ambiguity, and your controlled input inherited it right back.</p>
+    <div class="hf-scatter"><span>NULL and empty string are not the same value</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Optional chaining crashes on sparse data</h4>
+    <p><code>user.address.zip</code> throws when address is null for users who never filled in an address &mdash; a crash that, like this one, only ever shows up for the specific subset of real records missing that one field, never in a demo dataset where every field happens to be filled in.</p>
+    <div class="hf-scatter"><span>reproduces only for the sparse, real-world subset of data</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> the React form recipe is fetch into state, render controlled inputs off that state, derive validation each render, and PUT the state back on submit, checking res.ok yourself because fetch never throws on a 4xx. <b>The one new sentence this block adds:</b> setForm(user) only keeps every input controlled if every field in that fetched record is a real string &mdash; the moment one optional field comes back null, that one input silently runs by a different rulebook until the user's first keystroke flips it, and only for the users whose record actually has the gap.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="rfSeg">
@@ -271,6 +375,7 @@ DevHubCodeWalk.mount('#cw-rf',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -58,7 +58,110 @@
     <div class="intro-ciam"><span class="tag">CIAM React app:</span> Each resource gets a query key — <code>['users']</code>, <code>['users', userId]</code>, <code>['users', userId, 'roles']</code>. <code>enabled: !!userId</code> defers a parameterized query until the id is known; <code>useInfiniteQuery</code> with <code>getNextPageParam</code> handles cursor pagination; <code>prefetchQuery</code> on hover warms the cache before navigation; and a role mutation invalidates <code>['users', userId, 'roles']</code> on success.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the two fetches you see in dev aren't the bug &mdash; removing StrictMode to make them go away is.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Open the Network tab on a component that just mounts and fetches, and in development you see the SAME request fire twice.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The "duplicate" request that a teammate's fix makes worse</div>
+  <p>You write the textbook version: <code>useEffect(() =&gt; { fetch('/api/users/42').then(r =&gt; r.json()).then(setForm) }, [])</code>. In production this fires once, like the docs say. In development, the Network tab shows it fire TWICE, back to back, for the exact same URL.</p>
+  <p>A teammate "fixes" it by deleting <code>&lt;React.StrictMode&gt;</code> from <code>main.jsx</code>. The duplicate call vanishes &mdash; case closed, right? Except nothing about your code changed; you just turned off the one tool that was warning you your effect isn't safe to run twice. StrictMode intentionally mounts, simulates an unmount (running your cleanup), then remounts &mdash; specifically so effects with missing or wrong cleanup get caught in DEVELOPMENT, before something else in production (a route re-visit, a parent re-key, a remount you didn't plan for) legitimately remounts the same component and fires the same uncancelled request for real.</p>
+  <div class="hf-scatter">
+    <span>the URL is correct ✓</span>
+    <span>the data that comes back is correct ✓</span>
+    <span>no AbortController to cancel the first, now-orphaned request ⚠</span>
+  </div>
+  <p class="hf-foot">Removing StrictMode doesn't fix your effect. It just removes the thing that was telling you it was broken.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Give the effect a cleanup, and let StrictMode keep testing you</div>
+  <div class="hf-ladder">
+    <b>Put StrictMode back &mdash; treat the double-fire as free test coverage</b>
+    <i>&darr; it's the cheapest remount test you'll get: if your effect survives React deliberately abusing it, it survives a real remount in production</i>
+    <b>Add cancellation &mdash; an AbortController per effect run, aborted in the cleanup</b>
+    <i>&darr; the first call's response is now discarded instead of racing to call setForm after the component has already moved on</i>
+    <b>And step three: or just use TanStack Query &mdash; useQuery already dedupes and cancels this correctly (see section 1 above)</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> React 18's StrictMode deliberately mounts, cleans up, and remounts every component once in development specifically to expose effects that assume "mount" only ever happens once &mdash; a raw <code>fetch</code> in <code>useEffect</code> with no AbortController is exactly that assumption, and disabling StrictMode only hides the symptom you were supposed to go fix.
+</div>
+
+<div class="hf-note">StrictMode's double-invoke is a fire drill, not a fire. "Fixing" a fire drill by disabling the fire alarm doesn't make the building safer &mdash; it just means nobody hears about the next real fire until it's already spreading.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>My fetch effect fires twice in dev but only once in prod. Is that a StrictMode bug?</p></div>
+  <div class="hf-bub right"><span class="who">StrictMode, personified</span><p>No &mdash; I'm doing that on purpose. I mount you, tear you down, and mount you again, in dev only, to see if you survive it.</p></div>
+  <div class="hf-bub"><span class="who">Your cleanup function, which doesn't exist</span><p>There's nothing here to run when StrictMode tears the first mount down. The first fetch just keeps going, unaware anyone moved on.</p></div>
+  <div class="hf-bub right"><span class="who">AbortController</span><p>Give me to the effect and I'll cancel that orphaned first request the moment cleanup runs &mdash; then there's only ever one live request, in dev or prod.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Trace what StrictMode actually does to your effect, in order.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Component mounts &mdash; React runs your effect, fetch #1 goes out</span><span class="tag">mount 1</span></li>
+    <li class="open"><span>StrictMode immediately simulates an unmount &mdash; your effect's cleanup runs, if you wrote one</span><span class="tag">simulated unmount</span></li>
+    <li><span>No cleanup means fetch #1 is still in flight, uncancelled, with nothing tracking it anymore</span><span class="tag">orphaned</span></li>
+    <li class="open"><span>StrictMode remounts the component &mdash; React runs your effect again, fetch #2 goes out</span><span class="tag">mount 2</span></li>
+    <li><span>Both fetch #1 and fetch #2 are now racing toward the SAME setForm call</span><span class="tag">two in flight</span></li>
+    <li class="open"><span>Whichever resolves LAST wins and overwrites state &mdash; usually #2, but not guaranteed</span><span class="tag">the real bug</span></li>
+  </ol>
+  <p class="hf-annot">Step 6 is why this matters beyond a noisy Network tab: two in-flight requests racing to call the same setForm is exactly the stale-response race this page already teaches you to fix with AbortController &mdash; StrictMode just gives you a free, guaranteed reproduction of it every time you load the page in development, instead of only on a slow network in production.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Mount</span>
+      <span class="go"><em>render</em> <span class="arrow">&rarr;</span> effect runs, fetch #1 starts</span></div>
+    <div class="stt"><span class="nm">Simulated unmount</span>
+      <span class="go"><em>StrictMode, dev only</em> <span class="arrow">&rarr;</span> cleanup runs (or doesn't exist)</span></div>
+    <div class="stt"><span class="nm">Remount</span>
+      <span class="go"><em>React re-renders</em> <span class="arrow">&rarr;</span> effect runs again, fetch #2 starts</span></div>
+  </div>
+  <p class="hf-annot">This loop runs exactly once, only in development, only inside StrictMode &mdash; but it's rehearsing something that happens for real in production every time a component with this effect remounts: a route you navigate back to, a list item whose key changes, a parent that briefly unmounts its child. StrictMode just moved that rehearsal to your machine today instead of a user's machine in three weeks.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A component fetches a user record in a plain useEffect with no cleanup and no AbortController. In development (StrictMode on) the Network tab shows two identical requests on every mount. A teammate removes StrictMode and the second request disappears. Is the fetch effect now correct?</p>
+  <button type="button">No &mdash; the underlying problem (nothing cancels a stale in-flight request when the component unmounts and remounts) is still there; StrictMode just isn't around anymore to force it to happen every time you load the page in dev</button>
+  <button type="button">Yes &mdash; StrictMode only exists to catch double-fetch bugs, so once the duplicate call is gone in dev, the effect is safe</button>
+  <button type="button">Yes, but only because TanStack Query automatically fixes any remaining race condition even in a plain useEffect</button>
+  <p class="why" data-for="0">Exactly &mdash; the fetch still has no cancellation. It will still race itself the next time this component legitimately remounts in production (a route re-entry, a changed key, a flickering parent); you've only removed your early warning system.</p>
+  <p class="why" data-for="1">StrictMode's double-invoke exists to catch far more than fetch races &mdash; missing cleanups on subscriptions, timers, and event listeners all show the same symptom. And "the duplicate call is gone" isn't the same as "the effect is safe" &mdash; it means the test stopped running, not that the code passed it.</p>
+  <p class="why" data-for="2">TanStack Query is exactly the fix &mdash; but only if you're actually using useQuery. A plain useEffect plus fetch, which is what's described here, gets none of that deduplication or cancellation for free; you'd have to add it yourself with an AbortController.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Deliberately breaking an assumption on purpose, safely, before reality breaks it for you, is a pattern that shows up everywhere.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Angular's <code>takeUntilDestroyed()</code></h4>
+    <p>An Angular <code>HttpClient</code> subscription that never unsubscribes has the exact same failure mode: a component that gets destroyed and recreated (inside an <code>*ngIf</code> toggle, or a route re-entry) leaves an old subscription alive, racing a new one to update state that no longer belongs to it. <code>takeUntilDestroyed()</code> is Angular's version of the cleanup this page is asking for.</p>
+    <div class="hf-scatter"><span>orphaned subscription racing a fresh one</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Idempotency keys in payment APIs</h4>
+    <p>A payment gateway expects clients to retry failed requests, which means the SAME logical operation can arrive twice &mdash; servers handle it with an idempotency key so a retried "charge $50" doesn't charge twice. StrictMode is forcing your COMPONENT to prove it can survive being invoked twice for the "same" mount &mdash; the same discipline, a different layer.</p>
+    <div class="hf-scatter"><span>designed to survive being called twice, on purpose</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Chaos engineering</h4>
+    <p>Deliberately killing production instances in a controlled way proves the rest of the system tolerates a real failure before an uncontrolled one happens. StrictMode's double-invoke is chaos engineering in miniature: React deliberately breaks the "mount happens once" assumption in dev, on your machine, before an uncontrolled version breaks it for a user.</p>
+    <div class="hf-scatter"><span>break it on purpose, safely, before reality does</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Server state is different from client state &mdash; it's async, shared, and goes stale &mdash; and TanStack Query replaces hand-rolled useEffect fetching with caching, deduplication, stale-while-revalidate, and correct race handling out of the box. <b>The one new sentence this block adds:</b> the double-fetch you see in development under StrictMode isn't a React bug to silence &mdash; it's React proving, for free, that your raw useEffect fetch can't survive the exact remount scenario this whole page exists to solve.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="dfSeg">
@@ -251,6 +354,7 @@ DevHubCodeWalk.mount('#cw-rxfetch',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

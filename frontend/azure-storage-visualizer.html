@@ -62,6 +62,141 @@
     <div class="intro-ciam"><span class="tag">CIAM in production:</span> the standard pattern for user file uploads in an identity-aware app: the SPA never gets the account key. Your Spring API validates the user's JWT, authorizes, then either streams through the API or — for big files — mints a <strong>user-delegation SAS</strong> scoped to exactly one blob with a 10-minute expiry and hands the URL to the browser. The SAS is signed with a key derived from the API's <em>own</em> Entra token (its managed identity), so it is revocable by revoking the identity's role — no shared secret anywhere. That is the API→form upload recipe on the recipes pages, done the Azure way.</div>
   </div>
 
+<p class="hf-deck">or, why your perfectly sensible account name gets rejected twice</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">A name that matches every other resource in your subscription is exactly the kind of name a storage account can't have.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle"><code>az storage account create</code> fails, and it isn't a permissions problem</div>
+  <p>Every other resource in <code>rg-Shop-Prod</code> follows the same convention: mixed case, hyphens
+  between words — <code>App-Service-Shop</code>, <code>Cosmos-Shop-Prod</code>. So you name the storage
+  account <code>Shop-Prod-Uploads</code> to match. The CLI rejects it outright: storage account names
+  allow only <b>lowercase letters and digits</b>, 3–24 characters, no hyphens, no underscores, no
+  uppercase — full stop. That part is at least a same-second error.</p>
+  <p>So you comply — <code>stshopprod</code> — and get a second, different failure:
+  <code>StorageAccountAlreadyTaken</code>. Nobody in your team owns a storage account with that name.
+  Nobody in your <em>subscription</em> does. It doesn't matter — the name is checked against <b>every
+  storage account that exists anywhere in Azure</b>, across every customer, because the name becomes part
+  of a public DNS hostname: <code>stshopprod.blob.core.windows.net</code>. Someone, somewhere, already
+  has it.</p>
+  <div class="hf-scatter">
+    <span>naming convention followed ✓</span>
+    <span>name is unique in your subscription ✓</span>
+    <span>name collides with a stranger's account ⚠</span>
+  </div>
+  <p class="hf-foot">Every other resource in Azure only has to be unique within its resource group or
+  subscription. Storage accounts (and anything else that hands out a public DNS name) don't get that
+  privilege.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Fix: check availability before you commit a name to any template</div>
+  <div class="hf-ladder">
+    <b>az storage account check-name --name stshopprodv2</b>
+    <i>↓ this hits the same global namespace check the create call will — fail fast, before a pipeline run</i>
+    <b>Bake a near-unique suffix into the naming standard: stshopprod + a short hash or the subscription's last 6 digits</b>
+    <i>↓ hyphen-free, lowercase, and unlikely to collide with anyone else's convention</i>
+    <b>Keep resource-group-style naming for everything else — this constraint is specific to globally-namespaced resources</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A storage account name isn't a resource identifier, it's a DNS label.</b> Most Azure resource names
+  only have to be unique inside the scope that contains them — a resource group, a subscription. A name
+  that becomes part of a public hostname has to be unique across the entire service, worldwide, because
+  DNS doesn't know what subscription you're in.
+</div>
+
+<div class="hf-note">A storage account name isn't a label you pick, it's an <b>apartment number in a
+building shared with every Azure customer on Earth</b> — case-insensitive, punctuation-free, and if
+someone else moved into "302" before you, it doesn't matter how good your reason for wanting 302 is.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>Every resource group I own follows PascalCase-with-hyphens. Why does storage get to be different?</p></div>
+  <div class="hf-bub right"><span class="who">Storage account</span><p>Because I'm not just a resource — I'm also a public DNS hostname the moment you create me. DNS labels don't do hyphens between segments the way your naming doc assumes, and they definitely don't do uppercase.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Fine, lowercase and no hyphens. So why does a name nobody in my org has ever used still fail?</p></div>
+  <div class="hf-bub right"><span class="who">Storage account</span><p>Because "nobody in your org" was never the bar. I check against every storage account in every subscription, belonging to every customer, everywhere.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One naming rule, two entirely different reasons it exists.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>You submit a name to <code>az storage account create</code></span><span class="tag">request</span></li>
+    <li class="open"><span>ARM checks the character rules: lowercase + digits, 3–24 chars</span><span class="tag">syntax check</span></li>
+    <li><span>Fails here → immediate, same-request rejection</span><span class="tag">local failure</span></li>
+    <li class="open"><span>Passes syntax → ARM checks the name against the global DNS namespace</span><span class="tag">global check</span></li>
+    <li><span>Someone anywhere in Azure already holds it → <code>StorageAccountAlreadyTaken</code></span><span class="tag">global failure</span></li>
+    <li class="open"><span>Only a name that clears BOTH checks gets created</span><span class="tag">success</span></li>
+  </ol>
+  <p class="hf-annot">Steps three and five look like the same kind of error in your terminal, but they're
+  answered by two completely different systems — one is validating a string, the other is querying a
+  namespace the size of all of Azure. Only the second one can fail on a name nobody you know has ever
+  used.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>matches your naming convention</span><span>passes code review</span><span>never used by your team before</span></div>
+    <div class="funnel">still resolves to one public hostname ↓</div>
+    <div class="instance">Rejected — name taken<small>three different-looking "this should work" cases, one shared global namespace</small></div>
+  </div>
+  <p class="hf-annot">Every one of those three reasons feels like it should guarantee a free name. None of
+  them touch the actual constraint: the name has to be free in a namespace none of those three things
+  were ever checking against.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">You rename your storage account to <code>stshopprod</code> — lowercase, no hyphens, well
+  within 24 characters, and a name no one on your team has ever used. <code>az storage account create</code>
+  still fails with <code>StorageAccountAlreadyTaken</code>. Why?</p>
+  <button type="button">Storage account names must also be unique within your Entra ID tenant, and a different app registration already claimed it</button>
+  <button type="button">The name needs to be re-submitted after 24 hours because Azure caches rejected names temporarily</button>
+  <button type="button">The name is checked against every storage account across all of Azure, not just your subscription, because it becomes part of a public DNS hostname</button>
+  <p class="why" data-for="0">Storage account names have nothing to do with Entra ID tenants or app registrations — those are identity objects in a completely separate namespace. This answer borrows the right shape (some hidden shared scope) but points at the wrong system.</p>
+  <p class="why" data-for="1">There's no 24-hour cache on account names — the check is a live, real-time lookup at creation time, and resubmitting the identical name a day later fails exactly the same way if someone still holds it.</p>
+  <p class="why" data-for="2">Right — the name becomes <code>&lt;name&gt;.blob.core.windows.net</code>, a public DNS hostname, so it has to be unique across every Azure customer worldwide, not just your own subscription or resource group.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Whenever a name becomes a public address, "unique to me" stops being the rule.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>An S3 bucket name</h4>
+    <p>S3 has the identical two-tier rule: lowercase, no underscores in most naming conventions, 3–63
+    characters — and unique across every AWS account on the planet, because a bucket can be addressed as
+    <code>bucket.s3.amazonaws.com</code>. Teams that hit this usually end up doing exactly what the fix
+    above does: append an account ID or a hash to the name up front.</p>
+    <div class="hf-scatter"><span>same DNS-hostname reasoning, same fix</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A custom domain on an Angular deploy target</h4>
+    <p>Reserve <code>shop.azurestaticapps.net</code> or a Vercel/Netlify subdomain and you're in the same
+    namespace as literally every other project on that platform — your app's internal name has nothing to
+    do with whether the public-facing hostname is free.</p>
+    <div class="hf-scatter"><span>your project's uniqueness and the hostname's uniqueness are unrelated</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Spring Boot service's Eureka/DNS registration name</h4>
+    <p>Inside a single service registry, giving two services the same <code>spring.application.name</code>
+    is usually harmless (Eureka load-balances between instances) — but the moment that name has to resolve
+    externally through a shared DNS zone or ingress host, the same "unique to my team isn't unique enough"
+    rule kicks in.</p>
+    <div class="hf-scatter"><span>internal uniqueness rules stop applying once a name goes public</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a storage account exposes containers and blobs behind three kinds of
+  doors — Entra ID + RBAC, SAS tokens, or account keys — with access tiers and lifecycle rules controlling
+  what it costs to keep data around. <b>The one new sentence this block adds:</b> before any of that
+  matters, the account's own name has to clear a global DNS-uniqueness check that has nothing to do with
+  your subscription, your resource group, or how good your naming convention is.
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
@@ -275,6 +410,7 @@ DevHubCodeWalk.mount('#cw-st',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

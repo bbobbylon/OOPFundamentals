@@ -59,6 +59,135 @@
     <div class="intro-ciam"><span class="tag">CIAM in production:</span> HTTP-triggered functions have platform <em>authLevel</em> keys (function/admin) — fine for internal webhooks, wrong for user-facing APIs. For real callers, validate an <strong>Entra ID Bearer token</strong> exactly as your Spring resource server does (JWKS, iss/aud), either in code or by fronting the function with API Management / Easy Auth. And when a function needs to reach Key Vault, Storage, or your APIs, give the function app a <strong>managed identity</strong> — connection strings in app settings are the legacy path, identity-based connections are the AZ-204 answer.</div>
   </div>
 
+<p class="hf-deck">or, the one setting that decides whether your code ever runs at all</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You deploy a function app that builds clean, and the Functions blade lists zero functions.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Deployment succeeded. Zero functions loaded.</div>
+  <p>You write <code>placeOrder</code> with a correct <code>@FunctionName</code>, a correct <code>@HttpTrigger</code>, a correct <code>@QueueOutput</code>. <code>mvn azure-functions:deploy</code> finishes clean. The portal shows the app as <b>Running</b>, green dot and all.</p>
+  <p>And the Functions list under it is empty — or every call 404s. The reason has nothing to do with your annotations: the app setting <code>FUNCTIONS_WORKER_RUNTIME</code> still says <code>node</code>, carried over from the Bicep template you cloned from an older function app, or reset by a slot swap that brought over the wrong slot's settings. The host reads that <em>one</em> string to decide which language worker to start. Start the wrong one, and it never even attempts to index your Java code.</p>
+  <div class="hf-scatter">
+    <span>@FunctionName present ✓</span>
+    <span>trigger/binding attributes correct ✓</span>
+    <span>FUNCTIONS_WORKER_RUNTIME=node ⚠</span>
+  </div>
+  <p class="hf-foot">Every part of your code was right. The one line that decides which language host actually runs was wrong, and nothing in the build pipeline checks it.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Fix: make the runtime setting match what you actually deployed — every time</div>
+  <div class="hf-ladder">
+    <b>az functionapp config appsettings list -n fn-shop -g rg-shop</b>
+    <i>↓ see what the host thinks it's running, not what you assume you deployed</i>
+    <b>az functionapp config appsettings set … FUNCTIONS_WORKER_RUNTIME=java</b>
+    <i>↓ this is a deploy-time constant for the whole app — one function app, one language</i>
+    <b>And re-check it after every slot swap and every cloned Bicep/ARM template</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>One app setting selects the entire language host, and nothing else validates it.</b> The Functions
+  host does not sniff your uploaded artifact to guess a language — a Java jar deploys just as
+  "successfully" onto a Node worker as it does onto a Java one, because packaging and worker selection
+  are two separate steps that never cross-check each other. A cloned template carries its old
+  <code>FUNCTIONS_WORKER_RUNTIME</code> forward unless you explicitly overwrite it.
+</div>
+
+<div class="hf-note">Think of <code>FUNCTIONS_WORKER_RUNTIME</code> as the sign on the elevator, not the
+delivery address. The package (your zip) can arrive at the right building (the right app) and still
+never reach anyone, because the elevator only <b>stops on one language's floor</b>, and it isn't
+listening to what's inside the box.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I deployed a Java jar. The portal says Running. Why do I get zero functions?</p></div>
+  <div class="hf-bub right"><span class="who">Functions host</span><p>I only read <code>FUNCTIONS_WORKER_RUNTIME</code> to pick a worker process. Yours says <code>node</code>, so I started a Node worker — it has no idea what to do with your class files.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But my triggers and bindings are all correct Java annotations!</p></div>
+  <div class="hf-bub right"><span class="who">Functions host</span><p>I never got that far. Indexing your functions is the Java worker's job, and I never launched one.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One setting, one branch, no second opinion.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>You run <code>mvn azure-functions:deploy</code></span><span class="tag">deploy</span></li>
+    <li class="open"><span>The zip lands in the app's file system and is unpacked</span><span class="tag">artifact</span></li>
+    <li><span>The host reads <code>FUNCTIONS_WORKER_RUNTIME</code> from app settings</span><span class="tag">config read</span></li>
+    <li class="open"><span>It launches exactly one worker process for that language</span><span class="tag">worker start</span></li>
+    <li><span>That worker tries to index the deployed files for functions</span><span class="tag">indexing</span></li>
+    <li class="open"><span>Wrong language worker → nothing to index, logged quietly and easy to miss</span><span class="tag">outcome</span></li>
+  </ol>
+  <p class="hf-annot">Step three is the whole story: the host never sniffs your files to guess the
+  language, it reads one setting. Step six is where a Java deploy under a Node worker goes to die —
+  quietly, in a log stream most people never open until the Functions list already shows empty.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">FUNCTIONS_WORKER_RUNTIME<small>the one app setting that selects the worker</small></div>
+    <div class="arrow">you deployed a Java jar →</div>
+    <div class="opts">
+      <span>node</span>
+      <span class="on">java — must match, or nothing loads</span>
+      <span>python</span>
+    </div>
+  </div>
+  <p class="hf-annot">The setting doesn't get smarter because your code is correct — it's a plain string
+  compare against what you actually deployed. Get it right once per app, and re-verify it every time a
+  template or a slot swap could quietly have changed it.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">You migrate a Bicep template from an old Node function app to a new Java one, filling in
+  your own function names and bindings. Everything deploys without error, but the Functions blade in the
+  portal shows an empty list. What is the most likely cause?</p>
+  <button type="button">The template still sets FUNCTIONS_WORKER_RUNTIME to node — the deployed stack and the worker setting disagree</button>
+  <button type="button">The @FunctionName annotations are misspelled, so the host can't find them</button>
+  <button type="button">The storage account backing the app is in a different region than the function app</button>
+  <p class="why" data-for="0">Right — a copied template usually copies every setting, including the one that says which language worker to start. Deployment succeeding tells you the zip landed; it says nothing about whether the worker that starts can read it.</p>
+  <p class="why" data-for="1">Plausible, but a typo in an annotation would still get indexed by the RIGHT worker (as a build warning or a single missing function) — it doesn't produce a wholesale empty list from a build that deployed cleanly, and this bug reproduces even with letter-perfect annotations.</p>
+  <p class="why" data-for="2">Region mismatches cause latency or cross-region billing surprises, not an empty function list — the storage account here just backs the deployment package and Durable state; it doesn't gate which worker loads your code.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A build that succeeds is not proof the wiring underneath it is correct.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring profiles picking the wrong beans</h4>
+    <p><code>spring.profiles.active=prod</code> is exactly the same kind of single string: get it wrong
+    and the JAR that builds clean wires up the dev <code>DataSource</code> or a stale JWT issuer. The app
+    starts, binds its port, and passes a shallow health check while quietly talking to the wrong
+    backend.</p>
+    <div class="hf-scatter"><span>one string decides the whole wiring, and the process never objects</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4><code>ng build</code> without <code>--configuration=production</code></h4>
+    <p>Angular bakes <code>environment.ts</code> into the bundle at build time, not runtime. Skip the
+    production configuration flag and the build still succeeds and minifies; it just ships your local
+    API URL and debug flags to real users, because the build genuinely did succeed.</p>
+    <div class="hf-scatter"><span>the artifact is valid and still wrong</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An Entra ID app registration's platform type</h4>
+    <p>Register a SPA under the "Web" platform instead of "Single-page application" and PKCE auth-code
+    requests get rejected. The app registration exists, the client ID is real, and it still doesn't work
+    — one configuration field decided the entire code path, and creation succeeding said nothing about
+    whether that field matches what you actually built.</p>
+    <div class="hf-scatter"><span>the registration exists; the platform type is the whole bug</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Azure Functions is triggers-and-bindings on top of a host whose
+  hosting plan trades cost against cold starts, with Durable Functions layered on for stateful
+  workflows. <b>The one new sentence this block adds:</b> none of that matters if
+  <code>FUNCTIONS_WORKER_RUNTIME</code> doesn't match what you actually deployed, because that single
+  setting — not your code — decides whether the host loads a single function.
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
@@ -270,6 +399,7 @@ DevHubCodeWalk.mount('#cw-afn',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

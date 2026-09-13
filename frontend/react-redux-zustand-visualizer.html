@@ -58,6 +58,123 @@
     <div class="intro-ciam"><span class="tag">CIAM context:</span> An <code>authSlice</code> holds the token, current user, and roles; a memoized selector <code>selectIsAdmin = s =&gt; s.auth.roles.includes('ROLE_ADMIN')</code> drives role-gated UI, and every login/logout is a logged action you can replay in DevTools. The admin users list belongs in <strong>RTK Query</strong> / TanStack Query with cache invalidation, not hand-managed in a slice. A lighter app covers the same auth state with one Zustand <code>useAuth</code> store at a fraction of the code.</div>
   </div>
 
+<p class="hf-deck">or, the login state that's correct in the browser and wrong in that same page's own HTML</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Your store is right. Your component is right. The page still ships two different answers to "is anyone logged in?" in one response.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The NavBar that flashes "Sign in" for a user who is already logged in</div>
+  <p>Take this page's own auth store, wrapped exactly as shown above: <code>create(persist((set) =&gt; ({ user: null, ... }), { name: 'auth-storage' }))</code>, read inside <code>NavBar</code> with <code>const name = useAuthStore(s =&gt; s.user?.name)</code>. As a client-only single-page app it's flawless — refresh the page, <code>persist</code> reads localStorage before React even renders, and <code>NavBar</code> shows the real name from the very first frame.</p>
+  <p>Add server-side rendering (Next.js, Remix, any setup that renders this same component on the server first) and the identical store, the identical component, breaks. On every load where a user is already logged in, the console logs "Hydration failed because the initial UI does not match what was rendered on the server," and <code>NavBar</code> visibly flashes "Sign in" for one frame before snapping to the real name.</p>
+  <div class="hf-scatter">
+    <span>the store's logic never changed ✓</span>
+    <span>the component's code never changed ✓</span>
+    <span>the SERVER rendering that component has never once seen this browser's localStorage ⚠</span>
+  </div>
+  <p class="hf-foot"><code>persist</code> reads a browser API the server doesn't have — so "first render" quietly means two different things depending which machine is doing the rendering.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">The fix: make the server and the client agree on frame one</div>
+  <div class="hf-ladder">
+    <b>Render the logged-out state unconditionally on the very first pass, everywhere</b>
+    <i>↓ a hydration flag starts false on both the server and the client's first render</i>
+    <b>Only switch to the persisted value after that flag flips, inside an effect</b>
+    <i>↓ an effect never runs on the server, so the server's HTML and the client's FIRST render now describe the same "not hydrated yet" state</i>
+    <b>Or reach for the persist middleware's own hydration API for tighter control</b>
+    <i>↓ <code>skipHydration</code> at store creation plus a manual <code>rehydrate()</code> call, with <code>hasHydrated()</code> / <code>onFinishHydration()</code> to know exactly when it's safe to show the real data</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The server and the client don't share a "first render" — they share a name for two different ones.</b>
+  <code>persist</code>'s localStorage-backed hydration is genuinely synchronous, so there's no timing race
+  to lose on the client. The mismatch isn't a race at all: the server's render was built from information
+  — the browser's <code>localStorage</code> — that a server process structurally cannot read. Fixing the
+  timing on the client fixes nothing, because the client was never the side with the problem.
+</div>
+
+<div class="hf-note">The server is painting your UI from a photograph it was handed at request time — the
+client is standing in the actual room. <b>When the room has moved since the photo was taken, the
+client's first frame can never match the photograph, no matter how fast either side works.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>persist() is synchronous for localStorage, so where's the actual race? Both sides should be ready before anything renders.</p></div>
+  <div class="hf-bub right"><span class="who">React</span><p>There isn't a race. The SERVER never had a localStorage to read in the first place — it rendered your store's plain initial state because that's the only state that exists on a server process. Synchronous or not, the client is reading a source of truth the server was never connected to.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So the client rehydrating faster doesn't help.</p></div>
+  <div class="hf-bub right"><span class="who">React</span><p>It can't. I'm not comparing a fast client to a slow server — I'm comparing the server's HTML to the client's first render, and those two are correctly describing two different things. That's exactly what the hydration warning is for.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one already-logged-in visitor's request all the way to the mismatch.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A browser requests /dashboard; the request carries cookies and headers, never localStorage</span><span class="tag">server has no access</span></li>
+    <li class="open"><span>The server renders NavBar using the Zustand store's plain initial state — user: null</span><span class="tag">server render</span></li>
+    <li><span>HTML ships to the browser with "Sign in" already baked into the markup</span><span class="tag">HTML shipped</span></li>
+    <li class="open"><span>The browser parses that HTML immediately — same "Sign in" text, first paint</span><span class="tag">first paint matches HTML</span></li>
+    <li><span>React boots on the client; persist synchronously reads localStorage and hydrates the store with the real user, before React's own hydration pass reconciles</span><span class="tag">store hydrates</span></li>
+    <li class="open"><span>React compares the DOM it now wants ("Priya") against the DOM the server actually sent ("Sign in") — mismatch, warning, client-side patch</span><span class="tag">hydration mismatch</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the one that's easy to misread: the STORE hydrating fast is exactly what causes the mismatch, not what fixes it. A slower store would have briefly matched the server's HTML by accident. The real fix is making the server and the client's first render describe the same state on purpose, not racing to see who reads localStorage first.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">a request for /dashboard arrives at the server</span>
+      <div class="ring"><span class="lbl">server renders NavBar from the store's plain initial state — no localStorage exists here</span>
+        <div class="ring"><span class="lbl">HTML ships: "Sign in" — and the browser paints exactly that, first</span>
+          <div class="core">the client boots, persist() reads the REAL localStorage synchronously<small>React now wants "Priya" on a DOM it already painted as "Sign in" — that gap is the whole warning</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Every ring here is correct in isolation — the server correctly had no localStorage, the client correctly read the real one. The core is where those two separately-correct facts collide: nobody made a mistake, and React still has to reconcile two truths that were never going to match on their own.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your Zustand auth store is wrapped in <code>persist(...)</code> exactly like this page's own example, and NavBar reads <code>const name = useAuthStore(s =&gt; s.user?.name)</code>. It works perfectly as a client-only SPA. You then add server-side rendering (for example, migrating to Next.js), and now, on every load where a user is already logged in, the console logs "Hydration failed because the initial UI does not match what was rendered on the server," and NavBar briefly flashes "Sign in" before snapping to the real name. What's actually going on?</p>
+  <button type="button">It's a race condition — persist() sometimes finishes reading localStorage before the client's first render and sometimes after, so the mismatch only shows up occasionally</button>
+  <button type="button">The server never has access to the browser's localStorage at all, so it can only render the store's initial state — the client's first render, after persist() synchronously reads the real data, is describing a different, equally correct state, and React has to reconcile the gap</button>
+  <button type="button">NavBar's root element is missing a key prop, so React can't match the server-rendered tree to the client-rendered tree</button>
+  <p class="why" data-for="0">Not quite — for localStorage (synchronous storage), persist() hydrates before the client's first render every single time. There's no window where it sometimes wins and sometimes loses; the mismatch happens on every logged-in load, deterministically, because the server-side gap is structural, not timing-based.</p>
+  <p class="why" data-for="1">Right — this isn't a speed problem on either side. The server process was never connected to this browser's localStorage, full stop, so "first render" means something different in each place by construction. Bridging that gap means deliberately rendering the same initial state on both sides until an effect — which never runs on the server — says it's safe to switch.</p>
+  <p class="why" data-for="2">Keys help React match up siblings in a list — they're not what an SSR hydration check compares. This mismatch is a genuine state difference (null versus a real user) between the server's markup and the client's first render, unrelated to any missing key.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Two processes correctly computing two different answers from two different views of the world shows up everywhere state gets copied across a boundary.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A <code>.env.local</code> file that only exists on one laptop</h4>
+    <p>A CI server and a developer's machine can run the byte-for-byte identical source and still behave differently, because one of them was never going to see a config file the other one has — no bug in the code, just two environments with structurally different inputs.</p>
+    <div class="hf-scatter"><span>same code, different available inputs, different correct-for-that-environment output</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Per-instance caches behind a load balancer</h4>
+    <p>Two requests to "the same" endpoint can return two different answers depending purely on which server behind the load balancer happens to catch them — each instance's in-memory cache is a perfectly valid view of the world that just isn't the same view the other instance has.</p>
+    <div class="hf-scatter"><span>there's no single "first response" when two processes each compute their own</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Optimistic UI in a chat app</h4>
+    <p>The sender's own screen marks a message "Sent" immediately from local-only state, a full network round-trip before the server — and everyone else — actually agrees it arrived. For that gap, two different, equally sincere "current states" of the same message coexist.</p>
+    <div class="hf-scatter"><span>the local view and the source-of-truth view are allowed to disagree for a while, on purpose</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> createSlice + Immer give you mutation-looking syntax with a real
+  immutable update, configureStore wires up a strict, logged one-way flow, and Zustand gets you the same
+  selector-subscribe model with none of the ceremony. <b>New: wrapping a store in persist() and reading it
+  directly in a component is safe in a pure client-rendered app, but the instant that component can also
+  render on a server, the server's HTML and the client's first render are built from two different,
+  equally correct views of "the state" — and that gap is what a hydration-mismatch warning is actually
+  reporting.</b>
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -262,6 +379,7 @@ DevHubCodeWalk.mount('#cw-rzust',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

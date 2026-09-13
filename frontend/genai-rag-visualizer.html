@@ -65,7 +65,112 @@
     <div class="intro-ciam"><span class="tag">CIAM angle — retrieval is a data access:</span> A naive RAG bot embeds a query and searches the ENTIRE vector index with no filter — which means it will happily retrieve and quote chunks from documents the asking user has no right to see. The fix is the same one you'd apply to any other read path: scope the query with a <code>tenant_id</code>/<code>owner_id</code> metadata filter (or a separate per-tenant index) BEFORE the search runs, and treat retrieved chunks as untrusted, permission-checked data — not a shortcut around the authorization layer. "The LLM only said what was in the context" is not a defense if the context itself was fetched without checking who's asking.</div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, the chunk you needed was retrieved perfectly and still lost the argument</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Nail the chunking, nail the tenant filter, nail the refusal instruction — and the model can still answer as if the right chunk was never retrieved at all.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Four correct chunks, one buried answer</div>
+  <p>Your hybrid search plus re-ranker (section 3 above) does exactly what it's supposed to for "What's our maximum session-token lifetime before re-authentication is required?" — it returns the 4 most relevant chunks, and chunk #3 of 4 contains, verbatim: "Access tokens expire after 60 minutes; a session requires full re-authentication after 12 hours of inactivity."</p>
+  <p>The model answers "I don't see that specified in the provided context," or worse, confidently quotes a nearby but less relevant chunk instead. Every retrieval, filter, and ranking step worked. The model simply paid less attention to text sitting in the <em>middle</em> of a multi-chunk context than to text at the very start or the very end — a documented positional effect that has nothing to do with how relevant that text actually was.</p>
+  <div class="hf-scatter">
+    <span>top-4 retrieval, correct chunk in the set ✓</span>
+    <span>tenant filter applied correctly ✓</span>
+    <span>chunk position in the assembled prompt: 3rd of 4, buried ⚠</span>
+  </div>
+  <p class="hf-foot">Retrieval isn't the failure mode here. Placement is.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Put your best evidence at the edges, not the middle</div>
+  <div class="hf-ladder">
+    <b>Re-rank after retrieval, then reorder for position, not just for score</b>
+    <i>↓ the re-ranker already tells you which chunk matters most — use that signal to decide WHERE it sits in the prompt, not only whether it makes the top-k</i>
+    <b>Place the single most relevant chunk first or last — never in the middle of a long list</b>
+    <i>↓ attention over long contexts is measurably strongest at the beginning and end and weakest in the middle — a real, documented model behavior, not a retrieval bug you introduced</i>
+    <b>Keep k small when you honestly can</b>
+    <i>↓ fewer chunks means a smaller "middle" for anything to get lost in — 3-4 well-ranked chunks reliably beats 10 loosely-filtered ones for exactly this reason</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A model's attention across a long input isn't flat — it follows a U-shape, strongest at the edges of the context and weakest in the middle — so where a retrieved chunk lands in the assembled prompt is a second, independent lever on top of whether you retrieved the right chunk at all.
+</div>
+
+<div class="hf-note">A correct chunk sitting in slot 3 of 4 is the RAG equivalent of <b>burying the lede</b> — the fact was in the article, just not where anyone was ever going to read it closely.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I retrieved the right chunk. Why is the answer still wrong?</p></div>
+  <div class="hf-bub right"><span class="who">The context window, personified</span><p>I read everything you handed me, start to end — but I don't weigh every part of it evenly.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So being IN the context isn't the same as being read closely?</p></div>
+  <div class="hf-bub right"><span class="who">The context window</span><p>The first thing I see and the last thing I see get my closest reading. Whatever's wedged in between competes for a lot less of my attention — correct or not.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch a correctly retrieved chunk lose its own argument, one step at a time.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Query embedded and searched: "max session-token lifetime before re-auth"</span><span class="tag">correct intent</span></li>
+    <li class="open"><span><code>top_k=4</code> retrieved, re-ranked by relevance — chunk #3 is the one with the real answer</span><span class="tag">retrieval correct</span></li>
+    <li><span>The 4 chunks are joined in ranked order and dropped into the prompt</span><span class="tag">answer now sits mid-context</span></li>
+    <li class="open"><span>The model reads the start of the context closely, and the end closely</span><span class="tag">primacy + recency</span></li>
+    <li><span>Content in the middle — your answer — gets comparatively thin attention</span><span class="tag">the U-curve</span></li>
+    <li class="open"><span>The model hedges, or answers from a weaker chunk near an edge instead</span><span class="tag">wrong, not because retrieval failed</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is not a bug you introduced — it's a documented property of how these models read long inputs. It means "retrieved successfully" and "used successfully" are two separate claims, and nothing in a typical RAG pipeline checks the second one.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">the correct chunk, dropped into a 4-chunk context window<small>same text, three different slots</small></div>
+    <div class="arrow">what actually happens to it →</div>
+    <div class="opts">
+      <span>placed first — model quotes it accurately</span>
+      <span class="on">the one that applies: placed in the middle — model answers as if it were never retrieved</span>
+      <span>placed last — model quotes it accurately</span>
+    </div>
+  </div>
+  <p class="hf-annot">The chunk's content never changed across these three outcomes. Only its position did — which is exactly why this is so easy to miss in a demo built around one or two test questions where the answer happened to land at an edge.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your RAG bot retrieves 6 chunks for a support question. The chunk with the actual policy number sits in position 4 of 6, and the model answers with a vaguer, wrong number pulled from chunk 1 instead. What's the highest-leverage fix?</p>
+  <button type="button">Increase top_k to 10 so more context is available to the model.</button>
+  <button type="button">Re-rank and reorder so the highest-relevance chunk sits at the very start or end of the assembled context, not buried mid-list — and shrink k so there's less "middle" to begin with.</button>
+  <button type="button">Rewrite the system prompt to say "read every chunk carefully" before generating.</button>
+  <p class="why" data-for="0">More chunks makes the middle bigger, not smaller — this typically makes a positional problem worse, even though "more context" instinctively feels like it should help.</p>
+  <p class="why" data-for="1">Right — attention over a long context is strongest at the edges and weakest in the middle, so moving your best evidence to an edge (and shrinking k so less can get lost at all) targets the actual mechanism instead of hoping around it.</p>
+  <p class="why" data-for="2">An instruction to "read carefully" doesn't change how the underlying attention mechanism weighs tokens by position — it's a request the model has no more structural ability to comply with than it already was.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Whoever or whatever is reading a long list reads its edges closest.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A résumé skimmed by a hiring manager</h4>
+    <p>The strongest line on a twenty-line résumé gets read less carefully at line 14 than it would at line 1 or line 20 — the content didn't change, its position in the reader's attention did.</p>
+    <div class="hf-scatter"><span>position competes with content</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An OAuth consent screen listing ten requested scopes</h4>
+    <p>The one scope a user should actually worry about — "read your full directory" — buried as item 6 of 10 instead of first or last gets skimmed past the exact same way a middle-positioned chunk does; both a human eye and a model's attention favor the edges of a list.</p>
+    <div class="hf-scatter"><span>the risky scope is only as visible as its position</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A forty-slide status deck where the one risk that matters is slide 22</h4>
+    <p>Reviewers remember the opener and the closer clearly; the middle blurs together regardless of which slide actually carried the bad news.</p>
+    <div class="hf-scatter"><span>the middle blurs, no matter what's in it</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> RAG grounds a model in your own documents by embedding, retrieving, and augmenting the prompt before a single token generates — and the whole pipeline can still leak data if retrieval isn't scoped by tenant. <b>The one new sentence this block adds: a perfectly retrieved, perfectly authorized chunk can still lose to where it sits in the prompt, because attention across a long context is weakest exactly in the middle.</b>
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -388,6 +493,7 @@ DevHubCodeWalk.mount('#cw-rag',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

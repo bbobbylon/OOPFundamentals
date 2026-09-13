@@ -44,7 +44,110 @@
     <div class="intro-ciam"><span class="tag">CIAM / production shape:</span> a Spring Boot CIAM API with steady, predictable authentication traffic is usually a poor fit for Lambda (the JVM's cold start is one of the heaviest of any runtime) and a good fit for ECS/Fargate or EC2 behind an ALB — see <a href="aws-load-balancing-visualizer.html">the load balancing visualizer</a> for how that pairs with an Auto Scaling Group. A spiky, bursty side task like this page's image-resize example is the opposite case: exactly the shape Lambda was built for.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, why "the service is up" and "the service is fine" can both be true and useless</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Your ECS console shows 3/3 tasks running, right now, this second. It has said that continuously for two hours. It has also restarted 340 times in those two hours.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A "healthy" service that has never once stopped crashing</div>
+  <p>A bad deploy ships a Spring Boot task definition with a typo'd environment variable — the app throws on startup, every time, no exceptions. The ECS service's desired count is 3. The moment a task exits, the service scheduler's whole job is to notice the running count fell below the desired count and launch a replacement to fix it.</p>
+  <p>So it does. The new task starts, crashes on the same startup error a few seconds later, and the scheduler launches another one. And another. There is no default limit on how many times this repeats — ECS has no built-in concept of "this task definition is fundamentally broken, stop trying." Anyone glancing at the console's headline "Running tasks: 3" sees a healthy service, while "Stopped tasks" quietly fills up with hundreds of identical crash entries underneath.</p>
+  <div class="hf-scatter">
+    <span>desired count satisfied at any given instant ✓</span>
+    <span>ALB health check configuration correct ✓</span>
+    <span>the same 3 tasks crash-looping the entire time ⚠</span>
+  </div>
+  <p class="hf-foot">The scheduler isn't malfunctioning — restarting a stopped task to hit the desired count is precisely its job. Nobody told it that "restart" and "fix" aren't the same word.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make a crash loop visible, and give it a place to stop</div>
+  <div class="hf-ladder">
+    <b>Turn on the ECS deployment circuit breaker with rollback for the service</b>
+    <i>↓ it counts consecutive failed task starts during a deployment and automatically rolls back to the last known-good task definition instead of looping forever</i>
+    <b>Alarm on task restart count / stopped-task reason, not just on running-count-vs-desired-count</b>
+    <i>↓ "running count matches desired count" is true for both a healthy service and a service crash-looping in a tight cycle — you need a metric that actually distinguishes the two</i>
+    <b>Read the stopped task's exit reason before assuming a new task fixed anything</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>An ECS service's job is to keep the running-task count equal to the desired count — nothing more, and nothing about whether any given task is actually working.</b> A crash-looping task and a healthy one look identical on the one dashboard number most people glance at first, because the scheduler's single measure of success is a headcount, not a verdict on whether the code inside those tasks runs correctly.
+</div>
+
+<div class="hf-note">Sticky note: ECS restarting a crashing task is like <b>replacing a smoke alarm's dead battery with another dead battery</b> — technically "a battery is now installed" is true again, and that's exactly the number the scheduler is watching.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>The console says 3 out of 3 tasks running. Why is anyone paging me?</p></div>
+  <div class="hf-bub right"><span class="who">The ECS Service Scheduler</span><p>Because "3 running" is true again about four seconds after it stops being true. I only promised you a headcount — I never promised you the same three tasks, or that any of them stay up.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Shouldn't something have stopped this after the tenth identical crash?</p></div>
+  <div class="hf-bub right"><span class="who">The ECS Service Scheduler</span><p>Not unless you turned on the deployment circuit breaker. Left to my default behavior, "the task keeps crashing" and "the task keeps needing to be replaced" look like the same instruction to me, forever.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch the same broken task definition cycle through the scheduler's loop, second by second.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A task starts from the broken task definition</span><span class="tag">start</span></li>
+    <li class="open"><span>Spring Boot throws on startup because of the typo'd environment variable, and the process exits</span><span class="tag">crash</span></li>
+    <li><span>ECS records a stopped task with an exit reason, and the running count drops to 2 of 3 desired</span><span class="tag">detect</span></li>
+    <li class="open"><span>The service scheduler's ONLY job here fires: running count &lt; desired count, so launch a replacement</span><span class="tag">react</span></li>
+    <li><span>The new task pulls the SAME broken image and definition, because nothing about the underlying cause was fixed</span><span class="tag">repeat</span></li>
+    <li class="open"><span>It crashes on the identical line, and the loop returns to step 3 — with no counter anywhere asking "how many times has this already happened?"</span><span class="tag">loop</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is doing exactly what it's designed to do, which is the whole problem: the scheduler's decision rule has no memory of the PREVIOUS nine identical failures — every stopped task is evaluated as if it's the first one it's ever seen.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">RUNNING (briefly)</span>
+      <span class="go"><em>Spring Boot throws on the bad env var</em> <span class="arrow">→</span> the process exits</span></div>
+    <div class="stt"><span class="nm">STOPPED</span>
+      <span class="go"><em>running count now below desired count</em> <span class="arrow">→</span> scheduler launches a replacement task</span></div>
+    <div class="stt"><span class="nm">PROVISIONING</span>
+      <span class="go"><em>the same task definition, same broken image</em> <span class="arrow">→</span> the new task reaches RUNNING again</span></div>
+  </div>
+  <p class="hf-annot">There is no fourth state here called "give up" — without the circuit breaker enabled, this three-state cycle has no exit condition of its own. It runs until a human either fixes the task definition or manually stops the service, not because the loop detected anything was wrong.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">An ECS service has desired count 3 and no deployment circuit breaker configured. A new deployment's task definition has a fatal startup bug. What does the ECS console's "Running tasks: 3/3" most likely mean twenty minutes after that deploy?</p>
+  <button type="button">The deployment failed cleanly and ECS automatically rolled back to the previous task definition</button>
+  <button type="button">The bug only affects some requests, so the 3 tasks are serving traffic in a partially degraded state</button>
+  <button type="button">The scheduler has been continuously restarting crashed tasks to hold the headcount at 3, with no working task actually staying up</button>
+  <p class="why" data-for="0">Automatic rollback on failure is exactly what the deployment circuit breaker does — but it has to be explicitly enabled first. Without it, ECS has no built-in notion of "this deployment is bad, stop and revert."</p>
+  <p class="why" data-for="1">A fatal startup crash doesn't produce partial degradation — it produces a task that never finishes starting at all, which is a full crash-and-restart cycle, not a partially-working one.</p>
+  <p class="why" data-for="2">Correct. "3/3 running" only reports the current instant's headcount. With no circuit breaker to stop it, the scheduler has spent that entire twenty minutes launching replacement tasks for ones that immediately crashed, and the console's headline number never reflects any of that churn.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A supervisor that only counts, and never asks "is this actually working," shows up constantly outside of ECS.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Kubernetes' CrashLoopBackOff</h4>
+    <p>Kubernetes gives this exact behavior an actual name and a backoff delay between restarts — proof that the pattern is common enough across container orchestrators to need its own dedicated status, not a rare ECS quirk.</p>
+    <div class="hf-scatter"><span>the same headcount-not-health gap, with a name and a growing delay bolted onto it</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A JVM thread pool silently restarting a task that always throws</h4>
+    <p>A <code>ScheduledExecutorService</code> task that throws an uncaught exception on every run can look "scheduled and firing" in a thread dump forever, while doing zero useful work each time — the executor's only promise is that the task keeps getting invoked, never that it succeeds.</p>
+    <div class="hf-scatter"><span>"still running" and "still working" are different claims, even inside one JVM</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An account lockout policy that resets after every attempt</h4>
+    <p>A login system that unlocks an account after each failed attempt, rather than counting consecutive failures toward a real lockout, will "process" a brute-force attack indefinitely — every single attempt looks individually normal, because nothing is accumulating a memory of the ones before it.</p>
+    <div class="hf-scatter"><span>no counter across attempts means no loop ever looks abnormal from the inside</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> AWS gives you EC2, Lambda, ECS/Fargate, and EKS as four different points on a control-versus-ops-burden spectrum, each with its own cold-start shape, execution-time ceiling, and scaling model. <b>The one new sentence this block adds:</b> ECS's service scheduler only ever measures running-count against desired-count, so a task crash-looping forever and a genuinely healthy service can report the identical "3/3 running" headline the whole time.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="cdSeg">
@@ -246,6 +349,7 @@ DevHubCodeWalk.mount('#cw-cd',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

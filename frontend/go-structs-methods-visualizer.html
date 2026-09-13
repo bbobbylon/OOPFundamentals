@@ -58,7 +58,112 @@
     <div class="intro-ciam"><span class="tag">CIAM context:</span> A token validator models cleanly with embedding: <code>type Claims struct { jwt.RegisteredClaims; Roles []string `json:"roles"` }</code> embeds the library's standard claims (promoting their <code>Valid()</code>) and adds your CIAM <code>Roles</code>; a <code>func (c *Claims) HasRole(r string) bool</code> pointer receiver reads cleanly. Unlike Spring's <code>class CustomClaims extends DefaultClaims</code>, Go's embedding is composition you can mix freely (embed <code>RegisteredClaims</code> <em>and</em> an Audit mixin) with no single-inheritance ceiling.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the one-line fix that isn't a fix, it's a compile error</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You already learned that a slice-range copy silently swallows a mutation. Try the identical fix on a map and Go refuses to even build.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle"><code>cannot assign to struct field</code> — on code that looks exactly like the slice fix</div>
+  <p>You've got a session cache: <code>sessions := map[string]Session{}</code>, where <code>Session</code> has a <code>LastSeen time.Time</code> field. On every request you want to touch it: <code>sessions[userID].LastSeen = time.Now()</code>. This is the exact instinct the slice-index fix from earlier on this page trained into you — index into the container to get an addressable element, then mutate its field directly.</p>
+  <p>It doesn't compile. Go's compiler stops you cold: <code>cannot assign to struct field sessions[userID].LastSeen in map</code>. Not a silent no-op like the range-copy case — a build failure, every time, for every map of structs, everywhere in Go.</p>
+  <div class="hf-scatter">
+    <span>the field name and type ✓</span>
+    <span>the exact syntax that fixed the slice bug earlier ✓</span>
+    <span>doing it to a map instead of a slice ⚠</span>
+  </div>
+  <p class="hf-foot">A slice element and a map element look identical at the call site — <code>container[key].Field</code> — and Go treats them as fundamentally different things.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Either copy-modify-write-back, or store pointers</div>
+  <div class="hf-ladder">
+    <b>Copy out, mutate the copy, write it back: <code>s := sessions[userID]; s.LastSeen = time.Now(); sessions[userID] = s</code></b>
+    <i>↓ three separate, addressable steps — a local variable IS addressable, so the middle line compiles fine</i>
+    <b>Or change the map's value type to a pointer: <code>map[string]*Session</code></b>
+    <i>↓ now <code>sessions[userID].LastSeen = time.Now()</code> compiles directly, because you're dereferencing a pointer VALUE (which the map does hand you), not reaching into the struct stored inside the map</i>
+    <b>Prefer the pointer map when you mutate often; copy-modify-write-back for occasional, one-off updates</b>
+    <i>↓ a map of pointers also means every goroutine holding a copy of that pointer sees the same underlying Session — decide if that's what you want before reaching for it</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Addressability isn't about the type, it's about the container.</b> A slice element is one physical slot inside a fixed backing array, so the compiler can always compute its address. A map's internal layout (buckets that grow, shrink, and rehash) means the compiler can never promise a stable address for a value stored inside it — so the language simply forbids taking one, full stop.
+</div>
+
+<div class="hf-note">A slice is a <b>numbered row of lockers</b> — locker #3 is always locker #3, so you can hand someone its exact key. A map is <b>a valet who re-parks your car whenever the lot reorganizes</b> — you get the car back on request, but nobody can hand you "the exact spot it's in," because that spot might not exist five minutes from now.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I fixed the exact same bug on a slice by writing <code>users[i].Rename("Z")</code> instead of using the range copy. Why won't <code>sessions[userID].Touch()</code> work the same way on a map?</p></div>
+  <div class="hf-bub right"><span class="who">The Go compiler</span><p>Because <code>users[i]</code> names a real, stable memory address I can hand to <code>Touch</code>'s pointer receiver. <code>sessions[userID]</code> names a VALUE I have to look up and copy out for you — there's no stable address behind it for me to hand over.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Couldn't the map just... give me the address of wherever it's actually stored?</p></div>
+  <div class="hf-bub right"><span class="who">The Go compiler</span><p>If it did, and then you rewrote that address's contents while a rehash was moving buckets around underneath you, you'd be corrupting memory the map still thinks it owns. I'd rather refuse to compile than let that exist.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch why the SAME-looking line takes two completely different paths through the compiler.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>users []User</code> — a slice is a header pointing at a contiguous backing array</span><span class="tag">slice layout</span></li>
+    <li class="open"><span><code>users[i]</code> resolves to a fixed offset into that array — the compiler CAN compute <code>&amp;users[i]</code></span><span class="tag">addressable</span></li>
+    <li><span>So <code>users[i].Rename("Z")</code> compiles: Go silently takes that address and calls the pointer-receiver method on it</span><span class="tag">compiles + mutates</span></li>
+    <li class="open"><span><code>sessions map[string]Session</code> — a map is a hash table whose internal buckets can move on every insert/delete</span><span class="tag">map layout</span></li>
+    <li><span><code>sessions[userID]</code> has no fixed offset the compiler can promise stays valid — there is no <code>&amp;sessions[userID]</code> to take</span><span class="tag">not addressable</span></li>
+    <li class="open"><span>So <code>sessions[userID].LastSeen = x</code> is a compile error — the language refuses to pretend an address exists</span><span class="tag">refuses to compile</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 versus step 5 is the whole story: the SAME bracket-and-dot syntax means "a stable address I can hand out" for a slice and "a value I have to hand you a copy of" for a map, because the two data structures make fundamentally different promises about where things live.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">you write <code>container[key].Field = x</code><small>same syntax, one container swapped for another</small></div>
+    <div class="fan">how each container reacts ↓</div>
+    <div class="obs">
+      <span><code>[]T</code> (slice) — compiles, mutates in place</span>
+      <span class="new"><code>map[K]T</code> (map) — compile error, not addressable</span>
+      <span><code>map[K]*T</code> (map of pointers) — compiles, mutates the pointee</span>
+    </div>
+  </div>
+  <p class="hf-annot">Notice the map of pointers is back to compiling — because now <code>container[key]</code> yields a pointer VALUE (which IS just data you can copy), and dereferencing a pointer to reach a field never required addressing the map slot itself.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">You have <code>scores := map[string]Player{"a": {Points: 10}}</code> where <code>Player</code> has a pointer-receiver method <code>func (p *Player) AddPoint()</code>. What happens when you write <code>scores["a"].AddPoint()</code>?</p>
+  <button type="button">It fails to compile — Go can't take the address of <code>scores["a"]</code> to call a pointer-receiver method on it.</button>
+  <button type="button">It compiles and works, identically to calling a pointer-receiver method on a slice element.</button>
+  <button type="button">It compiles, but silently does nothing, the same way a value-receiver method on a range-loop copy does nothing.</button>
+  <p class="why" data-for="0">Right — calling a pointer-receiver method requires an address to call it on, exactly like directly assigning a field does. Since map values aren't addressable, Go can't auto-take <code>&amp;scores["a"]</code> the way it auto-takes <code>&amp;users[i]</code> for a slice, so this is a compile-time error, not a runtime surprise.</p>
+  <p class="why" data-for="1">Slice elements are addressable because they sit at a fixed offset in a backing array; map elements aren't, because the map's internal bucket layout can move data on rehash. The two only look the same at the call site — the compiler treats them completely differently.</p>
+  <p class="why" data-for="2">Silent do-nothing is what happens with the RANGE-COPY bug on a slice, where a copy genuinely exists and the mutation lands on it instead of the original. A map value method call never gets that far — there's no copy quietly absorbing the mutation, because the whole expression fails to compile first.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"You can get a value back, but not a stable place to point at" shows up anywhere a container's internal layout is allowed to move.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's <code>HashMap</code> and a mutable key</h4>
+    <p>Mutating a field used in a Java object's <code>hashCode()</code> after it's already a <code>HashMap</code> key doesn't error — it silently makes the entry unfindable, because the map bucketed it under the OLD hash and will never look there again. Different failure mode (silent vs. a Go compile error), same root cause: a hash-based container's internal placement can't tolerate you reaching in and changing things underneath it.</p>
+    <div class="hf-scatter"><span>hash-based containers police what you can touch inside them</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An Angular <code>@Input()</code> object mutated in place</h4>
+    <p>Angular's default change detection compares object references, not deep contents. Mutate a field on an <code>@Input()</code> object in place instead of replacing it and the parent component never sees a change — the framework's internal bookkeeping (like a map's bucket) was built around identity, and reaching in past that contract produces silence, not an update.</p>
+    <div class="hf-scatter"><span>reaching past a container's own bookkeeping breaks its bookkeeping</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Modifying a list while iterating it, in almost any language</h4>
+    <p>Python raises <code>RuntimeError: dictionary changed size during iteration</code>; Java throws <code>ConcurrentModificationException</code>. Different languages draw the line in different places, but the underlying deal is identical to Go's map rule: a container that manages its own internal layout gets to refuse operations that would let you corrupt that layout out from under it.</p>
+    <div class="hf-scatter"><span>every language eventually says "not through me, you don't"</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Go has no classes — structs hold data, methods attach to them via a value or pointer receiver, embedding gives you composition instead of inheritance, and interfaces are satisfied implicitly by method set (with pointer-receiver methods living only on <code>*T</code>). <b>The one new sentence this block adds:</b> a slice lets you reach in and mutate an element in place because its elements are addressable, but a map never does — <code>mapVal[key].Field = x</code> isn't a runtime gotcha like the range-copy trap, it's a compile error, because map values have no stable address to give you at all.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="gsmSeg">
@@ -266,6 +371,7 @@ DevHubCodeWalk.mount('#cw-gostructs',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

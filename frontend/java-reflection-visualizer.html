@@ -107,7 +107,112 @@
     <div class="intro-ciam"><span class="tag">CIAM / Spring Boot:</span> You rarely write reflection yourself, but it explains the gotchas: <code>@Transactional</code> can't wrap a <code>private</code> method (the CGLIB proxy can't override it), Jackson needs <code>-parameters</code> to read record field names, native images need a <code>reflect-config.json</code>, and <code>@Autowired</code> works on a <code>private</code> field because Spring calls <code>setAccessible(true)</code>. MapStruct generates mapping code instead — which is why it beats Jackson for DTO conversion.</div>
   </div>
 
-  <!-- ── TRY IT LIVE ── -->
+  <p class="hf-deck">or, the getDeclaredMethods() this page uses for JSON mapping and test discovery — quietly returning two methods for the one you wrote</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You implement <code>Comparable&lt;Money&gt;</code>, write exactly one <code>compareTo</code> method, and <code>getDeclaredMethods()</code> hands your framework code two methods named <code>compareTo</code>.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Your one-method class secretly compiles to two methods with the same name</div>
+  <p>You write <code>class Money implements Comparable&lt;Money&gt; { private final int cents; public int compareTo(Money other) { return Integer.compare(cents, other.cents); } }</code>. One method, one signature, nothing unusual. Somewhere in an in-house tool — the exact shape of the Jackson-style loop this page walks through — you write <code>Arrays.stream(Money.class.getDeclaredMethods()).filter(m -&gt; m.getName().equals("compareTo")).findFirst().get()</code> to grab "the compareTo method" for some generic tooling.</p>
+  <p><code>Money.class.getDeclaredMethods()</code> returns TWO <code>Method</code> objects named <code>compareTo</code>: the one you wrote, <code>compareTo(Money)</code>, and a second one the compiler generated, <code>compareTo(Object)</code> — a <b>bridge method</b>. <code>Comparable&lt;T&gt;</code>'s real interface method, after generics are erased, is <code>compareTo(Object)</code> — so javac produces a real <code>compareTo(Object)</code> overload to keep <code>Money</code> satisfying that erased interface, one that casts its argument to <code>Money</code> and forwards to your actual method. <code>getDeclaredMethods()</code>'s own Javadoc says the returned array is "not sorted and not in any particular order," so <code>.findFirst()</code> can hand you either one — and if it hands you the bridge, <code>getParameterTypes()[0]</code> is <code>Object</code>, not <code>Money</code>, silently breaking any code that assumed otherwise.</p>
+  <div class="hf-scatter">
+    <span>Comparable&lt;Money&gt; implemented correctly ✓</span>
+    <span>exactly one compareTo written by you ✓</span>
+    <span>compiler quietly generated a second one for erasure ⚠</span>
+  </div>
+  <p class="hf-foot">Type erasure isn't just a compile-time detail — it leaves a second, synthetic method sitting in your class file, and reflection sees it too.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Stop trusting name-only filtering on getDeclaredMethods()</div>
+  <div class="hf-ladder">
+    <b>Assume any generic-method override can produce a bridge</b>
+    <i>↓ Comparable, Iterator, and any covariant-return override can leave a compiler-generated stand-in with the same name and an erased signature</i>
+    <b>Filter out isBridge() / isSynthetic() before picking a match</b>
+    <i>↓ the JVM marks these methods explicitly for exactly this reason — <code>!m.isBridge()</code> removes them from consideration reliably, no matter what order the array comes back in</i>
+    <b>Or ask for the exact signature instead of filtering a list</b>
+    <i>↓ <code>getDeclaredMethod("compareTo", Money.class)</code> requests the one overload with that precise parameter type directly, sidestepping the ambiguity entirely</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Overriding a generic method with a more specific parameter type — Comparable&lt;T&gt;, or any covariant return type — gets erased back to the raw type at the bytecode level, and the compiler bridges the gap with a second, synthetic method sharing the same name, which <code>getDeclaredMethods()</code> returns right alongside yours, in no guaranteed order.
+</div>
+
+<div class="hf-note">Overriding a generic interface method hires the compiler a <b>stunt double</b> — same name tag, different job, standing in wherever the erased signature is expected. <code>getDeclaredMethods()</code> introduces you to both without saying which is which.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I wrote exactly one compareTo method on Money. Why does getDeclaredMethods() show me two?</p></div>
+  <div class="hf-bub right"><span class="who">javac</span><p>Comparable&lt;Money&gt;'s real interface method, after erasure, is compareTo(Object). I generated a second method with that exact signature so Money still satisfies the interface at the bytecode level — it just casts its argument and calls your real one.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Fine — so which one does getDeclaredMethods() hand me first?</p></div>
+  <div class="hf-bub right"><span class="who">javac</span><p>I never promised an order. The Javadoc says so outright — and I never promised you'd only get one, either.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one compareTo override from source code into two entries in the compiled class file.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>You write <code>class Money implements Comparable&lt;Money&gt;</code> with one method: <code>compareTo(Money other)</code></span><span class="tag">source</span></li>
+    <li class="open"><span>javac erases Comparable&lt;Money&gt; to raw Comparable — its real interface method is <code>compareTo(Object)</code></span><span class="tag">erasure</span></li>
+    <li><span>To keep Money satisfying that erased interface, javac generates a second method: <code>compareTo(Object other)</code></span><span class="tag">bridge generated</span></li>
+    <li class="open"><span>The bridge method's body just casts and forwards: <code>return compareTo((Money) other);</code></span><span class="tag">delegates</span></li>
+    <li><span>Money.class now holds TWO methods named compareTo in its bytecode — yours, and the bridge</span><span class="tag">two methods</span></li>
+    <li class="open"><span>Money.class.getDeclaredMethods() returns both, in no guaranteed order — Method.isBridge() is the only reliable way to tell them apart</span><span class="tag">reflection sees both</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the whole trap. Nothing about your source code is wrong or unusual — this happens for every single class that implements a generic interface with a type-specific override. The extra method isn't a bug in Money; it's the compiler quietly doing its job, and reflection is the only place that job becomes visible.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">Comparable&lt;T&gt; — erased to raw Comparable at the bytecode level</span>
+      <div class="ring"><span class="lbl">Money.class's declared methods table — 2 entries named compareTo, unordered</span>
+        <div class="ring"><span class="lbl">compareTo(Object other) — the compiler-generated bridge, isBridge() = true</span>
+          <div class="core">compareTo(Money other) — the real logic you wrote<small>the one your filter code was actually trying to find</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Read the rings from the outside in: generics erasure is the root cause, the two-entry method table is where it becomes observable, the bridge method is the decoy, and your real method is buried one layer past the one most name-only filters stop at.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Money implements Comparable&lt;Money&gt; with a single method, compareTo(Money other). A helper runs <code>Arrays.stream(Money.class.getDeclaredMethods()).filter(m -&gt; m.getName().equals("compareTo")).findFirst()</code>. What can this return?</p>
+  <button type="button">Always your real compareTo(Money) method — getDeclaredMethods() only returns methods that actually appear in your source code.</button>
+  <button type="button">Either your compareTo(Money) method or a compiler-generated compareTo(Object) bridge method — getDeclaredMethods() returns both, in no guaranteed order.</button>
+  <button type="button">A NoSuchMethodException, because filtering getDeclaredMethods() by name alone isn't legal on an interface implementation.</button>
+  <p class="why" data-for="0">Bridge methods are compiler-generated, not hand-written, but they're still real entries in the compiled class file — getDeclaredMethods() reflects the bytecode, not your source file, so it returns them too.</p>
+  <p class="why" data-for="1">Right. Type erasure forces javac to generate a compareTo(Object) bridge alongside your compareTo(Money). Both show up in getDeclaredMethods(), and the array's documented order is unspecified — a name-only filter can land on either one.</p>
+  <p class="why" data-for="2">Nothing throws — filtering by name is completely ordinary, legal reflection code. That's exactly what makes this bug easy to ship without ever seeing an exception.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"A generic override leaves the compiler's own stand-in sitting in the method table" shows up anywhere erasure meets reflection — including in the very frameworks this page just walked through.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Jackson and Spring's own reflection code defends against this</h4>
+    <p>Reflection-based bean introspection in the Java ecosystem has to explicitly skip <code>Method.isBridge()</code> when scanning for getters and setters — the identical erasure trick fires for a covariant-return override too (a subclass narrowing a getter's return type produces its own bridge return method). Production frameworks carry this filter as defensive code, not as paranoia over an edge case nobody actually hits.</p>
+    <div class="hf-scatter"><span>the same filter, already living inside the tools this page teaches</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Covariant return overrides trigger the identical mechanism</h4>
+    <p><code>class AnimalShelter { Animal get() {...} } class DogShelter extends AnimalShelter { @Override Dog get() {...} }</code> — <code>DogShelter.class.getDeclaredMethods()</code> also shows two methods named <code>get</code>: your <code>Dog get()</code>, and a bridge <code>Animal get()</code> generated for the same reason. This isn't a Comparable-specific quirk; it's what erasure does to any override that narrows a type.</p>
+    <div class="hf-scatter"><span>same root cause, a completely different everyday pattern</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>C#'s CLR generics don't have this problem at all</h4>
+    <p>.NET generics are <b>reified</b>, not erased — <code>List&lt;int&gt;</code> and <code>List&lt;string&gt;</code> get their own specialized runtime types from the CLR, so a C# class implementing <code>IComparable&lt;Money&gt;</code> reflects as exactly one <code>CompareTo(Money)</code> method, full stop. This is Java-specific, purely a consequence of the JVM's erasure strategy — worth knowing before you go looking for the same trap in a C# codebase.</p>
+    <div class="hf-scatter"><span>the identical question, a completely different runtime answer</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> reflection lets code inspect and invoke classes, methods, and fields by name at runtime, and it's the literal mechanism behind Spring's dependency injection, Jackson's JSON mapping, and JUnit's test discovery — powerful, slower than direct calls, and gated behind <code>setAccessible()</code> and module <code>opens</code> declarations. <b>The one new sentence this block adds:</b> <code>getDeclaredMethods()</code> can return more methods than you ever wrote, because generic overrides and covariant return types leave the compiler's own erasure bridge methods sitting right there in the same array, with no guaranteed order and no name to tell them apart from yours.
+</div>
+
+<!-- ── TRY IT LIVE ── -->
   <div class="tryit" data-lang="java"
        data-title="🧪 Try it: read a private field you were never meant to see"
        data-predict="The password field is private with no getter. Can the reflection block still print it? (Then: why frameworks need this power.)">
@@ -1005,6 +1110,7 @@ function escHtml(s){
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

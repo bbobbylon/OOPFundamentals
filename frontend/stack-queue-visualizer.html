@@ -250,7 +250,113 @@ console.log("queue serves:", queue.shift(), "then", queue.shift(), "— first in
   </div>
 
 
-    <!-- ── EXTREME-VIZ HERO ── -->
+    <p class="hf-deck">or, the one-line refactor this page just recommended, and the null it quietly stops accepting</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">This page tells you to stop using LinkedList and the legacy Stack class and reach for ArrayDeque. Do exactly that, and any code relying on a queued null blows up on the very next call.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The "modernize the queue" refactor that NPEs a working approval flow</div>
+  <p>An approvals pipeline keeps <code>Queue&lt;String&gt; pendingApprovals</code>, backed by a <code>LinkedList</code>. One step encodes "auto-approved, no reviewer needed" by literally enqueuing <code>null</code> — an old but working pattern, since <code>LinkedList</code> happily stores null and <code>poll()</code> just hands it back. A cleanup ticket cites this exact page's advice — "stop using legacy structures, use ArrayDeque" — and someone does the mechanical swap: <code>new LinkedList&lt;&gt;()</code> becomes <code>new ArrayDeque&lt;&gt;()</code>. Same interface, same method names, compiles clean.</p>
+  <p>The very next <code>pendingApprovals.offer(null)</code> throws <code>NullPointerException</code>, immediately, before anything is even stored. ArrayDeque's own Javadoc says it outright: null elements are prohibited. The reason isn't arbitrary — <code>poll()</code> returns null specifically to mean "the queue is empty," and if null were also a valid stored element, a caller could never tell those two cases apart. <code>LinkedList</code> accepts null anyway and just lives with that ambiguity; <code>ArrayDeque</code> refuses to let the ambiguity exist in the first place.</p>
+  <div class="hf-scatter">
+    <span>interface unchanged (still Queue&lt;String&gt;) ✓</span>
+    <span>offer/poll call sites unchanged ✓</span>
+    <span>compiles clean ✓</span>
+    <span>one call site enqueues null ⚠</span>
+  </div>
+  <p class="hf-foot">The refactor never touched the line that uses null. It just changed which implementation was willing to store one.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Give "no reviewer needed" its own value, not the absence of one</div>
+  <div class="hf-ladder">
+    <b>Replace the null sentinel with a real value</b>
+    <i>↓ an enum constant or a dedicated "AUTO_APPROVED" marker string says what you mean without leaning on the one value every queue implementation treats specially</i>
+    <b>If you can't change the data model yet, wrap it in Optional</b>
+    <i>↓ you enqueue a present-but-empty <code>Optional&lt;String&gt;</code> instead of a bare null — ArrayDeque is completely happy storing an object, it only refuses null itself</i>
+    <b>And grep for every LinkedList → Queue/Deque swap before you ship it</b>
+    <i>↓ the compiler will never flag this for you — Queue and Deque don't expose a stricter type for "no-null" implementations, so nothing but a person or a targeted test catches it</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Sharing an interface does not mean sharing a contract for every input — <code>LinkedList</code> allows null, <code>ArrayDeque</code> and most of <code>java.util.concurrent</code> forbid it specifically so that <code>poll()</code>'s null return can mean "empty" and nothing else.
+</div>
+
+<div class="hf-note">poll() needs one meaning for null: "nothing here." The moment null can also mean "here's your actual element," poll() can't tell you which one just happened — so ArrayDeque simply never lets that ambiguity exist.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I swapped LinkedList for ArrayDeque exactly like the docs said. Same interface. Why does my approval queue crash immediately?</p></div>
+  <div class="hf-bub right"><span class="who">ArrayDeque</span><p>Because somewhere upstream, you're handing me a null and asking me to hold onto it. I don't do that. I never have.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>LinkedList held it for two years without complaining.</p></div>
+  <div class="hf-bub right"><span class="who">ArrayDeque</span><p>LinkedList never had to decide what poll() means when it comes back empty-handed. I decided a long time ago that null only ever means "nothing's here."</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch the exact moment the two implementations part ways on the identical call.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>pendingApprovals.offer(null)</code> is called — same method, same argument, through a plain <code>Queue&lt;String&gt;</code> reference</span><span class="tag">call</span></li>
+    <li class="open"><span>On a LinkedList-backed queue: <code>offer</code> stores null as an ordinary node, no null check performed, returns true</span><span class="tag">LinkedList</span></li>
+    <li><span><code>poll()</code> later hands that null back — indistinguishable from "the queue is empty"</span><span class="tag">ambiguous</span></li>
+    <li class="open"><span>On an ArrayDeque-backed queue: <code>offer</code> calls <code>addLast</code>, which checks for null BEFORE anything is stored</span><span class="tag">ArrayDeque</span></li>
+    <li><span><code>NullPointerException</code> fires immediately at the call site — nothing was ever added to the array</span><span class="tag">fail fast</span></li>
+    <li class="open"><span>Every other call in the same class — real approver ids, iteration, size() — behaves identically either way</span><span class="tag">everything else fine</span></li>
+  </ol>
+  <p class="hf-annot">Compare steps 2 and 4: same method name, same argument, and the two implementations make opposite decisions about the identical input. Neither one is buggy — LinkedList is documented as permissive, ArrayDeque is documented as strict. The actual bug is trusting the shared Queue interface to guarantee the two behave the same.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">swap <code>Queue&lt;String&gt; pendingApprovals</code> from <code>new LinkedList&lt;&gt;()</code> to <code>new ArrayDeque&lt;&gt;()</code><small>the exact upgrade this page's own advice recommends</small></div>
+    <div class="fan">everywhere that reference gets called ↓</div>
+    <div class="obs">
+      <span>offer(realApproverId) ✓ identical behavior</span>
+      <span class="new">offer(null) as the "auto-approved" sentinel ⚠ NullPointerException, only now</span>
+      <span>poll() / peek() on real elements ✓ identical behavior</span>
+    </div>
+  </div>
+  <p class="hf-annot">Two of the three call sites don't even notice the swap happened. The third was quietly depending on a permissiveness that was never part of the Queue contract — just an accident of which class you'd originally picked.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A team swaps <code>Queue&lt;String&gt; pendingApprovals = new LinkedList&lt;&gt;()</code> for <code>new ArrayDeque&lt;&gt;()</code>, following this page's own advice to avoid legacy or slower structures. One code path calls <code>pendingApprovals.offer(null)</code> to mean "auto-approved, no reviewer needed." What happens after the swap?</p>
+  <button type="button">Nothing changes — Queue is an interface, so every implementation of it accepts the same inputs.</button>
+  <button type="button"><code>offer(null)</code> throws <code>NullPointerException</code> immediately, because ArrayDeque prohibits null elements while LinkedList allowed them.</button>
+  <button type="button"><code>offer(null)</code> silently returns false, and the auto-approval is dropped without any error.</button>
+  <p class="why" data-for="0">Implementing the same interface only guarantees the same method signatures, not the same behavior for every input. <code>Queue</code> explicitly leaves null-handling up to each implementation, and the two you're choosing between land on opposite answers.</p>
+  <p class="why" data-for="1">Right. ArrayDeque checks for null before storing anything and throws rather than silently accepting it — the same design choice ConcurrentHashMap makes for the same reason: keep poll()/get() returning null unambiguous.</p>
+  <p class="why" data-for="2">ArrayDeque doesn't fail quietly here. A false return from offer() is reserved for capacity-restricted queues that are genuinely full. For a null argument specifically, ArrayDeque throws instead of returning a value at all, precisely so the failure can't be mistaken for "queue full" or silently swallowed.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"This container forbids the one value the other container was quietly built on" is not a one-off Deque quirk — it's how Java's whole collections family treats null.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>ConcurrentHashMap in a Spring session cache</h4>
+    <p>Swap <code>Map&lt;String, Session&gt; cache = new HashMap&lt;&gt;()</code> for <code>new ConcurrentHashMap&lt;&gt;()</code> to make a Spring service thread-safe — the same flavor of upgrade this page recommends for queues — and <code>cache.put(sessionId, null)</code> throws <code>NullPointerException</code> immediately. <code>HashMap</code> allows one null key and any number of null values; <code>ConcurrentHashMap</code> forbids both, for the identical reason ArrayDeque forbids null: <code>get()</code> returning null can't be told apart from "the key isn't there," and that ambiguity is actively dangerous once threads are racing.</p>
+    <div class="hf-scatter"><span>same rule, same reason, one layer up in a Spring cache</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Kafka's compacted topics</h4>
+    <p>Distributed queues sometimes swing the other way and give null a deliberate, load-bearing meaning: in a Kafka log-compacted topic, a message with a null value is a documented "tombstone" — an instruction to delete that key during compaction, not a placeholder for nothing happening. Same value that's forbidden elsewhere, opposite decision here, and you have to know which convention the specific queue in front of you picked.</p>
+    <div class="hf-scatter"><span>the mirror image of this exact rule</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>NULL columns vs. no matching row in SQL</h4>
+    <p>A JDBC call that runs <code>resultSet.next()</code> then reads a column conflates two different kinds of "nothing" the same way a permissive queue does: zero rows returned (the record doesn't exist) and one row returned with a NULL column (the record exists, that field was just never set) need completely different handling — and code that treats them the same silently erases the difference between "never provisioned" and "explicitly cleared."</p>
+    <div class="hf-scatter"><span>the database's version of the same ambiguity</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> stacks pop the most recently added item (LIFO), queues serve the oldest item first (FIFO), and ArrayDeque is the modern Java structure that plays both roles fast, replacing the legacy Stack class and LinkedList. <b>The one new sentence this block adds:</b> that upgrade to ArrayDeque quietly stops accepting null, so any older code leaning on null as a stand-in value crashes on the very first call — not because the algorithm changed, but because the container did.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
     <div style="margin:0 0 28px">
       <div class="rt-ctlbar">
         <span class="lbl">Scenario</span>
@@ -747,6 +853,7 @@ DevHubCodeWalk.mount('#cw-stackq',{
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -106,7 +106,112 @@ print("still alive — suppress ate the FileNotFoundError")
   </div>
 
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">Or: the context manager that works perfectly the first time you use it, and only the first time.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You built a transaction context manager with <code>@contextmanager</code>, it passed code review, it passed its first test — and the second <code>with</code> block using the exact same object blows up with a <code>RuntimeError</code> that mentions a generator.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Reuse the instance, break the second call</div>
+  <p>You write the transaction helper correctly — <code>try</code>/<code>finally</code> around the <code>yield</code> and everything: <code>@contextmanager def transaction(conn): tx = conn.begin(); try: yield tx; tx.commit(); except Exception: tx.rollback(); raise</code>. Then, because building it once seems efficient, you save the result and reuse it: <code>tx_cm = transaction(conn)</code> at module scope, then <code>with tx_cm: do_work_a()</code> in one function and <code>with tx_cm: do_work_b()</code> in another.</p>
+  <p>The first <code>with tx_cm</code> works fine. The second raises <code>RuntimeError: generator didn't yield</code>. <code>@contextmanager</code> wraps a <strong>generator</strong> — calling <code>transaction(conn)</code> creates the generator object, and a generator can only run through its body once. The first <code>with</code> block drives it from start to (just past) <code>yield</code> and it's now exhausted. Calling <code>__enter__</code> a second time on that same exhausted generator has nowhere left to go.</p>
+  <div class="hf-scatter">
+    <span>try/finally around yield ✓</span>
+    <span>correct commit/rollback logic ✓</span>
+    <span>reusing the SAME cm instance ⚠</span>
+  </div>
+  <p class="hf-foot">A class-based context manager can often be reused across <code>with</code> blocks. A generator-based one, from <code>@contextmanager</code>, almost never can.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Call the factory function again for every <code>with</code></div>
+  <div class="hf-ladder">
+    <b>Never store the RESULT of calling a <code>@contextmanager</code> function — store the function itself</b>
+    <i>↓ <code>transaction</code> the function is reusable forever; <code>transaction(conn)</code> the generator is not</i>
+    <b>Call it fresh at each <code>with</code> site: <code>with transaction(conn): do_work_a()</code> ... <code>with transaction(conn): do_work_b()</code></b>
+    <i>↓ each call produces a brand-new generator, so each <code>with</code> block gets one full, unused run through <code>__enter__</code>/<code>__exit__</code></i>
+    <b>If you truly need one object reusable across many <code>with</code> blocks, write a class with <code>__enter__</code>/<code>__exit__</code> that resets its own state each time</b>
+    <i>↓ a class instance's methods can run any number of times; a generator's body cannot</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A <code>@contextmanager</code>-decorated function must be called again for every <code>with</code> block — the object it returns is a one-shot generator, not a reusable context manager, no matter how correct the commit/rollback logic inside it looks.
+</div>
+
+<div class="hf-note">Think of <code>@contextmanager</code> like a firework, not a lightbulb. A lightbulb (a class-based context manager, written carefully) can be switched on and off repeatedly. A firework goes off once — light the SAME one twice and nothing happens the second time except a loud complaint, because there's no fuse left to relight.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>The commit/rollback logic is identical to what worked a minute ago. Why does the second <code>with</code> block fail?</p></div>
+  <div class="hf-bub right"><span class="who">The generator object, personified</span><p>Because I'm not the function — I'm one specific RUN of it. You already drove me from my first line to my <code>yield</code> and back. I have no more code left to execute; there's nothing after "resume" to give you.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But I only wrote <code>transaction(conn)</code> once — I thought that was the reusable part.</p></div>
+  <div class="hf-bub right"><span class="who">The <code>transaction</code> function</span><p>I'M the reusable part — call me again and I'll happily hand you a brand-new generator every time. What you saved in <code>tx_cm</code> was the ONE-TIME OUTPUT of calling me, not me.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow <code>tx_cm</code> from creation through its second, doomed <code>with</code>.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>tx_cm = transaction(conn)</code> creates ONE generator object, saved in a variable</span><span class="tag">created once</span></li>
+    <li class="open"><span>First <code>with tx_cm:</code> calls <code>tx_cm.__enter__()</code>, which does <code>next(gen)</code>, running up to <code>yield tx</code></span><span class="tag">enter #1</span></li>
+    <li><span>Block body runs; exiting the <code>with</code> calls <code>__exit__</code>, which resumes the generator past <code>yield</code> to <code>tx.commit()</code></span><span class="tag">exit #1 — generator returns</span></li>
+    <li class="open"><span>The generator has now run off the end of its function body — it's exhausted, permanently</span><span class="tag">exhausted</span></li>
+    <li><span>Second <code>with tx_cm:</code> calls <code>__enter__()</code> again → <code>next(gen)</code> on an already-finished generator</span><span class="tag">enter #2</span></li>
+    <li class="open"><span><code>next()</code> on an exhausted generator has nothing to run; <code>contextlib</code> surfaces this as <code>RuntimeError: generator didn't yield</code></span><span class="tag">RuntimeError</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is invisible from the outside — nothing in the code, the variable name, or the successful first <code>with</code> block tells you the object is now dead weight. A class instance would just sit there, ready to be entered again; a generator quietly becomes unusable the moment it finishes running, and Python won't warn you until the next attempt.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">what "with tx_cm:" is actually asking<small>can this object's __enter__ run again?</small></div>
+    <div class="arrow">what actually happens →</div>
+    <div class="opts">
+      <span>a class instance — yes, its methods just run again</span>
+      <span class="on">a @contextmanager generator — no, it already ran to completion once</span>
+      <span>a plain function reference — n/a, never call it directly with `with`</span>
+    </div>
+  </div>
+  <p class="hf-annot">The <code>with</code> statement's protocol is identical either way — call <code>__enter__</code>, run the body, call <code>__exit__</code> — but what sits behind that protocol determines whether a second call succeeds. A generator-backed context manager can only ever answer "yes" to that question once.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A teammate refactors a database helper to <code>db_lock = file_lock("db.lock")</code> at module import time (where <code>file_lock</code> is decorated with <code>@contextmanager</code>), so every function can just do <code>with db_lock: ...</code> without re-creating it. The app works in dev (one request at a time) and breaks in production on the second concurrent request. Why?</p>
+  <button type="button">File locks aren't safe across multiple OS processes in production</button>
+  <button type="button"><code>db_lock</code> is a single generator object; the first <code>with</code> exhausts it, so every later <code>with db_lock</code> raises <code>RuntimeError</code></button>
+  <button type="button">Module-level variables aren't visible to functions in other files</button>
+  <p class="why" data-for="0">OS-level file lock semantics aren't the issue here — the code never even gets that far a second time, because the Python-level generator wrapping it is already exhausted before a second lock attempt happens.</p>
+  <p class="why" data-for="1">Right — <code>file_lock("db.lock")</code> was called exactly once, at import time, producing one generator. The first request's <code>with db_lock</code> drives it to completion; every subsequent request's <code>with db_lock</code> tries to re-enter an already-finished generator and gets <code>RuntimeError: generator didn't yield</code>.</p>
+  <p class="why" data-for="2">Module-level variables imported correctly are visible everywhere that imports the module — that's not the failure here. The failure is what kind of object <code>db_lock</code> is, not whether other files can see it.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Works once, silently dead after that" is a whole category of Python — and software — bugs.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Python: reusing an exhausted iterator</h4>
+    <p><code>it = iter(some_list); list(it); list(it)</code> — the second <code>list(it)</code> returns <code>[]</code>, not the same items again, because an iterator (which a generator also is) tracks its own position and can't rewind. The generator-based context manager is this same "already consumed, nothing left" behaviour wearing a <code>with</code>-statement costume.</p>
+    <div class="hf-scatter"><span>an iterator/generator remembers where it stopped — permanently</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Java: reading an <code>InputStream</code> twice</h4>
+    <p>An <code>InputStream</code> (from an HTTP response body, a socket, a file) can typically be read start-to-finish exactly once — call <code>.read()</code> again after reaching EOF and you get <code>-1</code> or nothing, not the data replayed. Wrapping it in a "reusable" helper doesn't change that the underlying stream is a one-pass resource, same as the generator underneath <code>@contextmanager</code>.</p>
+    <div class="hf-scatter"><span>a stream position, once past the end, doesn't reset itself</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>JavaScript: awaiting a Promise that's already settled twice, expecting it to re-run</h4>
+    <p>A Promise executes its work once, the moment it's created, and every subsequent <code>.then()</code> just replays the already-computed result — it never re-runs the underlying async function. Someone expecting "calling <code>.then()</code> again reruns the fetch" is making the exact same "one object, one run" mistake as reusing a context-manager generator.</p>
+    <div class="hf-scatter"><span>the work already happened; you're just re-reading its outcome</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> <code>with</code> guarantees <code>__enter__</code>/<code>__exit__</code> run in pairs on every exit path, <code>__exit__</code> sees the exception (and a truthy return swallows it), and <code>@contextmanager</code> turns a try/finally-wrapped generator into that same protocol with far less boilerplate. <b>The one new sentence this block adds:</b> the generator <code>@contextmanager</code> hands you is single-use — save the CALL, not the result, or the second <code>with</code> block gets a <code>RuntimeError</code> instead of your teardown logic.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="pycmSeg">
@@ -317,6 +422,7 @@ DevHubCodeWalk.mount('#cw-pycm',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

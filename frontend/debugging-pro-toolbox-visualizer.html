@@ -42,6 +42,184 @@
     <div class="intro-ciam"><span class="tag">The CIAM parallel:</span> a login request in this codebase crosses at least three log-owning layers — Angular's HTTP interceptor, the Spring filter chain (<code>CustomAuthFilter</code>, then the identity provider call), and the JDBC repo layer underneath it. Without a correlation ID, a failed login shows up as three unrelated-looking log lines in three places. With one — generated the moment the request hits Angular and threaded through every hop, including the outbound call to Ping or Entra — <code>grep correlationId=a1b2c3</code> reconstructs the whole request's path in one shot. Scenario ③ below walks through exactly that.</div>
   </div>
 
+<p class="hf-deck">or, your correlation ID stops at the thread boundary — and the part of the request you were actually investigating is the part with no ID on it</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You grep one ID, get a clean four-line story, and quietly lose the four seconds in the middle where the bug lives.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle"><code>grep a1b2c3 app.log</code> returns four lines. The slow part of the request logged three more, and none of them matched.</div>
+  <p>The filter generated <code>a1b2c3</code>, put it in MDC, and every layer below it logged beautifully:
+  filter, service, repo, outbound call. Then the service called an <code>@Async</code> provisioning
+  method — the one that takes four seconds, calls Entra, and is the entire reason you are reading
+  these logs. Those lines are in the file. You can find them by timestamp. They just don't have your
+  ID on them, so your grep says the request ended at the repo layer.</p>
+  <p>MDC is a <b>thread-local</b> map. The servlet thread has one; the pool thread running your async
+  task has its own, and it is empty. So <code>%X{correlationId}</code> renders nothing — no exception,
+  no warning, no gap in the pattern, because rendering an absent MDC key is a completely normal thing
+  for a layout to do. The same boundary breaks every other thread-local you rely on at the same time,
+  and it is not only <code>@Async</code>: an <code>ExecutorService</code>, a
+  <code>CompletableFuture.supplyAsync</code>, a parallel stream and a reactive scheduler hop all do
+  it. Correlation IDs give you one searchable story <i>per thread</i>, which nobody ever says out
+  loud, because within a plain servlet request the two happen to be the same thing.</p>
+  <div class="hf-scatter">
+    <span>filter generated and bound the ID ✓</span>
+    <span>every synchronous layer logged it ✓</span>
+    <span>MDC.clear() in a finally, correctly ✓</span>
+    <span>the pool thread's MDC map is empty ⚠</span>
+    <span>%X renders blank and nothing complains ⚠</span>
+  </div>
+  <p class="hf-foot">A trace that goes quiet exactly where the work got interesting is the shape of a
+  lost context, not the shape of a request that finished.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Carry the context across the boundary on purpose</div>
+  <div class="hf-ladder">
+    <b>Make the absence visible before anything else: log the pattern as <code>%X{correlationId:-NO-ID}</code></b>
+    <i>↓ a blank renders as nothing and reads as normal; <code>NO-ID</code> is a thing you notice on line one of the file and can grep for on its own</i>
+    <b>Copy the map at the submission point with a <code>TaskDecorator</code>: capture <code>MDC.getCopyOfContextMap()</code> on the calling thread, apply it inside the task, clear it in a finally</b>
+    <i>↓ capture has to happen where the context still exists — inside the task it is already too late, and the clear matters because a pooled thread will run someone else's task next</i>
+    <b>Use the framework's propagating wrappers where they exist rather than hand-rolling each one</b>
+    <i>↓ Spring Security ships <code>DelegatingSecurityContextExecutor</code> for exactly this problem, and Micrometer's context propagation carries observation context through reactive and async hops</i>
+    <b>Then verify the way you'd verify anything else: fire one request, grep the ID, and count whether every layer you expect to see is in the output</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Every tool in this toolbox carries context that belongs to something — and the boundary where
+  that something ends is invisible until it costs you.</b> MDC belongs to a thread. A conditional
+  breakpoint belongs to a process. A thread dump belongs to an instant. A heap dump belongs to one
+  JVM among the twelve behind your load balancer. None of them announce their edges; they just return
+  less than you assumed, formatted exactly like a complete answer. So when a professional-grade tool
+  gives you a clean, confident, <i>short</i> result, the question worth asking is not "what does this
+  tell me" but "what is this incapable of seeing, and did my bug happen there?"
+</div>
+
+<p class="hf-big">MDC rides in the thread's pocket, not in the request's passport.</p>
+
+<div class="hf-note">It is a relay race where nobody told the second runner about the baton. The first leg
+is run perfectly, the handoff zone passes in silence, and the second runner sprints off
+empty-handed — fast, correct, and untraceable. <b>Context does not follow the work; somebody has to
+hand it over.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>The correlation ID is missing on exactly the three log lines I care about. Did the filter fail?</p></div>
+  <div class="hf-bub right"><span class="who">The CorrelationIdFilter</span><p>No — I bound the ID to the servlet thread and cleared it afterwards, exactly as written. Everything that ran on <i>that</i> thread carries it. Your provisioning task didn't.</p></div>
+  <div class="hf-bub"><span class="who">The task executor's pool thread</span><p>That's me. I got handed a <code>Runnable</code>, not a context. My MDC map is whatever was left on me from the last task I ran — usually nothing. Nobody asked me to copy anything across, so I didn't.</p></div>
+  <div class="hf-bub right"><span class="who">The log pattern</span><p>And I rendered <code>%X{correlationId}</code> as an empty string, because that is what an absent key renders as. If you'd written <code>%X{correlationId:-NO-ID}</code> you'd have spotted this in about four seconds instead of an afternoon.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one ID until the exact line where it stops existing.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>CorrelationIdFilter</code> generates <code>a1b2c3</code> and calls <code>MDC.put</code> — writing into a map attached to <b>this</b> thread, <code>http-nio-8080-exec-4</code></span><span class="tag">thread-local from the first instruction</span></li>
+    <li class="open"><span>Controller, service and JDBC repo all log on that same thread. <code>%X{correlationId}</code> finds the key each time and prints it</span><span class="tag">the part of the trace that works</span></li>
+    <li><span>The service calls an <code>@Async</code> method. Spring submits a task to the executor and <b>returns immediately</b>; the work is now queued for a different thread</span><span class="tag">the boundary, crossed silently</span></li>
+    <li class="open"><span><code>task-exec-2</code> picks it up. Its MDC map is its own and empty — nothing about submitting a task copies thread-local state</span><span class="tag">no error, because nothing is wrong</span></li>
+    <li><span>The task logs three lines. <code>%X{correlationId}</code> finds no key and renders an empty string, so the lines look ordinary and carry no ID</span><span class="tag">an absence that is formatted like a presence</span></li>
+    <li class="open"><span>Your grep returns four lines. You conclude the request completed at the repo layer — and the four seconds you were hired to explain are not in the result set at all</span><span class="tag">the wrong conclusion, drawn confidently</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the one worth sitting with. A missing correlation ID is not a broken log
+  line; it is an <i>ordinary</i> log line that quietly fails to join the story you're assembling. That
+  makes it strictly worse than a crash, because a filtered-out line looks exactly like a line that was
+  never written, and both of them look like "nothing happened here" when you grep.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">a log line inside the <code>@Async</code> task asks for <code>correlationId</code><small>which MDC map actually answers?</small></div>
+    <div class="arrow">what the layout reads →</div>
+    <div class="opts">
+      <span>the servlet thread's map (what you assumed)</span>
+      <span class="on">this pool thread's own map — empty</span>
+      <span>a shared per-request context</span>
+    </div>
+  </div>
+  <p class="hf-annot">There is no per-request context anywhere in this picture, and that is the whole
+  misconception. "Correlation ID" sounds like a property of the request, so you reason about it as if
+  the request carries it; the implementation is a map bolted to a thread, and the request stopped
+  being one thread the moment you typed <code>@Async</code>. Every fix — a task decorator, a
+  delegating executor, reactive context propagation — is some form of copying that map across by
+  hand.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A login is traced as <code>correlationId=a1b2c3</code>: filter, service and repo lines
+  all carry it. The service then calls an <code>@Async</code> provisioning method that runs for four
+  seconds and writes three log lines — those lines are in the file, at the right timestamps, but
+  <code>grep a1b2c3</code> doesn't return them. Why?</p>
+  <button type="button">Logback wrote those lines before the MDC map reached the appender, so the ID exists in memory but never made it to disk — raising <code>immediateFlush</code> on the file appender will make subsequent lines carry it</button>
+  <button type="button">MDC is thread-local: the task runs on a pool thread with its own empty map, so <code>%X{correlationId}</code> rendered as nothing</button>
+  <button type="button">The filter's <code>finally</code> block cleared the MDC before the async task logged</button>
+  <p class="why" data-for="0"><code>immediateFlush</code> is real — it controls whether an appender
+  flushes its output stream after each event — but it governs <i>when</i> bytes reach disk, never
+  <i>what</i> a pattern renders. The lines were written completely and promptly; they were written
+  without an ID because there was no ID on that thread to render. Any explanation involving buffering
+  has to account for the fact that the rest of each line is perfectly intact.</p>
+  <p class="why" data-for="1">Right. Submitting a task copies a <code>Runnable</code>, not the calling
+  thread's thread-locals, so the pool thread starts with an empty map and the layout renders an empty
+  string for a key that isn't there. Fix it at the submission point with a <code>TaskDecorator</code>
+  that captures <code>MDC.getCopyOfContextMap()</code> on the caller, applies it inside the task and
+  clears it in a <code>finally</code> — and make the failure loud in the meantime with
+  <code>%X{correlationId:-NO-ID}</code> so a missing ID is something you can see and grep for.</p>
+  <p class="why" data-for="2">A sharp answer, and worth being precise about why it isn't this one. The
+  filter's <code>finally</code> clear does matter — servlet containers reuse threads, so without it
+  one request's ID leaks onto the next request unlucky enough to land on the same thread. But
+  clearing affects the <b>servlet</b> thread's map, and the task is reading a different thread's map
+  entirely. Delete the <code>clear()</code> and those three lines would still have no ID; you would
+  just have added a second bug.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">The same thread boundary drops three other things you are relying on, and only one of them fails loudly.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4><code>SecurityContextHolder</code> goes empty on the same line</h4>
+    <p>Spring Security's context is thread-local too, so the <code>@Async</code> method that lost your
+    correlation ID also lost the authenticated principal — <code>getAuthentication()</code> comes back
+    <code>null</code>, <code>@PreAuthorize</code> fails, auditing records no actor. This one at least
+    throws, which is why people meet it first. The fix is the same shape: a
+    <code>DelegatingSecurityContextExecutor</code>, or a strategy that propagates the context to child
+    threads, deliberately configured.</p>
+    <div class="hf-scatter"><span>same boundary, same cause, louder failure</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>The transaction doesn't come with you either</h4>
+    <p>Spring binds the current transaction and its connection to the thread, so work handed to another
+    thread runs outside it: no rollback together, no shared connection, and lazy JPA associations that
+    worked in the caller blow up in the task. "Async and transactional" is not a combination you get by
+    stacking two annotations — it is a design decision about what commits with what.</p>
+    <div class="hf-scatter"><span>@Async inside @Transactional is two transactions, or none</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>And nothing crosses a process boundary for free</h4>
+    <p>This page's scenario ③ sends <code>X-Correlation-Id</code> on the outbound call to Ping or Entra
+    for precisely this reason, and it is the same reason W3C trace context standardises a
+    <code>traceparent</code> header: context propagates only where somebody explicitly propagates it.
+    A thread hop is just the smallest boundary in that family — the one that looks like it's still the
+    same code, on the same machine, in the same request.</p>
+    <div class="hf-scatter"><span>every boundary needs a hand-off, including the invisible ones</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  This page is the toolbox you reach for once print statements and stepping stop scaling: bisect for
+  "which commit", conditional breakpoints for "which iteration", logpoints for "what's happening
+  without stopping it", correlation IDs for "what did this one request do everywhere", dumps and
+  profilers for "what is every thread doing right now". <b>The new sentence: a correlation ID is
+  thread-local, not request-local, so the moment work hops to another thread the ID silently stops
+  appearing — and a trace that goes quiet reads exactly like a request that finished.</b> Now predict:
+  you add a <code>TaskDecorator</code> that copies the MDC map into the pool thread but forget to clear
+  it afterwards. What does the <i>next</i> task on that thread log — and would you rather debug a
+  missing correlation ID or a confidently wrong one?
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
@@ -271,6 +449,7 @@ DevHubCodeWalk.mount('#cw-dbgtool',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -141,7 +141,108 @@ console.log('complete("do"):', trie.complete("do").join(", "));
   </div>
 
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, the insert() call that deletes a completely different word</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You add ONE new word to a compressed trie, and an entirely different word that's been sitting there safely for months quietly stops existing.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">insert("toast") makes search("toaster") return false</div>
+  <p>Take the radix trie from earlier on this page — "test", "team", "toaster" compressed down to 4 nodes, with the edge <code>"oaster"</code> hanging off the <code>t</code> node, leading to the end-flag for "toaster". Now insert <code>"toast"</code>. After consuming the shared leading <code>t</code>, the new word has <code>"oast"</code> left over, and the existing edge is <code>"oaster"</code> — not equal, and "oast" doesn't fully consume it by walking off the end either. It's a partial overlap: <code>"oast"</code> is a proper prefix of <code>"oaster"</code>.</p>
+  <p>An insert() that only ever handles "the remainder exactly matches this edge" or "no edge exists yet, make one" doesn't have a branch for that. Its fallback is the obvious-looking one: replace whatever's at this slot with a new edge for the leftover word. That single line doesn't just add "toast" — it throws away the old <code>"oaster"</code> edge object entirely, taking "toaster"'s continuation, and its end-flag, with it.</p>
+  <div class="hf-scatter">
+    <span>search("toast") now returns true ✓</span>
+    <span>search("test") and search("team") are untouched ✓</span>
+    <span>search("toaster") silently flips from true to false ⚠</span>
+  </div>
+  <p class="hf-foot">No exception. No warning. The trie doesn't know anything is wrong — as far as it's concerned, "toaster" was never inserted at all.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Compare against the SHARED prefix length, not equality or containment</div>
+  <div class="hf-ladder">
+    <b>Compute cp = the length of the common prefix between the remaining word and the edge's label</b>
+    <i>↓ this single number tells you which of the three real cases you're in — equality and containment are just cp equalling one string's full length</i>
+    <b>If cp reaches the end of the edge label, keep walking into its child node with whatever's left of the word</b>
+    <i>↓ this is the only case a naive insert actually handles — full consumption of the existing edge</i>
+    <b>If cp is less than BOTH lengths, split: build a new node for the shared cp-length prefix, and hang the OLD edge's remaining suffix and the NEW word's remaining suffix off it as two separate children</b>
+    <i>↓ this is the missing case — the split preserves what was already there instead of overwriting it</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A compressed trie edge is a promise about an entire span of characters, not a single one.</b> Inserting a word that only shares PART of that span with an existing edge doesn't fit either of the two easy cases — it demands a split into a shared node with two children, and skipping that case doesn't fail loudly, it silently discards whatever the original edge used to lead to.
+</div>
+
+<div class="hf-note">In an uncompressed trie, one new node never threatens an old one — nodes are one character each. <b>Compression is exactly what makes this possible</b>: the moment an edge represents more than one character, inserting near it can require surgery on that edge, not just an addition beside it.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I only added "toast" — I never touched "toaster". How did it disappear?</p></div>
+  <div class="hf-bub right"><span class="who">The "oaster" edge, personified</span><p>You didn't touch me on purpose. Your insert() function looked at what was left of "toast" after the shared 't', saw it didn't match me exactly, and decided the simplest fix was to replace me. I was carrying "toaster"'s entire second half. It went with me.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Why didn't it just split you instead?</p></div>
+  <div class="hf-bub right"><span class="who">The edge</span><p>Because nobody wrote that branch. "Exactly matches" and "doesn't exist yet" are easy to picture. "Partially overlaps, so cut me into a shared piece and two leftovers" takes actually thinking about what a compressed edge represents.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Trace the exact insert on the exact trie from earlier on this page.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Starting trie: t → {e → {"st"[end→test], "am"[end→team]}, "oaster"[end→toaster]}</span><span class="tag">4 nodes, matches the diagram above</span></li>
+    <li><span>insert("toast"): consume shared 't', remaining = "oast"</span><span class="tag">look up edge starting with 'o'</span></li>
+    <li class="open"><span>Found edge "oaster". Naive check #1: does "oast" equal "oaster"? No.</span><span class="tag">first branch fails</span></li>
+    <li><span>Naive check #2: does "oast" fully consume "oaster" (i.e. is "oaster" a prefix of "oast")? No — "oaster" is longer.</span><span class="tag">second branch fails</span></li>
+    <li class="open"><span>Fallback: replace node's 'o'-edge outright with a fresh edge {"oast", isEnd}</span><span class="tag">the old "oaster" edge object is gone</span></li>
+    <li><span>search("toaster") walks t → looks for an edge starting with 'o' → finds "oast", not "oaster" → mismatch → returns false</span><span class="tag">silent data loss</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the entire bug, and it never raises an exception because overwriting a dictionary entry is a completely ordinary, legal operation from the language's point of view. The trie's own invariant — one edge per starting character, and that edge accounts for a whole span — is a rule insert() has to enforce itself. Nothing enforces it for you.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>new word is a proper prefix of the edge label</span><span>edge label is a proper prefix of the new word, missed by an off-by-one containment check</span><span>new word and edge share only a partial prefix, then diverge entirely</span></div>
+    <div class="funnel">insert() replaces the whole edge object instead of splitting it ↓</div>
+    <div class="instance">An unrelated, already-inserted word silently disappears<small>search() returns false, no exception, no warning, no log line</small></div>
+  </div>
+  <p class="hf-annot">All three causes are really the same missing branch wearing different costumes — "partial overlap that isn't handled." Whichever flavor triggers it, the visible symptom is identical: a word that used to be found, isn't, and nothing in the code path ever noticed.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your radix trie already correctly stores "test", "team", and "toaster" (4 nodes, matching the diagram earlier on this page). You call insert("toast") using an insert() that only handles "the remainder exactly matches this edge" and "no edge exists yet, create one." What does search("toaster") return immediately afterward?</p>
+  <button type="button">Still true — inserting an unrelated new word can't affect a different word that was already correctly stored</button>
+  <button type="button">False — the naive insert replaced the "oaster" edge with a new "oast" edge instead of splitting it, taking "toaster"'s continuation and end-flag with it</button>
+  <button type="button">It throws an exception, because "toast" and "toaster" share a prefix and a trie doesn't allow one word to be a prefix of another</button>
+  <p class="why" data-for="0">That would be true for the uncompressed, one-character-per-node trie earlier on this page — a new node there never threatens an existing one. It's not true once edges represent multi-character spans, because inserting can require surgery on an existing edge instead of just adding beside it.</p>
+  <p class="why" data-for="1">Right. The naive insert hits the partial-overlap case ("oast" vs "oaster"), has no split branch, and falls back to overwriting the edge outright — which deletes the "er" continuation and the end-flag "toaster" depended on, with no error of any kind.</p>
+  <p class="why" data-for="2">Tries are explicitly built to allow one word to be a prefix of another — that's exactly what the isEnd flag sitting mid-path is for, as shown earlier on this page with "app" and "apple." Nothing about that relationship throws; the corruption here is silent, not an exception.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">An edit that only handles the two easy cases — exact match, or no overlap at all — and silently destroys data the moment reality lands in between.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>B-tree index page splits</h4>
+    <p>A database index page holds a sorted range of keys. Insert a key that overflows the page, and the engine has to split it into two pages and rewire the parent pointer — skip that split and you don't get an error, you get a page silently holding keys it was never supposed to, with the parent no longer pointing at a consistent structure.</p>
+    <div class="hf-scatter"><span>overflow demands a split, not an overwrite</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>CSS shorthand properties overwrite sibling values you never touched</h4>
+    <p>Set <code>margin-top: 40px</code> in one rule, then <code>margin: 10px</code> in a later one, and the top margin silently becomes 10px too — the shorthand doesn't merge with what was already there, it replaces the entire group of longhand values, including the one you had no intention of changing.</p>
+    <div class="hf-scatter"><span>meant to add one thing, replaced the whole group</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Regex alternation matches leftmost-FIRST, not leftmost-longest</h4>
+    <p>The pattern <code>toast|toaster</code> run against the text "toaster" in Java, PCRE, or JavaScript matches just "toast" and stops there — these engines try alternatives in the order you wrote them and take the first one that fits, they don't search for the longest possible match the way POSIX regex does.</p>
+    <div class="hf-scatter"><span>same two words, a different engine, the same "prefix wins early" trap</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a trie stores strings as shared paths through a tree, giving O(L) insert/search and cheap prefix operations, and a radix (compressed) trie collapses single-child chains into multi-character edges to save space. <b>The one new sentence this block adds:</b> inserting into a compressed trie can require splitting an existing edge, and an insert() that skips that case doesn't error — it silently deletes whatever that edge used to lead to.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -1020,6 +1121,7 @@ setTimeout(()=>{drawTrie('','');},100);
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

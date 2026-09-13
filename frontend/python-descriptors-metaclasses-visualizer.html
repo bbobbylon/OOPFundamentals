@@ -99,7 +99,112 @@ except ValueError as e:
   </div>
 
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">Or: the descriptor you wrote perfectly, that Python never once calls.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You copy-paste a validated-attribute descriptor into <code>__init__</code> instead of the class body — one line of difference — and every validation check inside it just... never runs, with no error, ever.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The validator that silently stops validating</div>
+  <p>Your <code>Positive</code> descriptor from earlier in this lesson works fine as a class attribute: <code>class Account: balance = Positive()</code>. But in a different class, written under deadline, you build the object inside <code>__init__</code> instead: <code>class Account: def __init__(self, balance): self.balance = Positive(); self.balance = balance</code> — one statement assigns the descriptor, the next assigns the actual value, both look like ordinary attribute assignment.</p>
+  <p><code>account.balance = -500</code> now succeeds. No <code>ValueError</code>, ever, for any value. The descriptor protocol only activates when Python finds a descriptor object on the <strong>class</strong> — via <code>type(obj).__mro__</code> — not when it finds one sitting in <code>instance.__dict__</code>. <code>self.balance = Positive()</code> just stores a plain <code>Positive</code> instance as a normal attribute VALUE. The very next line, <code>self.balance = balance</code>, then overwrites that value entirely — the descriptor object is garbage before the constructor even returns.</p>
+  <div class="hf-scatter">
+    <span>Positive class itself is correct ✓</span>
+    <span>__get__/__set__ methods work when tested standalone ✓</span>
+    <span>where the descriptor was assigned ⚠</span>
+  </div>
+  <p class="hf-foot">You built a lock. You just left it sitting on the floor instead of bolting it to the door.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Descriptors are declared on the class, never assigned in <code>__init__</code></div>
+  <div class="hf-ladder">
+    <b>Move the descriptor to a class-level assignment: <code>class Account: balance = Positive()</code></b>
+    <i>↓ this runs once, when the class itself is being built, so <code>Positive()</code> becomes part of <code>Account</code>'s own namespace — exactly where <code>type.__getattribute__</code> looks</i>
+    <b>In <code>__init__</code>, only ever ASSIGN a value through it — never re-assign the descriptor itself: <code>def __init__(self, balance): self.balance = balance</code></b>
+    <i>↓ this now goes through <code>Positive.__set__</code>, because Python finds the descriptor on the class first and routes the assignment through it</i>
+    <b>If you need per-instance validators with different bounds, parameterize the descriptor's <code>__init__</code>, not its placement — <code>balance = Bounded(0, 10_000)</code> on the class, still</b>
+    <i>↓ the descriptor OBJECT lives on the class either way; only the bounds it enforces vary</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A descriptor only works when it is found on the <strong>class</strong>, via the normal class attribute lookup Python already does for you — put the exact same object on an instance instead, and it's just an inert value sitting in <code>__dict__</code>, indistinguishable to Python from any other attribute.
+</div>
+
+<div class="hf-note">Think of a descriptor like a house rule posted on the FRONT DOOR of the building (the class) — every tenant (instance) who walks through automatically obeys it. Taping that exact same rule to the inside of one apartment's fridge (an instance's <code>__dict__</code>) means nobody walking through the front door ever sees it — it's real paper, it says the right words, and it governs nothing.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I wrote <code>__set__</code> to raise on negative values. I tested it in isolation and it works. Why does <code>account.balance = -500</code> just... succeed?</p></div>
+  <div class="hf-bub right"><span class="who">Python's attribute lookup, personified</span><p>Because I never called your <code>__set__</code> at all. When I see <code>obj.balance = x</code>, I check <code>type(obj)</code>'s namespace for a data descriptor named <code>balance</code> BEFORE I touch <code>obj.__dict__</code>. Your <code>Positive</code> instance is sitting inside <code>obj.__dict__</code>, not on the class — I never look there for descriptors.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But I definitely assigned a <code>Positive()</code> object to <code>self.balance</code>.</p></div>
+  <div class="hf-bub right"><span class="who">The Positive object itself</span><p>You did — and then the very next line, <code>self.balance = balance</code>, overwrote me with a plain number. I existed for one statement. I never got the chance to intercept anything.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Trace exactly where Python looks, and why the instance-assigned descriptor is invisible to it.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>class Account:</code> body executes; if <code>balance = Positive()</code> is HERE, it's stored in <code>Account.__dict__["balance"]</code></span><span class="tag">class-level path</span></li>
+    <li class="open"><span><code>__init__</code> runs; <code>self.balance = Positive()</code> instead stores it in <code>instance.__dict__["balance"]</code></span><span class="tag">instance-level path</span></li>
+    <li><span><code>self.balance = balance</code> (the very next line) OVERWRITES that entry with a plain int</span><span class="tag">descriptor discarded</span></li>
+    <li class="open"><span>Later: <code>account.balance = -500</code> triggers <code>object.__setattr__</code></span><span class="tag">assignment</span></li>
+    <li><span>Python checks <code>type(account).__mro__</code> for a data descriptor named <code>balance</code> — finds none, because it was never placed there</span><span class="tag">lookup misses</span></li>
+    <li class="open"><span>Falls back to plain <code>instance.__dict__["balance"] = -500</code> — ordinary assignment, no validation, no error</span><span class="tag">silent success</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the trap within the trap: even someone who catches "wait, I put the descriptor in <code>__init__</code>" and fixes only the SECOND line still has a bug, because the descriptor object from line 2 is already gone by the time line 3 runs. The fix has to move the descriptor itself up to the class body — nothing you do later in <code>__init__</code> can resurrect it.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">type(account).__mro__ — where Python looks for a DATA descriptor first</span>
+      <div class="ring"><span class="lbl">Account's own class __dict__</span>
+        <div class="ring"><span class="lbl">only checked if the class body itself put "balance" here</span>
+          <div class="core">If found: __set__ runs, validation happens<small>if NOT found, Python falls through to plain instance __dict__ — no validation, ever</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">The descriptor protocol is nested lookup, outside-in: class hierarchy first, instance dict second, and only for a NAME Python is already resolving via ordinary attribute access. An object assigned in <code>__init__</code> never enters that outer ring at all — it lands directly in the instance <code>__dict__</code>, the innermost, last-resort layer, where a descriptor object is just inert data.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">You refactor <code>class User: role = RoleField()</code> (a working class-level descriptor) into a factory function: <code>def make_user(name): u = User.__new__(User); u.role = RoleField(); return u</code>, trying to set a default role per instance. What happens when code later does <code>u.role = "admin"</code>?</p>
+  <button type="button">It just stores the string "admin" as a plain attribute — <code>RoleField.__set__</code> never runs, because <code>u.role = RoleField()</code> put the descriptor on the INSTANCE, not the class</button>
+  <button type="button">It raises a <code>TypeError</code>, because you can't assign a descriptor instance outside the class body</button>
+  <button type="button">It works exactly like the class-level version, since <code>u.role</code> still refers to a <code>RoleField</code> object either way</button>
+  <p class="why" data-for="0">Right — <code>u.role = RoleField()</code> inside the factory function is an instance assignment, indistinguishable to Python from assigning any other value. The descriptor protocol never engages because Python never finds a descriptor on <code>type(u)</code> — <code>User</code> itself has no <code>role</code> attribute here at all.</p>
+  <p class="why" data-for="1">Python raises no error for this — it's syntactically identical to any other attribute assignment. That's exactly what makes it dangerous: nothing warns you at the moment you make the mistake.</p>
+  <p class="why" data-for="2">It does NOT work like the class-level version. On the class, <code>role = RoleField()</code> lives in <code>User.__dict__</code>, where the protocol looks. On the instance, that same object sits in <code>u.__dict__</code>, which the protocol never checks for descriptors — the object being a <code>RoleField</code> is irrelevant once it's in the wrong dictionary.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Put it in the wrong scope and the mechanism that would have used it never sees it" repeats across languages.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java: an <code>@Override</code>d method with the wrong signature</h4>
+    <p>Add an extra parameter to what you meant as an override and Java silently treats it as a brand-new overload instead — the base class's dispatch never routes to your method, with no compiler error unless you remembered <code>@Override</code> (which catches only THIS specific mismatch). A descriptor in the wrong dict is the same shape of "looks connected, isn't" failure.</p>
+    <div class="hf-scatter"><span>the right code, filed under the wrong lookup key</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Spring: a <code>@Bean</code> method that isn't inside a <code>@Configuration</code> class</h4>
+    <p>Write a perfectly correct <code>@Bean public DataSource ds() {...}</code> method on a plain class instead of one annotated <code>@Configuration</code>, and Spring's component scan never registers it — the method is 100% valid Java, it just isn't in a place Spring's mechanism looks for bean definitions.</p>
+    <div class="hf-scatter"><span>correct code that the framework's scan never reaches</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Angular: a provider registered on a component instead of the module/root</h4>
+    <p>Registering a service in a child component's <code>providers</code> array (instead of at the module or root level) gives that component and its children their OWN instance, invisible to the rest of the app that expected a shared singleton via DI — the service works, injection succeeds, and it's still silently the wrong instance because of where it was declared.</p>
+    <div class="hf-scatter"><span>DI resolves scope by declaration site, not by intention</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> descriptors (<code>__get__</code>/<code>__set__</code>) power <code>@property</code>, methods, and ORM fields by intercepting attribute access declared on a class, and metaclasses control class creation itself — with lighter hooks like <code>__init_subclass__</code> covering most everyday needs. <b>The one new sentence this block adds:</b> a descriptor only works from the class's own namespace — assign the exact same object to an instance instead, and it becomes an inert value the protocol never looks at.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="pymetaSeg">
@@ -311,6 +416,7 @@ DevHubCodeWalk.mount('#cw-pymeta',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

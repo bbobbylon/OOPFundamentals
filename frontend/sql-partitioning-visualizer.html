@@ -47,6 +47,107 @@
       </div>
     </div>
     <div class="intro-ciam"><span class="tag">Partitioning in a CIAM stack:</span> a <code>login_events</code> or <code>audit_log</code> table is the textbook range-partitioning case — partition by month, keep 90 days queryable, and <code>DROP</code> (not <code>DELETE</code>) the partitions older than your retention policy in O(1) instead of a table-locking bulk delete. If you ever shard <code>users</code> across tenants, shard by <code>tenant_id</code>, not by <code>user_id</code> — nearly every CIAM query (login, session list, permission check) is scoped to one tenant, so tenant_id as the shard key keeps almost everything single-shard; user_id as the shard key would force cross-shard fan-out on routine tenant-wide admin queries.</div>
+<p class="hf-deck">or, the id column that stopped meaning what everyone assumed</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Postgres won't even let you keep your old primary key once you partition the table.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle"><code>ERROR: unique constraint on partitioned table must include all partitioning columns</code></div>
+  <p>You take an existing <code>orders(id bigserial PRIMARY KEY, customer_id, created_at, total)</code> table and add <code>PARTITION BY RANGE (created_at)</code> because this page already sold you on it — range partitioning by date, drop old partitions in O(1). You try to keep the schema otherwise identical: <code>PRIMARY KEY (id)</code>, same as before. Postgres refuses to create it. Not a warning — a hard error at <code>CREATE TABLE</code> time.</p>
+  <p>The fix everyone reaches for is obvious: make the key composite, <code>PRIMARY KEY (id, created_at)</code>. Postgres accepts it immediately, and it feels like you're done. But that fix quietly changes what "unique" means: uniqueness is only enforced <em>within each partition's own local index</em>, never across the whole table. Nothing stops <code>id = 42</code> from existing in both <code>orders_2026_01</code> and <code>orders_2026_03</code> at once — two completely different orders, same id, and Postgres considers both perfectly valid.</p>
+  <div class="hf-scatter">
+    <span>added the partition key to the primary key, as required ✓</span>
+    <span>CREATE TABLE succeeds, no more errors ✓</span>
+    <span>id alone no longer identifies a unique row anywhere in the table ⚠</span>
+  </div>
+  <p class="hf-foot">Every step here was forced on you by Postgres's own rule, followed correctly. The surprise is what the rule quietly gives up in exchange: your "primary key" moved from guaranteeing one thing (id is globally unique) to guaranteeing a weaker one (id is unique per date range) without changing its name.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Decide where global uniqueness actually has to live</div>
+  <div class="hf-ladder">
+    <b>Generate ids that are unique by construction, not by index</b>
+    <i>↓ a UUID, or a Snowflake-style id that encodes a timestamp/shard bit, is globally unique whether or not any single index ever sees every row — the partitioned composite key becomes a performance detail, not your only defense</i>
+    <b>If you must keep a bigserial id, treat (id, created_at) as the real key everywhere</b>
+    <i>↓ every foreign key, every API lookup, every cache key has to carry BOTH columns from then on — "just look it up by id" quietly stopped being true the moment the table was partitioned</i>
+    <b>Add an application-level or trigger-based global-uniqueness check only if you truly can't change either</b>
+    <i>↓ this reintroduces exactly the cross-partition coordination cost that made partitioning attractive in the first place — worth naming as a deliberate trade-off, not something you discover in an incident</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A unique or primary-key index on a partitioned table can only be enforced inside each partition's own local B-tree, so Postgres forces you to add the partition key to it — and that same forcing function quietly downgrades "globally unique" to "unique within one partition," under the identical constraint name.
+</div>
+
+<div class="hf-note">Partitioning a table doesn't just split its ROWS across files — it can silently split what your <b>primary key even means</b>. The column is still called <code>id</code>. It stopped being a single source of truth the moment <code>created_at</code> joined it in the key.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I added created_at to the primary key like Postgres demanded. Why do I now have two rows with id=42?</p></div>
+  <div class="hf-bub right"><span class="who">Postgres</span><p>I never promised id=42 was unique across the whole table — only within whichever partition each row landed in. That was true the moment you made the key composite; it just wasn't obvious.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So the "primary key" on this table means something different now than it did before I partitioned it?</p></div>
+  <div class="hf-bub right"><span class="who">The composite index, per partition</span><p>Same name, smaller promise. I guard my own partition's rows. Nobody's watching across the boundary.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one attempt to insert a duplicate id into two different partitions.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>orders</code> is partitioned by range on <code>created_at</code>, key is <code>(id, created_at)</code></span><span class="tag">schema</span></li>
+    <li class="open"><span>Row A: <code>id=42, created_at='2026-01-15'</code> lands in partition <code>orders_2026_01</code></span><span class="tag">insert 1</span></li>
+    <li><span>That partition's own local unique index accepts it — no conflict there</span><span class="tag">local check</span></li>
+    <li class="open"><span>Row B: <code>id=42, created_at='2026-03-02'</code> is inserted later, months apart</span><span class="tag">insert 2</span></li>
+    <li><span>Postgres routes it to a DIFFERENT partition, <code>orders_2026_03</code>, based on <code>created_at</code></span><span class="tag">routing</span></li>
+    <li class="open"><span>That partition has its OWN separate local index — it has never heard of the id=42 sitting in January's partition — so the insert succeeds</span><span class="tag">silent duplicate</span></li>
+  </ol>
+  <p class="hf-annot">Step 6 is the whole gotcha. Nothing crashed, nothing warned — two genuinely different physical B-tree indexes, one per partition, each faithfully enforced uniqueness within its own file and had no way to know about the other one's contents.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span><code>PRIMARY KEY (id)</code> alone</span><span><code>UNIQUE (id)</code> alone</span><span>a foreign key referencing <code>orders(id)</code> alone</span></div>
+    <div class="funnel">same underlying rule: a partitioned table's index can only see its own partition ↓</div>
+    <div class="instance">Postgres requires the partition key IN the constraint<small>and even then, only guarantees uniqueness per-partition, never globally</small></div>
+  </div>
+  <p class="hf-annot">All three attempts — a plain primary key, a plain unique constraint, a foreign key target — run into the identical wall from three different angles, because they all reduce to "can one index enforce a rule across every partition," and a partitioned table's indexes are local by construction. There's no version of "just add a constraint" that sidesteps this.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">You partition <code>orders</code> by range on <code>created_at</code>. Postgres refuses <code>PRIMARY KEY (id)</code> alone, so you change it to <code>PRIMARY KEY (id, created_at)</code> and the table creates successfully. What does that composite key actually guarantee now?</p>
+  <button type="button">Exactly what it guaranteed before — id is still unique across the entire orders table, Postgres just needed the extra column syntactically.</button>
+  <button type="button">id is only guaranteed unique within a single partition — the same id value can legally appear in two different partitions.</button>
+  <button type="button">Postgres automatically creates a hidden global index behind the scenes to keep enforcing table-wide uniqueness.</button>
+  <p class="why" data-for="0">This is the trap — the syntax accepting your change reads as "problem solved," but a partitioned table's unique/PK indexes are built per-partition. Adding created_at to the key didn't preserve the old global guarantee; it's what let Postgres accept a constraint that only checks each partition on its own.</p>
+  <p class="why" data-for="1">Right. Each partition maintains its own local B-tree for that composite key. Two rows with the same id but different created_at values route to different partitions, and neither partition's index has any visibility into the other's contents — so the same id can exist more than once in the table as a whole.</p>
+  <p class="why" data-for="2">Postgres does not maintain any hidden cross-partition index for you. If you need a table-wide uniqueness guarantee on just <code>id</code>, you have to build it yourself — a globally-unique id generation scheme, or accept that "unique" now means "unique per partition" and design around it.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The same constraint name, a smaller guarantee" turns up anywhere data gets split.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Sharded databases and auto-increment ids</h4>
+    <p>This page's own sharding section already warns that a query without the shard key has to fan out — the same root cause shows up here one level down: an auto-increment id generated independently per shard is unique per shard, never across shards, unless you switch to UUIDs or a Snowflake-style scheme up front.</p>
+    <div class="hf-scatter"><span>partition-local uniqueness and shard-local uniqueness are the same bug at two different scales</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Distributed CIAM identity — the same user_id across IDPs</h4>
+    <p>Ping's internal id for a user and Entra's internal id for the "same" human are both locally unique within their own IDP and mean nothing across the boundary — which is exactly why a CIAM schema needs its own globally unique <code>users.id</code> plus an <code>external_id</code> per IDP link, rather than trusting either provider's id to be unique on its own.</p>
+    <div class="hf-scatter"><span>"unique within my system" was never the same claim as "unique, period"</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Kubernetes pod names versus deployment identity</h4>
+    <p>A pod name is unique within its node/namespace at a point in time, but two different deployments can produce pods that look interchangeable from outside — the label selector, not the pod name, is the thing that's actually globally meaningful. Same pattern: the locally-unique identifier isn't automatically the globally-unique one.</p>
+    <div class="hf-scatter"><span>always ask which scope a "unique" guarantee was actually checked at</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> partitioning splits one logical table into physical pieces on one server, with the planner pruning irrelevant pieces when a query filters on the partition key — lose that filter and every partition gets scanned, which sharding then repeats one level up across separate machines. <b>The one new sentence this block adds:</b> a unique or primary-key constraint on a partitioned table must include the partition key too, and that requirement quietly turns "globally unique" into "unique per partition" — the same id value can legally exist more than once in the table as a whole.
+</div>
+
   </div>
 
 <div class="rt-ctlbar">
@@ -236,6 +337,7 @@ $('Run').addEventListener('click',run);renderNodes();chip();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

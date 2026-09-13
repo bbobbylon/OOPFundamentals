@@ -92,7 +92,111 @@
     <div class="intro-ciam"><span class="tag">In CIAM / Context:</span> The CIAM production VPC has 3 tiers: public (ALB, NAT Gateway), private-app (ECS Fargate tasks), private-db (RDS). Security groups enforce that RDS is only reachable from ECS tasks, and ECS only from the ALB. Secrets Manager and ECR use VPC Interface Endpoints so no AWS API calls traverse the internet — Ping/Entra OAuth calls are the only internet traffic from the private subnet, routed through the NAT Gateway.</div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, why peering with your friend's friend doesn't make you friends</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You peered VPC A with VPC B. You peered VPC B with VPC C. On a whiteboard that looks like one connected network. AWS disagrees.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Two working peering connections, and A still can't reach C</div>
+  <p>The CIAM platform team owns three VPCs: <code>vpc-a</code> (the auth service), <code>vpc-b</code> (a shared services hub), and <code>vpc-c</code> (a partner's reporting VPC, connected only through the hub). Someone peers <code>vpc-a</code> ↔ <code>vpc-b</code> and separately peers <code>vpc-b</code> ↔ <code>vpc-c</code>. Both connections show <code>active</code>. Both have correct route table entries on their own two ends.</p>
+  <p>Then an engineer in <code>vpc-a</code> tries to reach a reporting endpoint in <code>vpc-c</code> and gets a connection timeout — not a deny, not a 403, just silence. Nothing is misconfigured. There is simply no path, because AWS does not support routing traffic across a chain of peering connections at all: peering is explicitly non-transitive. A route table in <code>vpc-a</code> can only ever point at a peering connection <code>vpc-a</code> is itself a party to — it can never route "through" <code>vpc-b</code> to a VPC <code>vpc-a</code> has no direct peering connection with.</p>
+  <div class="hf-scatter">
+    <span>vpc-a ↔ vpc-b peering ✓</span>
+    <span>vpc-b ↔ vpc-c peering ✓</span>
+    <span>a route from vpc-a to vpc-c anywhere ⚠</span>
+  </div>
+  <p class="hf-foot">Two correct, active, healthy peering connections. Zero path between the two VPCs that aren't directly peered with each other.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Give every pair that needs to talk its own direct connection</div>
+  <div class="hf-ladder">
+    <b>Create a third, direct peering connection: vpc-a ↔ vpc-c</b>
+    <i>↓ this is the only way AWS will route between two VPCs that are not themselves peered</i>
+    <b>Add the matching route table entries on both vpc-a's and vpc-c's route tables</b>
+    <i>↓ a peering connection existing is not enough — each side still needs an explicit route pointing traffic at it, exactly like any other peering pair</i>
+    <b>Or, once you need more than a handful of VPCs talking to each other, replace the growing mesh of pairwise connections with a Transit Gateway</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A VPC peering connection is a private link between exactly two VPCs, never a hop in a longer chain.</b> AWS calls this "no edge-to-edge routing" — traffic can travel to either end of a specific peering connection, but it can never continue on to a third VPC on the other side of that connection's far end. If two VPCs need to reach each other, they need their own direct peering connection (or a shared Transit Gateway), full stop.
+</div>
+
+<div class="hf-note">Sticky note: peering is <b>a private tunnel between exactly two houses, not a hallway through the neighborhood</b>. Being friends with your neighbor, and your neighbor being friends with the house behind them, does not put a hallway through your neighbor's living room. You still need your own door to that third house.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>vpc-a is peered with vpc-b, and vpc-b is peered with vpc-c. So vpc-a can reach vpc-c through vpc-b, right?</p></div>
+  <div class="hf-bub right"><span class="who">VPC Route Table (vpc-a's)</span><p>I only have two kinds of entries: local traffic, and traffic to VPCs I am directly peered with. vpc-c isn't in either category, so I have nowhere to send it.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Can I just add a route in vpc-a pointing at the vpc-b↔vpc-c peering connection?</p></div>
+  <div class="hf-bub right"><span class="who">VPC Route Table (vpc-a's)</span><p>That peering connection doesn't belong to me — it belongs to vpc-b and vpc-c. I can't point at a connection I'm not a party to. You'll need one that actually includes me.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one packet from vpc-a trying to reach vpc-c, and watch exactly where it runs out of road.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>An app in vpc-a's private subnet sends a request to 10.20.0.5 (a host inside vpc-c)</span><span class="tag">send</span></li>
+    <li class="open"><span>vpc-a's route table is checked for a matching destination</span><span class="tag">route</span></li>
+    <li><span>The only non-local entries point at the vpc-a↔vpc-b peering connection (pcx-ab) — nothing points at vpc-c's CIDR</span><span class="tag">no match</span></li>
+    <li class="open"><span>Even if the packet somehow reached vpc-b, vpc-b's OWN route table would need a rule for it too — and no VPC will forward peered traffic on to a third VPC regardless</span><span class="tag">dead end</span></li>
+    <li><span>The packet is dropped with no path — not denied, just unroutable</span><span class="tag">drop</span></li>
+    <li class="open"><span>The engineer sees a plain connection timeout, indistinguishable from a security group or NACL block</span><span class="tag">timeout</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is where this actually fails, and it fails silently — there's no error message that says "peering isn't transitive," just an absent route, which looks identical to a dozen other, more common misconfigurations.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">A new pcx-bc peering connection (vpc-b ↔ vpc-c) is created and activated<small>vpc-a already has a working pcx-ab connection to vpc-b</small></div>
+    <div class="fan">who gets a new route as a result ↓</div>
+    <div class="obs">
+      <span>vpc-b's route table — updates, points part of its traffic at pcx-bc</span>
+      <span>vpc-c's route table — updates, points its return traffic at pcx-bc</span>
+      <span class="new">vpc-a's route table — completely untouched, despite already being peered with vpc-b</span>
+    </div>
+  </div>
+  <p class="hf-annot">vpc-a is the "surprising reactor" precisely because it doesn't react at all. It's easy to assume that anything already connected to vpc-b inherits whatever vpc-b connects to next — but a route table only ever changes when something is explicitly added to IT, never as a side effect of a neighbor's new connection.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">vpc-prod is peered with vpc-shared. vpc-shared is peered with vpc-partner. You need vpc-prod to reach a database inside vpc-partner. What is the correct fix?</p>
+  <button type="button">Add a route in vpc-prod's route table pointing at the vpc-shared↔vpc-partner peering connection</button>
+  <button type="button">Create a new, direct vpc-prod↔vpc-partner peering connection, with matching routes on both ends</button>
+  <button type="button">Nothing — once vpc-shared is peered with both, traffic between vpc-prod and vpc-partner routes automatically</button>
+  <p class="why" data-for="0">You can't point a route at a peering connection your VPC isn't a party to — vpc-prod isn't one of the two VPCs on the vpc-shared↔vpc-partner connection, so AWS won't let this route exist at all.</p>
+  <p class="why" data-for="1">Correct. Peering is strictly pairwise. The only way to get traffic directly between vpc-prod and vpc-partner is a direct peering connection between exactly those two, with its own route table entries on both sides.</p>
+  <p class="why" data-for="2">This is the exact assumption that breaks in production — peering connections never combine or chain automatically, no matter how many VPCs share a common peer.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Connected to my connection" quietly not meaning "connected to me" shows up far outside networking.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>OAuth scopes granted to one client don't extend to another</h4>
+    <p>If Client A has a token scoped for the CIAM API, and the CIAM API in turn calls a downstream partner API with its own credentials, Client A's original token doesn't automatically carry any authority into that downstream call — each hop needs its own explicit grant, exactly like each VPC pair needing its own explicit peering connection.</p>
+    <div class="hf-scatter"><span>trust doesn't chain by default — it has to be re-granted at every hop</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Angular's dependency injector doesn't share providers across unrelated modules</h4>
+    <p>A service provided in one lazy-loaded module isn't automatically visible to a sibling module just because both are children of the same root — each injector only sees what was explicitly provided to it or above it, not what a sibling injector happens to have.</p>
+    <div class="hf-scatter"><span>sibling scopes don't inherit from each other, only from a shared ancestor</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Being CC'd on two separate email threads doesn't merge them</h4>
+    <p>If you're on a thread with Alice, and Alice is on a separate thread with Bob, you still can't reply-all your way into Bob's thread — the two conversations stay two conversations until someone deliberately connects them, the same way two peering connections stay two connections until a third, direct one is created.</p>
+    <div class="hf-scatter"><span>shared membership in one link is not membership in the other</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a VPC is your private network, carved into public and private subnets, protected by stateful Security Groups and stateless NACLs, and connected outward through Internet and NAT Gateways. <b>The one new sentence this block adds:</b> VPC peering connects exactly two VPCs and nothing routes through a third, so a chain of working peering connections still leaves the two ends of that chain completely unreachable from each other.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -401,6 +505,7 @@ DevHubCodeWalk.mount('#cw-vpc',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

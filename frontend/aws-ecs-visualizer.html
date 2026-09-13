@@ -102,6 +102,113 @@
     <div class="intro-ciam"><span class="tag">In CIAM / Context:</span> Production CIAM Spring Boot apps live in ECS Fargate — 2-4 tasks across AZs behind an ALB, auto-scaling on CPU. The ADO pipeline builds the image, pushes to ECR, then calls <code>aws ecs update-service</code> to trigger a rolling deploy, all automated. The task IAM role reads Ping/Entra client secrets from Secrets Manager so no credentials ever touch application code or env files.</div>
   </div>
 
+<p class="hf-deck">or, the placement failure that has nothing to do with CPU or memory</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Your cluster has room on paper, and a task that still won't start.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">PENDING, while three CloudWatch graphs all whisper "there's plenty of room"</div>
+  <p>You picked the EC2 launch type on purpose, for exactly the reason the scenario above shows: <code>binpack</code> packs tasks tightly onto the fewest instances, which keeps the bill down. Instance <code>i-01</code> is running two small tasks at 40% CPU and 35% memory. You register a third, tiny task — <code>cpu: 128</code>, <code>memory: 256</code>, practically free. <code>binpack</code> looks at <code>i-01</code>, sees CPU and memory headroom, and places it there.</p>
+  <p>The task sits in <code>PENDING</code>, then fails. CPU is fine. Memory is fine. The scheduler's own diagnostic names the real blocker: no container instance met all of its requirements, and the closest candidate's reason is <code>RESOURCE:ENI</code>. <code>i-01</code> ran out of network interfaces before it ran out of anything <code>binpack</code> was actually measuring.</p>
+  <div class="hf-scatter">
+    <span>CPU headroom ✓</span>
+    <span>memory headroom ✓</span>
+    <span>ENI slots ⚠</span>
+  </div>
+  <p class="hf-foot"><code>binpack</code> optimizes for the two resources it can see — and a third resource, hard-capped per instance, was never one of them.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Give the scheduler a resource it can actually count</div>
+  <div class="hf-ladder">
+    <b>Know what every awsvpc task actually spends</b>
+    <i>↓ on the EC2 launch type, each task using <code>awsvpc</code> network mode takes one whole Elastic Network Interface off its host — no matter how small its cpu/memory request is</i>
+    <b>Know your instance type's ceiling before you binpack</b>
+    <i>↓ a <code>c5.large</code> supports 3 ENIs total; one is the primary, leaving 2 — exactly two <code>awsvpc</code> tasks fit, full stop, even at 5% CPU each</i>
+    <b>Opt in to ENI trunking if you need more density</b>
+    <i>↓ <code>aws ecs put-account-setting --name awsvpcTrunking --value enabled</code> turns that same <code>c5.large</code>'s ceiling into roughly ten tasks instead of two</i>
+    <b>And know the trap hiding inside that fix</b>
+    <i>↓ trunking only applies to instances launched AFTER you opt in — your already-running fleet keeps the old ceiling until it's replaced, and not every instance family supports it at all</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> On the EC2 launch type, <code>awsvpc</code> networking turns "how many tasks fit on this instance" into three separate questions — CPU, memory, and ENIs — and a placement strategy like <code>binpack</code> is only ever answering two of them. Fargate makes this whole class of problem disappear, because there's no customer-visible instance to run out of ENIs on.
+</div>
+
+<div class="hf-note">Think of each EC2 instance as an apartment building. CPU and memory are square footage, and <code>binpack</code> is a leasing agent who only checks square footage. ENIs are <b>parking spots</b> — the building can have five empty rooms and zero open spots in the garage, and a tenant with a car still can't move in.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p><code>binpack</code> told me <code>i-01</code> had room. Why is my task stuck in PENDING?</p></div>
+  <div class="hf-bub right"><span class="who">The scheduler, personified</span><p>I checked CPU and memory, like I always do. Both had room. I placed it there.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Then why didn't it actually start?</p></div>
+  <div class="hf-bub right"><span class="who">The EC2 instance, personified</span><p>Because I only ever had two ENI slots beyond my own primary one, and both were already handed out. Nobody asked me about that until just now.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Walk the same binpack scenario from above, one ENI further.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Instance i-01 launches; the ECS-optimized AMI registers its EC2 instance type with the cluster</span><span class="tag">capacity registered</span></li>
+    <li class="open"><span>Two awsvpc tasks are already placed on i-01, each holding one of its two non-primary ENIs</span><span class="tag">2 of 2 ENIs used</span></li>
+    <li><span>A third, tiny task registers — cpu: 128, memory: 256 — practically free by CPU/memory accounting</span><span class="tag">tiny request</span></li>
+    <li class="open"><span>binpack scores every instance by CPU and memory headroom only, and ranks i-01 as the best fit</span><span class="tag">ENI not scored</span></li>
+    <li><span>ECS tries to attach a network interface for the new task and finds none available on i-01</span><span class="tag">RESOURCE:ENI</span></li>
+    <li class="open"><span>The task stays PENDING, then fails to place — and someone has to notice the reason code isn't on a capacity graph at all</span><span class="tag">silent failure mode</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the whole bug: <code>binpack</code>'s ranking is only ever as honest as the resources it counts, and on the EC2 launch type with <code>awsvpc</code> networking, ENIs are a real, hard-capped, per-instance resource that placement strategies never mention. The instance that "wins" the placement can still be the wrong answer.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">Why won't this task start, when i-01's own dashboards show room?<small>binpack already chose i-01 as the best-fit instance</small></div>
+    <div class="arrow">what the scheduler actually hit →</div>
+    <div class="opts">
+      <span>CPU headroom on i-01</span>
+      <span class="on">i-01's ENI limit — 2 of 2 already attached</span>
+      <span>memory headroom on i-01</span>
+    </div>
+  </div>
+  <p class="hf-annot">Two of these three are real, true, and completely irrelevant to why the task failed. The one that applies is the one no dashboard was built to show you by default.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your EC2-launch-type cluster uses the binpack placement strategy to keep costs down. A new, tiny task (cpu: 128, memory: 256) registers successfully but sits in PENDING and then fails — even though every instance in the cluster is under 50% CPU and memory. The scheduler's own diagnostic names the closest candidate's blocking reason as RESOURCE:ENI. What's actually going on?</p>
+  <button type="button">The task definition's cpu/memory reservation is set too low for ECS to place it at all</button>
+  <button type="button">Every awsvpc-mode task consumes one whole ENI from its EC2 host, and that host's instance type has already handed out its last available ENI slot — independent of any CPU or memory headroom</button>
+  <button type="button">binpack has a hidden per-instance task-count cap, and this cluster has hit it</button>
+  <p class="why" data-for="0">Wrong direction — a low cpu/memory reservation is easier to place, not harder. ECS never rejects a task for asking for too little; RESOURCE:ENI is a networking-capacity reason, not a compute one.</p>
+  <p class="why" data-for="1">Right. Each awsvpc task takes one ENI off its host, ENIs are capped per EC2 instance type (a c5.large supports only 3 total, 1 of which is the primary), and neither CPU nor memory accounting has any way to represent that ceiling — which is exactly why the dashboards look fine while the placement fails.</p>
+  <p class="why" data-for="2">There's no such built-in cap in binpack itself — it will happily keep stacking tasks by CPU/memory alone. The real ceiling being hit here belongs to the EC2 instance and its network mode, not to the placement strategy.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A resource running out silently, one layer below the one you were watching, is a familiar shape.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A connection pool maxed out under a healthy CPU graph</h4>
+    <p>A Spring Boot service can sit at 10% CPU and still reject every request, because HikariCP's pool — a completely different, narrower resource — is exhausted. The CPU dashboard was never going to show you that.</p>
+    <div class="hf-scatter"><span>watch the resource actually being spent, not the one that's easiest to graph</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Linux process hitting its file-descriptor limit</h4>
+    <p>A process can have all the free RAM in the world and still throw "too many open files," because <code>ulimit -n</code> is a separate, quietly-enforced ceiling that has nothing to do with memory at all.</p>
+    <div class="hf-scatter"><span>plenty of the resource you checked, none left of the resource that mattered</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>DynamoDB per-partition throttling</h4>
+    <p>A table can look nearly empty in the console, with capacity to spare overall, while individual writes are throttled anyway — because the limit that actually bit was per-partition, not the aggregate number the console makes easy to see.</p>
+    <div class="hf-scatter"><span>an aggregate view hiding a narrower limit underneath it</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> ECS runs your Spring Boot containers as tasks — Fargate if you don't want to think about the underlying host, the EC2 launch type if you want tighter control over placement and cost — with a task role and a completely separate execution role standing behind every one of them. <b>The one new thing this block adds:</b> on the EC2 launch type, <code>awsvpc</code> networking taxes a resource neither your CPU nor your memory graphs will ever show you — size your instance types, and your ENI trunking opt-in, around it before <code>binpack</code> finds out the hard way.
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -520,6 +627,7 @@ function showTab(id) {
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

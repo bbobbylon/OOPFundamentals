@@ -130,7 +130,108 @@
     <div class="intro-ciam"><span class="tag">Docker in your CIAM stack:</span> Your Spring Boot CIAM app runs as a container in production — JRE 21 base (~190MB) + fat JAR (~50MB). The ADO pipeline does <code>mvn package → docker build -t …azurecr.io/ciam-auth:$(Build.BuildId) → docker push</code>, then Kubernetes pulls and runs it, reading Ping secrets from K8s Secrets (env vars). The Ping server itself ships as an official Docker image. For local dev, one Compose file spins up ciam-auth + postgres + redis in the right order — no manual DB install.</div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, why two environments can both swear they're running "the same image"</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You treat a tag like <code>1.0.0</code> as a fixed identity. The registry treats it as a sticky note anyone can move.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Staging and production both say "1.0.0" — and disagree</div>
+  <p>Friday afternoon: the team builds <code>ciam-auth:1.0.0</code> from commit <code>abc123</code> and pushes it. Staging pulls it that same afternoon and caches it locally.</p>
+  <p>Monday morning: a hotfix lands, gets built from commit <code>def456</code>, and someone pushes it under the SAME tag — <code>ciam-auth:1.0.0</code> again. The registry doesn't reject this. It just quietly updates what <code>1.0.0</code> points to. Production, deploying fresh that afternoon, pulls "1.0.0" and gets Monday's bytes. Staging's already-cached "1.0.0" is still Friday's bytes. <code>docker images --digests</code> on each shows two completely different SHA256 values, for the exact same tag name.</p>
+  <div class="hf-scatter">
+    <span>docker build succeeded ✓</span>
+    <span>docker push succeeded ✓</span>
+    <span>what the tag actually means ⚠</span>
+  </div>
+  <p class="hf-foot">"1.0.0" was never a promise about content. It was only ever a label somebody can re-stick.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Pin what you actually deploy, not what you hope stays still</div>
+  <div class="hf-ladder">
+    <b>Compare digests, not tags, across environments</b>
+    <i>↓ <code>docker inspect --format='{{index .RepoDigests 0}}' ciam-auth:1.0.0</code> on each host — a digest (<code>sha256:...</code>) is content-addressed, so it can only ever mean one exact set of bytes</i>
+    <b>Deploy by a tag that's never reused</b>
+    <i>↓ a git commit SHA or CI build number (like this page's own CIAM pipeline already tags with <code>$(Build.BuildId)</code>) is created exactly once, so it can never quietly get repointed at different content later</i>
+    <b>Turn on registry-level tag immutability where it's available</b>
+    <i>↓ ECR, ACR, and GHCR all support marking a tag immutable — a second push to that tag then fails loudly at push time, instead of silently succeeding for whoever pulls it next</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A tag is a pointer, not an identity.</b> It's a human-readable label the registry maps to whatever image digest was most recently pushed under that name — nothing stops a second push from remapping it. The digest underneath is the actual, unchangeable fingerprint; the tag is just today's sticky note pointing at it, and tomorrow it can point somewhere else entirely.
+</div>
+
+<div class="hf-note">A Docker tag behaves like a <b>Git branch name, not a Git commit hash</b>. <code>main</code> can point at a different commit tomorrow than it does today — so can <code>:1.0.0</code>, unless something stops it.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p><code>docker pull ciam-auth:1.0.0</code> twice, three days apart. Same exact command. Why do the two containers behave differently?</p></div>
+  <div class="hf-bub right"><span class="who">The tag "1.0.0"</span><p>I'm not a fingerprint. I'm a label someone can re-stick onto different bytes any time they push under my name again.</p></div>
+  <div class="hf-bub"><span class="who">The registry</span><p>I don't reject a second push to a tag that already exists — unless immutability is turned on, I just quietly update where the label points.</p></div>
+  <div class="hf-bub right"><span class="who">The digest, sha256:...</span><p>I'm the real fingerprint. I can't be reused for different content — ask for me by name and you get exactly one thing, forever.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Walk the exact sequence that leaves two environments running different code under one tag name.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Friday: <code>docker build -t ciam-auth:1.0.0</code> from commit abc123, then <code>docker push</code></span><span class="tag">first push</span></li>
+    <li class="open"><span>Staging pulls <code>ciam-auth:1.0.0</code> that afternoon and caches it locally</span><span class="tag">digest X cached</span></li>
+    <li><span>Monday: a hotfix from commit def456 is built and pushed under the SAME tag, <code>1.0.0</code></span><span class="tag">same tag, new bytes</span></li>
+    <li class="open"><span>The registry accepts the second push without complaint — <code>1.0.0</code> now resolves to digest Y</span><span class="tag">silently repointed</span></li>
+    <li><span>Production, deploying fresh Monday afternoon, pulls <code>1.0.0</code> and gets digest Y</span><span class="tag">a different "1.0.0"</span></li>
+    <li class="open"><span>Comparing digests — not tags — is the only thing that reveals the two environments are running different images</span><span class="tag">the only real proof</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the one nobody expects: pushing to an existing tag is a completely normal, unremarkable, successful operation from Docker's point of view. There's no warning, no confirmation prompt, no version conflict error — the registry does exactly what it was asked and moves the label.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>a hotfix re-pushed under the old tag</span><span>CI reusing a static version string across builds</span><span>an upstream base image rebuilt and re-tagged behind your back</span></div>
+    <div class="funnel">the tag now points somewhere new ↓</div>
+    <div class="instance">"The same version" now means two different images<small>one confusing symptom, three unrelated-looking causes</small></div>
+  </div>
+  <p class="hf-annot">All three causes are ordinary, successful Docker operations — nobody typos a command or gets an error. They converge on the exact same symptom: a tag that used to mean one thing now means another, and the only environments that notice are the ones that cached the old pull before it happened.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Staging and production both report running <code>ciam-auth:1.0.0</code>, but staging shows a bug production doesn't. <code>docker images --digests</code> shows two different SHA256 values for that same tag on each host. What actually happened?</p>
+  <button type="button">Docker Compose cached an old container instead of pulling a fresh image, so staging never picked up the update</button>
+  <button type="button">The Dockerfile's <code>FROM eclipse-temurin:21-jre</code> base tag is mutable, so OS packages inside drifted between the two builds</button>
+  <button type="button">Someone pushed a new image under the tag <code>1.0.0</code> after staging had already pulled and cached the old one — the tag now points at different bytes than it did before</button>
+  <p class="why" data-for="0">A real failure mode, but it doesn't match what's described: a stale cached CONTAINER would still be running the exact same digest it always had, and wouldn't explain the registry itself resolving <code>1.0.0</code> to two different digests depending on when you pulled.</p>
+  <p class="why" data-for="1">Base-image drift is real and worth watching for separately, but it wouldn't produce two different digests for <code>ciam-auth:1.0.0</code> itself unless the app image was actually rebuilt and re-pushed — which is exactly what happened, just one layer higher than the base image.</p>
+  <p class="why" data-for="2">Right. Nothing stopped a second push from reusing the tag <code>1.0.0</code>, and the registry has no concept of "this tag already means something, reject the overwrite" unless immutability is explicitly turned on. Comparing digests instead of tags is what actually catches this.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The label looks the same; what it points to moved" is one of the oldest bugs in software.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>npm's floating version ranges</h4>
+    <p>A dependency pinned as <code>^1.2.0</code> in <code>package.json</code> resolves to whatever the latest matching version happens to be published RIGHT NOW — not a fixed artifact. A malicious or broken publish under a version that satisfies the range reaches every install without anyone touching your lockfile-less config.</p>
+    <div class="hf-scatter"><span>a version range is a pointer, not a pinned artifact</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Git branches vs commit SHAs</h4>
+    <p><code>git clone --branch main</code> gets you whatever <code>main</code> currently points to — which is different today than it was yesterday. A commit SHA, like an image digest, can never mean anything other than the exact content it was computed from.</p>
+    <div class="hf-scatter"><span>the same pointer-vs-identity split, one tool over</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>DNS names getting repointed</h4>
+    <p>A hostname like <code>api.internal.example.com</code> can be repointed to a completely different backend by updating one DNS record — every caller using the hostname follows silently, with zero code changes on their end. The name looked stable; the thing behind it moved.</p>
+    <div class="hf-scatter"><span>same shape, at the network layer instead of the registry</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> This page explains what Docker actually is — images as read-only layered blueprints, containers as running instances with their own writable layer, and why sharing the host kernel makes containers dramatically faster to start than a VM but weaker to isolate. <b>The one new sentence this block adds:</b> a tag like <code>1.0.0</code> is only ever a movable label pointing at whatever was pushed under that name most recently, not a permanent identity — so proving two environments run "the same image" needs a digest comparison, never just a tag comparison.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -540,6 +641,7 @@ function resetRace() {
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

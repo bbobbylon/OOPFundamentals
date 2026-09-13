@@ -57,7 +57,142 @@
     <div class="intro-ciam"><span class="tag">Ruby in a CIAM world:</span> Ruby's strength is gluing identity systems together quickly — a few lines to call an OAuth2/OIDC provider, decode a JWT, and map claims to roles. Duck typing means a "token verifier" is just any object that <code>respond_to?(:verify)</code>, so swapping Ping for Entra is a config change, not a refactor. The same object model that makes <code>5.+(3)</code> a message send makes it trivial to wrap an identity client in a decorator or mixin. In Rails (next page) this becomes Devise/OmniAuth for login and <code>before_action</code> filters for auth — Ruby's equivalent of a Spring Security filter chain.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the module you included six months later that quietly stole a method name from the one you already had</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">When two included modules both define the same method, Ruby doesn't merge them, warn you, or pick the "more important" one — it just runs whichever one you happened to include LAST.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Adding an unrelated mixin quietly canceled your order-confirmation emails</div>
+  <p>Your checkout flow includes a mixin that sends the confirmation email:</p>
+  <p><code>module Notifiable; def notify = OrderMailer.confirmation(self).deliver_now; end</code></p>
+  <p><code>class Order; include Notifiable; end</code> — written first, because email felt like the important behavior. <code>order.notify</code> works for months.</p>
+  <p>Then an unrelated PR bolts on analytics: <code>module Trackable; def notify = AnalyticsClient.track("order_notified", order_id: id); end</code>, added to the same class with <code>include Trackable</code>. Nobody on that PR touches <code>Notifiable</code>, reads its source, or even knows it defines a method also called <code>notify</code>.</p>
+  <p>Reveal: <code>Order.ancestors</code> is now <code>[Order, Trackable, Notifiable, Object, Kernel, BasicObject]</code>.
+  Every <code>include</code> inserts its module directly above the class, which pushes whatever was already
+  there one step further up the chain. <code>Trackable</code>, included second, now sits closer to
+  <code>Order</code> than <code>Notifiable</code> does — so it's found FIRST. Every subsequent
+  <code>order.notify</code> call fires the analytics event and returns; <code>Notifiable#notify</code> is
+  never reached again through this class. <code>order.respond_to?(:notify)</code> is still true.
+  <code>order.notify</code> still runs with no error. Any test that just checks the call doesn't raise
+  keeps passing. Customers quietly stop getting confirmation emails.</p>
+  <div class="hf-scatter">
+    <span>Notifiable#notify is a perfectly correct method ✓</span>
+    <span>Trackable#notify is also a perfectly correct method ✓</span>
+    <span>both modules include cleanly, no errors anywhere ✓</span>
+    <span>the SECOND include silently wins the naming collision ⚠</span>
+  </div>
+  <p class="hf-foot">Ruby never warns you two mixins define the same method — the ancestor chain just quietly resolves the tie by include order, in the direction most people guess backwards.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Never let two mixins share a method name by accident</div>
+  <div class="hf-ladder">
+    <b>Check <code>Klass.ancestors</code> whenever you mix in more than one module</b>
+    <i>↓ that printed array IS the real lookup order — if a name shows up in two modules, whichever sits CLOSER to your class in that list wins, and that's always the module included LAST</i>
+    <b>Namespace or rename overlapping methods explicitly</b>
+    <i>↓ <code>Trackable#track_notification</code> instead of <code>#notify</code> removes the ambiguity entirely — the real fix isn't about include order at all, it's not sharing a name in the first place</i>
+    <b>Reach for <code>prepend</code> only when you deliberately want to wrap the class's OWN method</b>
+    <i>↓ <code>prepend</code> inserts a module BELOW the class in the chain instead of above it, letting the module intercept calls before the class's own method runs — a genuinely different tool, easy to confuse with include's ordering rule</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Ruby resolves a naming collision between two included modules exactly
+  the way it resolves any method lookup — by walking the ancestor chain and stopping at the first
+  match — and every <code>include</code> re-inserts its module at the position closest to the class, so
+  the LAST module you include is always the FIRST one Ruby checks.
+</div>
+
+<div class="hf-note">It's less like two chefs sharing one recipe and more like two chefs each shouting
+their own version of the same recipe into the kitchen. The kitchen doesn't blend them, and it doesn't
+pick the better one. <b>It just listens to whoever walked in most recently.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I called order.notify to send the confirmation email. Why did an analytics event fire instead?</p></div>
+  <div class="hf-bub right"><span class="who">Order.ancestors</span><p>Trackable is sitting right above me now, closer than Notifiable ever was. When you send :notify, I ask whoever's closest first — that's Trackable, every time.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But Notifiable was included FIRST — shouldn't the original behavior win?</p></div>
+  <div class="hf-bub right"><span class="who">Order.ancestors</span><p>Being included first just means you got shoved further from me by everything that came after. First in, first buried.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow <code>Order.ancestors</code> as each <code>include</code> runs, then watch one <code>.notify</code> call take the wrong branch.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>class Order</code> defines nothing of its own yet — ancestors: <code>[Order, Object, Kernel, BasicObject]</code></span><span class="tag">baseline</span></li>
+    <li class="open"><span><code>include Notifiable</code> runs — inserted directly above Order: <code>[Order, Notifiable, Object, ...]</code></span><span class="tag">first include</span></li>
+    <li><span>Months pass; <code>order.notify</code> resolves to <code>Notifiable#notify</code> every time, sending real emails</span><span class="tag">works as intended</span></li>
+    <li class="open"><span>A later, unrelated PR adds <code>include Trackable</code> to the same class</span><span class="tag">second include</span></li>
+    <li><span><code>Trackable</code> is inserted directly above Order too, pushing Notifiable one step further away: <code>[Order, Trackable, Notifiable, ...]</code></span><span class="tag">chain reshuffled</span></li>
+    <li class="open"><span>The next <code>order.notify</code> call walks the chain top to bottom, finds <code>Trackable#notify</code> FIRST, and runs it instead</span><span class="tag">silent takeover</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is where the damage actually starts, and it looks completely harmless: one
+  ordinary <code>include</code> line, added for a feature that has nothing to do with email. The real
+  work happens in how Ruby maintains that ancestor array — every include is an insert-just-above-the-class
+  operation, so the newest addition always becomes the newest first-checked thing, silently displacing
+  whatever was there before it. No tool, linter, or code review flags a dependency between two features
+  that were never meant to touch each other.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx"><code>order.notify</code> is called<small>which implementation actually answers?</small></div>
+    <div class="arrow">what actually happens →</div>
+    <div class="opts">
+      <span><code>Notifiable#notify</code> — the email, what everyone assumes runs</span>
+      <span class="on"><code>Trackable#notify</code> — the analytics event, what actually runs</span>
+      <span><code>Order</code>'s own <code>notify</code>, if it ever defined one directly</span>
+    </div>
+  </div>
+  <p class="hf-annot">Only one option ever fills the <code>:notify</code> slot, and it isn't decided by which
+  behavior "sounds" more central to placing an order — it's decided purely by which module's
+  <code>include</code> line runs last, textually, in the class body. Swap the two include lines and the
+  answer in this diagram flips completely, with no other change to either module.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A class does <code>include Notifiable</code> (defines <code>notify</code> for email), then later, in an unrelated change, <code>include Trackable</code> (also defines <code>notify</code>, for analytics). <code>Order.ancestors</code> is now <code>[Order, Trackable, Notifiable, Object, ...]</code>. What does <code>order.notify</code> actually run?</p>
+  <button type="button"><code>Notifiable#notify</code>, because it was included first and Ruby gives priority to the first module included.</button>
+  <button type="button">Both methods, one after another, because Ruby merges methods with the same name from multiple mixins.</button>
+  <button type="button"><code>Trackable#notify</code>, because each <code>include</code> inserts its module directly above the class, so the most recently included module sits closest to <code>Order</code> and is checked first.</button>
+  <p class="why" data-for="0">It's the opposite: being included first means everything included after it gets inserted between it and the class, pushing it FURTHER from the front of the lookup order — not closer.</p>
+  <p class="why" data-for="1">Ruby's method lookup stops at the very first match it finds while walking the ancestor chain — it never keeps going past a hit to look for a second definition somewhere else, so there's no merging or running-both behavior.</p>
+  <p class="why" data-for="2">Right. <code>include Notifiable</code> then <code>include Trackable</code> produces the ancestor chain <code>[Order, Trackable, Notifiable, ...]</code> — Trackable sits closer to Order because it was inserted second, so lookup finds <code>Trackable#notify</code> before it ever reaches <code>Notifiable#notify</code>.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Whichever one was declared later silently wins the collision" is a rule that shows up anywhere composition order affects behavior.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>CSS cascade order</h4>
+    <p>Two CSS rules with equal specificity targeting the same element don't get merged or averaged — the one that appears LATER in the stylesheet's source order wins outright, silently overriding the earlier rule's declarations. Reordering two <code>&lt;link&gt;</code> tags, or two rules in the same file, can flip which style actually renders with zero warning.</p>
+    <div class="hf-scatter"><span>the exact same "last one wins" rule, in the browser</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Python's multiple-inheritance MRO</h4>
+    <p>A Python class with several base classes resolves a shared method name via C3 linearization (MRO) — which depends directly on the ORDER those base classes are listed in the class definition. Swap <code>class Foo(A, B)</code> to <code>class Foo(B, A)</code> and a completely different parent's method can win, for the identical underlying reason: declaration order decides the collision.</p>
+    <div class="hf-scatter"><span>a different algorithm, the same order-decides-it shape</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Spring bean-definition overriding (pre-Boot 2.1)</h4>
+    <p>Before Spring Boot 2.1, if two <code>@Configuration</code> classes each defined a bean with the same name, the one processed LAST silently overrode the earlier one — no error, no log by default. It caused so many silent production surprises that Boot 2.1 flipped the default to throw a <code>BeanDefinitionOverrideException</code> instead of picking a winner quietly.</p>
+    <div class="hf-scatter"><span>the JVM's version, serious enough that the framework changed its own default</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Ruby treats every call as a message sent to a receiver, resolved
+  by walking a completely predictable ancestor chain — <code>include</code> splices a module in just
+  above the class, so one well-placed <code>&lt;=&gt;</code> or a couple of methods on a mixin can grant a
+  whole bundle of behavior for free. <b>The one new sentence this block adds:</b> when two included
+  modules define the same method name, that same predictable chain resolves the collision silently and
+  in the direction most people guess backwards — by include order, most-recent-first, with nothing
+  anywhere warning you a collision even happened.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="rbSeg">
@@ -259,6 +394,7 @@ DevHubCodeWalk.mount('#cw-rb',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

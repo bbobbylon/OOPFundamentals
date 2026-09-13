@@ -128,6 +128,127 @@ public class Main {
 </script>
   </div>
 
+<p class="hf-deck">or, the import that processed 31,401 rows and then threw on the one with a blank last column</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The methods tab lists <code>split(regex)</code> as "split into array". It is — but the array it returns is not the one you counted, and the rule only bites at the end of the string.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle"><code>"a,b,,,".split(",")</code> has length <b>2</b></div>
+  <p>Four commas, so five fields, so an array of five. That is the reading every developer has, and it is wrong: <code>split</code> with no limit argument <b>discards trailing empty strings</b>. The result is <code>["a", "b"]</code>, length 2, and nothing warns you.</p>
+  <p>The rule is stranger than "empties are dropped", because empties in the middle survive: <code>"a,,b".split(",")</code> is length <b>3</b>, and leading empties survive too — <code>",,a".split(",")</code> is length <b>3</b>, starting with two empty strings. Only the tail is trimmed. And two edge cases go in opposite directions: <code>"".split(",")</code> returns an array of length <b>1</b> holding the empty string, while <code>",".split(",")</code> returns an array of length <b>0</b>. A longer input produced a shorter array.</p>
+  <p>Now put it in a CSV import — a bulk user upload, say. <code>"1001,Priya,eng,true"</code> splits into 4. <code>"1002,Sam,eng,"</code> — same shape, blank last column — splits into <b>3</b>, and <code>parts[3]</code> throws <code>ArrayIndexOutOfBoundsException: Index 3 out of bounds for length 3</code>. <b>The parser is correct for every row until someone leaves the last field blank</b>, which in a fifty-thousand-row file means it dies partway through, after thousands of rows have already been committed.</p>
+  <div class="hf-scatter">
+    <span>the delimiter is correct ✓</span>
+    <span>the column order is correct ✓</span>
+    <span>it works on every row you tested ✓</span>
+    <span>trailing empty fields silently vanish ⚠</span>
+    <span>row length now depends on the <i>data</i> ⚠</span>
+  </div>
+  <p class="hf-foot">Split is lossy: <code>String.join(",", "a,b,,,".split(","))</code> gives back <code>"a,b"</code>. Splitting and rejoining is not the identity.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Pass the limit, or stop hand-rolling the parser</div>
+  <div class="hf-ladder">
+    <b>Any time the field count matters, write <code>split(",", -1)</code></b>
+    <i>↓ a negative limit means "apply the pattern as many times as possible and keep every trailing empty", which is what you meant by "split on commas"; the default of 0 is the special case, not the plain one</i>
+    <b>Then decide what a blank field <i>means</i>, because the array cannot tell you</b>
+    <i>↓ <code>""</code> for "the user submitted an empty box" and <code>""</code> for "the column was never filled in" are the same string, and a CSV has no way to distinguish them — that decision belongs in your code, explicitly, not in an array length</i>
+    <b>And for real CSV, use a real parser</b>
+    <i>↓ quoted fields containing commas, embedded newlines, escaped quotes and a BOM on the first line are all legal CSV and all defeat <code>split</code> entirely — the limit argument fixes this bug, it does not make <code>split</code> a CSV parser</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A method with a convenience default has two behaviours, and the one you get by not thinking about it is the one tuned for a different use case than yours.</b> Dropping trailing empties is genuinely useful when you are tokenising words out of a sentence and do not care that the line ended with punctuation. It is exactly wrong when the delimiters are structure — columns, path segments, protocol fields — because there the empty field between two delimiters is data. Same method, same call, opposite requirement, and the API asks you to express the difference in a parameter almost nobody passes.
+</div>
+
+<div class="hf-note"><b>Leading empties are kept. Interior empties are kept. Only trailing empties disappear.</b> The asymmetry is why testing with <code>",,a"</code> tells you nothing about <code>"a,,"</code>.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>Four commas, five fields. Where did the other three array slots go?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who"><code>String.split</code></span>
+    <p>With no limit I use a limit of zero, and zero is documented to mean "apply the pattern as many times as possible, then drop trailing empty strings". You got <code>["a", "b"]</code>. I did the thing my contract says I do — it is just not the thing the name suggests.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The CSV row</span>
+    <p>And I have no way to signal that my last column was intentionally blank. <code>"1002,Sam,eng,"</code> and <code>"1002,Sam,eng"</code> are different strings that split into the identical array. Whatever you decide about missing data, you have to decide it before you call split, not after.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">A real CSV parser</span>
+    <p>Worth pointing out what else I handle that split cannot: a field like <code>"Smith, Priya"</code> in quotes, a newline inside a quoted description, a doubled <code>""</code> escape. Those are all valid CSV. Split sees commas.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps through a bulk user import that has been running happily for four minutes.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The importer reads <code>id,name,dept,active</code> and hard-codes four column indices, <code>0</code> through <code>3</code></span><span class="tag">four columns, agreed</span></li>
+    <li class="open"><span>Row 1: <code>"1001,Priya,eng,true"</code> splits into 4. <code>parts[3]</code> is <code>"true"</code>. Inserted</span><span class="tag">works</span></li>
+    <li><span>31,400 more rows, every one with all four fields populated. Every one inserted, committed, and counted</span><span class="tag">still working</span></li>
+    <li class="open"><span>Row 31,402: <code>"1002,Sam,eng,"</code> — the <code>active</code> column was left blank in the spreadsheet</span><span class="tag">valid input</span></li>
+    <li><span><code>split(",")</code> drops the trailing empty, returns length 3, and <code>parts[3]</code> throws <code>ArrayIndexOutOfBoundsException</code></span><span class="tag">the first failure</span></li>
+    <li class="open"><span>The job dies with 31,401 users already created. Rerun it and you now need to work out which ones</span><span class="tag">half-imported</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is what makes this expensive rather than merely annoying. Thirty-one thousand successes are not evidence that the parser is right — they are evidence that thirty-one thousand rows happened to have a non-empty last column, which is a property of the data, not of the code. <b>A test suite built from realistic sample rows will pass, because realistic sample rows are the ones people bothered to fill in</b>; the case that breaks you is the one a human left blank, and nobody writes that row by hand into a fixture. Test with the ugly row — trailing delimiter, empty file, single delimiter — because those three inputs are where every delimiter-based parser keeps its surprises.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx"><code>"a,b,,,".split(",", limit)</code><small>four commas, five fields — what comes back depends entirely on this one argument</small></div>
+    <div class="arrow">the limit decides how the tail is treated →</div>
+    <div class="opts">
+      <span><b>0</b> (the default, when you pass nothing) → <code>["a", "b"]</code>, length <b>2</b> — trailing empties dropped</span>
+      <span class="on"><b>-1</b> (any negative) → <code>["a", "b", "", "", ""]</code>, length <b>5</b> — every field kept</span>
+      <span><b>2</b> → <code>["a", "b,,,"]</code>, length <b>2</b> — the pattern is applied at most <code>limit-1</code> times, so the rest is one field</span>
+      <span><b>5</b> or larger → <code>["a", "b", "", "", ""]</code>, length <b>5</b> — any positive limit also keeps trailing empties</span>
+    </div>
+  </div>
+  <p class="hf-annot">Read the four rows together and the parameter stops looking like a tuning knob: it is a three-way switch, and only one of the three settings is the one you almost always meant. Negative keeps everything. Positive keeps everything <i>and</i> caps the field count, which is genuinely useful for <code>key=value</code> lines where the value may contain the delimiter — <code>split("=", 2)</code> is the right way to parse those. <b>Zero, the default, is the only setting that throws data away</b>, and it is the setting you get by writing the call the obvious way. When an API's default is its most surprising mode, the fix is a lint rule or a helper, not a promise to remember.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">In Java, what are the lengths of <code>"".split(",")</code> and <code>",".split(",")</code>?</p>
+  <button type="button">Both 0 — neither string contains a field with any content, so both produce an empty array</button>
+  <button type="button"><code>""</code> gives length <b>1</b> (an array holding the empty string, because the pattern never matched) and <code>","</code> gives length <b>0</b> (two empty fields, both of them trailing, both dropped)</button>
+  <button type="button"><code>""</code> gives length 0 and <code>","</code> gives length 2 — the empty string has nothing to split, and one comma separates two empty fields</button>
+  <p class="why" data-for="0">Close on the second one, wrong on the first. When the pattern does not match the input at all, <code>split</code> is documented to return a one-element array containing the whole input — and the whole input here is the empty string, so you get <code>[""]</code>, length 1.</p>
+  <p class="why" data-for="1">Correct, and this is the pair worth remembering because it runs backwards: the <i>longer</i> input produces the <i>shorter</i> array. A one-element array is not an empty array, and code that checks <code>parts.length == 0</code> to detect a blank line will never fire.</p>
+  <p class="why" data-for="2">This is the intuitive reading and both halves are inverted. The empty string does not match the pattern, so it comes back as a single element; <code>","</code> really does produce two empty fields, but both of them are trailing, and the default limit of 0 discards every trailing empty — leaving nothing.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Convenience defaults that discard information, in three other places you have already been bitten.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>JavaScript's <code>split</code> does the opposite</h4>
+    <p><code>"a,b,,,".split(",")</code> in JS has length 5 — trailing empties are kept, always. So the same line of code ported between a Java backend and a JS frontend produces different field counts from identical input, which is a wonderful way to lose a day.</p>
+    <div class="hf-scatter"><span>same name, different contract</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4><code>trim()</code> versus <code>strip()</code></h4>
+    <p><code>trim()</code> removes anything at or below <code>U+0020</code>, so it leaves an ideographic space (<code>U+3000</code>) in place; <code>strip()</code>, added in Java 11, removes it. Neither removes a non-breaking space — <code>Character.isWhitespace(' ')</code> is <b>false</b> by design — so a value pasted out of a rich-text editor survives both and compares unequal to the same word typed by hand.</p>
+    <div class="hf-scatter"><span>"whitespace" is a narrower word than you think</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4><code>replace</code> versus <code>replaceAll</code></h4>
+    <p>Despite the names, the difference is not one-vs-all — both replace every occurrence. The difference is that <code>replaceAll</code> takes a <b>regex</b>, so <code>replaceAll(".", "-")</code> replaces every character in the string. <b>Two methods, near-identical names, and the distinction is in a word neither name contains.</b></p>
+    <div class="hf-scatter"><span>read the parameter, not the name</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> strings are immutable, so every "change" allocates a new object; literals live in the pool and are shared, which is why <code>==</code> sometimes appears to work; build strings in a loop with <code>StringBuilder</code>, not <code>+</code>. The sentence worth adding: <b><code>split</code> silently drops trailing empty fields</b> — <code>"a,b,,,".split(",")</code> has length 2, so pass <code>split(",", -1)</code> whenever the number of fields is part of the meaning.
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -848,6 +969,7 @@ function benchConcat(){
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

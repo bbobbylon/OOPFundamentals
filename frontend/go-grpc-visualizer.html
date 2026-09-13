@@ -58,7 +58,108 @@
     <div class="intro-ciam"><span class="tag">CIAM context:</span> Internal auth calls — token introspection, user/role lookup, session checks — are a perfect gRPC fit: typed, HTTP/2-multiplexed, low-latency. Carry the caller's bearer token and trace ID in <strong>metadata</strong>, and put one <strong>auth interceptor</strong> in front of every method to validate the JWT and inject the principal into the context — Spring Security's filter chain, but for RPCs. Map <code>codes.Unauthenticated</code> (16) → 401 and <code>codes.PermissionDenied</code> (7) → 403 at the edge gateway.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the request that kept running long after the caller gave up</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The client set a deadline. The server respected it perfectly. And a downstream call the handler made kept burning CPU for another eight seconds after that deadline passed.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A 2-second deadline that a downstream lookup never heard about</div>
+  <p>Your <code>GetUser</code> RPC handler needs to enrich the response with data from a second internal service, so it calls <code>enrichmentClient.Lookup(context.Background(), req)</code> instead of forwarding the <code>ctx</code> the RPC handler was actually given. The client called <code>GetUser</code> with a 2-second deadline via <code>context.WithTimeout</code>. At 2 seconds, gRPC correctly cancels the CLIENT's wait and returns <code>codes.DeadlineExceeded</code> — the caller moves on immediately.</p>
+  <p>The <code>Lookup</code> call, though, was handed <code>context.Background()</code> — a context that is never cancelled and carries no deadline at all. It keeps running: still holding a database connection, still consuming a goroutine, still doing work, for however long <code>Lookup</code> naturally takes — 8 seconds, in this case — for a response nobody is waiting for anymore. Under load, this is exactly how a slow downstream dependency turns into a resource leak: every timed-out client just adds one more orphaned call that outlives it.</p>
+  <div class="hf-scatter">
+    <span>the client's <code>context.WithTimeout(2*time.Second)</code> ✓</span>
+    <span>gRPC returning <code>DeadlineExceeded</code> to the client on time ✓</span>
+    <span>what the SERVER did with that deadline internally ⚠</span>
+  </div>
+  <p class="hf-foot">The deadline worked exactly where you could see it — at the client — and silently stopped existing exactly where you couldn't.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Forward the context you were given — always</div>
+  <div class="hf-ladder">
+    <b>Pass the handler's own <code>ctx</code> to every downstream call: <code>enrichmentClient.Lookup(ctx, req)</code></b>
+    <i>↓ gRPC clients read the deadline off the context you pass in and stop the call automatically once it's exceeded — no manual timer needed</i>
+    <b>Never use <code>context.Background()</code> or <code>context.TODO()</code> inside a request handler</b>
+    <i>↓ both create a fresh context with no deadline and no cancellation — reserve them for <code>main()</code>, service startup, and background jobs that genuinely have no caller to inherit from</i>
+    <b>If a downstream call needs its OWN shorter budget, derive it: <code>ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)</code></b>
+    <i>↓ deriving from the incoming ctx keeps the parent deadline as a hard ceiling — the derived context can only be stricter, never looser</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A context you don't forward is a promise you don't keep.</b> The whole point of Go's <code>context.Context</code> is that cancellation and deadlines propagate down a call chain automatically — but only along edges where the code actually passes the context forward. Swap in a fresh one anywhere in that chain and every promise upstream made about "stop when the caller stops" ends at that line.
+</div>
+
+<div class="hf-note">Think of the incoming <code>ctx</code> as a <b>relay baton</b>, not a starting gun. Every downstream call needs the SAME baton passed into its hand — hand it a brand-new baton (<code>context.Background()</code>) instead, and it has no idea the race was ever supposed to end.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>The client's deadline fired and it moved on. Why is my enrichment lookup still running?</p></div>
+  <div class="hf-bub right"><span class="who">context.Background()</span><p>Because that's what I am — a context with no deadline, no parent, no cancellation signal. I don't know a client existed, let alone that it gave up two seconds ago. Nobody told me to stop, so I don't.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But the handler DID have a ctx with the deadline on it.</p></div>
+  <div class="hf-bub right"><span class="who">The handler's real ctx</span><p>I did, and I was sitting right there in scope. The code just called <code>Lookup</code> with <code>context.Background()</code> instead of me — a completely valid Go value, so nothing warned anyone at compile time.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Trace the same 2-second deadline through a handler that does — and doesn't — forward it.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The client calls <code>GetUser</code> with <code>ctx, _ := context.WithTimeout(ctx, 2*time.Second)</code></span><span class="tag">deadline set</span></li>
+    <li class="open"><span>gRPC transmits that deadline to the server; the server's handler receives a <code>ctx</code> already carrying it</span><span class="tag">propagated</span></li>
+    <li><span>The handler calls <code>enrichmentClient.Lookup(context.Background(), req)</code> — a fresh context, not the one it was given</span><span class="tag">dropped</span></li>
+    <li class="open"><span>At the 2-second mark, the CLIENT's original call unblocks with <code>codes.DeadlineExceeded</code> — that part of the contract still works</span><span class="tag">client returns</span></li>
+    <li><span>The <code>Lookup</code> call, riding on <code>context.Background()</code>, has no idea a deadline ever existed and keeps executing</span><span class="tag">still running</span></li>
+    <li class="open"><span>It finishes 6 seconds later, holding a DB connection and a goroutine the whole time, and writes a result nothing will ever read</span><span class="tag">wasted work</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the entire bug in one function call. Everything before it and after it behaves exactly as documented — <code>context.Background()</code> is doing precisely what it's supposed to do: nothing. The mistake is calling it there at all.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>a downstream gRPC client call passed <code>context.Background()</code></span><span>a goroutine spawned with <code>go func(){ ... }()</code> that closes over a NEW context instead of the handler's</span><span>a repo/DB call using <code>context.TODO()</code> "just to get it compiling"</span></div>
+    <div class="funnel">none of them carry the caller's deadline or cancellation ↓</div>
+    <div class="instance">work keeps running after the client has already given up<small>same root cause, three different call sites it hides in</small></div>
+  </div>
+  <p class="hf-annot">Every one of these looks like an unrelated, small decision made under time pressure. All three throw away the same thing: the one piece of information — "someone is still waiting, and here's until when" — that only exists on the context you were actually handed.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A unary interceptor authenticates the caller, then calls <code>handler(context.WithValue(ctx, userKey, principal), req)</code> — the exact pattern from this page's own interceptor code. The wrapped handler internally makes a downstream call using this new context. Does the ORIGINAL client's deadline still apply to that downstream call?</p>
+  <button type="button">No — <code>context.WithValue</code> creates an entirely fresh context tree, so the deadline is lost the same way it is with <code>context.Background()</code>.</button>
+  <button type="button">Only if the downstream call happens within the first half of the original timeout window.</button>
+  <button type="button">Yes — <code>context.WithValue(ctx, ...)</code> wraps the SAME parent context, so it still carries the parent's deadline and cancellation alongside the new value.</button>
+  <p class="why" data-for="0">This is the wrong instinct built from today's lesson — but <code>WithValue</code> isn't <code>Background()</code>. It derives a child context that still has the original as its parent, so cancellation and the deadline are inherited, not discarded. Only creating a genuinely NEW root context throws them away.</p>
+  <p class="why" data-for="1">Deadlines aren't windowed like that — a context either carries a specific deadline (checked against `time.Now()`) or it doesn't. There's no "first half only" behavior in `context.Context`; this answer invents a rule that doesn't exist.</p>
+  <p class="why" data-for="2">Correct — every <code>context.With*</code> function (<code>WithValue</code>, <code>WithTimeout</code>, <code>WithCancel</code>) returns a CHILD of the context you pass in, and a child always inherits its parent's deadline and cancellation. This is exactly why forwarding the real <code>ctx</code> — even after attaching values to it — keeps the whole chain intact.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The caller stopped waiting, but the work kept happening anyway" is a resource-leak shape that shows up anywhere cancellation has to be threaded through by hand.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>An Angular HTTP call that isn't unsubscribed</h4>
+    <p>Navigate away from a component mid-request and an <code>HttpClient</code> call with no <code>takeUntilDestroyed()</code>/manual unsubscribe keeps running, then tries to update a component that no longer exists. Same shape as the orphaned gRPC call: the "caller" (the component) is gone, but nothing told the in-flight work to stop.</p>
+    <div class="hf-scatter"><span>an in-flight call outliving its own caller is a pattern, not a one-off bug</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Spring <code>@Async</code> method that ignores the caller's timeout</h4>
+    <p>A <code>CompletableFuture</code> from an <code>@Async</code> method keeps executing on its own thread-pool thread even after the caller times out waiting on it (<code>future.get(2, TimeUnit.SECONDS)</code> throwing just stops the CALLER from waiting — it doesn't cancel the work) unless you explicitly call <code>future.cancel(true)</code> and the underlying task actually checks for interruption.</p>
+    <div class="hf-scatter"><span>a caller giving up is not the same event as the work actually stopping</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A database query that keeps running after the API request times out</h4>
+    <p>An HTTP framework returning a 504 to the client doesn't automatically send a query-cancellation signal down to Postgres/MySQL unless the driver is wired to the request's cancellation (e.g. passing <code>ctx</code> into <code>sql.QueryContext</code>, or a JDBC statement's <code>setQueryTimeout</code>). Skip that wiring and the database keeps grinding on a query whose answer will be thrown away.</p>
+    <div class="hf-scatter"><span>the response timing out and the underlying work stopping are two separate things you have to wire together</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> gRPC is a contract-first RPC framework — a <code>.proto</code> generates typed client/server stubs, calls travel as binary protobuf over HTTP/2 in four shapes (unary and three streaming styles), and cross-cutting concerns ride on interceptors, metadata, and typed status codes. <b>The one new sentence this block adds:</b> the <code>ctx</code> your handler receives carries the caller's real deadline and cancellation, but only for as long as your code keeps passing that SAME context forward — swap in <code>context.Background()</code> for even one downstream call, and that call becomes deaf to a client that already left.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="ggrpcSeg">
@@ -253,6 +354,7 @@ DevHubCodeWalk.mount('#cw-gogrpc',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -69,7 +69,108 @@
     <div class="intro-ciam"><span class="tag">Where this shows up in CIAM work:</span> a support chatbot that resolves "it locked me out" across a multi-turn conversation is doing exactly this attention trick to figure out what "it" refers to (the account? the device? the token?). Fraud/anomaly-detection models that embed login events into vectors for similarity search are the same Q/K/V machinery, just applied to structured events instead of words. See the <a href="genai-rag-visualizer.html" style="color:var(--accent)">RAG</a> and <a href="genai-embeddings-vector-db-visualizer.html" style="color:var(--accent)">Embeddings</a> pages for how attention-built representations get used downstream.</div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, why the token holding all the attention might just be sitting in the wrong seat</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You just built a heatmap that makes it look like the model is "paying attention to" the meaningful word — and for a lot of tokens, it's lying to you.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Token 0 grabs 38% of the attention weight for a query it has nothing to do with</div>
+  <p>Run the scenario above on a long sentence and pick a query token buried in the middle — say, the word "report" in "...the quarterly report was late." You'd expect the biggest slice of its attention weight to land on "quarterly," the one word it actually needs. Instead a huge chunk lands on the very first token in the sequence: a BOS marker, or whatever word happened to start the input — a token with no semantic connection to "report" at all.</p>
+  <p>Here's why: every row of an attention matrix has to sum to exactly 1.0 &mdash; that's what softmax guarantees. When a query token doesn't have a strongly relevant match anywhere else (which is most tokens, most of the time), the leftover probability mass still has to land <em>somewhere</em>. Researchers studying long-context and streaming LLMs found it reliably dumps onto the first few tokens of the sequence, regardless of what those tokens say — a learned "no-op" address, not a vote for relevance.</p>
+  <div class="hf-scatter">
+    <span>high weight on the closest real match ✓</span>
+    <span>low weight on unrelated filler words ✓</span>
+    <span>38% weight parked on a BOS tag ⚠</span>
+  </div>
+  <p class="hf-foot">Read that 38% at face value and you'd swear the model thinks the BOS token is what matters here. It doesn't. It's a drain, not a decision.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Read attention weight as plumbing, not as an explanation</div>
+  <div class="hf-ladder">
+    <b>Expect a sink at the start of the sequence</b>
+    <i>&darr; almost every trained decoder does this — treat a spike on position 0-2 as a pressure-release valve, not a signal</i>
+    <b>Look at the RELATIVE weight among the non-sink tokens</b>
+    <i>&darr; once you discount the sink, the remaining spread across real content words is where the actual "what mattered" signal lives</i>
+    <b>Never ship "attention weight = explanation" to a stakeholder</b>
+    <i>&darr; if you're building an audit trail for why a model flagged something, attention weight is not a citation — it wasn't validated for that job</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Softmax normalizes, it doesn't judge — a row of attention weights always sums to 1 whether or not anything in the sequence is truly relevant to the query, so a large number is proof that the row was normalized, not proof that the model found something meaningful.
+</div>
+
+<div class="hf-note">Attention sinks aren't a curiosity — they're load-bearing. Long-context and streaming-inference systems keep the first few tokens <b>pinned in the KV cache</b> even after evicting everything else to save memory, because evicting the sink collapses output quality, even though those tokens "don't say anything."</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>So the model is telling me token 0 is important?</p></div>
+  <div class="hf-bub right"><span class="who">The softmax layer, personified</span><p>No. I'm telling you the numbers in this row add up to 1. Where the leftovers land isn't my job to explain.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Then why does it always land in the same spot?</p></div>
+  <div class="hf-bub right"><span class="who">Gradient descent, personified</span><p>Because parking unused probability on a fixed, always-present token turned out cheaper than learning a genuine "attend to nothing" output. Nobody asked for a sink — it just never needed to be a real word.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Walk one query token through a row of the attention matrix and watch where softmax sends the mass it can't place anywhere meaningful.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Query token "report" is compared against every Key in the sequence via Q&middot;K&#7488;</span><span class="tag">scores</span></li>
+    <li class="open"><span>Only one token — "quarterly" — scores meaningfully high against it</span><span class="tag">real match</span></li>
+    <li><span>Every other raw score sits close to zero, token 0 included</span><span class="tag">raw scores</span></li>
+    <li class="open"><span>Softmax normalizes the row so it sums to 1.0 regardless of how weak those scores were</span><span class="tag">normalize</span></li>
+    <li><span>Token 0 absorbs the leftover mass nothing else earned — often 30-40% of the row</span><span class="tag">sink</span></li>
+    <li class="open"><span>The heatmap renders that leftover exactly like it would render a genuine match</span><span class="tag">no visual difference</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the whole gotcha in one line: that mass wasn't earned by token 0's content — it's what was left after everything else got normalized down, and it has to go somewhere. Step 6 is why you can't spot the difference just by looking.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>no strongly relevant token exists</span><span>query is a low-information filler word</span><span>query is deep in a long context</span></div>
+    <div class="funnel">same underlying thing &darr;</div>
+    <div class="instance">Token 0 (or the first few tokens) shows a disproportionate attention weight<small>one symptom, three unrelated-looking causes</small></div>
+  </div>
+  <p class="hf-annot">Three completely different situations end up looking identical on the heatmap: a bright cell on token 0. If you can't tell those three apart from the score alone, you can't use the score alone as an explanation for anything.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">Your visualizer shows 38% of a mid-sentence query's attention weight landing on the very first token in the sequence — a plain BOS marker with no relation to the query. What's the most likely explanation?</p>
+  <button type="button">Softmax forced the row to sum to 1, and the leftover mass the model couldn't place elsewhere landed on the sink token</button>
+  <button type="button">The BOS token is secretly the most semantically relevant token in the sentence</button>
+  <button type="button">The model's weights are corrupted and it needs to be retrained</button>
+  <p class="why" data-for="0">Exactly — softmax normalizes the row regardless of whether anything deserves the mass, and that leftover has to land somewhere. This is exactly why raw attention weight is a poor stand-in for "importance."</p>
+  <p class="why" data-for="1">A BOS token carries essentially no content on its own. High weight here isn't evidence of meaning — it's evidence of normalization needing somewhere to put the remainder.</p>
+  <p class="why" data-for="2">This is normal, expected, well-documented behavior in trained decoder models — not a sign anything is broken or needs fixing.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Same shape, different plumbing: something in your system has to balance to a fixed total, so the leftover gets parked somewhere that looks meaningful but isn't.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>An OAuth token's granted-scopes list</h4>
+    <p>A client requests <code>read:profile</code>, <code>read:billing</code>, and <code>admin:*</code>, and the token that comes back always includes a baseline scope like <code>openid</code> — not because the client asked hardest for it, but because the authorization server always attaches it by default. A scope's presence in the token isn't evidence the client meaningfully needed it.</p>
+    <div class="hf-scatter"><span>a required field isn't the same as a meaningful one</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A load balancer during a rolling deploy</h4>
+    <p>Round-robin has to send 100% of traffic somewhere every second. Mid-rollout, when only one pod behind an ALB is actually healthy, its traffic share spikes to near 100% on the dashboard — not because it's the best-performing instance, but because it's the only place left for the traffic to go.</p>
+    <div class="hf-scatter"><span>high share isn't the same as high merit</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A catch-all <code>@ExceptionHandler(Exception.class)</code></h4>
+    <p>In a Spring <code>@RestControllerAdvice</code>, the generic fallback handler ends up "handling" a huge share of the exceptions in your logs — not because most bugs are generic, but because every exception that didn't match a more specific handler falls through to it. The biggest bucket in a metrics dashboard is often the drain, not the top cause.</p>
+    <div class="hf-scatter"><span>the biggest bucket in your metrics might just be the leftover bucket</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> self-attention lets every token look at every other token and blend them by learned relevance, with multi-head attention, positional encoding, and causal masking making that mechanism work at scale and in the right direction. <b>The one new sentence this block adds:</b> a high attention weight is not proof of relevance — softmax has to distribute 100% of every row somewhere, and it reliably dumps the leftovers on the first token whether or not that token means anything at all.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -347,6 +448,7 @@ DevHubCodeWalk.mount('#cw-transformers',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

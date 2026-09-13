@@ -57,7 +57,143 @@
     <div class="intro-ciam"><span class="tag">CIAM at the edge:</span> the gateway is where identity is enforced. A <strong>JWT-validation policy</strong> checks the access token's signature against the IdP's <strong>JWKS</strong> plus <code>iss</code>/<code>aud</code>/<code>exp</code>, and a <strong>client-ID-enforcement</strong> policy verifies the calling app — both <em>before</em> the request reaches any flow, so your integration logic only ever sees authenticated, authorized traffic. This is the same edge-validation pattern as a Spring resource server or the gateway in the <code>node-auth</code> / <code>aspnet-auth</code> pages, applied centrally across every API. Tokens from Entra or Ping are validated identically — only the <code>jwksUrl</code> and audience change per environment.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the two green checkmarks in API Manager that still produced the wrong policy result</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">A policy that depends on knowing WHO is calling can only do its job correctly if it runs AFTER the policy that actually establishes who that is.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">You dragged one policy up in API Manager, and every Gold customer got throttled like a stranger</div>
+  <p>Your Orders System API has two policies attached: <code>client-id-enforcement</code> (validates the
+  caller's registered client ID/secret, and resolves WHICH contract/SLA tier that client belongs to —
+  say, "Gold: 100 requests/minute") and <code>rate-limit-sla</code> (throttles based on the caller's
+  tier). Both show green and correctly configured in API Manager. During a policy cleanup, someone
+  drags <code>rate-limit-sla</code> higher in the list — "rate limiting should happen as early as
+  possible, reject cheap traffic fast" sounds reasonable — so the gateway's applied order becomes
+  <code>rate-limit-sla</code> first, <code>client-id-enforcement</code> second.</p>
+  <p>Reveal: when <code>rate-limit-sla</code> runs, nothing has resolved which client — or which
+  SLA contract/tier — is making this request, because <code>client-id-enforcement</code> hasn't executed
+  yet. The rate limiter has no identity to key a tier lookup off of, so it can only fall back to
+  treating the request against the pipeline's default bucket, exactly like it would treat a brand-new,
+  unregistered caller. A Gold-tier partner paying for 100 requests/minute gets throttled at whatever
+  the fallback limit is — the same as anyone else. Nothing in API Manager's dashboard flags this as a
+  misconfiguration: both policies are individually valid, both show "enabled," and the pipeline runs
+  top to bottom exactly as configured. It's just configured in the wrong order.</p>
+  <div class="hf-scatter">
+    <span>client-id-enforcement correctly configured ✓</span>
+    <span>rate-limit-sla correctly configured ✓</span>
+    <span>both policies show green/enabled in API Manager ✓</span>
+    <span>rate-limit-sla runs before anything establishes WHO is calling ⚠</span>
+  </div>
+  <p class="hf-foot">API Manager will happily let you attach policies in any order you like. It has no idea one of them is functionally meaningless without the other running first.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Order identity-establishing policies before identity-consuming ones — always</div>
+  <div class="hf-ladder">
+    <b>Put every policy that IDENTIFIES the caller first — jwt-validation, client-id-enforcement</b>
+    <i>↓ these are the only policies that attach WHO is calling to the request context; nothing downstream can use an identity that hasn't been resolved yet</i>
+    <b>Put every policy that CONSUMES that identity second — rate-limit-sla, tier-based routing</b>
+    <i>↓ an SLA-based rate limiter is only ever as correct as the identity it's handed; give it nothing, and the only thing it CAN do is treat every caller the same</i>
+    <b>Treat the policy list as a pipeline, not an independent checklist</b>
+    <i>↓ "is this policy correctly configured" is the wrong question in isolation — the real question is "does this policy have what it needs by the time it runs," which depends entirely on what ran before it</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A policy's correctness isn't only a property of its own configuration —
+  it also depends on what earlier policies in the pipeline have already established, so two
+  individually perfect policies can still produce a completely wrong result together, purely because of
+  which one runs first.
+</div>
+
+<div class="hf-note">It's like checking someone's loyalty card AFTER you've already rung up the regular
+price. The card is real. The discount tier is real. <b>You just asked for it one step too late for it
+to change anything.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>Both policies show green in API Manager. Why is my Gold customer being throttled at the default rate?</p></div>
+  <div class="hf-bub right"><span class="who">rate-limit-sla</span><p>By the time I run, nobody has told me who's calling. I need a resolved client and contract to look up a tier — you handed me a request with no identity attached yet, so the only bucket I have is the one for everybody.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But client-id-enforcement IS attached to this API!</p></div>
+  <div class="hf-bub right"><span class="who">rate-limit-sla</span><p>Attached, sure. Attached after me. I already made my decision, based on nothing, before it ever ran.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow the exact same Gold-tier request through the gateway twice — once in the right order, once after one drag-and-drop swap.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Correct order: <code>client-id-enforcement</code> runs first, validates the caller, resolves the Gold contract</span><span class="tag">identity established</span></li>
+    <li class="open"><span><code>rate-limit-sla</code> runs second, reads Gold from context, applies 100 req/min</span><span class="tag">correct tier applied</span></li>
+    <li><span>Someone reorders the policy list: <code>rate-limit-sla</code> is dragged above <code>client-id-enforcement</code></span><span class="tag">the swap</span></li>
+    <li class="open"><span>The same Gold request arrives; <code>rate-limit-sla</code> now runs FIRST, before any identity is attached</span><span class="tag">no identity yet</span></li>
+    <li><span><code>rate-limit-sla</code> has no tier to look up — it applies the default bucket to every caller, Gold or not</span><span class="tag">wrong tier applied</span></li>
+    <li class="open"><span><code>client-id-enforcement</code> still runs afterward and still validates the caller correctly — but the rate limiter already decided, using nothing</span><span class="tag">too late to matter</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is where it goes wrong, and neither policy is broken — read on its own,
+  each one performs exactly its documented job. The break is entirely relational: one policy's
+  correctness was silently borrowed from a DIFFERENT policy's output, and nothing on either policy's
+  own configuration screen in API Manager shows that dependency exists at all.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">the gateway's policy pipeline, applied top to bottom, exactly as configured</span>
+      <div class="ring"><span class="lbl">an identity-consuming policy sitting above the identity-establishing one</span>
+        <div class="ring"><span class="lbl">rate-limit-sla executes with an empty request context</span>
+          <div class="core">a rate limiter given zero identity to key its lookup off of<small>every caller collapses into the same anonymous bucket, Gold customers included</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Trace the rings from the outside in: each layer is completely ordinary on its own —
+  a pipeline running top to bottom is exactly how a gateway is supposed to work. The problem only
+  exists at the center, where a specific policy needed something specific from an earlier stage and
+  simply never received it, silently substituting a default instead of raising any alarm.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your Orders API has two gateway policies: <code>client-id-enforcement</code> and <code>rate-limit-sla</code> (which throttles by the caller's SLA tier). Someone reorders the list so <code>rate-limit-sla</code> runs BEFORE <code>client-id-enforcement</code>. Both policies are still individually configured correctly. What happens to a Gold-tier partner's requests (contracted for 100 req/min)?</p>
+  <button type="button">Nothing changes — API Manager applies all attached policies together, regardless of the order they're listed in.</button>
+  <button type="button">They get throttled using the default/anonymous rate limit instead of their Gold tier, because rate-limit-sla runs before any policy has resolved which client — and therefore which tier — is calling.</button>
+  <button type="button">The gateway detects the misconfiguration and automatically reorders identity-related policies to run first.</button>
+  <p class="why" data-for="0">Policies apply strictly in the order they're configured — that ordering is precisely why reordering them is exposed as a feature in API Manager in the first place. If order didn't matter, there would be nothing to reorder.</p>
+  <p class="why" data-for="1">Right. <code>client-id-enforcement</code> is what resolves which registered client — and which SLA contract/tier — is making the call. Run <code>rate-limit-sla</code> before that happens and it has no tier to key off of, so it can only apply whatever the pipeline's default bucket is, Gold customers included.</p>
+  <p class="why" data-for="2">API Manager has no way to know that one policy's correctness depends on another policy running first — from its point of view, both policies are independently valid configurations. It applies the list exactly as ordered, with no semantic check running between them.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"A later stage silently depends on an earlier stage's output, and nothing enforces the order" is the same trap in every request pipeline, not just an API gateway.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring Security's filter chain</h4>
+    <p>A custom filter that reads the authenticated principal off <code>SecurityContextHolder</code> gets nothing useful if it's registered (via <code>addFilterBefore</code>) ahead of the JWT/username-password authentication filter — the context simply hasn't been populated yet. The filter isn't broken; it just ran before the filter it silently depends on.</p>
+    <div class="hf-scatter"><span>the identical ordering trap, in the framework this page compares itself to</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Express/Node middleware order</h4>
+    <p>A route handler that reads <code>req.user</code> gets <code>undefined</code> if the auth middleware that attaches it is registered with <code>app.use()</code> AFTER that route — <code>req.user</code> only exists because some earlier middleware chose to set it, and nothing forces that ordering except the order you wrote the <code>app.use()</code> calls in.</p>
+    <div class="hf-scatter"><span>the same shape, one framework over in JavaScript</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Database trigger firing order</h4>
+    <p>When more than one trigger fires on the same table event, PostgreSQL runs them in alphabetical order by trigger name by default, and MySQL runs them in creation order unless you say otherwise with <code>FOLLOWS</code>/<code>PRECEDES</code>. A trigger written assuming a sibling trigger's side effect already happened can silently read stale data purely because of naming or creation order — nobody configured a bug, they just didn't control the sequence.</p>
+    <div class="hf-scatter"><span>the database's own version of policy order mattering</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> API-led connectivity organizes integrations into System/Process/
+  Experience layers for reuse, and the Anypoint Gateway enforces auth, client identity, and rate limits
+  as declarative policies applied in order, before your flow ever runs. <b>The one new sentence this
+  block adds:</b> "in order" isn't just a performance nicety for rejecting bad traffic cheaply — a
+  policy that depends on the caller's identity is only as correct as whatever ran before it, so two
+  individually perfect policies, attached in the wrong sequence, can produce a result that's silently
+  wrong for every single caller, with nothing in API Manager's own dashboard ever flagging it.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="alSeg">
@@ -256,6 +392,7 @@ DevHubCodeWalk.mount('#cw-al',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

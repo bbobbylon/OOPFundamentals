@@ -121,6 +121,140 @@
     </div>
   </div>
 
+<p class="hf-deck">or, the one JWT field you should never let the token itself decide</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The header field that names the signing algorithm lives INSIDE the token — which means whoever forges a token also gets to write that field.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Your verifier let a forged Admin token through, using nothing but a public key</div>
+  <p>Your resource server verifies tokens from your IdP with real RS256: it fetches the IdP's public
+  key from <code>/oauth2/jwks</code> and hands it, plus the token, to a verify function. Some JWT
+  libraries — this is a real, documented weakness several popular ones shipped historically — accept a
+  bare key and read the token's own <code>alg</code> header to decide HOW to use it: RSA public key for
+  RS256, or plain HMAC secret for HS256. Convenient. Also fatal.</p>
+  <p>An attacker fetches your public JWKS — it's meant to be public, that's the whole point of RS256 —
+  and builds a token by hand: header <code>{"alg":"HS256"}</code>, payload
+  <code>{"sub":"attacker","roles":["Admin"]}</code>, then computes the signature as
+  <code>HMAC-SHA256(header.payload, publicKeyBytes)</code> — using your RSA public key's raw bytes as
+  if they were a shared HMAC secret. Your verifier reads <code>alg: HS256</code> off the token, reaches
+  for the exact same public key it already had loaded for RS256, and runs it through HMAC instead. The
+  attacker computed that same HMAC using that same public key. The two match. The forged token
+  verifies — the IdP's actual private key was never touched, and never needed to be.</p>
+  <div class="hf-scatter">
+    <span>JWKS correctly serving the public key ✓</span>
+    <span>the IdP's private key never left the IdP ✓</span>
+    <span>the signature check ran, and technically matched ✓</span>
+    <span>the TOKEN got to choose which algorithm/key-type verified it ⚠</span>
+  </div>
+  <p class="hf-foot">The <code>alg</code> header is a claim like any other — the same untrusted, attacker-editable JSON you've been tampering with all through this page. Trusting it to decide how you check the signature hands the attacker the one decision that was supposed to be yours.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Pin the algorithm on the server — never read it off the token</div>
+  <div class="hf-ladder">
+    <b>Configure your verifier with an explicit allow-list, e.g. <code>algorithms: ["RS256"]</code></b>
+    <i>↓ modern libraries (jjwt, jose, a patched PyJWT) require this and refuse to verify at all if the token's own header names anything outside it — the token no longer gets a vote</i>
+    <b>Never let one code path accept both HMAC and RSA/EC verification</b>
+    <i>↓ HMAC wants a plain secret, RSA wants a public/private keypair; a verifier willing to take either based on the token's own say-so is exactly the ambiguity this attack lives in</i>
+    <b>Reject <code>alg: none</code> outright, not just fail to specifically support it</b>
+    <i>↓ <code>none</code> means "no signature at all" — technically spec-legal, but a hardened verifier should treat it as an attack signal, never a valid choice to fall back to</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A cryptographic verifier has to decide, independently of the message
+  it's checking, which algorithm and which key that check is allowed to use — the moment the message
+  itself gets a vote in that decision, the message can simply lie its way into passing.
+</div>
+
+<div class="hf-note">It's like a bouncer who asks the guest which ID-checking method to use before
+looking at the ID. Of course the fake ID says <b>"just glance at the photo, don't scan the
+barcode."</b> The guest should never be the one setting the rules for their own inspection.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>The signature matched. Doesn't a matching signature always mean the token is authentic?</p></div>
+  <div class="hf-bub right"><span class="who">The old verifier</span><p>I checked whatever algorithm the token's own header told me to check with, using the key you handed me. This one said HS256, so I ran HMAC — and it matched.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But I gave you an RSA public key, not an HMAC secret!</p></div>
+  <div class="hf-bub right"><span class="who">The old verifier</span><p>You never told me it could only ever be one or the other. I just used whatever bytes you handed me, exactly the way the token asked me to.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow a forged Admin token all the way through a verifier that lets the <code>alg</code> header make the call.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Your server publishes its RSA public key at <code>/oauth2/jwks</code> — public by design, meant for anyone to fetch</span><span class="tag">public by design</span></li>
+    <li class="open"><span>An attacker downloads that key the same way any legitimate resource server would</span><span class="tag">no secret needed</span></li>
+    <li><span>Attacker builds a token: header <code>{"alg":"HS256"}</code>, payload <code>{"sub":"attacker","roles":["Admin"]}</code></span><span class="tag">forged claims</span></li>
+    <li class="open"><span>Attacker signs it: <code>HMAC-SHA256(header.payload, publicKeyBytes)</code> — the public key standing in as a shared secret</span><span class="tag">the trick</span></li>
+    <li><span>Your verifier reads <code>alg: HS256</code> off the token and reruns HMAC using the same public key it already had loaded</span><span class="tag">trusts the header</span></li>
+    <li class="open"><span>Both HMACs were computed from the exact same bytes — they match, and the forged Admin token verifies "successfully"</span><span class="tag">forgery accepted</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the whole bug, and there's nothing broken about the cryptography anywhere
+  in this chain — HMAC and RSA are both doing precisely what they're built to do. The mistake was made
+  once, early, in how the verifier was wired: "read the token's <code>alg</code> field, and use whatever
+  it says." Everything downstream of that one decision worked flawlessly toward the wrong outcome.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">an HTTP request arrives, carrying a JWT</span>
+      <div class="ring"><span class="lbl">the JWT's own header self-declares alg: HS256</span>
+        <div class="ring"><span class="lbl">the verifier's algorithm-selection logic defers to that header</span>
+          <div class="core">an RSA PUBLIC key, doing an HMAC SECRET's job<small>meant to be shared with the world, now protecting a forged "Admin" claim instead</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Trace the nesting from the outside in: each layer trusted the one just inside it a
+  little further than it should have, and by the time you reach the center, a key that was DESIGNED to
+  be public is standing guard over a decision that needed a secret. Nothing in any single ring looks
+  wrong — the request is real, the header parses fine, the key really is the IdP's key. The vulnerability
+  only exists in the accumulated trust between the rings.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">Your resource server reads the <code>alg</code> field out of the token itself, then verifies using whatever type that field names. An attacker downloads your IdP's PUBLIC RSA key from your own JWKS endpoint, crafts a token with <code>alg: HS256</code> and <code>roles: ["Admin"]</code>, and signs it with HMAC using that public key's bytes as the secret. What happens?</p>
+  <button type="button">It verifies successfully — your verifier treats the public key as an HMAC secret because the token's own header told it to, so the attacker's HMAC matches and the forged Admin token is accepted.</button>
+  <button type="button">It fails, because an RSA public key can't mathematically be used as an HMAC secret.</button>
+  <button type="button">It fails, because the JWKS endpoint detects the mismatched algorithm and rejects the request before your verifier ever runs.</button>
+  <p class="why" data-for="0">Right. HMAC's secret can be any bytes at all — including a supposedly public RSA key. Because the verifier let the token's own <code>alg</code> header pick the algorithm, it reused the RSA public key as an HMAC secret, and since the attacker used that exact same public key, the HMAC matches perfectly.</p>
+  <p class="why" data-for="1">HMAC doesn't know or care where its secret came from or what it "means" elsewhere — it's just bytes in, hash out. An RSA public key is, at the byte level, just as usable as any other string of bytes, which is exactly the problem.</p>
+  <p class="why" data-for="2">A JWKS endpoint's only job is serving public keys to anyone who asks — it has no visibility into what algorithm some later, unrelated request decides to use those keys with, and no role in verification at all. The vulnerability lives entirely inside the verifier's own logic.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Let the untrusted input decide how it gets interpreted" is the same root mistake behind some of the oldest bug classes in software.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>SQL injection</h4>
+    <p>Concatenating user input directly into a query string lets the attacker's input decide what's <em>code</em> and what's <em>data</em> — a string that was supposed to be a value for <code>WHERE name = ?</code> gets treated as SQL syntax instead. Parameterized queries fix it the same way pinning <code>alg</code> does: the interpretation is fixed by the server, never negotiated with the input.</p>
+    <div class="hf-scatter"><span>the original "let input choose the rules" bug</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>XXE — untrusted XML declaring its own parsing rules</h4>
+    <p>An XML document's <code>&lt;!DOCTYPE&gt;</code> can declare external entities that a naive parser will dutifully resolve — including reading local files or making outbound requests — because the document itself is allowed to configure how it gets parsed. A hardened parser disables external entity resolution by server-side policy, not by trusting the document to behave.</p>
+    <div class="hf-scatter"><span>the document telling the parser how to read it</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Unsafe polymorphic deserialization (Jackson <code>@class</code>, Java's <code>ObjectInputStream</code>)</h4>
+    <p>Enabling default typing lets an incoming JSON payload include a <code>@class</code> field naming exactly which Java class to instantiate — attacker-controlled data choosing its own deserialization target, which is how a crafted payload turns into remote code execution. Same shape: the data names its own interpretation, and the deserializer obeys.</p>
+    <div class="hf-scatter"><span>a JVM-native version of the identical trap</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a JWT is a readable, tamperable JSON payload made trustworthy only
+  by a signature the resource server re-checks on every request — that's what separates "anyone can
+  read and edit a JWT" from "only the key holder can make a valid one." <b>The one new sentence this
+  block adds:</b> that separation only holds if the server pins, on its own, which algorithm and which
+  kind of key are allowed to perform that check — the instant a verifier lets the token's own
+  <code>alg</code> header make that choice, the token can talk its way into being checked against the
+  wrong kind of key entirely.
+</div>
+
   <section>
     <h2>1 — JWT Workbench</h2>
 
@@ -594,6 +728,7 @@ document.addEventListener('click', function (e) {
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

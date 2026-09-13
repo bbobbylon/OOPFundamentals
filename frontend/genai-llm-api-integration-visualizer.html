@@ -63,7 +63,111 @@
     <div class="intro-ciam"><span class="tag">Vs. a typical internal REST call:</span> Compare this to <a href="spring-boot-rest-client-visualizer.html" style="color:var(--accent)">Spring's RestClient</a> — same fluent-request, parse-response shape, but an LLM call trades a &lt;50ms round trip for a multi-second one, trades a fixed response shape for a token stream, and trades "retry is a nice-to-have" for "retry is required because 429s are routine." If you've built a resilient internal REST client with timeouts and backoff already, you have 80% of what you need here.</div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, the 200 OK that lied to you three seconds into the response</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Your <code>callWithRetry</code> function up above checks <code>res.status</code> once, right after the headers come back. For a streaming call, that check has already finished its job before the failure you actually care about even happens.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The response says 200 OK. The answer on screen is half a sentence, forever.</div>
+  <p>You wire up streaming exactly like Section 3 above: open the connection, get back HTTP <code>200</code>, start reading <code>data:</code> chunks and appending <code>delta.content</code> to the UI. Three seconds in, on a long generation, the provider hits an internal overload, trips a content filter, or the connection drops — and the stream just stops. No exception. No non-2xx status you can catch. <code>res.ok</code> was <code>true</code> the entire time, because it was checked once, at the start, before any of this happened.</p>
+  <p>That's the trap: HTTP status codes describe the response you got when you FIRST connected. A stream is a promise to keep sending you more — and once that promise is made, the status line can't be un-sent to tell you it broke. Real streaming APIs handle a mid-stream failure by sending an in-band signal instead: an <code>error</code>-typed SSE event, a <code>finish_reason</code> other than <code>"stop"</code>, or simply closing the connection without ever sending <code>[DONE]</code>. If your client only ever inspects <code>res.status</code>, none of those are visible to it.</p>
+  <div class="hf-scatter">
+    <span>connection opened ✓</span>
+    <span>200 OK received ✓</span>
+    <span>retry logic never triggers, because nothing ever returned non-2xx ⚠</span>
+  </div>
+  <p class="hf-foot">You built retry logic for the failure that happens before the stream starts. The failure that actually bit you happens after.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Treat the stream itself as the thing that can fail, not just the handshake</div>
+  <div class="hf-ladder">
+    <b>Check <code>res.ok</code> once, for connection-level failures only</b>
+    <i>&darr; this still matters — a 429 or 401 arrives as a real status code before any chunk is sent, and your existing retry-with-backoff handles that correctly</i>
+    <b>Parse every chunk for an in-band error, not just for content</b>
+    <i>&darr; look for an <code>error</code> field or event type on each SSE message, the same way you already look for <code>delta.content</code></i>
+    <b>Track whether you ever received a clean terminator (<code>[DONE]</code> / a <code>stop</code> finish_reason)</b>
+    <i>&darr; a stream that just goes silent without one is a failure, even though nothing ever threw and the status was 200 the whole time</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> An HTTP status code is a snapshot taken at connection time, not a running health check — the moment a response becomes a stream, the only place left to report a failure is inside the stream itself.
+</div>
+
+<div class="hf-note">Think of a streaming response like a <b>phone call, not a letter</b>: the letter either arrives or it doesn't (that's your status code), but the call can be answered fine and still drop mid-sentence — and the only way to know is to keep listening, not to check that someone picked up.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>The response was 200. Why did my retry logic never fire when the generation cut off?</p></div>
+  <div class="hf-bub right"><span class="who">The <code>fetch</code> promise, personified</span><p>Because I resolved successfully. You got your headers, you got your 200, my job was done in the first 40 milliseconds. Everything after that is the response BODY's problem, not mine.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So who was supposed to tell me the generation died?</p></div>
+  <div class="hf-bub right"><span class="who">The SSE stream, personified</span><p>I tried — I sent an <code>error</code> event instead of another <code>delta.content</code> chunk. Nobody was reading me closely enough to notice the shape of what I sent had changed.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one streaming request from connection to its silent death and see exactly where a status-code check would have to be looking, and isn't.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Client opens the connection, provider responds <code>200 OK</code> with headers</span><span class="tag">connect</span></li>
+    <li class="open"><span><code>res.ok</code> is checked once here — this is the only status-code check that will ever run</span><span class="tag">handshake check</span></li>
+    <li><span>Chunks of <code>delta.content</code> stream in and get appended to the rendered text</span><span class="tag">happy path</span></li>
+    <li class="open"><span>Three seconds in, the provider's backend hits an overload condition</span><span class="tag">failure occurs</span></li>
+    <li><span>The provider sends an <code>error</code>-typed event on the SAME open connection — the status line can't change now</span><span class="tag">in-band signal</span></li>
+    <li class="open"><span>A client only watching <code>res.status</code> sees nothing wrong; a client parsing every chunk sees the error event</span><span class="tag">detection gap</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the part that trips people up: the failure is real and the provider DID report it — just not in the one place (<code>res.status</code>) that every non-streaming error-handling habit trained you to look.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Connecting</span>
+      <span class="go"><em>server responds</em> <span class="arrow">&rarr;</span> 200 OK, status check passes once</span></div>
+    <div class="stt"><span class="nm">Streaming</span>
+      <span class="go"><em>each chunk arrives</em> <span class="arrow">&rarr;</span> append delta.content, OR receive an in-band error event</span></div>
+    <div class="stt"><span class="nm">Terminated</span>
+      <span class="go"><em>[DONE] received</em> <span class="arrow">&rarr;</span> success — but silence with no [DONE] means failure too</span></div>
+  </div>
+  <p class="hf-annot">The status code only ever exists in the "Connecting" state. Everything that can go wrong in "Streaming" has to be detected by watching the stream's content, because there's no HTTP status left to check — the response already committed to 200 and can't take it back.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A user reports a chat answer that just stops mid-sentence with no error shown. Your server logs show the LLM API call returned <code>200 OK</code> and your retry-on-429/503 logic never triggered. Where's the bug?</p>
+  <button type="button">In the retry logic — it should retry on 200 responses too, just in case</button>
+  <button type="button">There is no bug; a 200 response means the call fully succeeded by definition</button>
+  <button type="button">The client is only checking the response status once at connection time and never inspecting individual stream chunks for an in-band error or a missing terminator</button>
+  <p class="why" data-for="0">Retrying a genuinely successful 200 response would just re-run a fine request for no reason — the problem isn't that 200 needs retry logic, it's that a 200 doesn't cover the whole lifetime of a stream.</p>
+  <p class="why" data-for="1">That's true for a normal request/response call, but not for a stream — the 200 only certifies the connection opened, not that every chunk that follows will complete cleanly.</p>
+  <p class="why" data-for="2">Right — once a response starts streaming, failures have to be reported inside the stream (an error event, or simply no <code>[DONE]</code>), because the status line was already sent and can't be revised. The fix is to watch the chunks, not just the handshake.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The connection succeeded" and "the thing I asked for actually finished" are two different claims in more places than just LLM streaming.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A WebSocket that stays open after the backend dies</h4>
+    <p>The TCP handshake and the WebSocket upgrade both succeeded — the connection is technically "up." That tells you nothing about whether the process on the other end is still alive and sending real messages versus silently hung.</p>
+    <div class="hf-scatter"><span>a connected socket isn't the same as a healthy one</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A 202 Accepted from an async job endpoint</h4>
+    <p>Kick off a long-running export job and the API correctly returns <code>202 Accepted</code> — meaning "I received your request," not "your job succeeded." You still have to poll a status endpoint or listen for a webhook to learn how the job actually ended.</p>
+    <div class="hf-scatter"><span>accepted is not the same as completed</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A SAML/OIDC redirect that lands on your callback URL</h4>
+    <p>The browser successfully redirecting back to your <code>/callback</code> route just means the identity provider sent something — it says nothing about whether the assertion or code inside that redirect is valid until you actually validate the signature and claims.</p>
+    <div class="hf-scatter"><span>arriving at the endpoint isn't the same as passing validation</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a production LLM integration is a request built with a system message, a key kept server-side, a streamed response accumulated chunk by chunk, a context window you have to manage the cost of, and retry-with-backoff for the errors that show up before generation starts. <b>The one new sentence this block adds:</b> once a response starts streaming, HTTP status can no longer report a failure — you have to watch the chunks themselves for an in-band error or a missing terminator, because the status line already committed to 200 and it isn't coming back to tell you otherwise.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -398,6 +502,7 @@ DevHubCodeWalk.mount('#cw-genaiapi',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

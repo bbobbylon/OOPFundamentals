@@ -104,7 +104,108 @@ for row in qs:                                   # NOW it runs
   </div>
 
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">Or: the one-line bulk update that deactivates a thousand accounts and revokes zero sessions.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You write the fastest, most idiomatic Django line you know to deactivate a batch of accounts — and every one of those users keeps a perfectly valid session for the rest of the day.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A bulk deactivation that never tells anyone</div>
+  <p>Your <code>User</code> model has a <code>save()</code> override that revokes cached sessions and writes an audit-log row whenever <code>is_active</code> flips to <code>False</code>, plus a <code>post_save</code> signal that pushes a "your access changed" event to your CIAM event bus. Individually deactivating a user with <code>user.is_active = False; user.save()</code> fires all of it correctly.</p>
+  <p>Then a compliance sweep needs to deactivate a thousand accounts at once, and you reach for the obviously faster line: <code>User.objects.filter(role="contractor", contract_end__lt=today).update(is_active=False)</code>. It runs in one query and looks like exactly the right tool. Django's own docs are explicit about what it actually does: <code>QuerySet.update()</code> is converted directly into a single SQL <code>UPDATE</code> statement — it does not instantiate any model objects, so it never calls <code>save()</code>, and it never emits <code>pre_save</code> or <code>post_save</code> signals. Every one of those thousand rows flips to <code>is_active=False</code> in the database. None of their sessions get revoked, no audit rows get written, and the event bus hears nothing.</p>
+  <div class="hf-scatter">
+    <span>the SQL runs correctly ✓</span>
+    <span>is_active is False in the database ✓</span>
+    <span>save() / signals / auto_now never fire ⚠</span>
+  </div>
+  <p class="hf-foot">The database says "deactivated." Every session those users are holding says otherwise.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Loop and call <code>save()</code> when custom logic must run</div>
+  <div class="hf-ladder">
+    <b>If <code>save()</code>, signals, or <code>auto_now</code> fields matter, iterate and call <code>save()</code> per instance: <code>for u in User.objects.filter(...): u.is_active = False; u.save()</code></b>
+    <i>↓ each iteration is a real model save — your override, both signals, and any <code>auto_now</code> timestamp all run exactly as they would for a single manual deactivation</i>
+    <b>If you truly only need the column changed and nothing else, keep <code>.update()</code> — but say so on purpose, in a comment, at the call site</b>
+    <i>↓ a future reader (including you in six months) needs to know this bypass was a deliberate trade-off, not an oversight</i>
+    <b>For a large batch where per-row <code>save()</code> is too slow, use <code>bulk_update()</code> and fire the side effects (revoke sessions, log, publish events) yourself, explicitly, right after it</b>
+    <i>↓ you get back the single-query performance of <code>.update()</code> while still doing the work your <code>save()</code> override was responsible for</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> <code>QuerySet.update()</code> (and <code>.delete()</code>) talk to the database directly and skip <code>Model.save()</code> entirely — any logic living in a custom <code>save()</code> method, a <code>pre_save</code>/<code>post_save</code> signal, or an <code>auto_now</code> field simply does not run for rows changed this way.
+</div>
+
+<div class="hf-note">Think of <code>.update()</code> like editing a spreadsheet's raw cells directly instead of clicking through the form that's supposed to be the only way in. The cell changes. Every validation, notification, and side effect wired to "someone submitted the form" never fires — because nobody submitted a form, they just overwrote the cell.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>The database clearly shows <code>is_active=False</code> for all thousand rows. Why do their sessions still work?</p></div>
+  <div class="hf-bub right"><span class="who">Django's ORM, personified</span><p>You asked me for a bulk <code>UPDATE</code>, so I sent the database exactly one SQL statement — the fastest thing I could do. I never built a <code>User</code> Python object for any of those rows, so there was nothing to call <code>save()</code> on, and no signal to send.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But <code>save()</code> is where I put the session-revocation logic. I assumed changing the field would trigger it.</p></div>
+  <div class="hf-bub right"><span class="who">Your save() override</span><p>I only run when someone constructs a model instance and calls me directly, or through the ORM's single-object path. A bulk <code>UPDATE</code> statement never goes through Python model instances at all — I have no way to know a thousand rows even changed.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Compare the two paths side by side — they end at the same database rows, and nowhere else the same.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>user.is_active = False</code> sets an attribute on an in-memory Python object</span><span class="tag">single-object path</span></li>
+    <li class="open"><span><code>user.save()</code> calls your overridden <code>save()</code>, which does its side effects, then <code>super().save()</code></span><span class="tag">save() runs</span></li>
+    <li><span><code>pre_save</code> fires, the row is written, <code>post_save</code> fires — your event-bus listener hears about it</span><span class="tag">signals fire</span></li>
+    <li class="open"><span>Meanwhile: <code>.update(is_active=False)</code> is compiled directly to <code>UPDATE ... SET is_active=false WHERE ...</code></span><span class="tag">bulk path</span></li>
+    <li><span>The database executes that statement — no Python <code>User</code> instances exist anywhere in this path</span><span class="tag">no instances</span></li>
+    <li class="open"><span>No <code>save()</code>, no <code>pre_save</code>/<code>post_save</code>, no <code>auto_now</code> field update — the row changed, nothing else did</span><span class="tag">everything else skipped</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the whole story: a bulk <code>UPDATE</code> is a database operation with the ORM as a thin translator, not a Python-object operation. Anything you wired to "an instance got saved" — a method override, a signal handler, a timestamp field — depends on that instance existing in the first place, and this path never creates one.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>a bulk compliance sweep</span><span>an admin "deactivate selected" action</span><span>a scheduled cleanup job</span></div>
+    <div class="funnel">all reach for the same convenient .update() call ↓</div>
+    <div class="instance">Rows change, everything wired to save() doesn't<small>one root cause: .update() never constructs a model instance to hang side effects on</small></div>
+  </div>
+  <p class="hf-annot">It doesn't matter which part of the codebase reaches for <code>.update()</code> — a nightly job, an admin panel bulk action, a one-off management command. Every one of them silently skips <code>save()</code>-based logic the same way, because the skip happens inside the ORM itself, not in how any particular caller uses it.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A <code>Subscription</code> model has <code>auto_now=True</code> on <code>last_modified</code> and a <code>post_save</code> signal that syncs status to a billing API. A cron job runs <code>Subscription.objects.filter(status="trial", trial_end__lt=now).update(status="expired")</code> to expire trials in bulk. What actually happens to <code>last_modified</code> and the billing sync?</p>
+  <button type="button">Both update correctly — Django always keeps <code>auto_now</code> fields and signals in sync with any field change</button>
+  <button type="button"><code>last_modified</code> updates because it's automatic, but the billing sync is skipped because signals need explicit <code>.send()</code> calls</button>
+  <button type="button">Neither happens — <code>.update()</code> bypasses <code>save()</code> entirely, so the <code>auto_now</code> field is NOT touched and the <code>post_save</code> signal never fires</button>
+  <p class="why" data-for="0">"Always" is the trap here — <code>auto_now</code> and signals are both implemented as part of the <code>save()</code> machinery, not as database-level triggers. A path that skips <code>save()</code> skips both, with no exception for how "automatic" a field sounds.</p>
+  <p class="why" data-for="1">Close on the signal half, wrong on the timestamp half. <code>auto_now</code> isn't a database default either — it's Django code inside <code>Model.save()</code> that sets the field right before writing. Skip <code>save()</code> and that code never runs, so <code>last_modified</code> is left exactly as it was.</p>
+  <p class="why" data-for="2">Right — <code>.update()</code> is a direct SQL statement with no model instances involved anywhere in the path. <code>auto_now</code>'s timestamp-setting code and the <code>post_save</code> signal dispatch both live inside <code>save()</code>, so a call that never reaches <code>save()</code> triggers neither.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The fast bulk path quietly skips the logic wired to the slow individual path" is a recurring shape.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring Data JPA: bulk <code>@Modifying</code> queries bypass the persistence context</h4>
+    <p>A <code>@Modifying @Query("UPDATE User u SET u.active = false WHERE ...")</code> repository method updates the database directly, the same way Django's <code>.update()</code> does — entity lifecycle callbacks (<code>@PreUpdate</code>/<code>@PostUpdate</code>), Hibernate event listeners, and cascading side effects tied to a normal <code>save()</code>/<code>merge()</code> call never run, and any already-loaded entities in the session go stale.</p>
+    <div class="hf-scatter"><span>the identical bulk-vs-per-entity gap, one ORM over</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>SQL directly against a table an ORM manages</h4>
+    <p>Running a raw <code>UPDATE</code> statement (or a DBA script) against a table that Hibernate or Django's ORM also manages changes the row correctly and skips every application-level rule attached to "going through the model" — validation, computed columns, audit trails — because none of that logic lives in the database itself.</p>
+    <div class="hf-scatter"><span>the database enforces constraints; the application enforces everything else</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Identity providers: revoking a user record without revoking their tokens</h4>
+    <p>Flipping a user's <code>enabled</code> flag to <code>false</code> directly in an IdP's user store (via a bulk import or a direct database fix) doesn't automatically invalidate already-issued access or refresh tokens — those are separate systems, and the "disable this user" workflow that DOES revoke tokens lives in application code, not in the flag itself.</p>
+    <div class="hf-scatter"><span>changing a record and revoking access are two different jobs</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Django's MVT (Model-View-Template) is MVC renamed, a request flows through URLconf and middleware to a view, and the ORM's QuerySets are lazy — building up a query costs nothing until you actually iterate or evaluate it. <b>The one new sentence this block adds:</b> <code>QuerySet.update()</code> writes the database directly and skips <code>save()</code>, signals, and <code>auto_now</code> entirely — fine for a plain column change, dangerous for anything with side effects riding on <code>save()</code>.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="djSeg">
@@ -304,6 +405,7 @@ DevHubCodeWalk.mount('#cw-dj',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

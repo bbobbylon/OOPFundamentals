@@ -57,7 +57,142 @@
     <div class="intro-ciam"><span class="tag">In this very repo:</span> the backend ships with <code>.github/workflows/deploy-backend-aws.yml</code> and <code>deploy-backend-azure.yml</code> — deliberately <code>workflow_dispatch</code>-only so they never fail-spam before cloud secrets exist. They build the multi-stage Docker image and push to AWS App Runner / Azure Container Apps. For a CIAM service the pipeline is also where you keep secrets <em>out</em> of code: client secrets and signing keys live in encrypted Actions/ADO secrets injected at deploy time, never committed — the same discipline as the <code>.env</code>-driven config in the Spring backend.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the environment variable you set in one job that quietly doesn't exist in the next</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Two jobs in the same workflow file read like two functions in the same program. They aren't — they're two different machines, and nothing you set on one exists on the other unless you say so on purpose.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Your deploy job shipped an empty version string to production</div>
+  <p>Your build job computes a version from <code>git describe --tags</code> and saves it with
+  <code>echo "VERSION=1.4.1" >> $GITHUB_ENV</code>. A later step in that same job echoes
+  <code>$VERSION</code> to confirm it worked — and it does, printing <code>1.4.1</code> right there in
+  the log. Confident it's wired up, your deploy job declares <code>needs: build</code> and runs
+  <code>./deploy.sh ${{ env.VERSION }}</code>, assuming that since deploy waits for build, it can also
+  see whatever build set.</p>
+  <p>It can't. <code>$GITHUB_ENV</code> is documented to persist "for the remainder of the job" —
+  scoped to that one job's steps, because they all run on the same runner VM. The deploy job is a
+  completely separate runner, one that never heard the build job's <code>echo</code> at all.
+  <code>${{ env.VERSION }}</code> resolves to an empty string. The <code>run:</code> step doesn't
+  fail — the shell just expands <code>./deploy.sh</code> with no argument, and if <code>deploy.sh</code>
+  quietly falls back to whatever's already checked out (or a "latest" tag) when its argument is blank,
+  the workflow finishes green while shipping the wrong build.</p>
+  <div class="hf-scatter">
+    <span>workflow YAML syntax ✓</span>
+    <span><code>needs: build</code> correctly orders the two jobs ✓</span>
+    <span>the same-job echo really does confirm $VERSION works ✓</span>
+    <span>assuming that confirmation carries into a DIFFERENT job ⚠</span>
+  </div>
+  <p class="hf-foot"><code>needs: build</code> tells GitHub Actions <em>when</em> to run the deploy job. It says nothing at all about <em>what that job can see.</em></p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Hand values across jobs with outputs, never environment variables</div>
+  <div class="hf-ladder">
+    <b>Give the value-producing step an <code>id:</code></b>
+    <i>↓ e.g. <code>id: ver</code> — this is what lets anything reference <code>steps.ver.outputs.value</code> afterward</i>
+    <b>Declare <code>outputs:</code> on the job itself</b>
+    <i>↓ <code>outputs: { version: ${{ steps.ver.outputs.value }} }</code> — this is what actually makes the value visible OUTSIDE that job, to anything that lists <code>needs: build</code></i>
+    <b>Read it downstream as <code>needs.build.outputs.version</code></b>
+    <i>↓ this crosses the job boundary the way a plain env var or <code>$GITHUB_ENV</code> never does — GitHub Actions itself records the output as part of the workflow run, not the runner</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A GitHub Actions job is a separate machine, not a separate function
+  call — anything that has to survive from one job into the next needs an explicit
+  <code>outputs:</code> / <code>needs.&lt;job&gt;.outputs</code> hand-off (or a real uploaded artifact),
+  never a shell or environment variable, because there is no shared process, filesystem, or
+  environment between two jobs even when one <code>needs</code> the other.
+</div>
+
+<div class="hf-note"><code>needs: build</code> is a start signal, not a memory share. It's like phoning
+a coworker in a different building and telling them "go" — <b>they still can't see anything sitting
+on your desk just because you told them when to start.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I set VERSION with $GITHUB_ENV in the build job, and I can see it if I echo it right after. Why is it empty in deploy?</p></div>
+  <div class="hf-bub right"><span class="who">$GITHUB_ENV</span><p>I only promised to carry that value through the REST of the job you wrote me in. I never left that runner, and I can't — it gets destroyed the moment your job ends.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But deploy has "needs: build" right there in the YAML. Doesn't that mean it inherits whatever build had?</p></div>
+  <div class="hf-bub right"><span class="who">needs: build</span><p>I only tell the scheduler "wait for build to finish and succeed before starting deploy." I hand over precisely nothing build had lying around — that's a job <code>output</code>'s job, not mine.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch the exact same value, <code>1.4.1</code>, take two different paths out of the build job — one that dies at the runner's edge, one that survives it.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Build job, step <code>id: ver</code>: <code>echo "value=1.4.1" >> $GITHUB_OUTPUT</code></span><span class="tag">step output</span></li>
+    <li class="open"><span>Build job, a later step in the SAME job: <code>echo "VERSION=1.4.1" >> $GITHUB_ENV</code> — just to compare</span><span class="tag">job env</span></li>
+    <li><span>Build job finishes; its runner VM is torn down — disk, process tree, every env var it ever set, all gone</span><span class="tag">runner destroyed</span></li>
+    <li class="open"><span>Deploy job starts once <code>needs: build</code> is satisfied — on a brand-new runner that has never heard of <code>$VERSION</code></span><span class="tag">fresh runner</span></li>
+    <li><span><code>${{ env.VERSION }}</code> resolves to empty in deploy — but <code>${{ needs.build.outputs.version }}</code> resolves to <code>1.4.1</code></span><span class="tag">the fork</span></li>
+    <li class="open"><span>Deploy runs <code>./deploy.sh 1.4.1</code> using the output reference and ships the right build; the env-var reference, left in, would have shipped nothing</span><span class="tag">correct hand-off</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the fork in the road, and the reason it goes two different ways is where
+  the value is stored. A job output is recorded by GitHub Actions itself, as part of the workflow
+  run's own state — it survives the runner being destroyed because it was never IN the runner to
+  begin with. An environment variable lives only inside a runner's process tree, and when that VM is
+  torn down at the end of the job, so is everything <code>$GITHUB_ENV</code> ever wrote.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">the deploy job asks: what's $VERSION?<small>read at the moment ./deploy.sh actually runs</small></div>
+    <div class="arrow">what actually happens →</div>
+    <div class="opts">
+      <span><code>env.VERSION</code> — job-scoped, never crossed the boundary</span>
+      <span class="on"><code>needs.build.outputs.version</code> — the one that actually made the trip</span>
+      <span>a hardcoded fallback like <code>latest</code> some deploy scripts default to</span>
+    </div>
+  </div>
+  <p class="hf-annot">Only the middle option was ever built to cross a job boundary — it's the one
+  GitHub Actions itself carries forward, not the runner. Read the diagram as a warning too: the third
+  option, a silent fallback, is exactly how a blank <code>$VERSION</code> turns into "deployed
+  something, just not the thing you meant" instead of a loud, obvious failure.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your build job runs <code>echo "VERSION=1.4.1" >> $GITHUB_ENV</code>, and a later step in that same job echoes <code>$VERSION</code> successfully. Your deploy job (<code>needs: build</code>) then runs <code>./deploy.sh ${{ env.VERSION }}</code>. What actually gets deployed?</p>
+  <button type="button">1.4.1 — <code>needs: build</code> makes the deploy job inherit every environment variable the build job set.</button>
+  <button type="button">Nothing useful — <code>$GITHUB_ENV</code> only persists for the rest of the job it's written in, so <code>env.VERSION</code> is empty in the deploy job even though <code>needs: build</code> ran first.</button>
+  <button type="button">The workflow fails to start, because referencing an env var with no value is a YAML validation error.</button>
+  <p class="why" data-for="0">That's the intuitive assumption, but <code>needs:</code> only controls ordering and success/failure gating between jobs — it creates no shared environment. Each job is a separate runner with its own process tree, and a <code>$GITHUB_ENV</code> write never leaves the process tree it was made in.</p>
+  <p class="why" data-for="1">Right. <code>$GITHUB_ENV</code> is scoped to "the rest of the current job" by design — it survives across steps because they share one runner, but a second job boots a brand-new runner that never saw that write. The fix is a declared job output, read as <code>needs.build.outputs.&lt;name&gt;</code>, which GitHub Actions itself carries across the boundary instead of the runner.</p>
+  <p class="why" data-for="2">GitHub Actions doesn't validate at parse time whether an env var actually holds a value — <code>${{ env.VERSION }}</code> is syntactically fine and simply evaluates to an empty string at runtime. The workflow starts, runs, and reports success while silently deploying the wrong thing.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"State doesn't cross a process boundary just because you told it to wait its turn" shows up the moment any pipeline splits work across more than one machine.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Azure DevOps stage-to-stage variables</h4>
+    <p>Setting a variable with <code>##vso[task.setvariable]myVar=1.4.1</code> in one job only reaches later steps of that SAME job by default — to read it from a different stage you must mark it <code>isOutput=true</code> and reference it explicitly as <code>dependencies.&lt;StageName&gt;.outputs['&lt;JobName&gt;.&lt;StepName&gt;.myVar']</code>. It's the identical hand-off requirement, in ADO's own syntax.</p>
+    <div class="hf-scatter"><span>same rule, the tool this page already compares itself to</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Docker multi-stage builds</h4>
+    <p>An <code>ENV</code> set in one <code>FROM ... AS builder</code> stage of a <code>Dockerfile</code> does not exist in a later <code>FROM node:20</code> stage — each stage starts from its declared base image with none of the previous stage's environment, and only files explicitly pulled across with <code>COPY --from=builder</code> make the trip.</p>
+    <div class="hf-scatter"><span>the same isolation, one layer down in the build system</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A child process's <code>export</code> never reaches its parent shell</h4>
+    <p>Run a script that does <code>export FOO=bar</code> from your terminal, and <code>FOO</code> is gone the moment that script's process exits — a child process inherits its parent's environment one-way, downward, and can never hand a new variable back up. It's the same underlying operating-system rule GitHub Actions' job isolation is built on top of.</p>
+    <div class="hf-scatter"><span>the root cause, one layer below any pipeline tool</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a pipeline moves one immutable artifact through
+  checkout → build → test → package → deploy, using <code>needs</code> to order jobs and protected
+  <code>environment</code>s to gate promotion into production. <b>The one new sentence this block
+  adds:</b> <code>needs: build</code> only orders WHEN the deploy job starts, never WHAT it can see —
+  each job is its own separate runner, so carrying a value across that boundary takes a declared job
+  output, not an environment variable, no matter how confidently the same-job echo confirmed it worked.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="ciSeg">
@@ -260,6 +395,7 @@ DevHubCodeWalk.mount('#cw-ci',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

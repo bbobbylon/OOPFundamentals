@@ -62,6 +62,112 @@
     <div class="intro-ciam"><span class="tag">CIAM ASP.NET service:</span> A .NET resource server validating Ping/Entra tokens uses <code>AddAuthentication().AddJwtBearer()</code> with <code>Authority</code> set to the IdP (it auto-fetches the JWKS and validates RS256/iss/aud), then <code>[Authorize(Policy = "CiamAdmin")]</code> on actions for role/claim checks (≈ <code>@PreAuthorize</code>). <code>UseAuthentication()</code> must come before <code>UseAuthorization()</code> in the pipeline — get the order wrong and every request is anonymous. Microsoft's own Entra integration (<code>Microsoft.Identity.Web</code>) layers cleanly on top.</div>
   </div>
 
+<p class="hf-deck">You kept the <code>[Required]</code> attributes. You just fired the only thing that read them.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The same DTO, the same annotations, the same JSON — moved from a controller to a minimal API, and now an empty name gets a <code>201 Created</code>.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A user row lands in the database with <code>name = ""</code> and <code>email = "bad"</code>, and the API says 201</div>
+  <p>You are trimming a service down. <code>UsersController.Create</code> was five lines of ceremony around one call, so you delete the controller and write <code>app.MapPost("/api/users", async (CreateUserDto dto, IUserService svc) =&gt; ...)</code>. The DTO does not change a character — <code>[Required]</code> is still on <code>Name</code>, <code>[EmailAddress]</code> is still on <code>Email</code>. You redeploy on a Friday.</p>
+  <p>On Monday there are 1,400 rows with a blank name. Post <code>{"name":"","email":"bad"}</code> and you get <code>201 Created</code>, not the <code>400 ValidationProblemDetails</code> you got last week. Nothing you wrote is wrong. The catch is <em>where</em> that 400 came from: automatic model validation is an MVC <strong>action filter</strong> that the <code>[ApiController]</code> attribute adds to controllers. Minimal API endpoints do not run MVC filters — they are not MVC. Binding still works perfectly and cheerfully hands your handler an object that no one ever checked.</p>
+  <div class="hf-scatter">
+    <span>the DTO still has its annotations ✓</span>
+    <span>binding still fills the DTO ✓</span>
+    <span>nothing runs the annotations ⚠</span>
+  </div>
+  <p class="hf-foot">Validation did not fail. Validation did not happen.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make the check explicit the moment you leave the controller</div>
+  <div class="hf-ladder">
+    <b>Decide, per endpoint, what runs the rules — never assume the attributes run themselves</b>
+    <i>↓ in a controller <code>[ApiController]</code> answers this for you; in a minimal API nothing does</i>
+    <b>Opt in on purpose: <code>builder.Services.AddValidation()</code> on .NET 10, or a filter (<code>AddEndpointFilter</code>) that validates and returns <code>Results.ValidationProblem</code></b>
+    <i>↓ one filter on a route group covers every endpoint in it, so you write it once, not per handler</i>
+    <b>Then prove it with a test that POSTs deliberately invalid JSON and asserts <strong>400</strong>, not 201</b>
+    <i>↓ a test that only posts valid data passes identically whether validation exists or not</i>
+    <b>And keep returning the same <code>ValidationProblemDetails</code> shape your clients already parse</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>An attribute is data; something still has to read it.</b> <code>[Required]</code> does not validate anything — it is a marker object sitting in metadata, inert until some component enumerates it and acts. In MVC that component is the filter <code>[ApiController]</code> installs. Delete the controller and the marker survives while its reader does not, which is why the failure is silent: there is no missing method, no null reference, no exception to catch. The code still compiles, the endpoint still returns a normal status, and the only evidence is the data.
+</div>
+
+<div class="hf-note">Data annotations are <b>labels on the parcel</b>. <code>[ApiController]</code> is <b>the inspector who reads labels</b>. Moving to a minimal API keeps every label and <b>fires the inspector</b> — and a parcel with a label nobody reads still goes straight onto the truck.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>The DTO literally says <code>[Required]</code>. How did an empty name get through?</p></div>
+  <div class="hf-bub right"><span class="who">Model binding</span><p>My job is to turn JSON into a <code>CreateUserDto</code>. I did that. It has an empty string in it, which is a perfectly legal string.</p></div>
+  <div class="hf-bub"><span class="who">The <code>[ApiController]</code> filter</span><p>I am the one who used to return your 400. I run inside the MVC action pipeline. Your endpoint is a lambda now, so I was never invited.</p></div>
+  <div class="hf-bub right"><span class="who">The minimal API endpoint</span><p>I run route handlers. I enforce binding — send me <code>id=abc</code> for an <code>int</code> and you get a 400 — but I have never once looked at an attribute on your model.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One POST, followed from the socket to the database row nobody wanted.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>POST /api/users</code> arrives with <code>{"name":"","email":"bad"}</code> and <code>Content-Type: application/json</code></span><span class="tag">request</span></li>
+    <li class="open"><span>Routing matches the minimal API endpoint registered by <code>app.MapPost</code> — a route handler, not an MVC action</span><span class="tag">match</span></li>
+    <li><span>Parameter binding deserializes the body into <code>CreateUserDto</code>; every property is a valid string, so binding succeeds</span><span class="tag">bind ok</span></li>
+    <li class="open"><span>The MVC filter pipeline — including the <code>[ApiController]</code> model-state filter — is never entered, because there is no action to filter</span><span class="tag">the gap</span></li>
+    <li><span>Your lambda runs with <code>dto.Name == ""</code> and calls <code>svc.CreateAsync(dto)</code>, which has no reason to doubt it</span><span class="tag">handler runs</span></li>
+    <li class="open"><span><code>Results.Created(...)</code> → <strong>201</strong>, and the client's happy path fires as designed</span><span class="tag">201</span></li>
+  </ol>
+  <p class="hf-annot">Step four is the one that has no output. Everything else in this list produces a log line, a status code, or a row — the missing filter produces nothing at all, which is exactly why the bug reaches Monday. Notice too that step three still <em>works</em>: minimal APIs absolutely do reject <code>id=abc</code> bound to an <code>int</code>, because that is a binding failure, not a validation failure. The endpoint enforces types and ignores rules, and the difference between those two words is 1,400 blank rows.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">Who rejects <code>{"name":"","email":"bad"}</code> on a minimal API route?<small>the DTO carries <code>[Required]</code> and <code>[EmailAddress]</code></small></div>
+    <div class="arrow">what actually happens →</div>
+    <div class="opts">
+      <span>the <code>[Required]</code> attribute</span>
+      <span class="on">nobody — the handler runs</span>
+      <span>the <code>[ApiController]</code> filter</span>
+    </div>
+  </div>
+  <p class="hf-annot">Two of those three slots look like they should plug in, and that is the trap. The attribute is metadata with no behaviour of its own. The filter has behaviour but lives in a pipeline this request never enters. The slot fills with the only remaining candidate — your handler — and your handler was written assuming someone upstream had already said no. Read it the other way and it becomes a design rule: for every route, name the component that says no, out loud. If you cannot name it, it does not exist.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">You move <code>Create</code> off <code>UsersController</code> to <code>app.MapPost("/api/users", (CreateUserDto dto, IUserService svc) =&gt; ...)</code>. <code>CreateUserDto</code> is unchanged: <code>[Required] Name</code>, <code>[EmailAddress] Email</code>. You POST <code>{"name":"","email":"bad"}</code>. What comes back?</p>
+  <button type="button">201 — the handler runs with the invalid DTO, because minimal APIs do not run data-annotation validation unless you opt in.</button>
+  <button type="button">400 with <code>ValidationProblemDetails</code> — the attributes live on the DTO, so they travel with it wherever it is bound.</button>
+  <button type="button">500 — binding throws when a property marked <code>[Required]</code> arrives empty, and the exception handler turns it into a server error.</button>
+  <p class="why" data-for="0">Exactly, and the reason is worth more than the answer: the 400 you used to get was produced by an MVC action filter that <code>[ApiController]</code> installs, and minimal API endpoints are not MVC actions, so no filter runs. Opt in deliberately — <code>AddValidation()</code> on .NET 10, or an <code>AddEndpointFilter</code> on the route group that validates and returns <code>Results.ValidationProblem</code> — and write a test that posts bad JSON and asserts 400.</p>
+  <p class="why" data-for="1">This is the intuition almost everyone has, and it quietly assumes attributes are active code. They are not: an attribute is inert metadata until a component enumerates it. What "travels with the DTO" is the marker, not the enforcement. The enforcement lived in the controller pipeline you just deleted.</p>
+  <p class="why" data-for="2">Binding never throws here, and seeing why sharpens the distinction. An empty string is a valid <code>string</code>, so deserialization succeeds cleanly — <code>[Required]</code> is not consulted during binding at all. Minimal APIs <em>do</em> fail requests on genuine binding errors, like <code>id=abc</code> for an <code>int</code> route value, which returns a 400. Type errors, yes; rule violations, no.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Every stack you work in has a validator that only runs when something opts it in — and stays silent when nothing does.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Spring: <code>@RequestBody</code> without <code>@Valid</code></h4>
+    <p>Your Java DTO can be covered in <code>@NotBlank</code>, <code>@Email</code> and <code>@Size</code>, and a handler declared <code>create(@RequestBody UserDto dto)</code> will validate exactly none of them. The constraints only run because <code>@Valid</code> (or <code>@Validated</code>) on the parameter tells the argument resolver to invoke the validator. Same shape, same silence, same 201 — drop one four-letter annotation and the bean-validation rules become documentation.</p>
+    <div class="hf-scatter"><span>the annotation that turns the other annotations on</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Angular: a disabled control is not an invalid control</h4>
+    <p>Call <code>control.disable()</code> on a required field and its status becomes <code>DISABLED</code>, not <code>INVALID</code> — Angular skips validators on disabled controls and leaves them out of <code>form.value</code> entirely. So <code>form.valid</code> is <code>true</code>, your submit button enables, and the payload silently ships without the field. You reach for <code>getRawValue()</code> the first time and remember it forever.</p>
+    <div class="hf-scatter"><span>valid because nobody checked</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>TypeScript: <code>await res.json() as UserDto</code></h4>
+    <p>The cast makes the compiler stop asking questions and generates no runtime check whatsoever. The API can return <code>null</code>, an error envelope, or HTML from a captive-portal redirect, and your typed variable claims to be a <code>UserDto</code> all the way to the property access that finally throws. Same lesson one layer up: the declaration describes an intention, and something separate has to enforce it.</p>
+    <div class="hf-scatter"><span>a type is a promise, not a guard</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> ASP.NET Core is Spring Boot's closest cousin — a first-class DI container with Singleton/Scoped/Transient lifetimes, an ordered middleware pipeline where the order <em>is</em> the behaviour, and endpoints written either as attribute-routed controllers or as minimal-API lambdas that share that pipeline, that container, and model binding. <b>And the one thing this block adds: they do not share validation — the automatic 400 comes from an MVC filter that <code>[ApiController]</code> installs, so a minimal API binds your annotated DTO perfectly and never once reads the annotations.</b>
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
@@ -278,6 +384,7 @@ DevHubCodeWalk.mount('#cw-aspnet',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

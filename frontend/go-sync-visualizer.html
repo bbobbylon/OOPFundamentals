@@ -58,7 +58,110 @@
     <div class="intro-ciam"><span class="tag">CIAM context:</span> A JWKS / token cache is the textbook <code>RWMutex</code> case — thousands of concurrent validations <em>read</em> the keys while a background refresh occasionally <em>writes</em>. Lazy-load the signing keys with <code>sync.Once</code> so a burst of first requests doesn't fetch the JWKS five times. And to validate a batch of tokens against an external IdP, a bounded <strong>worker pool</strong> (say 16 workers) stops you from opening 10,000 simultaneous connections and getting rate-limited or OOM-killed.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">Or: two reads, zero writes, and a deadlock anyway.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You RLock. You RLock again, from the same goroutine, while still holding the first. That should be the safest possible thing to do with a read lock. It can deadlock your whole service.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A "just reading twice" bug that only shows up under write traffic</div>
+  <p>A JWKS cache has a method <code>Get(kid)</code> that RLocks, reads, RUnlocks. A second method, <code>GetOrRefresh(kid)</code>, RLocks, checks whether the key is missing, and — while STILL holding that RLock — calls <code>Get(kid)</code> again recursively. Two RLocks, same goroutine, nested. In dev, with one goroutine hammering it, this never fails once.</p>
+  <p>In production, a background goroutine periodically calls <code>Lock()</code> to rotate the keys. Goroutine A calls GetOrRefresh, takes RLock #1. Goroutine B calls Lock() for rotation and blocks, waiting for readers to drain — waiting specifically for A. Goroutine A, still holding RLock #1, now tries to take RLock #2 (the recursive call) — but Go's RWMutex blocks NEW readers once a writer is waiting, specifically so writers can't starve. A's second RLock now waits behind B's Lock(). B's Lock() waits behind A's first RLock, which A can never release because A is stuck waiting on its own second RLock. Deadlock — and it only happens if a Lock() call lands in that exact narrow window.</p>
+  <div class="hf-scatter">
+    <span>each individual RLock call ✓</span>
+    <span>works fine with no writer active ✓</span>
+    <span>a Lock() landing between the two RLocks ⚠</span>
+  </div>
+  <p class="hf-foot">Go's own RWMutex docs say this outright: if another goroutine might call Lock, no goroutine should recursively RLock — it "prohibits recursive read locking" by name, precisely because of this.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Never call back into the same RWMutex while holding it</div>
+  <div class="hf-ladder">
+    <b>Split into a public locking method and a private one that assumes the lock is held</b>
+    <i>↓ Get calls getLocked internally; GetOrRefresh takes ONE RLock and calls getLocked directly, no second RLock</i>
+    <b>Or read everything you need in one critical section before deciding anything</b>
+    <i>↓ removes the reason to re-enter the lock at all</i>
+    <b>And treat "a locking method calling another locking method" as a code-review flag, full stop</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>RWMutex recursion isn't just non-reentrant like Mutex — it's conditionally unsafe.</b> A plain sync.Mutex at least deadlocks the SAME way every time you re-lock it: predictably, immediately, 100% of the time. A recursively-RLocked RWMutex looks completely fine until a Lock() call happens to land in the split second between your two RLocks — rare enough to pass code review, pass tests, and pass weeks of production traffic before it fires.
+</div>
+
+<div class="hf-note">Picture a revolving door built to let unlimited people walk in (readers) but only one person cross the other way at a time (a writer) — and the door's rule is: once someone's waiting to go the other way, stop letting new people in your direction, even people already partway through. If you're already inside and try to bring in "just one more" of yourself, you're now stuck behind the very person you're blocking.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I'm not even trying to write — I'm RLocking twice. Why would that ever deadlock?</p></div>
+  <div class="hf-bub right"><span class="who">Go's RWMutex</span><p>Because I don't just count active readers — I also watch for a waiting writer. The instant one shows up, I stop admitting new readers, no matter who's asking, so that writer can't starve forever.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But I already have a read lock! Shouldn't my second RLock be "free" since I'm already in?</p></div>
+  <div class="hf-bub right"><span class="who">Go's RWMutex</span><p>I have no idea it's "you" again — I only see a new RLock() call. And I've already promised the waiting writer that no new reader gets in ahead of it. Your second call waits like anyone else's would, including behind your own first one, which you can no longer release.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Play the three goroutines out in order and watch the ring close.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Goroutine A calls cache.GetOrRefresh(kid) → takes RLock #1</span><span class="tag">A: RLock #1</span></li>
+    <li class="open"><span>Goroutine B (key rotation) calls cache.Rotate() → calls mu.Lock()</span><span class="tag">B: Lock() called</span></li>
+    <li><span>B's Lock() blocks, waiting for all current readers (including A) to RUnlock</span><span class="tag">B waits on A</span></li>
+    <li class="open"><span>RWMutex now refuses NEW readers, to guarantee B eventually gets in</span><span class="tag">new RLocks blocked</span></li>
+    <li><span>A, still holding RLock #1, recursively calls RLock() again inside GetOrRefresh</span><span class="tag">A: RLock #2 attempted</span></li>
+    <li class="open"><span>A's RLock #2 blocks behind B's Lock() → A can never reach its RUnlock for RLock #1 → B waits forever too</span><span class="tag">deadlock</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the rule that makes this a deadlock instead of just a slow path: RWMutex deliberately blocks fresh readers once a writer is waiting, specifically so writers can't starve. That fairness guarantee is exactly what turns A's own recursive RLock into a lock A is now waiting behind itself.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">A holds RLock #1</span>
+      <span class="go"><em>B calls Lock()</em> <span class="arrow">→</span> B blocks, waiting for A to RUnlock</span></div>
+    <div class="stt"><span class="nm">B waiting to write</span>
+      <span class="go"><em>A recursively calls RLock() again</em> <span class="arrow">→</span> A's 2nd RLock blocks behind B</span></div>
+    <div class="stt"><span class="nm">A blocked on its own 2nd RLock</span>
+      <span class="go"><em>nothing — A can't reach RUnlock #1</em> <span class="arrow">→</span> circular wait: deadlock</span></div>
+  </div>
+  <p class="hf-annot">Read it as a ring, not a line: A waits on B (indirectly, via its stuck second RLock), and B waits on A. Neither goroutine did anything individually illegal by Go's syntax — the deadlock is purely about the ORDER these three calls happened to interleave in.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A JWKS cache's Get does <code>mu.RLock(); defer mu.RUnlock(); ...</code>. A second method Warm does <code>mu.RLock(); defer mu.RUnlock(); if missing { cache.Get(kid) }</code> — calling Get while still holding Warm's RLock. Under what condition does this deadlock?</p>
+  <button type="button">Never — RWMutex allows unlimited concurrent RLocks, recursive or not, so this is always safe.</button>
+  <button type="button">Only if Get and Warm are called from the same goroutine at the exact same nanosecond.</button>
+  <button type="button">Whenever a third goroutine calls Lock() (e.g. key rotation) after Warm's RLock but before Get's nested RLock completes.</button>
+  <p class="why" data-for="0">That's true only if no goroutine ever calls Lock() concurrently. The Go docs are explicit that recursive RLock is unsafe specifically because a concurrent Lock() call can land in between the two — "unlimited concurrent RLocks" stops being true the moment a writer is in the queue.</p>
+  <p class="why" data-for="1">This isn't a same-nanosecond race — Warm and Get here run sequentially in ONE goroutine (Warm calls Get itself). The danger is a completely different, third goroutine calling Lock() in the window between Warm's RLock and Get's nested RLock.</p>
+  <p class="why" data-for="2">That's the exact trigger: once a writer's Lock() call is waiting, RWMutex stops admitting new readers so the writer isn't starved. The nested RLock inside Get is a "new" reader as far as the mutex is concerned, so it queues behind a writer that is itself waiting on the RLock this same goroutine already holds and can't release. Circular wait, one goroutine, one bad interleaving with a second.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Safe alone, deadlocks combined with a third party" is a classic lock-fairness shape.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's ReentrantReadWriteLock made the opposite tradeoff</h4>
+    <p>Java's ReentrantReadWriteLock explicitly DOES support reentrant read locking by the same thread, specifically to avoid this exact deadlock — its own docs call out the tradeoff. Go's RWMutex chose the other side: simpler and faster, but not reentrant.</p>
+    <div class="hf-scatter"><span>same problem, opposite design decision</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Database row-lock upgrade deadlocks</h4>
+    <p>A transaction that holds a shared (read) lock on a row, then tries to upgrade to an exclusive (write) lock on the SAME row while another transaction is queued for the same upgrade, is the textbook lock-upgrade deadlock in SQL databases — the same reader-blocking-behind-a-writer-blocking-behind-the-reader ring.</p>
+    <div class="hf-scatter"><span>lock upgrade is where reader/writer fairness rules bite hardest</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Dining philosophers</h4>
+    <p>The classic CS deadlock puzzle is this shape generalized: each philosopher holds one fork (like A's first RLock) and waits for a second (like A's second RLock), and the very fairness rule meant to prevent starvation is what closes the ring.</p>
+    <div class="hf-scatter"><span>circular wait needs a cycle, not a mutex bug</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> sync.Mutex gives exclusive access, RWMutex splits many readers from one writer, WaitGroup/Once coordinate goroutines, sync/atomic is lock-free for a single value, and a bounded worker pool caps concurrency. <b>The one new sentence this block adds:</b> recursively RLock-ing the same RWMutex from one goroutine is only safe as long as no other goroutine ever calls Lock() in between — the moment one does, RWMutex's own writer-starvation guard turns your "harmless" second read into a deadlock with that writer.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="gsySeg">
@@ -268,6 +371,7 @@ DevHubCodeWalk.mount('#cw-gosync',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

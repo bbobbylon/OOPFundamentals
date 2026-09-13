@@ -97,7 +97,111 @@ print("C extensions (NumPy) are the real escape hatches.")
   </div>
 
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">The GIL diagrams above show WHERE the parallelism lives. This block is about a multiprocessing bug that doesn't even involve the GIL — it involves how a NEW process gets born.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You write eleven lines of correct multiprocessing code, run it, and your laptop fan spins up like it's mining bitcoin — because you just forked a process bomb.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A ProcessPoolExecutor script that only explodes on some machines</div>
+  <p>You write a script at the top level of <code>batch_verify.py</code> — no function wrapper, just module-level code, the way you'd write any quick script:</p>
+  <p><code>from concurrent.futures import ProcessPoolExecutor</code><br>
+  <code>with ProcessPoolExecutor(4) as ex:</code><br>
+  <code>&nbsp;&nbsp;results = list(ex.map(verify_signature, tokens))</code><br>
+  <code>print(results)</code></p>
+  <p>On your team's Linux CI runner this passes every time. On your Windows laptop, or your teammate's Mac, running the exact same file either spawns dozens of Python processes in a runaway loop or crashes immediately with <code>RuntimeError: An attempt has been made to start a new process before the current process has finished its bootstrapping phase</code>.</p>
+  <div class="hf-scatter">
+    <span>the import ✓</span>
+    <span>the ProcessPoolExecutor call ✓</span>
+    <span>running it with no __main__ guard ⚠</span>
+  </div>
+  <p class="hf-foot">Same file, same Python version, wildly different outcomes — because "start a new process" doesn't mean the same thing on every OS.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Wrap the entry point, every time you touch multiprocessing</div>
+  <div class="hf-ladder">
+    <b>Put the top-level code inside <code>if __name__ == "__main__":</code></b>
+    <i>↓ this is the one line standing between you and a fork bomb on Windows/macOS</i>
+    <b>Call your pool/executor code from inside that block</b>
+    <i>↓ now the module can be safely re-imported by a child process without re-running your logic</i>
+    <b>Do this even for a five-line throwaway script</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Fork copies memory; spawn re-imports the file.</b> Linux's default start method, <code>fork</code>, clones the already-running process — your module-level code already ran once, so it never runs again in the child. Windows has no <code>fork</code> at all, and macOS has defaulted to <code>spawn</code> since Python 3.8, so on both, every worker process launches a brand-new interpreter that imports <code>batch_verify.py</code> from scratch to find the function it needs to run. If that import re-triggers your <code>ProcessPoolExecutor</code> call, each new process tries to spawn four more, which each try to spawn four more.
+</div>
+
+<div class="hf-note">Think of <code>spawn</code> as a new employee who was handed your entire script as their "onboarding doc" instead of just their one task. They read it top to bottom before starting — and if the doc says "hire four more people," <b>they do that too, before doing anything else.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>It ran fine when I tested it on the CI box. Why is my laptop trying to launch a hundred Python processes?</p></div>
+  <div class="hf-bub right"><span class="who">The multiprocessing module</span><p>Your CI box is Linux, so I used <code>fork</code> — I copied your already-running process, module-level code and all. Your laptop is Windows, so I had to <code>spawn</code> a fresh interpreter, which means re-importing <code>batch_verify.py</code> from line one.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But the import shouldn't run my <code>ProcessPoolExecutor</code> code again... should it?</p></div>
+  <div class="hf-bub right"><span class="who">Python's import system</span><p>Importing a module always executes its top-level code — that's the whole definition of "import." If that code isn't guarded behind <code>if __name__ == "__main__":</code>, I have no way to know you didn't mean to run it again.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Walk through what actually happens when an unguarded script hits a spawn-based platform.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Main process runs <code>batch_verify.py</code> top to bottom</span><span class="tag">normal start</span></li>
+    <li class="open"><span>It reaches <code>ProcessPoolExecutor(4)</code> and asks the OS for 4 worker processes</span><span class="tag">spawn requested</span></li>
+    <li><span>On Windows/macOS, each worker is a brand-new Python interpreter, not a copy of memory</span><span class="tag">no fork available</span></li>
+    <li class="open"><span>Each new interpreter must re-import <code>batch_verify.py</code> to find <code>verify_signature</code></span><span class="tag">re-import</span></li>
+    <li><span>Importing the file re-executes every un-guarded top-level line — including the <code>ProcessPoolExecutor(4)</code> call itself</span><span class="tag">re-execution</span></li>
+    <li class="open"><span>Each of those 4 workers now tries to spawn 4 more — CPython actually detects this pattern and raises <code>RuntimeError</code> before your machine dies</span><span class="tag">caught or runaway</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the whole bug in one line: on a fork platform, step 1's code already ran, so re-running the module is harmless — there's nothing left at the top level TO execute twice in a meaningful way once you're past it. On a spawn platform, "importing the module" and "running the script" are the exact same action, so anything not fenced off behind the <code>__main__</code> check runs again, in every single child.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>Windows (always spawn)</span><span>macOS 3.8+ (spawn default)</span><span>explicit set_start_method("spawn")</span></div>
+    <div class="funnel">no fork → child re-imports __main__ ↓</div>
+    <div class="instance">Un-guarded top-level code runs again in every child<small>one root cause, three different-looking places you'll first meet it</small></div>
+  </div>
+  <p class="hf-annot">It doesn't matter whether you hit this on a Windows laptop, a modern Mac, or a Linux box where someone explicitly requested <code>spawn</code> for cleaner process isolation — the underlying reason is identical: no <code>fork</code> means no free copy of "code that already ran," so the interpreter has to reconstruct your module by importing it, and importing runs everything.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A teammate's <code>bulk_jwt_verify.py</code> has a module-level <code>with ProcessPoolExecutor(8) as ex: ex.map(verify, tokens)</code> and no <code>if __name__ == "__main__":</code> guard. It's been running fine in Docker (Linux) for months. They just switched to developing on a MacBook and it now hangs and spams RuntimeErrors on startup. What changed?</p>
+  <button type="button">Nothing changed in Python 3 — this has always been broken and Docker was silently swallowing the errors</button>
+  <button type="button">macOS's default multiprocessing start method is <code>spawn</code>, not <code>fork</code>, so the child processes now re-import and re-run the un-guarded module-level code</button>
+  <button type="button">ProcessPoolExecutor requires manual cleanup on macOS that Linux's cgroups handle automatically</button>
+  <p class="why" data-for="0">Docker wasn't hiding anything — the script genuinely behaves differently depending on the platform's default start method, and Linux containers use <code>fork</code> regardless of Docker.</p>
+  <p class="why" data-for="1">Exactly this. Linux defaults to <code>fork</code> (copies the running process, module-level code doesn't re-run); macOS has defaulted to <code>spawn</code> since Python 3.8 (fresh interpreter, full re-import). The guard is what makes a script portable across both.</p>
+  <p class="why" data-for="2">There's no such cgroups/cleanup distinction here — the failure is about how a NEW process is created (copy vs. re-import), not about resource cleanup.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Code that runs once here, but re-runs somewhere else" is a whole category of bug, not a Python quirk.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java static initializer blocks across classloaders</h4>
+    <p>A <code>static {}</code> block runs once per classloader, not once per JVM — load the same class through two classloaders (a common app-server pattern) and your "singleton" initializer runs twice, each with its own copy of "the one instance."</p>
+    <div class="hf-scatter"><span>one execution assumption, broken by a second loader</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A React component with a side effect outside useEffect</h4>
+    <p>Code written directly in the render body runs on every re-render, not once — exactly the same "I assumed this only happens at startup" trap, just triggered by React's render cycle instead of an OS process model.</p>
+    <div class="hf-scatter"><span>the "surely this only runs once" assumption</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Serverless cold starts re-running module-level setup</h4>
+    <p>Code outside your Lambda handler runs on every cold start, not once per deployment — teams have accidentally re-created DB connection pools or re-sent startup metrics per cold start for the same reason: import-time code isn't as "one-time" as it looks.</p>
+    <div class="hf-scatter"><span>import-time code is not deploy-time-once code</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> the GIL means threads don't parallelize CPU work but do help I/O, so real CPU parallelism means multiprocessing (separate interpreters, separate GILs) or the experimental free-threaded build. <b>The one new sentence this block adds:</b> that same multiprocessing escape hatch silently re-runs your whole script in every worker unless you guard the entry point with <code>if __name__ == "__main__":</code> — and whether that bites you depends entirely on which OS you're standing on.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="pygilSeg">
@@ -299,6 +403,7 @@ DevHubCodeWalk.mount('#cw-pygil',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

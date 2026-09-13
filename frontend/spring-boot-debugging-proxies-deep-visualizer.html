@@ -104,6 +104,202 @@
     <div class="intro-ciam"><span class="tag">Debug proxy issues:</span> In the debugger, inspect the injected field — a class name like <code>UserService$$SpringCGLIB$$0</code> means it's a proxy; plain <code>UserService</code> means Spring couldn't proxy it (maybe <code>final</code>). For transactions, set <code>logging.level.org.springframework.transaction=DEBUG</code> and look for "Getting transaction for [class.method]". No such log on an annotated method = the proxy is being bypassed.</div>
   </div>
 
+<p class="hf-deck">or, you took this page's advice, extracted the method — and invented a worse bug</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You caught the exception. You handled it. The transaction rolled back anyway, and the stack trace names none of your code.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The audit insert failed, you logged a warning, and the user row vanished</div>
+  <p>You did everything right. <code>registerUser()</code> is <code>@Transactional</code>. The
+  audit write used to be a <code>this.logSignup(...)</code> self-call that silently skipped its
+  advice, so you extracted it into its own <code>AuditService</code> bean — the exact fix this page
+  teaches. Now the call goes through a real proxy and the advice really runs.</p>
+  <p>Then one signup hits a unique-constraint collision on the audit table. You'd already thought
+  about that: an audit hiccup must never cost a customer their account, so
+  <code>registerUser()</code> wraps the call in <code>try/catch</code>, logs
+  <code>WARN could not write signup audit</code>, and returns the saved user. Deploy it, test it,
+  and the response is <b>HTTP 500</b> —
+  <code>UnexpectedRollbackException: Transaction rolled back because it has been marked as
+  rollback-only</code> — thrown from inside the transaction manager, from no line you wrote. The
+  user row is gone too. Your catch block executed perfectly and changed nothing.</p>
+  <div class="hf-scatter">
+    <span>method extracted to its own bean ✓</span>
+    <span>the call really goes through the proxy ✓</span>
+    <span>exception caught and logged ✓</span>
+    <span>the shared transaction was already flagged ⚠</span>
+  </div>
+  <p class="hf-foot">The assumption underneath: that catching an exception undoes what the
+  exception already caused. The inner proxy didn't throw at you and wait to see how you'd react —
+  it set a flag on the transaction on its way out.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Decide, in the annotation, whether the inner work is allowed to fail on its own</div>
+  <div class="hf-ladder">
+    <b>@Transactional on logSignup(), default propagation</b>
+    <i>↓ REQUIRED means "join whatever transaction is already here", so its failure is the caller's failure — a try/catch can't take that back</i>
+    <b>@Transactional(propagation = Propagation.REQUIRES_NEW) on logSignup()</b>
+    <i>↓ now it runs in its own physical transaction on its own connection; that one rolls back, the outer one never hears about it, and your catch does what you expected</i>
+    <b>Or drop the annotation entirely — an unannotated method that throws never reaches a transaction interceptor, so there is no flag to set</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>With the default <code>REQUIRED</code> propagation, an inner <code>@Transactional</code>
+  method gets its own logical scope over the <i>same physical transaction</i> — and a logical scope
+  that fails can only mark the shared transaction rollback-only.</b> It has no transaction of its
+  own to roll back. So the outer method returns normally, the outer interceptor calls
+  <code>commit()</code>, <code>AbstractPlatformTransactionManager</code> finds the rollback-only
+  marker, issues a real rollback instead, and raises <code>UnexpectedRollbackException</code> —
+  "unexpected" precisely because the outer scope never asked for a rollback. Everything in the
+  transaction goes: the user, the profile, the role assignment, the work before your catch and the
+  work after it. This is documented behaviour, not a leak; it is how Spring refuses to let you
+  commit half of something another scope already declared invalid.
+</div>
+
+<div class="hf-note">Catching the exception is standing in the lobby telling everyone "false alarm,
+go back to your desks." <b>You can catch an exception; you can't un-pull a fire alarm.</b> Someone
+already hit the glass on the way past, and the building is going to empty whatever you say next.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I caught the exception. Why did my user insert roll back?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">AuditService's transaction interceptor</span>
+    <p>Because by the time you caught it, I'd already acted. My rollback rules matched an unchecked
+    exception — but I was <i>participating</i> in your transaction, not running my own, so the only
+    thing I can do is set <code>rollbackOnly</code> on the shared status before rethrowing. That
+    happened a stack frame before your <code>catch</code> ever ran.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The shared TransactionStatus</span>
+    <p>And I'm bound to the thread, not passed to anyone as an argument. Nothing in your code holds
+    a reference to me, which is exactly why nothing in your code can clear my flag. It's one boolean
+    and it only ever goes one way.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The outer interceptor, at commit time</span>
+    <p>Your method returned normally, so I asked for a commit in good faith. I found the marker, ran
+    a rollback instead, and threw <code>UnexpectedRollbackException</code> — because silently
+    discarding your data while returning 201 would have been far worse than a 500.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One <code>POST /api/register</code>, two beans, one physical transaction, and the flag nobody sees being set.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The controller calls <code>userService.registerUser()</code> through its proxy; the interceptor starts a transaction on a pooled connection and binds it to the current thread</span><span class="tag">one physical tx</span></li>
+    <li class="open"><span>The user <code>INSERT</code> runs inside it. Nothing is committed yet — the row exists only to this connection</span><span class="tag">uncommitted</span></li>
+    <li><span><code>auditService.logSignup()</code> is a <b>different bean</b>, so this call really does go through a proxy. Its interceptor finds a transaction already bound to the thread and, under the default <code>REQUIRED</code>, joins it — a second <i>logical</i> scope, same physical transaction</span><span class="tag">join, not create</span></li>
+    <li class="open"><span>The audit insert violates a unique constraint. The inner interceptor's rollback rules match, but it owns nothing it could roll back — so it calls <code>setRollbackOnly()</code> on the shared status and rethrows</span><span class="tag">the flag goes up here</span></li>
+    <li><span>Your <code>catch</code> runs. You log a warning and return the user. From your code's point of view the incident is closed and handled</span><span class="tag">too late by one frame</span></li>
+    <li class="open"><span>The outer interceptor sees a clean return and calls <code>commit()</code>. The transaction manager finds the marker, performs an actual <code>ROLLBACK</code>, and throws <code>UnexpectedRollbackException</code> — from the framework, not from you</span><span class="tag">500, and no user</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is where the whole bug happens, and it is invisible in every tool you
+  would normally reach for. There is no log line at default levels, no metric, no hint in the
+  response until commit time — set
+  <code>logging.level.org.springframework.transaction=DEBUG</code> and you'll see
+  "Participating in existing transaction" followed by "Setting rollback-only", which is the
+  smoking gun. Note what step 3 implies too: this bug is only reachable because the extracted-bean
+  fix worked. Back when it was a <code>this.logSignup()</code> self-call, no interceptor ran, no
+  flag was set, and your catch block genuinely did what it looked like it did — a broken annotation
+  was quietly protecting you from this.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">ACTIVE</span>
+      <span class="go"><em>outer @Transactional opens it</em> <span class="arrow">→</span> one physical transaction, bound to the thread, shared by every bean the call touches</span></div>
+    <div class="stt"><span class="nm">MARKED ROLLBACK-ONLY</span>
+      <span class="go"><em>the inner participating scope throws</em> <span class="arrow">→</span> its interceptor sets the flag on the shared status; your catch block never sees this happen</span></div>
+    <div class="stt"><span class="nm">UNEXPECTEDLY ROLLED BACK</span>
+      <span class="go"><em>outer method returns normally, commit attempted</em> <span class="arrow">→</span> real ROLLBACK + UnexpectedRollbackException, thrown by the transaction manager</span></div>
+  </div>
+  <p class="hf-annot">Three states, and only the middle one is a surprise. Read the arrows and
+  you'll notice the trigger for the second transition is <i>an exception you handled</i> — this
+  state machine advances on things your code deliberately swallowed. That's the reason the symptom
+  lands so far from the cause: the transition happens in one bean, the consequence fires in the
+  proxy of another, and the two are joined by a flag on an object neither of them named.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q"><code>registerUser()</code> is <code>@Transactional</code>. It saves a user, then
+  calls <code>auditService.logSignup()</code> — a separate bean, also <code>@Transactional</code>
+  with default propagation — inside a <code>try/catch</code> that swallows
+  <code>DataIntegrityViolationException</code> and logs a warning. The audit insert collides with a
+  unique constraint. What does the client get?</p>
+  <button type="button">201 with the user. The audit row is missing, but your catch did its job and the signup succeeded</button>
+  <button type="button">500 with <code>UnexpectedRollbackException</code> from the transaction manager — and no user row either, because the whole physical transaction was rolled back</button>
+  <button type="button">500 with the original <code>DataIntegrityViolationException</code> — catching it in the caller doesn't stop the outer proxy from seeing it</button>
+  <p class="why" data-for="0">This is what the code plainly appears to say, and it would be right if
+  <code>logSignup()</code> had no <code>@Transactional</code> on it at all. The annotation is what
+  changes everything: it puts an interceptor between you and the method, and that interceptor
+  reacts to the exception (by flagging the shared transaction) a full stack frame before your
+  <code>catch</code> gets a chance to decide anything. Your catch controls the exception's
+  <i>propagation</i>, never its side effects.</p>
+  <p class="why" data-for="1">Right — and the detail worth keeping is <i>where</i> the 500 comes
+  from. Nothing in your stack trace will be a line you wrote; it is raised by
+  <code>AbstractPlatformTransactionManager</code> at commit, long after the code that caused it
+  finished running. That's your fingerprint for this bug in a log aggregator. The fix is a design
+  decision, not a try/catch: if an audit failure genuinely must not cost a signup, give it
+  <code>REQUIRES_NEW</code> so it owns a transaction it can roll back by itself, or take the
+  annotation off. (There is a global switch,
+  <code>globalRollbackOnParticipationFailure=false</code> on the transaction manager, but flipping
+  it site-wide to fix one method means quietly committing partial work everywhere else.)</p>
+  <p class="why" data-for="2">The outer proxy only rolls back on exceptions that actually
+  <i>propagate out of</i> the outer method — so your catch really did stop it seeing this one. That
+  is what makes the real behaviour surprising: the outer interceptor is not rolling back in
+  response to an exception, it is trying its best to <b>commit</b>, and discovering it has been
+  forbidden. Different exception, different moment, different cause.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Three other places where state was bound to the thread or deferred to commit, and you got the bill later.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>SecurityContextHolder across an @Async boundary</h4>
+    <p>The authenticated principal lives in a <code>ThreadLocal</code>, not in your method
+    arguments. Hand the work to <code>@Async</code> and the pool thread starts with an empty
+    context, so <code>@PreAuthorize</code> on the async method sees an anonymous caller — until you
+    wrap the executor in <code>DelegatingSecurityContextExecutor</code>. Same lesson as the
+    transaction: the thing governing your call is attached to the thread, and nothing warns you when
+    you leave it.</p>
+    <div class="hf-scatter"><span>thread-bound state doesn't travel</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Hibernate's flush at commit</h4>
+    <p><code>repository.save(entity)</code> returns happily and the constraint violation surfaces
+    minutes of code later, when the persistence context flushes at commit. You debug the line that
+    threw, but the line that was wrong is the one that returned cleanly. Deferred work means the
+    stack trace points at the accountant, not the spender.</p>
+    <div class="hf-scatter"><span>where it throws ≠ where it broke</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An Angular interceptor that returns EMPTY</h4>
+    <p><code>catchError(() =&gt; EMPTY)</code> in an <code>HttpInterceptor</code> looks like tidy
+    central error handling. It also means the component's <code>subscribe</code> never receives
+    next <i>or</i> error, so the spinner runs forever and the console is clean. Swallowing an error
+    doesn't undo it — it just moves the symptom somewhere nobody is looking.</p>
+    <div class="hf-scatter"><span>handled quietly, failed loudly elsewhere</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Spring's <code>@Transactional</code>, <code>@Async</code>,
+  <code>@Cacheable</code> and <code>@PreAuthorize</code> advice lives in a proxy, so only calls
+  arriving through the injected bean get advised — a <code>this.method()</code> self-call, or a
+  <code>private</code>/<code>final</code>/<code>static</code> method, silently runs with no advice
+  at all. <b>The new sentence: once you fix that and the inner call really does go through a proxy,
+  the inner method's failure marks the shared transaction rollback-only, and no amount of
+  <code>try/catch</code> in the caller can take that back.</b>
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -481,6 +677,7 @@ document.querySelectorAll('#callbtns button').forEach(b=>b.onclick=()=>diagnose(
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

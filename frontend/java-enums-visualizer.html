@@ -161,6 +161,127 @@ public class Main {
   </div>
 
 
+<p class="hf-deck">or, the enum constant whose <code>isEnum()</code> returns false and whose class name is the empty string</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The per-constant behaviour section shows constants with their own method bodies. Those bodies are not syntax — each one compiles to a separate anonymous class, and the constants stop sharing a runtime type.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Two constants of the same enum, two different <code>getClass()</code> results</div>
+  <p>Write an enum where some constants override a method and some do not:</p>
+  <p><code>enum Op { PLUS { int apply(…){…} }, MINUS { int apply(…){…} }, NOOP; int apply(…){ return 0; } }</code></p>
+  <p>Ask each constant what class it is and the answers do not match. <code>NOOP.getClass()</code> is <code>Op</code>, as expected. <code>PLUS.getClass()</code> is <code>Op$1</code> and <code>MINUS.getClass()</code> is <code>Op$2</code> — anonymous subclasses the compiler generated, one per body. And it goes further than the name: <b><code>PLUS.getClass().isEnum()</code> returns <code>false</code></b>, because an anonymous subclass of an enum is not itself an enum type. <code>PLUS.getClass().getSimpleName()</code> returns the <b>empty string</b>, since anonymous classes have no simple name.</p>
+  <p>So any code that routes on the runtime class quietly splits your enum in half. <code>handlers.get(NOOP.getClass())</code> finds the entry registered under <code>Op.class</code>; <code>handlers.get(PLUS.getClass())</code> returns <code>null</code>. <code>EnumSet.noneOf(PLUS.getClass())</code> throws <code>ClassCastException: class Op$1 not an enum</code>, while the same call on <code>NOOP</code> works fine. <b>The failure is per-constant</b> — which means it depends on which enum value happens to be flowing through, and that is the hardest kind of bug to reproduce from a bug report.</p>
+  <div class="hf-scatter">
+    <span><code>switch</code> on the enum still works ✓</span>
+    <span><code>values()</code>, <code>name()</code>, <code>ordinal()</code> all fine ✓</span>
+    <span>serialization by name is fine ✓</span>
+    <span><code>getClass()</code> differs per constant ⚠</span>
+    <span><code>isEnum()</code> is false for half of them ⚠</span>
+  </div>
+  <p class="hf-foot">A constant-specific class body is exactly what its name says: a class. You wrote a subclass without writing the word.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Ask for the declaring class, which is the question you meant</div>
+  <div class="hf-ladder">
+    <b>Use <code>getDeclaringClass()</code>, never <code>getClass()</code>, on an enum constant</b>
+    <i>↓ <code>java.lang.Enum</code> declares this method for exactly this reason: it returns <code>Op</code> for every constant, body or no body, so a map keyed on it finds the same entry for all of them</i>
+    <b>Never key a lookup on <code>getClass()</code> when the values might be enum constants</b>
+    <i>↓ a <code>Map&lt;Class&lt;?&gt;, Handler&gt;</code> is a perfectly good pattern and this is the one input type that breaks it silently — the miss returns <code>null</code> rather than throwing, so the first symptom is a <code>NullPointerException</code> somewhere downstream</i>
+    <b>And if you only need one shared implementation, prefer a field over a body</b>
+    <i>↓ <code>PLUS(Integer::sum)</code> with an <code>IntBinaryOperator</code> field keeps every constant the same class, keeps the behaviour per-constant, and reads better than three method bodies — the abstract-method form earns its keep when the logic is genuinely long</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Syntax that looks like configuration and compiles to a class will behave like a class, and the place that shows up is always reflection.</b> A constant-specific body, an anonymous <code>Comparator</code>, a lambda, a proxy, a generated Hibernate subclass — each is a runtime type the source file does not name. Everything that reads the <i>shape</i> of an object rather than its declaration will see them: a class-keyed map, an ORM, a serializer, a dependency injector, a logging framework printing <code>getClass().getSimpleName()</code>. The declared type is what you reason about; the runtime type is what those tools get.
+</div>
+
+<div class="hf-note"><b><code>getDeclaringClass()</code> exists because <code>getClass()</code> is wrong here.</b> A method on <code>java.lang.Enum</code> whose only job is to undo a compiler detail is a strong hint that the detail bites.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p><code>PLUS</code> and <code>NOOP</code> are both <code>Op</code> constants. How is <code>getClass()</code> different?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The compiler</span>
+    <p>Because <code>PLUS</code> has a body, and a body needs somewhere to live. I made <code>Op</code> abstract-ish and emitted <code>Op$1</code> as an anonymous subclass holding your <code>apply</code>. <code>NOOP</code> had nothing to override, so it is a plain <code>Op</code>. Two constants, two classes, one declared type.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who"><code>Class.isEnum()</code></span>
+    <p>And I answer honestly: I return true only for the class that has the <code>ENUM</code> modifier, which is <code>Op</code>. <code>Op$1</code> is an anonymous subclass — it does not carry that flag, so I say false. That is also why <code>EnumSet.noneOf</code> rejects it: it checks me first.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who"><code>getDeclaringClass()</code></span>
+    <p>Worth knowing I am not a workaround someone bolted on. I am declared on <code>java.lang.Enum</code> itself, and I return the class that declared the constant — <code>Op</code>, always. If you are reflecting over an enum, I am the method you wanted from the start.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps through a handler registry that works for two of three enum values.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>An <code>Op</code> enum starts life plain — three constants, no bodies — and every constant's <code>getClass()</code> is <code>Op</code></span><span class="tag">uniform, for now</span></li>
+    <li class="open"><span>A registry is built: <code>Map&lt;Class&lt;?&gt;, Handler&gt;</code> with one entry under <code>Op.class</code>. Every lookup hits it</span><span class="tag">works for every value</span></li>
+    <li><span>Months later, <code>PLUS</code> gets a constant-specific body so it can do something the others do not</span><span class="tag">a normal, welcome change</span></li>
+    <li class="open"><span>The compiler emits <code>Op$1</code> for that one constant. Nothing in the source file mentions it, and nothing warns</span><span class="tag">a new runtime type</span></li>
+    <li><span><code>handlers.get(PLUS.getClass())</code> now returns <code>null</code>. <code>handlers.get(NOOP.getClass())</code> still returns the handler</span><span class="tag">one value diverges</span></li>
+    <li class="open"><span>A <code>NullPointerException</code> in the dispatcher, on requests using <code>PLUS</code> only, in code nobody touched</span><span class="tag">blamed on the wrong commit</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the whole lesson, and it is about change rather than about enums: adding a method body to one constant is a source-level edit that alters the <i>runtime type</i> of that constant, and no signature changed, no interface moved, and no compiler warning fired. <b>Binary-compatible edits can still be behaviour-incompatible when something reflects on the class</b> — which is why a code review that reads only the diff cannot catch this. The diff shows three lines of arithmetic. The consequence is in a registry file nobody opened, keyed on a property the language never promised would stay the same.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span><code>PLUS</code> — <code>getClass()</code> is <code>Op$1</code>, <code>isEnum()</code> false</span>
+      <span><code>MINUS</code> — <code>getClass()</code> is <code>Op$2</code>, <code>isEnum()</code> false</span>
+      <span><code>NOOP</code> — <code>getClass()</code> is <code>Op</code>, <code>isEnum()</code> true</span>
+    </div>
+    <div class="funnel">ask <code>getDeclaringClass()</code> instead ↓</div>
+    <div class="instance"><code>Op</code><small>one answer for every constant — the class that declared them, which is what you meant by "what type is this?"</small></div>
+  </div>
+  <p class="hf-annot">Three runtime types converging on one declared type is the entire fix, and it is worth noticing how narrow the correct question is: not "what class is this object" but "what class declared this constant". <b>Those two questions have the same answer for almost every object in Java, which is precisely why the distinction is invisible until it is not.</b> The same gap explains why Hibernate tells you to write <code>equals</code> against a proxy-safe type rather than <code>getClass()</code>, and why a logging helper that prints <code>getClass().getSimpleName()</code> prints an empty string for a lambda or an anonymous class — same cause, different symptom, and <code>getDeclaringClass()</code> is the enum's purpose-built answer to it.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">In <code>enum Op { PLUS { int apply(…){…} }, NOOP; int apply(…){ return 0; } }</code>, what do <code>PLUS.getClass().isEnum()</code> and <code>NOOP.getClass().isEnum()</code> return?</p>
+  <button type="button">Both <code>true</code> — <code>isEnum()</code> reports whether the object is an enum constant, and both of these are constants of the same enum regardless of whether they override a method</button>
+  <button type="button"><code>false</code> for <code>PLUS</code> and <code>true</code> for <code>NOOP</code> — the constant-specific body makes <code>PLUS</code> an instance of an anonymous subclass <code>Op$1</code>, which does not carry the enum modifier</button>
+  <button type="button">Both <code>false</code> — <code>isEnum()</code> is true only for the enum class itself, so calling it on the class of any <i>instance</i> always returns false</button>
+  <p class="why" data-for="0"><code>isEnum()</code> is a question about a <i>class</i>, not about an object, and the two constants have different classes here. <code>Op.class.isEnum()</code> is true; <code>PLUS.getClass()</code> is <code>Op$1</code>, an anonymous subclass, and that class is not an enum type.</p>
+  <p class="why" data-for="1">Correct — and the consequences are concrete: <code>EnumSet.noneOf(PLUS.getClass())</code> throws <code>ClassCastException: class Op$1 not an enum</code>, while the same call on <code>NOOP</code> succeeds. Use <code>getDeclaringClass()</code>, which returns <code>Op</code> for both.</p>
+  <p class="why" data-for="2">For a constant with no body, <code>getClass()</code> <i>is</i> the enum class — <code>NOOP.getClass() == Op.class</code> is true, so <code>isEnum()</code> on it returns true. The split only appears once some constants get their own bodies.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">The runtime type is not the type you wrote, and reflection is where you find out.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A Spring bean that is really a proxy</h4>
+    <p><code>@Transactional</code> or <code>@Cacheable</code> wraps the bean in a CGLIB subclass or a JDK dynamic proxy, so <code>getClass()</code> returns <code>UserService$SpringCGLIB$0</code>. Code that switches on the class, or that casts to a concrete implementation, breaks the moment the annotation is added.</p>
+    <div class="hf-scatter"><span>AopUtils.getTargetClass exists for this</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A lambda's class name</h4>
+    <p>A lambda's runtime class is generated at first use with a name like <code>Service$Lambda/0x00007f…</code> — containing a hex address that changes every run. Anything that logs, caches or persists <code>getClass().getName()</code> for a lambda is storing a value with a lifetime of one JVM.</p>
+    <div class="hf-scatter"><span>generated names are not stable</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Erasure and <code>List&lt;String&gt;.getClass()</code></h4>
+    <p>It returns <code>ArrayList</code>, with no trace of <code>String</code>, because the type argument exists only at compile time. <b>Every one of these is the same question: which of my types survives to runtime, and which one was only ever a note to the compiler?</b></p>
+    <div class="hf-scatter"><span>ask what survives compilation</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> an enum is a final class with a fixed set of instances, so it gets type safety, <code>switch</code> exhaustiveness, identity comparison with <code>==</code>, fields and methods per constant, and the fastest possible <code>Set</code> and <code>Map</code> in <code>EnumSet</code> and <code>EnumMap</code>. The sentence worth adding: <b>a constant-specific body compiles to an anonymous subclass</b>, so that constant's <code>getClass()</code> is <code>Op$1</code> and its <code>isEnum()</code> is <code>false</code> — call <code>getDeclaringClass()</code> whenever you reflect on an enum constant.
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -1114,6 +1235,7 @@ function runBarComparison(){
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

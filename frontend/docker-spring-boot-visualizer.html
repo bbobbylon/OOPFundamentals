@@ -107,7 +107,112 @@
     <div class="intro-ciam"><span class="tag">CIAM Spring Boot + Docker production:</span> ADO pipeline: compile → test → <code>docker build -t …azurecr.io/ciam-auth:$(Build.BuildId)</code> → push → Helm upgrade — the BuildId tag gives exact traceability. <code>-XX:MaxRAMPercentage=75</code> with a 1Gi limit gives a ~768MB heap, and <code>-XX:+ExitOnOutOfMemoryError</code> exits cleanly so K8s restarts the pod (faster than a hung JVM). Use JSON logging (LogstashEncoder) for Azure Monitor, and a custom <code>PingHealthIndicator</code> so readiness fails when Ping is down and traffic routes to healthy pods.</div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, why <code>docker ps</code> can say "unhealthy" about an app that is perfectly fine</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You copy the HEALTHCHECK line straight off this page, the app answers every request correctly, and the orchestrator still keeps killing it.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">ECS cycles a healthy task every 90 seconds</div>
+  <p>You build the Dockerfile from Section 1 exactly as written. <code>docker build</code> succeeds. <code>docker run</code> starts. You hit <code>http://localhost:8080/actuator/health</code> from your own laptop and get back <code>{"status":"UP"}</code>. Everything about the app says it's fine.</p>
+  <p>Then ECS marks the task UNHEALTHY, drains it, and starts a replacement — which also goes UNHEALTHY 90 seconds later. The app in the logs never crashes. Nothing in Spring Boot ever throws. The HEALTHCHECK just keeps failing, forever, on a service that works.</p>
+  <div class="hf-scatter">
+    <span>image builds ✓</span>
+    <span>app responds 200 from your laptop ✓</span>
+    <span>HEALTHCHECK itself ⚠</span>
+  </div>
+  <p class="hf-foot">The HEALTHCHECK command doesn't run on your laptop. It runs inside the container, using whatever binaries THAT image happens to ship.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Check what the base image actually contains, don't assume it</div>
+  <div class="hf-ladder">
+    <b>Run the base image alone and ask it for the tool</b>
+    <i>↓ <code>docker run --rm eclipse-temurin:21-jre-alpine which curl</code> prints nothing and exits 1 — curl was never there</i>
+    <b>Swap to a binary the image already ships, or add the one you need</b>
+    <i>↓ Alpine's BusyBox ships <code>wget</code> by default — <code>wget --no-verbose --tries=1 --spider http://localhost:8080/actuator/health || exit 1</code> needs nothing extra; alternatively <code>RUN apk add --no-cache curl</code> if you'd rather keep curl syntax</i>
+    <b>Rebuild and watch the actual STATUS column, not just the app logs</b>
+    <i>↓ <code>docker ps</code> should read "(healthy)" within one interval; ECS's task health in the console flips the same way — the app was never the problem</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A HEALTHCHECK is a program, and it runs where the container runs.</b> It doesn't inherit your laptop's shell, your laptop's PATH, or the tools your normal terminal happens to have installed. If the base image is minimal — and JRE-alpine images are minimal on purpose, to stay small — every binary the HEALTHCHECK calls has to actually be sitting inside that same image, or the check fails before it ever reaches your code.
+</div>
+
+<div class="hf-note">Alpine ships a kitchen with no can-opener. <b>curl is not part of the base — wget (via BusyBox) is</b>. A recipe written for a fully-stocked Debian kitchen fails quietly in this one, and nothing in the failure message mentions your Spring Boot app at all.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>The health endpoint returns 200 in my browser. Why does Docker keep saying unhealthy?</p></div>
+  <div class="hf-bub right"><span class="who">HEALTHCHECK</span><p>I don't run in your browser. I run inside the container's own shell, with whatever's on ITS PATH — and this image never gave me curl.</p></div>
+  <div class="hf-bub"><span class="who">eclipse-temurin:21-jre-alpine</span><p>I was built to be small: a JVM and BusyBox, nothing more. I never promised curl. I never claimed to.</p></div>
+  <div class="hf-bub right"><span class="who">ECS</span><p>I don't diagnose why you're unhealthy. Three failed checks and I replace you — that's the whole job.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Walk the exact HEALTHCHECK line from Section 1 through what actually executes at runtime.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Runtime stage builds FROM <code>eclipse-temurin:21-jre-alpine</code></span><span class="tag">no curl package</span></li>
+    <li class="open"><span>Dockerfile bakes in <code>HEALTHCHECK CMD curl -f http://localhost:8080/actuator/health</code></span><span class="tag">stored, not checked</span></li>
+    <li><span>Container starts; Tomcat binds 8080; Actuator answers real HTTP requests with 200</span><span class="tag">app is genuinely fine</span></li>
+    <li class="open"><span>Every interval, Docker execs that CMD string INSIDE the container's own namespace</span><span class="tag">not from the host</span></li>
+    <li><span>The shell resolves <code>curl</code>: no such binary — exits 127, not connection-refused</span><span class="tag">127, not 200</span></li>
+    <li class="open"><span>After 3 straight failures the container flips to unhealthy; ECS drains and replaces the task</span><span class="tag">orchestrator reacts to the check, not the app</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is the one to sit with: exit code 127 means "command not found," which is a completely different failure than the app returning an error. Docker's healthcheck log shows you the raw output if you run <code>docker inspect --format='{{json .State.Health}}' &lt;container&gt;</code> — it will literally say <code>curl: not found</code> if you know to look. Most people don't look; they just see "unhealthy" and start debugging the wrong layer of the stack.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">Which HTTP-capable binary does <code>eclipse-temurin:21-jre-alpine</code> actually ship?<small>the assumption baked into a copy-pasted HEALTHCHECK line</small></div>
+    <div class="arrow">what actually happens →</div>
+    <div class="opts">
+      <span>curl</span>
+      <span class="on">wget (via BusyBox)</span>
+      <span>netcat</span>
+    </div>
+  </div>
+  <p class="hf-annot">Three tools you might reach for out of habit; only one is actually in the image without adding a package. BusyBox — the tiny multi-call binary Alpine bundles for basic shell utilities — includes a stripped-down <code>wget</code> by default. curl and netcat both need an explicit <code>apk add</code>. The fix isn't "use a smarter command," it's knowing which of the three slots is actually filled before you write the HEALTHCHECK line.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">This page's Dockerfile builds clean, and <code>curl http://podip:8080/actuator/health</code> from your own machine returns <code>{"status":"UP"}</code>. ECS still cycles the task as UNHEALTHY every 90 seconds. What's the most likely cause?</p>
+  <button type="button">The HEALTHCHECK's <code>curl</code> call fails inside the container because the <code>jre-alpine</code> base image never installs curl — the command itself can't run, regardless of app health</button>
+  <button type="button">Actuator's <code>/health</code> endpoint is returning 503 under load because the connection pool to the database is exhausted</button>
+  <button type="button">The ECS target group's deregistration delay is set too low, so the task drains before it finishes starting up</button>
+  <p class="why" data-for="0">Right. The <code>CMD</code> in a HEALTHCHECK runs inside the container's own filesystem and shell, and this exact base image doesn't ship curl. It exits 127 ("not found") on every single attempt — a failure that has nothing to do with Spring Boot. Swap to <code>wget --spider</code> (already present via BusyBox) or add curl with <code>apk add</code>, and the same signal starts working.</p>
+  <p class="why" data-for="1">A real failure mode, but it doesn't match the symptoms here: if Actuator itself were returning 503, your own <code>curl</code> from your laptop would fail too. It didn't — it returned UP — which means the app is genuinely healthy and the check mechanism itself is what's broken.</p>
+  <p class="why" data-for="2">Deregistration delay controls how long a task keeps draining traffic before ECS removes it from rotation — it has no bearing on whether the container's own internal HEALTHCHECK command can even execute. That setting matters elsewhere, just not here.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The base image doesn't ship the tool you assumed" is one of the most common ways a container quietly breaks.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Distroless images for hardened identity services</h4>
+    <p>Security-conscious teams running CIAM workloads often go further than Alpine and use a <code>distroless</code> base — no shell at all, not even BusyBox. A HEALTHCHECK's <code>CMD</code> instruction needs a shell to interpret it, so it fails outright, not just when curl is missing. Teams that ship distroless bake a tiny static binary (like Go's <code>grpc_health_probe</code>) into the image at build time instead of relying on any shell tool.</p>
+    <div class="hf-scatter"><span>fewer tools in the image = fewer assumptions you're allowed to make</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Alpine Node images and native modules</h4>
+    <p><code>npm install</code> on a package with a native addon needs <code>python3</code>, <code>make</code>, and a C compiler to run <code>node-gyp</code>. A slim <code>node:alpine</code> image doesn't ship a build toolchain any more than the JRE-alpine image ships curl — the install fails with a compiler error that looks nothing like "missing package."</p>
+    <div class="hf-scatter"><span>the same shape of bug, one layer earlier in the pipeline</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>ASP.NET's runtime-only image</h4>
+    <p><code>mcr.microsoft.com/dotnet/aspnet</code> deliberately ships no <code>dotnet</code> CLI — only what's needed to run an already-built app. A healthcheck script or entrypoint written and tested against the full <code>sdk</code> image works in dev and silently breaks the moment someone "optimizes" production to the runtime-only tag.</p>
+    <div class="hf-scatter"><span>smaller image, fewer tools, same trap</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> This page's Dockerfile builds a lean, container-aware Spring Boot image — JDK for compiling, JRE for running, memory flags sized to the cgroup limit, and a HEALTHCHECK so ECS or Kubernetes knows when to route traffic. <b>The one new sentence this block adds:</b> that HEALTHCHECK is only as trustworthy as the binary it calls, and the exact <code>curl</code> command on this page silently fails on the exact base image this page uses — check what a minimal image actually ships before you write a command that assumes it.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -517,6 +622,7 @@ function updatePipe() {
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

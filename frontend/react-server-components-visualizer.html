@@ -58,7 +58,111 @@
     <div class="intro-ciam"><span class="tag">CIAM relevance:</span> A Next.js App Router admin panel can use a Server Component for the user list — query Ping/Entra via a server-side SDK with no token exposed to the browser — and a Server Action for role assignment (<code>'use server'; async function assignRole(userId, role) { await pingClient.addRole(userId, role); revalidatePath('/users/' + userId) }</code>) called straight from a button. Auth reads the session from cookies server-side, no Bearer header. Your Spring+Angular path (Angular → Bearer → Spring validates JWT → Ping) is 3 hops; RSC + Server Actions collapse it into one server-side call, and API keys / DB creds never leave the server.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the shared helper with no 'use client' at the top is the trap door your Server Component just fell through.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Your Server Component doesn't use hooks, doesn't touch the DOM, and still crashes the whole page render with "window is not defined."</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The crash that isn't even in the file you're looking at</div>
+  <p>Your <code>UserDashboard</code> Server Component looks completely innocent &mdash; <code>await db.user.findMany()</code>, no <code>'use client'</code>, no hooks, straight server code. Somewhere in the middle it imports a small shared helper, <code>formatActivity.ts</code>, to format a timestamp for display. That helper, in turn, imports a lightweight charting library to render a little sparkline &mdash; a library that reads <code>window.devicePixelRatio</code> at the TOP of its module, outside any function, so it runs the instant the module is loaded.</p>
+  <p>There's no <code>'use client'</code> anywhere in this chain &mdash; not in <code>UserDashboard</code>, not in <code>formatActivity.ts</code>, not in the charting library. Because none of them opted into the client boundary, the framework treats the WHOLE import chain as server code and tries to execute it on the server, in Node &mdash; where there is no <code>window</code>. The render throws <code>ReferenceError: window is not defined</code> and the ENTIRE page fails, not just the sparkline. Nothing in your Server Component's own code is wrong; the bug lives two imports deep, in a module that quietly assumes a browser exists.</p>
+  <div class="hf-scatter">
+    <span>the DB query in UserDashboard is correct ✓</span>
+    <span>formatActivity.ts has no hooks, looks server-safe ✓</span>
+    <span>the charting library reads window at MODULE scope ⚠</span>
+  </div>
+  <p class="hf-foot">"No hooks, no event handlers" is not the same test as "no browser assumptions" &mdash; and only the second one is what a Server Component actually needs.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Push the client-only code behind its own boundary</div>
+  <div class="hf-ladder">
+    <b>Find the actual browser dependency &mdash; usually a library reading window/document/localStorage at import time, not inside a function</b>
+    <i>&darr; the stack trace points at the crash site, but the real culprit is whichever module executes browser code the moment it's imported</i>
+    <b>Wrap just that piece in its own file with 'use client' at the top</b>
+    <i>&darr; this draws the boundary at the smallest possible scope &mdash; everything above it (your DB query, your layout) stays server-only and ships zero JS</i>
+    <b>And step three: render the client piece as a child, and pass it only serializable data &mdash; not the library import itself</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A Server Component isn't disqualified by using hooks or an event handler &mdash; it's disqualified by executing, even transitively through an innocent-looking shared utility, any code that assumes a browser exists (window, document, localStorage) the instant that module loads, because Node has none of those globals to give it.
+</div>
+
+<div class="hf-note"><code>'use client'</code> isn't a label you put on the component that CAUSES the crash &mdash; it's a label you put on the component that NEEDS the browser. Chase the import chain until you find the actual window reference; the crash trace usually points at your innocent component, not the guilty library three imports away.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>My Server Component doesn't use useState, doesn't have an onClick, and it STILL throws "window is not defined." How is that possible?</p></div>
+  <div class="hf-bub right"><span class="who">formatActivity.ts, your shared helper</span><p>I don't use hooks either. But I import a sparkline library, and that library reads window.devicePixelRatio the moment it's loaded &mdash; not when you call a function, when the FILE runs.</p></div>
+  <div class="hf-bub"><span class="who">Node.js, running your server render</span><p>I don't have a window object. I never have. When that line runs during your Server Component's render, there's nothing there &mdash; so I throw, and the whole page render fails with me.</p></div>
+  <div class="hf-bub right"><span class="who">'use client', on the sparkline wrapper only</span><p>Put me on a thin file that just imports the sparkline library and re-exports a component. Now that browser code only ever runs in the browser or during a client component's own render &mdash; never during your Server Component's server-only render.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Trace the import chain from your clean-looking Server Component down to the actual browser dependency.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>UserDashboard (Server Component, no directive) imports formatActivity from ./formatActivity.ts</span><span class="tag">import 1</span></li>
+    <li class="open"><span>formatActivity.ts (no directive either) imports Sparkline from a charting library</span><span class="tag">import 2</span></li>
+    <li><span>The charting library's module-level code runs const dpr = window.devicePixelRatio OUTSIDE any function</span><span class="tag">module scope</span></li>
+    <li class="open"><span>The server renders UserDashboard &mdash; this whole import chain executes in Node to produce the RSC payload</span><span class="tag">server executes it</span></li>
+    <li><span>Node evaluates the charting library's module and hits window &mdash; there is no such global</span><span class="tag">ReferenceError</span></li>
+    <li class="open"><span>The error surfaces attached to UserDashboard &mdash; the component that did nothing wrong except import something that, two hops later, wasn't safe</span><span class="tag">misleading trace</span></li>
+  </ol>
+  <p class="hf-annot">Step 6 is the practical lesson: when a Server Component crashes with a browser-globals error, don't just re-read that component's own code looking for the mistake &mdash; it's very often clean. Walk its import tree instead, because the actual browser assumption is usually sitting in a "plain utility" file nobody thought to mark, exactly the way formatActivity.ts here never needed 'use client' for its OWN code, only for what it dragged in.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">UserDashboard throws "window is not defined" during a server render<small>no hooks, no onClick, nothing obviously client-side in the component itself</small></div>
+    <div class="arrow">what's actually wrong &rarr;</div>
+    <div class="opts">
+      <span>the DB query in UserDashboard is malformed</span>
+      <span class="on">a module two imports deep reads window at load time, with no 'use client' anywhere in the chain</span>
+      <span>Server Components can never import any shared utility file</span>
+    </div>
+  </div>
+  <p class="hf-annot">Rule out the DB query (it works fine in isolation) and rule out "Server Components can't import utilities" (they import them constantly &mdash; that's most of what they do) and you're left with the actual mechanism: something in the chain executes browser-only code the moment its module loads, and nothing marked the boundary before that code ran on the server.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A Server Component with no hooks and no event handlers throws ReferenceError: window is not defined during rendering. You confirm the component's own code never references window. What's the most likely explanation?</p>
+  <button type="button">Something it imports &mdash; possibly several hops away through a shared utility file with no 'use client' directive &mdash; executes code that reads a browser global at module load time, and that whole import chain is being executed on the server</button>
+  <button type="button">Server Components cannot import ANY module that isn't a React component, so any utility import will eventually throw this error</button>
+  <button type="button">The error is unrelated to imports &mdash; it means the framework failed to detect that this file should have been treated as a Client Component</button>
+  <p class="why" data-for="0">Right &mdash; the component's own code being clean doesn't clear its dependencies. Anything imported, transitively, that touches window/document/localStorage outside a function runs the instant its module loads, and on the server that's during your Server Component's render, in an environment with no such global.</p>
+  <p class="why" data-for="1">Server Components import plain utility modules constantly &mdash; data-formatting helpers, validation functions, non-browser libraries &mdash; with zero issue. The failure mode is specific to modules that assume a browser exists, not to importing in general.</p>
+  <p class="why" data-for="2">The framework isn't guessing whether a file "should" be a Client Component &mdash; the boundary is explicit, drawn by wherever 'use client' is placed. Nothing here is auto-detected incorrectly; the actual problem is that nothing in the chain declared a boundary, so it all ran as server code, including code that needed a browser.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Code that quietly assumes an ambient environment breaks the moment it runs somewhere that environment doesn't exist.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Angular Universal + isPlatformBrowser</h4>
+    <p>The identical crash exists in Angular's server-side rendering: a service that calls <code>localStorage.getItem(...)</code> unconditionally works fine client-side and throws during Universal's server render, because Node has no localStorage either. Angular's fix is the same shape as React's &mdash; gate the browser-only code behind <code>isPlatformBrowser(this.platformId)</code> instead of letting it run unconditionally wherever the module happens to load.</p>
+    <div class="hf-scatter"><span>browser API called unconditionally in code that also runs server-side</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Spring Boot code assuming a servlet request</h4>
+    <p>Calling a helper that reads <code>HttpServletRequest</code> from a background thread &mdash; a <code>@Scheduled</code> job, an <code>@Async</code> method &mdash; throws because there's no request in scope on that thread. Same category of mistake: code written assuming an ambient context (a browser window, an HTTP request) that isn't guaranteed to exist everywhere that code can run.</p>
+    <div class="hf-scatter"><span>code assumes an ambient context it isn't guaranteed to have</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>npm's "browser" vs "main" package fields</h4>
+    <p>Bundlers support a browser field in package.json specifically because so many packages ship code that only works in a browser; Node resolves main instead and gets a version that assumes globals Node doesn't have. The RSC boundary enforces, at the React level, exactly the split the npm ecosystem already needed a whole package.json field to express.</p>
+    <div class="hf-scatter"><span>an entire ecosystem convention exists because of this exact split</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Server Components run only on the server, ship zero JS, and can query the database directly, while Client Components ('use client') add hooks and event handlers and cross the boundary only via serializable props &mdash; composition is one-way, and Server Actions are server functions the client can call like local functions. <b>The one new sentence this block adds:</b> the boundary isn't just about which component YOU wrote &mdash; it's about every module that component imports, transitively, and a single unmarked shared utility that quietly drags in browser-only code is enough to crash the entire server render, not just the piece that actually needed a browser.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="scSeg">
@@ -247,6 +351,7 @@ DevHubCodeWalk.mount('#cw-rsc',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

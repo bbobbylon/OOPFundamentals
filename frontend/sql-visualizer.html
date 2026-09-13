@@ -118,7 +118,109 @@
       <div class="intro-ciam"><span class="tag">In your CIAM stack:</span> JOINs run constantly — a user's roles (users → user_roles → roles), active sessions (users → sessions WHERE expires_at > NOW()), audit trail with user details. Indexes are critical: <code>users.email</code> (login), <code>sessions.token_hash</code> (validated on every API call — must be ms), <code>user_roles.user_id</code> (every auth check). Transactions prevent partial state: provisioning (user + roles + audit), role assignment, session rotation. Spring's <code>@Transactional</code> handles it — but understanding the SQL underneath is essential for debugging, tuning, and queries JPA can't express.</div>
     </div>
 
-    <!-- ── EXTREME-VIZ HERO ── -->
+    <p class="hf-deck">or, the blocklist query that returns zero rows because one row in the subquery is broken</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You write the query any senior engineer would sign off on, run it against production, and get back zero rows — when the table clearly has hundreds of matches.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The NOT IN that quietly excluded every single row</div>
+  <p>You need "every active user except the ones on the banned list": <code>SELECT * FROM users WHERE id NOT IN (SELECT user_id FROM banned_users)</code>. It's the obvious, textbook way to write it. In staging, against a clean <code>banned_users</code> table, it returns exactly what you expect. In production it returns <b>zero rows</b> — not "too few," zero — even though <code>banned_users</code> has maybe 40 rows out of a million users.</p>
+  <p>One row in <code>banned_users</code> has <code>user_id = NULL</code> — a bad manual insert, an orphaned record, an ETL job that once loaded a blank field. <code>NOT IN</code> expands into a chain of <code>&lt;&gt;</code> comparisons ANDed together: <code>id &lt;&gt; 101 AND id &lt;&gt; 205 AND ... AND id &lt;&gt; NULL</code>. SQL's three-valued logic says any comparison against NULL evaluates to UNKNOWN — never TRUE, never FALSE. <code>UNKNOWN AND anything</code> is UNKNOWN, and a WHERE clause only keeps rows that evaluate to TRUE. That one NULL poisons the AND chain for every row in the outer query, not just the row it was actually about.</p>
+  <div class="hf-scatter">
+    <span>banned_users has 40 real rows ✓</span>
+    <span>the subquery runs fine on its own ✓</span>
+    <span>one NULL user_id row in there ⚠</span>
+  </div>
+  <p class="hf-foot">It's not that the query is wrong for the banned users — it's wrong for every user, all at once, because of a row it was never even checking against.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Never trust NOT IN against a subquery that can contain NULL</div>
+  <div class="hf-ladder">
+    <b>Rewrite as NOT EXISTS (SELECT 1 FROM banned_users b WHERE b.user_id = users.id)</b>
+    <i>↓ NOT EXISTS checks row-by-row existence instead of expanding into one giant ANDed comparison list, so a NULL sitting in the other table's column has nothing left to poison</i>
+    <b>Or filter the subquery defensively — NOT IN (SELECT user_id FROM banned_users WHERE user_id IS NOT NULL)</b>
+    <i>↓ this removes the NULL before it reaches the comparison, but only works if you remember to add it every time — NOT EXISTS makes the failure structurally impossible instead of relying on memory</i>
+    <b>And add a NOT NULL constraint on banned_users.user_id so a stray NULL can never land there again</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>NULL doesn't mean "no match" — it means "unknown," and unknown poisons everything it touches.</b> Any comparison against NULL evaluates to UNKNOWN, not FALSE, and a WHERE clause silently drops UNKNOWN rows exactly like it drops FALSE ones. The moment NULL can appear on either side of NOT IN, the whole clause is one bad row away from returning nothing at all.
+</div>
+
+<div class="hf-note">Sticky note: <b>NOT IN plus a subquery that might contain NULL is a landmine with a very long fuse — it works for months until one bad row lands in the wrong table.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>banned_users has 40 rows. Why did "everyone except banned" return zero users out of a million?</p></div>
+  <div class="hf-bub right"><span class="who">NOT IN</span><p>I expand into id&lt;&gt;101 AND id&lt;&gt;205 AND ... for every value in that subquery — including the NULL one.</p></div>
+  <div class="hf-bub"><span class="who">The NULL row</span><p>I'm not really banning anyone. I'm just a broken row nobody noticed. But id &lt;&gt; me isn't false — it's UNKNOWN, for every id you check me against.</p></div>
+  <div class="hf-bub right"><span class="who">The WHERE clause</span><p>I only keep rows where the whole condition is TRUE. ANDing in one UNKNOWN turns the entire thing UNKNOWN, and I throw that out just like I throw out FALSE.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch NOT IN expand into an AND chain, and watch one NULL poison every single row's result.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>banned_users contains 40 real ids, plus one row where user_id is NULL</span><span class="tag">data</span></li>
+    <li class="open"><span>NOT IN (SELECT user_id FROM banned_users) logically expands to id&lt;&gt;101 AND id&lt;&gt;205 AND ... AND id&lt;&gt;NULL</span><span class="tag">expansion</span></li>
+    <li><span>for a normal user, say id=999: 999&lt;&gt;101 is TRUE, 999&lt;&gt;205 is TRUE — every real comparison is TRUE</span><span class="tag">looks fine</span></li>
+    <li class="open"><span>but 999&lt;&gt;NULL evaluates to UNKNOWN, not TRUE — SQL can't confirm 999 differs from a value it doesn't know</span><span class="tag">three-valued logic</span></li>
+    <li><span>TRUE AND TRUE AND ... AND UNKNOWN reduces to UNKNOWN for the whole expression</span><span class="tag">AND chain</span></li>
+    <li class="open"><span>the WHERE clause keeps only rows where the condition is TRUE — UNKNOWN is discarded exactly like FALSE, so id=999 vanishes along with literally every other id</span><span class="tag">silent drop</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is where intuition breaks. You'd expect "999 is obviously not NULL" to just work itself out. SQL disagrees on principle — it never asserts two things are different unless it can prove it, and it can't prove anything against a value it doesn't know.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">WHERE id NOT IN (SELECT user_id FROM banned_users)</span>
+      <div class="ring"><span class="lbl">expands to: id&lt;&gt;101 AND id&lt;&gt;205 AND ... AND id&lt;&gt;NULL</span>
+        <div class="core">id &lt;&gt; NULL → UNKNOWN<small>UNKNOWN AND anything = UNKNOWN, so the whole row is dropped — for every row in the table, not just this one</small></div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Peel back the SQL and there's exactly one NULL at the center of it — strong enough to sink every row in the outer query, not because it's special, but because AND propagates UNKNOWN the way a hull breach floods a whole ship, not just one compartment.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q"><code>SELECT * FROM users WHERE id NOT IN (SELECT user_id FROM banned_users)</code> returns 0 rows, even though <code>users</code> has a million rows and <code>banned_users</code> has only 40. A direct <code>SELECT * FROM banned_users</code> shows exactly those 40 rows with nothing obviously wrong. What's the most likely cause?</p>
+  <button type="button">One row in banned_users has a NULL user_id, which turns the NOT IN's expanded comparison chain to UNKNOWN for every row in users</button>
+  <button type="button">The users table has a corrupted index on id, causing the NOT IN subquery to fail to match anything</button>
+  <button type="button">NOT IN has a hard limit on subquery result size, and silently returns nothing once the subquery has more than a handful of rows</button>
+  <p class="why" data-for="0">Right. A single NULL in the subquery's column is invisible in a plain SELECT * (it just prints as a blank cell) but turns every comparison against it into UNKNOWN, which an AND chain propagates to the whole expression, for every outer row.</p>
+  <p class="why" data-for="1">An index problem typically causes wrong or missing rows from a scan, or a planner error — not a WHERE clause evaluating to UNKNOWN for literally everything. NOT IN's behavior here has nothing to do with indexing.</p>
+  <p class="why" data-for="2">NOT IN has no such row-count limit in any mainstream SQL database — 40 rows is nothing. The failure is about a VALUE inside the subquery, not the number of rows it returns.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"One unknown value silently fails a check buried inside a bigger evaluation" isn't a SQL-only trick.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>RxJS combineLatest with one silent source</h4>
+    <p><code>combineLatest([a$, b$, c$])</code> won't emit ANYTHING until every source has emitted at least once. If <code>c$</code> is a cold observable that's never subscribed to fire, or is gated behind a condition that never triggers, the combined stream just never emits — forever — even though <code>a$</code> and <code>b$</code> are firing constantly. No error, no data, ever.</p>
+    <div class="hf-scatter"><span>one silent source, zero emissions forever</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>AWS IAM condition keys that aren't present</h4>
+    <p>An S3 bucket policy condition like <code>StringEquals: aws:PrincipalOrgID</code> silently evaluates to false for any request where that context key simply isn't present — no Organization, no key, no match. The request is denied with no log line explaining that the key was missing rather than wrong.</p>
+    <div class="hf-scatter"><span>absent key, silently denied</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Array.prototype.indexOf() and NaN</h4>
+    <p><code>[NaN].indexOf(NaN)</code> returns <code>-1</code> — always — because <code>indexOf</code> compares with strict equality, and <code>NaN !== NaN</code> by definition. Any "already in this list?" check built on <code>indexOf</code> silently fails to detect NaN, no matter how many times it's actually there. It's exactly why <code>Array.prototype.includes</code> exists.</p>
+    <div class="hf-scatter"><span>NaN, forever unfound</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> joins recombine what normalization split, indexes turn scans into lookups, and transactions plus isolation levels keep databases correct under concurrency — <b>and NOT IN against a subquery is one stray NULL away from silently excluding every row in your table, not just the one it was supposed to check.</b>
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
     <style>
       .who-CLIENT{background:rgba(34,211,238,.14);color:#7dd3fc}
       .who-POOL{background:rgba(129,140,248,.16);color:#a5b4fc}
@@ -709,6 +811,7 @@ DevHubCodeWalk.mount('#cw-sqlcore',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

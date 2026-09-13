@@ -47,6 +47,111 @@
       </div>
     </div>
     <div class="intro-ciam"><span class="tag">CIAM schema normalization:</span> A bad schema — <code>users(id, email, role1, role2, role3, ping_id, entra_id, ...)</code> — violates 1NF (role columns/arrays) and 2NF (IDP info mixed in). Normalized: <code>users</code> → <code>user_idp_links(user_id, idp_type, external_id)</code> → <code>user_roles</code> → <code>roles</code>. Now adding Okta is just a row with <code>idp_type='OKTA'</code> (no schema change), a new role needs no new column, and cross-IDP role queries are a clean JOIN. Strategic denormalization: <code>sessions</code> stores <code>user_email</code> redundantly to skip a JOIN on every validation — fine since email rarely changes; document the decision in a schema comment.</div>
+<p class="hf-deck">or, the table that passes every normal form and still lies to you</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">1NF: atomic. 2NF: no partial dependency. 3NF: no transitive dependency. Every box checked. The anomaly is still there.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Adding one role means inserting four rows</div>
+  <p>A user can hold several independent <strong>roles</strong> (ADMIN, VIEWER, BILLING) and can be enrolled in several independent <strong>MFA factors</strong> (TOTP, WEBAUTHN, SMS) — two facts about the same user that have nothing to do with each other. Someone models both in one junction table: <code>user_role_mfa(user_id, role, mfa_factor)</code>, primary key on all three columns.</p>
+  <p>Run it through the checklist: 1NF — every column atomic, yes. 2NF — no partial dependency, because there's no non-key column at all to depend on part of the key. 3NF — no transitive dependency, same reason; BCNF — the only candidate key is the whole row, so it trivially holds. The table is fully normalized by every rule this page teaches. And yet: user 42 has 2 roles and 2 MFA factors, so representing "these are simply the facts about user 42" correctly requires <strong>four rows</strong> — one for every role/factor combination — because leaving any combination out reads as "role X only applies via factor Y," which was never true.</p>
+  <div class="hf-scatter">
+    <span>1NF/2NF/3NF/BCNF all pass ✓</span>
+    <span>single composite primary key ✓</span>
+    <span>adding a 3rd role means inserting 2 more rows just to keep the cross-product honest ⚠</span>
+  </div>
+  <p class="hf-foot">This is a real, documented anomaly with its own name and its own normal form: 3NF and BCNF only ever talk about <em>functional</em> dependencies. This table's problem is a <strong>multi-valued dependency</strong> — two independent one-to-many facts crammed into one table — and only 4NF checks for that.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Split independent multi-valued facts into their own tables</div>
+  <div class="hf-ladder">
+    <b>Ask: are these two attributes actually independent of each other?</b>
+    <i>↓ roles and MFA factors both depend on user_id, but never on EACH OTHER — that's the definition of a multi-valued dependency worth splitting</i>
+    <b>Give each one its own two-column table</b>
+    <i>↓ <code>user_roles(user_id, role)</code> and <code>user_mfa_factors(user_id, mfa_factor)</code> — 2 + 2 = 4 rows total instead of the 2 × 2 = 4-row cross-product that grows multiplicatively as either list grows</i>
+    <b>Recombine with a JOIN only when you actually need both facts together</b>
+    <i>↓ the two tables were never related to each other in the first place — a JOIN across them was always an artificial cross-product, not a real relationship</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> 3NF and BCNF only rule out one non-key column determining another — they say nothing about two independent one-to-many facts sharing a table, so a table with a spotless 3NF/BCNF checklist can still force you to fake a relationship between two things that were never related.
+</div>
+
+<div class="hf-note">1NF asks "is each cell atomic?" 3NF asks "does every non-key column depend on nothing but the key?" 4NF asks a completely different question: <b>"are two of these facts independent of each other, even though they share the same key?"</b> — and nothing before 4NF ever asks it.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>This table is in BCNF. Why do I still have to insert four rows to add one role?</p></div>
+  <div class="hf-bub right"><span class="who">The user_role_mfa table</span><p>Because you're storing two independent one-to-many facts as if they were one three-way relationship. I have no way to say "user 42 has role BILLING" without also picking an MFA factor to pair it with.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But roles and MFA factors have nothing to do with each other!</p></div>
+  <div class="hf-bub right"><span class="who">A multi-valued dependency</span><p>Exactly — and that's precisely the shape 4NF exists to catch. 3NF never checks for it, because there's no non-key column here for one column to transitively depend on.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Walk through what "add role BILLING for user 42" actually requires in each design.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>User 42 currently has roles {ADMIN, VIEWER} and MFA factors {TOTP, WEBAUTHN}</span><span class="tag">starting state</span></li>
+    <li class="open"><span>In the combined table, that's 4 existing rows: every role × every factor</span><span class="tag">cross-product</span></li>
+    <li><span>You need to add role BILLING for user 42 — nothing to do with their MFA factors</span><span class="tag">the change</span></li>
+    <li class="open"><span>To keep the table honest, you must insert (BILLING, TOTP) AND (BILLING, WEBAUTHN) — two rows for one fact</span><span class="tag">forced duplication</span></li>
+    <li><span>Forget the second row and the table now implies "BILLING only applies via TOTP," which is false</span><span class="tag">silent lie</span></li>
+    <li class="open"><span>In the split design, the same change is one row in user_roles — user_mfa_factors is untouched, because it was never related</span><span class="tag">the fix</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the anomaly in miniature: a single, simple fact ("user 42 also has role BILLING") that should cost one row costs two, purely because of a table design decision made before anyone tried to add a role. Multiply that by however many MFA factors a real system supports and the duplication compounds every time either list grows.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cast">
+    <div class="subject">user 42 gains one new role: BILLING<small>a fact with nothing to do with MFA factors</small></div>
+    <div class="fan">who has to react in the combined table ↓</div>
+    <div class="obs">
+      <span>the roles this user holds</span>
+      <span class="new">every existing MFA-factor row — each one needs a BILLING-paired duplicate</span>
+      <span>nothing in a properly split schema</span>
+    </div>
+  </div>
+  <p class="hf-annot">In the split design, adding a role is a subject reacting alone — one insert, one table, done. In the combined design, the fan-out is real: every row in the OTHER independent fact has to react too, just to keep the cross-product from silently implying a relationship that was never true.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A table <code>user_role_mfa(user_id, role, mfa_factor)</code> has a composite primary key on all three columns and passes every 1NF/2NF/3NF/BCNF check with no non-key columns at all. A user has 3 roles and 2 MFA factors, both independent facts. How many rows does correctly representing that user require?</p>
+  <button type="button">6 rows — one for every role/factor combination, even though the two facts have nothing to do with each other.</button>
+  <button type="button">5 rows — one per role, plus one per MFA factor, sharing the same user_id.</button>
+  <button type="button">This is impossible — a table that passes BCNF cannot have this problem by definition.</button>
+  <p class="why" data-for="0">Right. Because the table forces every role to pair with every factor, 3 roles × 2 factors means 6 rows for what is really just 5 independent facts (3 roles + 2 factors) about one user — that gap between "6 rows stored" and "5 facts that are true" is the multi-valued-dependency anomaly, invisible to 3NF and BCNF alike.</p>
+  <p class="why" data-for="1">That's the row count in the CORRECTLY split design — two separate tables, one row per fact. In the single combined table this question describes, you don't get to choose 5 rows; the composite key forces every combination to exist or the missing ones read as false negatives.</p>
+  <p class="why" data-for="2">BCNF only ever reasons about functional dependencies — one column determining another. It has no concept of two independent multi-valued facts sharing a key, which is exactly why a spotless BCNF table can still have this anomaly. That's what 4NF exists to catch, and this page's normal-form ladder stops one rung short of it.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Passing every check on the list doesn't mean the list covered everything" recurs constantly.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A CIAM permissions table with the same shape</h4>
+    <p>A table like <code>user_permission_scope(user_id, permission, tenant_scope)</code> has the identical trap if permissions and tenant scopes are actually independent per-user facts — granting a new permission forces you to re-pair it with every scope the user already has, or the table implies the permission only applies in some scopes when it should apply in all of them.</p>
+    <div class="hf-scatter"><span>the exact same multi-valued shape, one table over from the example above</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Passing unit tests that never covered the real bug</h4>
+    <p>A test suite with 100% line coverage on a function can still miss an entire category of bug — coverage answers "was this line executed," never "was every INDEPENDENT combination of inputs considered." 4NF is the database version of a coverage metric people forget exists.</p>
+    <div class="hf-scatter"><span>a green checklist measures what it was built to measure, nothing more</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>OWASP's own list versus "secure"</h4>
+    <p>Passing every item on the OWASP Top 10 checklist doesn't mean an application has no vulnerabilities — it means the specific categories that list enumerates were addressed. 3NF/BCNF are the OWASP Top 10 of schema design: necessary, well-known, and not the complete list of things that can go wrong.</p>
+    <div class="hf-scatter"><span>a named, numbered standard is still a subset of "actually correct"</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> normalization decomposes tables to kill update, insert, and delete anomalies by working up through 1NF (atomic values), 2NF (no partial dependency), and 3NF/BCNF (no transitive dependency) — with denormalization as a deliberate, documented trade-off for read-heavy paths. <b>The one new sentence this block adds:</b> a table can satisfy every one of those rules and still force a false cross-product on two independent multi-valued facts, because 3NF and BCNF only ever check functional dependencies — catching that specific anomaly is what 4NF is for.
+</div>
+
   </div>
 
 <div class="rt-ctlbar">
@@ -236,6 +341,7 @@ $('Run').addEventListener('click',run);renderNodes();chip();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

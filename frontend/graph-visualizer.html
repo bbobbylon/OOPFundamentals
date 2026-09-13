@@ -176,7 +176,109 @@ console.log("hops from A:", JSON.stringify(dist));
   </div>
 
 
-    <!-- ── EXTREME-VIZ HERO ── -->
+    <p class="hf-deck">or, why your cycle-detector passed every test and then took the app down at 3 a.m.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Recursive DFS is textbook-correct, O(V+E), and it will still crash your JVM on a real graph — and nothing in your own code is what throws the error.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">It worked on 200 test nodes. It died on a partner's sync job.</div>
+  <p>Say you write a recursive DFS cycle-checker that runs before a role-import job commits — the exact recursive shape from the intro card above, one call per node, recursing into every unvisited neighbor. It's reviewed, it's tested against your 200-node fixture graph, it ships.</p>
+  <p>Then a partner's nightly SCIM sync uploads a role hierarchy where a generator bug points every role's "parent" at the row directly above it — no branching, just <code>ROLE_1 → ROLE_2 → ROLE_3 → … → ROLE_80000</code>, one straight 80,000-node chain. Your DFS starts walking it, one recursive call per role. Somewhere in the low tens of thousands of open frames, the thread's call stack runs out of room and the JVM throws <code>StackOverflowError</code> — not from a line you wrote, from the act of calling a function inside a function 80,000 times without any of them returning yet.</p>
+  <div class="hf-scatter">
+    <span>adjacency list ✓</span>
+    <span>visited set ✓</span>
+    <span>cycle logic ✓</span>
+    <span>recursion depth == chain length ⚠</span>
+  </div>
+  <p class="hf-foot">Every line of the algorithm is right. The bug is that you asked the call stack to hold 80,000 open frames at the same time.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Get the traversal off the JVM's call stack</div>
+  <div class="hf-ladder">
+    <b>Rewrite the recursion as an explicit stack</b>
+    <i>↓ you push/pop your own array on the heap instead of the JVM's fixed-size thread stack — heap scales to gigabytes, the default thread stack does not</i>
+    <b>Or raise <code>-Xss</code> for that one worker thread, if you must keep the recursion</b>
+    <i>↓ buys headroom today, but bakes in a new, higher, still-silent ceiling — someone imports 500,000 roles next quarter and it dies again</i>
+    <b>And cap the traversal depth before you ship either version</b>
+    <i>↓ a depth cap turns a silent JVM crash into an ordinary, catchable "graph too deep, rejecting import" error you can hand back to whoever generated the bad file</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Recursive DFS is only as deep as your input lets it be, and nothing about "traverse the graph" promises the input stays shallow. Treat call-stack depth as a finite resource, the same way you'd treat memory or open file handles — especially anywhere DFS runs on a graph built from data someone else controls.
+</div>
+
+<div class="hf-note">A stack frame doesn't know it's traversing a graph. It just knows a function called a function called a function. <b>80,000 nested calls in, and the JVM never once asks whether you meant it.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>My DFS is O(V+E). Why did it just crash on a graph that's smaller than graphs I've BFS'd through fine?</p></div>
+  <div class="hf-bub right"><span class="who">The call stack</span><p>Because BFS never asked me to hold anything. Its queue lives on your heap. I'm a fixed slice of memory the OS carved out for this one thread before your first line even ran.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So the shape of the graph — chain versus branching tree — decides whether I crash?</p></div>
+  <div class="hf-bub right"><span class="who">The call stack</span><p>Recursion depth is the longest unbroken chain of open calls, not the node count. A wide, bushy graph with 80,000 nodes and depth 12 never troubles me. A straight chain with the same node count fills me up completely.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one recursive call as it goes 80,000 nodes deep, and watch exactly where the stack runs out.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>dfs(ROLE_1)</code> is called from the import job's main loop — frame #1 is pushed onto the thread's call stack</span><span class="tag">depth 1</span></li>
+    <li class="open"><span><code>dfs(ROLE_1)</code>'s loop calls <code>dfs(ROLE_2)</code> for its one neighbor — frame #2 is pushed, frame #1 stays open, waiting on frame #2 to return</span><span class="tag">depth 2</span></li>
+    <li><span>The pattern repeats: <code>dfs(ROLE_3)</code> pushes frame #3 — now two frames above it are still open, still waiting</span><span class="tag">depth 3</span></li>
+    <li class="open"><span>By roughly <code>ROLE_9,987</code> the thread's reserved stack memory is essentially full — because not one of those 9,987 calls has returned yet</span><span class="tag">near limit</span></li>
+    <li><span><code>dfs(ROLE_9,988)</code> tries to push one more frame and there is nowhere left to put it</span><span class="tag">overflow</span></li>
+    <li class="open"><span><code>StackOverflowError</code> is thrown from inside the JVM, unwinding all 9,987 open frames at once — the import job dies mid-transaction</span><span class="tag">crash</span></li>
+  </ol>
+  <p class="hf-annot">Look at steps 2 through 4: none of the earlier frames had returned. Recursive DFS doesn't finish a node and move on — it pauses on a node, dives into its neighbor, and only unwinds once every deeper call has finished. BFS never does this: BFS fully finishes one node, discards its stack frame, and only then looks at the next one in its queue. That's the whole difference between "depth held open" and "depth already released."</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>80,000-row SCIM import with a generator bug</span><span>a legacy migration's flattened scope chain</span><span>a linked list someone modeled as a graph "for consistency"</span></div>
+    <div class="funnel">recursion depth == length of the longest unbroken chain ↓</div>
+    <div class="instance">StackOverflowError / "Maximum call stack size exceeded"<small>one crash, three unrelated-looking origin stories</small></div>
+  </div>
+  <p class="hf-annot">All three causes look nothing alike in a bug report — one's a data-import bug, one's an old migration nobody remembers, one's a deliberate design choice. They funnel into the exact same failure because none of them care what kind of data they're modeling: DFS's recursion only sees "how long is the chain," and a chain is a chain whether you call it a role hierarchy, a linked list, or a dependency line.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your recursive cycle-detection DFS works fine on every graph in your test suite (largest is 200 nodes, several branches deep). A partner's nightly sync produces a role-inheritance graph that's a single unbranched chain of 80,000 nodes. What actually happens when the cycle check runs against it?</p>
+  <button type="button">It runs slower than usual but completes — DFS is O(V+E) regardless of the graph's shape.</button>
+  <button type="button">It throws a <code>StackOverflowError</code> partway through, because recursion depth equals chain length and the thread's call stack has a fixed size.</button>
+  <button type="button">It silently reports "no cycle found" without having checked most of the graph.</button>
+  <p class="why" data-for="0">O(V+E) describes total work across the whole run — it says nothing about how much of that work has to be <em>in flight at once</em>. Recursion depth is a separate resource, one open stack frame per call that hasn't returned yet, and big-O never prices it in.</p>
+  <p class="why" data-for="1">Right — and here's the sharper detail: <code>StackOverflowError</code> extends <code>Error</code>, not <code>Exception</code>. A <code>catch (Exception e)</code> around the whole import job won't catch it. The crash isn't just unexpected, it slips past the exact safety net most teams reach for by habit.</p>
+  <p class="why" data-for="2">It doesn't fail quietly — the crash is loud, it's just thrown from a place your own <code>try/catch</code> isn't watching. A silent wrong answer would actually be a different (and in some ways scarier) bug than the one that happens here.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Unbounded recursion on attacker- or partner-controlled input" is a whole category of bug, and graphs are only one costume it wears.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Jackson deserializing your Spring controller's request body</h4>
+    <p>A deeply nested JSON payload — thousands of nested arrays, not necessarily large in bytes — drives a recursive-descent JSON parser one stack frame per nesting level, the same way a deep graph drives DFS. It's exactly why Jackson 2.15 added <code>StreamReadConstraints</code> with a default max nesting depth: to turn that <code>StackOverflowError</code> into an ordinary, catchable <code>JsonParseException</code> before it ever reaches your controller.</p>
+    <div class="hf-scatter"><span>same shape: recursion depth tied to untrusted input, not to data size</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>SAML assertions in identity systems</h4>
+    <p>SAML assertions are XML, and XML has been parsed recursively for decades. Deeply nested XML elements are a documented denial-of-service vector for exactly this reason — a small, deliberately deep document can exhaust a naive parser's stack the same way a deliberately deep graph exhausts DFS's. It's why hardened XML parsers cap element nesting depth as part of the same threat model as entity-expansion bombs.</p>
+    <div class="hf-scatter"><span>identity's own version of the depth attack</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Recursive-descent expression parsers</h4>
+    <p>A hand-written parser for a calculator or config language hits the identical wall on deeply nested parentheses — <code>((((((…))))))</code> a few thousand deep — because <code>parseExpression()</code> calling <code>parseExpression()</code> calling <code>parseExpression()</code> overflows before it evaluates a single number.</p>
+    <div class="hf-scatter"><span>the classic compilers-class version of this exact bug</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> BFS explores level by level with a queue and guarantees shortest paths in unweighted graphs; DFS dives depth-first with a stack or recursion and is the tool for cycles, components, and topological order. <b>The one new sentence this block adds:</b> recursive DFS spends the JVM's own call stack to do that diving, and a long enough chain anywhere in your input runs that stack out before it runs out of nodes.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
     <div style="margin:0 0 28px">
       <div class="rt-ctlbar">
         <span class="lbl">Scenario</span>
@@ -835,6 +937,7 @@ DevHubCodeWalk.mount('#cw-graph',{
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

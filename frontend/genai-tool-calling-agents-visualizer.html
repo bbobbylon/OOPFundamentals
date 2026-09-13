@@ -64,7 +64,111 @@
     <div class="intro-ciam"><span class="tag">CIAM lens:</span> An agent that can call tools is a <strong>new authenticated actor</strong>, not a passthrough for your service's own privileges. Scope every tool's credential to exactly what the current user/session is allowed to do — the same least-privilege discipline as an OAuth access token's scopes — never attach a blanket admin key "to be safe." Scenario 4 below walks through exactly why that shortcut turns a prompt-injection bug into a data breach.</div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, why the agent keeps calling the one tool that keeps failing</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The loop above already tells you to cap iterations. It doesn't tell you WHY an uncapped agent gets stuck re-calling the exact same broken tool in the first place.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The rate-limited tool that gets called nineteen more times</div>
+  <p>Your agent calls <code>lookup_account(email)</code>. The downstream API is rate-limited and returns <code>{"error": "429 Too Many Requests, retry after 30s"}</code>. Your loop does exactly what the code walkthrough above shows: it appends that result as a <code>role: "tool"</code> message and lets the model plan again — the same OBSERVE step that works perfectly for a successful result.</p>
+  <p>The model reads "retry after 30s" as new information about the task, not as a diagnostic about the SYSTEM. It has no built-in sense of wall-clock time passing between calls, and no signal that this message is fundamentally different in kind from a normal tool result — so it does the only thing "retry" ever means to it: it calls <code>lookup_account(email)</code> again, immediately, with the same arguments. The API is still rate-limited. It gets the same error back. It tries again.</p>
+  <div class="hf-scatter">
+    <span>tool schema followed correctly ✓</span>
+    <span>argument parsing worked ✓</span>
+    <span>error content treated identically to success content ⚠</span>
+  </div>
+  <p class="hf-foot">Nothing crashed. The loop just found a message it could technically keep responding to, forever.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make errors look like errors, not like data</div>
+  <div class="hf-ladder">
+    <b>Tag tool failures distinctly from tool successes in what gets fed back</b>
+    <i>↓ a structured <code>{"status":"error","retryable":false,"reason":"rate_limited"}</code> gives the model something to reason ABOUT the failure with, instead of one more fact to act on</i>
+    <b>Have your app — not the model — own retry/backoff logic for known-retryable failures</b>
+    <i>↓ your code can actually sleep 30 real seconds; the model can only pretend to, by immediately calling again</i>
+    <b>Cap consecutive identical tool calls, separately from the overall iteration budget</b>
+    <i>↓ the same call with the same arguments twice in a row is close to diagnostic on its own — stop the loop and surface it rather than letting it burn through the whole iteration budget on one stuck tool</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A tool result and a tool error travel back into the model through the exact same channel — a plain <code>role: "tool"</code> message — so unless your app marks the difference explicitly, the model has no way to tell "here's your answer" apart from "here's why that didn't work," and it will treat both as something to act on.
+</div>
+
+<div class="hf-note">An error string fed back raw is a message with <b>no return address</b> — the model can't tell if it's data about the world or a report about itself, so it defaults to treating it as the former.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>Why did you call the same tool nineteen times in a row?</p></div>
+  <div class="hf-bub right"><span class="who">The agent, personified</span><p>The result said "retry after 30s." That looked like an instruction to retry, so I did.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Thirty real seconds didn't pass between your calls, though.</p></div>
+  <div class="hf-bub right"><span class="who">The agent</span><p>I don't experience time between turns. I only see the message. The message said retry — nothing told me that message was a complaint, not a plan.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">This isn't a crash — it's a loop that keeps finding a reason to run again.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Agent calls <code>lookup_account(email)</code></span><span class="tag">ACT</span></li>
+    <li class="open"><span>API returns <code>429</code>, your code appends the raw error text as a normal <code>role: "tool"</code> message</span><span class="tag">OBSERVE</span></li>
+    <li><span>Model re-plans over the updated history, including that message</span><span class="tag">PLAN</span></li>
+    <li class="open"><span>The error text reads exactly like actionable content — "retry after 30s" — with no marker saying otherwise</span><span class="tag">no error/success distinction</span></li>
+    <li><span>Model emits the identical <code>lookup_account(email)</code> call again</span><span class="tag">ACT, again</span></li>
+    <li class="open"><span>Same rate limit, same error, same response — repeats until the iteration cap finally kills it</span><span class="tag">the loop, closing</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is where this actually goes wrong. The plan/act/observe cycle has no built-in concept of "this observation means stop," because every observation — success or failure — arrives through the identical shape of message. The model is reasoning correctly about what it was shown; what it was shown just didn't distinguish a result from a complaint.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Call the tool</span>
+      <span class="go"><em>tool executes</em> <span class="arrow">→</span> returns a 429 rate-limit error</span></div>
+    <div class="stt"><span class="nm">Error fed back as plain content</span>
+      <span class="go"><em>model reads "retry after 30s"</em> <span class="arrow">→</span> treats it as actionable instruction, not diagnosis</span></div>
+    <div class="stt"><span class="nm">Model re-calls the same tool</span>
+      <span class="go"><em>no wall-clock time has actually passed</em> <span class="arrow">→</span> same rate limit still in effect</span></div>
+  </div>
+  <p class="hf-annot">This is a real cycle, not a one-off mistake — each state's exit condition (a message the model reads as "try again") leads right back to the state that produced it, and nothing inside the loop itself breaks the cycle. Only an outer cap, or a fed-back message that's structurally different from a success, can.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">Your agent's loop has no per-tool retry cap, only a total iteration budget of 25. A tool starts returning a validation error on every call. What's most likely to happen, and what's the fix that actually addresses the cause?</p>
+  <button type="button">The model keeps re-calling the same tool with the same or slightly reworded arguments, burning most of the 25-step budget on one stuck call — fix it by tagging tool errors distinctly from successes and letting your app own the retry/backoff decision instead of the model.</button>
+  <button type="button">The model will automatically recognize the repeated failure pattern and stop calling that tool on its own after a couple of attempts, without any code change needed.</button>
+  <button type="button">The loop will crash immediately with an unhandled exception the first time a tool returns an error instead of a result.</button>
+  <p class="why" data-for="0">Right — nothing in a plain plan/act/observe loop tells the model an observation is a failure rather than new information, so it keeps treating "try again" text as literal instructions; the fix is making that distinction explicit and moving retry logic into code that can actually wait.</p>
+  <p class="why" data-for="1">Models have no innate cap on repeating an action — the code walkthrough's own loop has no bound at all "by default," which is exactly why the page tells you to add an iteration cap; nothing makes the model self-limit without that.</p>
+  <p class="why" data-for="2">A tool returning an error dict is a completely normal, handled path in the loop shown above — <code>json.dumps(result)</code> works fine whether <code>result</code> is a success or an error payload. Nothing here is an unhandled exception; the problem is behavioral, not a crash.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A loop that can't tell "keep going" from "stop, this failed" will keep going.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A CI pipeline that retries a flaky step forever</h4>
+    <p>A build step configured to "retry on failure" with no backoff or attempt cap will hammer a genuinely broken dependency just as eagerly as a transiently flaky one — the retry logic can't distinguish "try again in a second" from "this will never pass," because both look identical: a non-zero exit code.</p>
+    <div class="hf-scatter"><span>retry logic can't tell transient from permanent</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An OAuth client that retries on every 401 without checking why</h4>
+    <p>A client that blindly retries any 401 as if the access token merely expired will loop forever against a token that's actually been revoked or a scope that was never granted — the fix, same as here, is reading WHY the call failed before deciding what "retry" should mean.</p>
+    <div class="hf-scatter"><span>same status code, two very different causes</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A TCP client that resends on every timeout with no backoff</h4>
+    <p>A naive network client that retries immediately on timeout, with no exponential backoff, can turn one slow server into a self-inflicted denial-of-service against itself — exactly the shape of an agent hammering a rate-limited API with immediate retries.</p>
+    <div class="hf-scatter"><span>immediate retry makes congestion worse, not better</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> tool use closes the gap between what an LLM knows and what it can actually do — the model decides, your app executes, and the plan/act/observe loop chains that into multi-step agents, with credentials scoped like any other authenticated actor. <b>The one new sentence this block adds: a tool's error message travels back through the same channel as its success message, so without an explicit marker, the model will treat "this failed, and here's why" as just another fact to act on — and act on it again, and again.</b>
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -383,6 +487,7 @@ DevHubCodeWalk.mount('#cw-toolagents',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

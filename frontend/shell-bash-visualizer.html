@@ -57,7 +57,107 @@
     </div>
   </div>
 
-  <!-- ── HERO ── -->
+  <p class="hf-deck">or, the safety net that has holes exactly where you didn't look</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You put <code>set -euo pipefail</code> at the top and chained every step with <code>&amp;&amp;</code> because that's the textbook-safe pattern — and your pipeline still reports success after <code>mvn</code> fails to compile.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The deploy script that survives its own build failure</div>
+  <p>The script opens with <code>set -euo pipefail</code>, then chains the steps exactly the way this page's own examples do: <code>mvn clean package &amp;&amp; docker build -t myapp:latest . &amp;&amp; docker push myapp:latest</code>. Below it, one more line: <code>echo "Deploy pipeline finished"</code>.</p>
+  <p><code>mvn clean package</code> fails on a real compile error. You'd expect strict mode to kill the script right there. It doesn't. Bash's <code>-e</code> rule has a specific carve-out: for a command list joined by <code>&amp;&amp;</code> or <code>||</code>, only the <em>last</em> command in that list can trigger an exit. Every command before it — including the one that just failed — is treated as ordinary control flow, because that's literally what <code>&amp;&amp;</code> means: "only run the next part if this succeeded." <code>docker build</code> and <code>docker push</code> get skipped, correctly. The script does not stop. It falls straight through to <code>echo "Deploy pipeline finished"</code>.</p>
+  <div class="hf-scatter">
+    <span>set -euo pipefail at the top ✓</span>
+    <span>&amp;&amp; used exactly as documented ✓</span>
+    <span>mvn genuinely failed to compile ⚠</span>
+  </div>
+  <p class="hf-foot">Nothing here is wrong Bash — it's the exact chaining pattern this page's own skeleton uses two sections up.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Fix: don't ask set -e to watch a spot it's already exempted from</div>
+  <div class="hf-ladder">
+    <b>Give the failing step its own line instead of burying it mid-chain</b>
+    <i>↓ a command that fails on its own line, with nothing after it, is exactly the case set -e was built to catch</i>
+    <b>Or add an explicit failure path to the whole chain: <code>mvn … &amp;&amp; docker build … &amp;&amp; docker push … || { echo "pipeline failed"; exit 1; }</code></b>
+    <i>↓ the trailing <code>||</code> gives the entire line one outcome to report, instead of hoping set -e notices something buried inside it</i>
+    <b>And treat set -e as a floor, not a ceiling — anything wrapped in if/while/&amp;&amp;/|| needs its own exit check</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> <code>set -e</code> ignores a failing command whenever that command sits inside an <code>if</code>/<code>while</code>/<code>until</code> test, is any command but the last in a <code>&amp;&amp;</code> or <code>||</code> list, is any pipeline stage but the last (unless <code>pipefail</code> is set), or has its result inverted with <code>!</code>. Four blind spots — and CI scripts hit them constantly, because <code>if</code>, <code>&amp;&amp;</code>, and pipes are exactly how people write what looks like careful, defensive Bash.
+</div>
+
+<div class="hf-note">set -e is a smoke detector wired to <b>only the front door</b>. It's real protection — right up until the fire starts at the <code>&amp;&amp;</code>, the <code>if</code>, or the pipe in the middle of the hallway, which is most of the house.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I've got <code>set -euo pipefail</code> at the top and I chain every step with <code>&amp;&amp;</code>. Doesn't that cover me?</p></div>
+  <div class="hf-bub right"><span class="who">bash</span><p><code>pipefail</code> covers your pipes. It does nothing for <code>&amp;&amp;</code>. If the first command in an <code>&amp;&amp;</code> chain fails, I let the whole line finish running — that's what <code>&amp;&amp;</code> is for.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So my script just keeps going after a failed build?</p></div>
+  <div class="hf-bub right"><span class="who">bash</span><p>Straight to the next line. I only look at the exit code of the <em>last</em> command in that list — that's the only exit code the list actually reports.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Here's exactly what set -e inspects on <code>mvn clean package &amp;&amp; docker build -t img . &amp;&amp; docker push img</code>.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>mvn clean package</code> runs first and exits 1 — a real compile error</span><span class="tag">step 1 fails</span></li>
+    <li class="open"><span>Bash notices this command is inside an <code>&amp;&amp;</code> list, not standing alone on its line</span><span class="tag">context check</span></li>
+    <li><span>The <code>&amp;&amp;</code>/<code>||</code> rule: only the LAST command in the list is allowed to trigger set -e</span><span class="tag">the rule</span></li>
+    <li class="open"><span><code>mvn</code> isn't the last command — <code>docker push</code> is — so this failure is exempt</span><span class="tag">exempted</span></li>
+    <li><span><code>docker build</code> and <code>docker push</code> are both skipped — correctly, that's what <code>&amp;&amp;</code> short-circuiting means</span><span class="tag">short-circuit</span></li>
+    <li class="open"><span>The whole line's real exit status is 1, but nothing after it ever asks what that status was</span><span class="tag">swallowed</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the one every "just use set -e" tutorial skips. The rule isn't about whether the chain overall succeeded — it's about which single command's exit code set -e is even allowed to look at. In an <code>&amp;&amp;</code> or <code>||</code> list, that's only ever the last one.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span>fails inside <code>if cmd; then</code></span><span>fails inside <code>A &amp;&amp; B</code>, not last</span><span>fails mid-pipe, no pipefail</span></div>
+    <div class="funnel">set -e's blind spot ↓</div>
+    <div class="instance">The script keeps running<small>one silent outcome, three unrelated-looking causes</small></div>
+  </div>
+  <p class="hf-annot">Three completely different pieces of syntax — a test, a chain, a pipe — and they all funnel into the exact same non-event: nothing happens. That's why this bug is so hard to pin down by reading the script once; you have to know all three shapes to recognize any of them.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your pipeline has <code>set -euo pipefail</code> and this line: <code>mvn clean package &amp;&amp; docker build -t app:latest . &amp;&amp; docker push app:latest</code>. <code>mvn</code> fails to compile. What actually happens next?</p>
+  <button type="button">The script exits immediately with mvn's exit code, because set -e catches a nonzero exit code anywhere in the script</button>
+  <button type="button">docker build and docker push are both skipped by &amp;&amp;, but the script does NOT exit — it falls through to whatever comes after this line</button>
+  <button type="button">pipefail forces the whole &amp;&amp; chain to abort, the same way it would abort a piped chain</button>
+  <p class="why" data-for="0">That's the assumption almost everyone makes, and it's exactly what the bash manual carves an exception out of: a failing command that isn't the last in an <code>&amp;&amp;</code>/<code>||</code> list doesn't trigger set -e.</p>
+  <p class="why" data-for="1">Right — <code>&amp;&amp;</code> short-circuits the rest of the chain (correct behavior), but set -e only watches the last command in that chain, so the script's own failure detector never fires here.</p>
+  <p class="why" data-for="2"><code>pipefail</code> only changes how set -e treats a <code>|</code> pipeline — it has no effect on <code>&amp;&amp;</code> or <code>||</code> lists at all. They're different operators with different rules, and conflating them is exactly how this bug survives code review.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A safety net that only watches one specific position in a chain — you've debugged this shape in languages that have nothing to do with shells.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>@Transactional's checked-exception blind spot</h4>
+    <p>Spring's <code>@Transactional</code> rolls back automatically on an unchecked exception, but by default does nothing when a method throws a checked one — you need <code>rollbackFor = Exception.class</code> to cover that case. A service method that looks fully wrapped in transactional safety can still commit half-finished writes, for the same reason set -e stays quiet: the safety net was only ever watching one specific category.</p>
+    <div class="hf-scatter"><span>the annotation was there; the coverage wasn't</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>RxJS <code>catchError</code> position in the pipe</h4>
+    <p>In an Angular service, <code>source$.pipe(catchError(handle), map(transform))</code> only catches errors thrown by operators <em>upstream</em> of it — an error thrown inside <code>map(transform)</code>, which sits after <code>catchError</code>, sails right past it. The operator works; it just isn't positioned to see the failure, the same way set -e is positioned to see only the last command in a chain.</p>
+    <div class="hf-scatter"><span>order in the pipe decides what a guard can even see</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>@ExceptionHandler on the wrong thread</h4>
+    <p>A <code>@RestControllerAdvice</code> catches anything thrown on the request thread — but an exception thrown inside an <code>@Async</code> method, a Kafka listener, or a scheduled job runs on a different thread entirely, and the global handler never sees it. It logs to nowhere unless you add your own handling on that thread.</p>
+    <div class="hf-scatter"><span>a global handler is only global for the thread it's actually watching</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a Bash script is a shebang, some quoted variables, and control flow built entirely on exit codes — and <code>set -euo pipefail</code> exists to turn a silent failure into a loud one. <b>The new sentence this block adds: that safety net has four documented blind spots — if/while tests, non-final commands in &amp;&amp;/||, non-final pipeline stages without pipefail, and inverted commands — and ordinary CI chaining walks straight into the first one.</b>
+</div>
+
+<!-- ── HERO ── -->
   <div class="card" style="border-color:var(--accent)">
     <h2 id="hero" style="margin-top:0;border:0;padding:0;color:var(--accent2)">▶ From file to running script</h2>
     <p class="note top">How does a <code>.sh</code> file become a program you can run? Pick a scenario and press ▶ — the inspector shows the
@@ -375,6 +475,7 @@ document.addEventListener('click', function (e) {
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

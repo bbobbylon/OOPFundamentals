@@ -93,6 +93,195 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> A JWT 401 reproduces on staging but not locally. Enable JDWP in the staging Compose (<code>JAVA_OPTS="-agentlib:jdwp=…address=*:5005"</code>), port-forward, set a conditional exception breakpoint on <code>JwtException</code> so IntelliJ pauses exactly when parsing fails, and inspect the raw token in the frame — truncated? wrong encoding? — instead of guessing from logs.</div>
   </div>
 
+<p class="hf-deck">or, why your debug session keeps dying after exactly thirty seconds</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You paused one thread to read one variable. Forty seconds later the pod was gone and you blamed the VPN.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The orchestrator restarted the pod while you were reading a variable</div>
+  <p>Staging only. You patch the deployment with
+  <code>-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005</code>,
+  <code>kubectl port-forward</code> the port, and IntelliJ attaches on the first try. You drop a
+  line breakpoint in <code>TokenController.refresh()</code>, fire the request, and it stops exactly
+  where you wanted. You expand the frame, read the claims map, start typing an expression into
+  Evaluate…</p>
+  <p>…and the IDE says <b>Disconnected</b>. The terminal running <code>port-forward</code> has
+  exited. <code>kubectl logs</code> shows a fresh Spring banner. You reattach, it happens again, and
+  by the third time you're convinced the cluster network is flaky. It isn't. Your breakpoint
+  suspended <b>every thread in the JVM</b> — that's the default, not something you chose — so the
+  kubelet's <code>httpGet</code> liveness probe against <code>/actuator/health</code> got no answer
+  three times in a row and did precisely what you configured it to do: restart the container.</p>
+  <div class="hf-scatter">
+    <span>JDWP flags correct ✓</span>
+    <span>port-forward established ✓</span>
+    <span>breakpoint hit on the right line ✓</span>
+    <span>nothing in the JVM can answer the health probe ⚠</span>
+  </div>
+  <p class="hf-foot">The assumption underneath: that pausing is something that happens to your
+  request. It happens to the process, and the process has other people depending on it.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Suspend one thread, and give the probe room to be wrong</div>
+  <div class="hf-ladder">
+    <b>Right-click the breakpoint → Suspend: Thread (not All)</b>
+    <i>↓ the Tomcat worker holding your request stops; the acceptor, the scheduler and Actuator keep running, so <code>/actuator/health</code> still answers 200 while you read the frame</i>
+    <b>On the debug deployment only, loosen the probe — failureThreshold 30, or drop the liveness probe entirely</b>
+    <i>↓ a pod you are actively debugging does not need to be auto-healed; you are the healing</i>
+    <b>And prefer a logpoint when you only want to see a value — it prints and never suspends anything at all</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A breakpoint is a full stop for the whole JVM unless you tell it otherwise, and every watchdog
+  pointed at that JVM reads a full stop as death.</b> IntelliJ creates line breakpoints with a
+  suspend policy of <i>All</i>, which is the right default on your laptop and the wrong one inside
+  an orchestrated container: the kubelet's default probe budget is roughly
+  <code>periodSeconds: 10</code> × <code>failureThreshold: 3</code>, so you have about thirty
+  seconds of thinking time before something decides your app has hung and replaces it. Nothing about
+  this is unique to Kubernetes — an ECS health check, an ALB target group, or a plain
+  <code>docker-compose</code> <code>healthcheck</code> block all behave the same way. The debugger
+  is not being interrupted by an unrelated failure; the debugger <i>is</i> the failure, as far as
+  every health check can tell.
+</div>
+
+<div class="hf-note">Pausing a JVM feels like pausing a video. It's closer to putting a patient under
+while they are still wired to a monitor whose only job is to call a code blue the second the trace
+goes flat. <b>Your breakpoint is the flatline — a health check cannot tell "paused" from
+"dead".</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>I set one breakpoint on one line. Why did the whole pod restart?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The breakpoint's suspend policy</span>
+    <p>Because I'm set to <i>All</i>, and I always have been — it's the default on every line
+    breakpoint you create. I don't stop your request, I stop the JVM: your worker thread, the other
+    forty worker threads, the scheduler, the Actuator endpoints, the lot. Flip me to <i>Thread</i>
+    and only the one frame you care about freezes.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The kubelet</span>
+    <p>From out here you look identical to a deadlock. I asked <code>/actuator/health</code> three
+    times, ten seconds apart, and got nothing inside my one-second timeout each time. Restarting a
+    hung container is my entire job description. Nobody told me a human was reading a variable.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Postgres</span>
+    <p>And while you were frozen mid-<code>@Transactional</code>, I was still holding the row lock
+    you took. Your other two replicas were very much awake and queuing behind it. The debugger
+    stopped one JVM; it didn't stop the system.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Thirty seconds, second by second, from "breakpoint hit" to "Disconnected".</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>kubectl port-forward pod/api-7d9f 5005:5005</code>, IDE attaches. With <code>suspend=n</code> the attach itself changes nothing — the app serves traffic exactly as before</span><span class="tag">t = 0s, all healthy</span></li>
+    <li class="open"><span>You add a plain line breakpoint. Its suspend policy is <b>All</b>, inherited from the IDE default rather than chosen</span><span class="tag">the setting you never saw</span></li>
+    <li><span>A refresh request reaches the line. The JDWP agent stops <b>every</b> thread: your worker, the Tomcat acceptor, the scheduled tasks, and the threads that would serve <code>/actuator/health</code></span><span class="tag">t = 0s, whole JVM stopped</span></li>
+    <li class="open"><span>The kubelet's next probe gets no response inside <code>timeoutSeconds: 1</code>. Failure one. Ten seconds later, failure two. Ten after that, failure three — <code>failureThreshold</code> reached</span><span class="tag">t = 10s, 20s, 30s</span></li>
+    <li><span>All that time your frozen thread is inside a transaction holding a row lock, and your other replicas — awake, healthy, serving users — are piling up behind it</span><span class="tag">the part that hurts other people</span></li>
+    <li class="open"><span>The kubelet restarts the container. The JVM dies, the JDWP socket closes, <code>port-forward</code> exits because its pod is gone, and the IDE reports a network problem it did not have</span><span class="tag">t = 30s, "Disconnected"</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is where the clock you didn't know about runs out, and it's worth
+  knowing the shape of that clock precisely: it is <code>periodSeconds</code> ×
+  <code>failureThreshold</code>, nothing to do with the debugger, and it is the same budget whether
+  the JVM is paused, deadlocked, or in a twenty-second stop-the-world GC pause. Which is also the
+  tell in reverse — if a probe's <code>tcpSocket</code> check keeps passing while its
+  <code>httpGet</code> fails, that is never a network issue, it's the kernel accepting connections
+  that no application thread is alive to answer.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers">
+      <span>kubelet: 3 failed liveness probes → container restarted</span>
+      <span>ALB target group: unhealthy threshold → target deregistered, your repro request never arrives</span>
+      <span>kubectl port-forward: its pod was replaced, so the tunnel exits</span>
+    </div>
+    <div class="funnel">all three begin with "this JVM answered nothing for 30 seconds" ↓</div>
+    <div class="instance">"Debugger disconnected"<small>one symptom, three watchdogs, and not one of them is your IDE</small></div>
+  </div>
+  <p class="hf-annot">Read the three inputs and notice none of them is a bug. Each is a piece of
+  infrastructure doing exactly the job you asked it to do, triggered by a silence you created on
+  purpose. That's why "the connection keeps dropping" is such a misleading way to describe this —
+  the connection is the last domino, and fixing it means changing the silence (suspend one thread)
+  or changing who is listening for it (relax the probe on the debug deployment), never the IDE.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">You attach to a staging pod, stop on a line breakpoint in
+  <code>TokenController.refresh()</code>, and spend about forty seconds inspecting the frame. The
+  IDE disconnects and <code>kubectl logs</code> shows a fresh Spring Boot banner. What actually
+  happened?</p>
+  <button type="button">JDWP has a thirty-second idle timeout; if you don't step or resume, the agent drops the session</button>
+  <button type="button">Only your HTTP worker thread was suspended, and Kubernetes recycled the pod because a single request exceeded its request timeout</button>
+  <button type="button">The breakpoint suspended every thread, so nothing was left to answer <code>/actuator/health</code>; three failed liveness probes later, the kubelet restarted the container</button>
+  <p class="why" data-for="0">JDWP has no idle timeout — that's the point of a debugger, and a
+  suspended JVM can sit suspended for hours quite happily. The agent only goes away when the process
+  does. If your session dies on a schedule, something outside the JVM is running that schedule, and
+  the very useful diagnostic is that the interval will be suspiciously round: thirty seconds, ninety
+  seconds, five minutes. Debuggers don't have round numbers; health checks do.</p>
+  <p class="why" data-for="1">Two things to untangle. First, a line breakpoint's default suspend
+  policy in IntelliJ is <i>All</i>, not <i>Thread</i> — suspending just the one thread is the thing
+  you have to opt into, and it's the fix here. Second, Kubernetes has no concept of a slow HTTP
+  request; it never watches your traffic. It only knows what its probes tell it, which is why a slow
+  endpoint is invisible to the kubelet and an unanswered probe is fatal.</p>
+  <p class="why" data-for="2">Right, and the arithmetic gives you the whole story:
+  <code>periodSeconds: 10</code> × <code>failureThreshold: 3</code> is about thirty seconds of
+  thinking time, which is roughly how long it takes to expand a JWT claims map and type an
+  expression. Set that breakpoint's suspend policy to <i>Thread</i> and the freeze narrows to the
+  one worker holding your request, leaving the rest of the JVM free to keep answering probes. On a
+  dedicated debug deployment, raise <code>failureThreshold</code> or remove the liveness probe
+  outright — and while you're paused, remember the transaction you're sitting inside is still
+  holding its locks against every other replica.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Three other times something stopped for a perfectly good reason and a watchdog called it dead.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A twenty-second stop-the-world GC pause</h4>
+    <p>An undersized heap, a full GC, and the JVM stops answering for long enough to blow the same
+    probe budget — so the pod restarts, starts cold with an empty cache, takes a fresh wave of
+    traffic, and GCs again. The restart loop looks like a crash loop and there is no crash anywhere
+    in it. Identical mechanism to your breakpoint, minus the human.</p>
+    <div class="hf-scatter"><span>paused and dead look the same from outside</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>idle_in_transaction_session_timeout</h4>
+    <p>The database has its own opinion about how long you may think. Sit on a breakpoint inside an
+    open transaction and Postgres may terminate the session out from under you — and even where it
+    doesn't, your locks block every other replica and your open snapshot holds back vacuuming. The
+    debugger paused your code; it did not pause everyone waiting on your code.</p>
+    <div class="hf-scatter"><span>your pause is someone else's outage</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A <code>debugger;</code> statement in the browser</h4>
+    <p>It freezes the event loop, so the silent-refresh timer that renews your access token never
+    fires and the WebSocket heartbeat stops. Step out five minutes later and the app has been logged
+    out and disconnected — not because of your bug, but because you were in the same single thread
+    as everything keeping the session alive.</p>
+    <div class="hf-scatter"><span>one thread, and everything was on it</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> when a bug only reproduces in the container, attach your IDE to
+  the live JVM over JDWP instead of redeploying, then use the right kind of breakpoint — conditional,
+  hit-count, exception, field watch, logpoint — so you stop on the one call that matters, and never
+  open that port in production, where it's unauthenticated remote code execution. <b>The new
+  sentence: a breakpoint suspends the entire JVM by default, so while you read a variable the health
+  probe goes unanswered and the orchestrator restarts the pod out from under your session.</b>
+</div>
+
   <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
@@ -434,6 +623,7 @@ answer();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

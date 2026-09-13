@@ -105,7 +105,111 @@ for e in errs:
   </div>
 
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the profile update that returned 200 and changed nothing</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Every field validated. The response was a clean 200. And the value you sent never got saved — because Pydantic never even saw it.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A typo'd JSON key that nobody, and nothing, complained about</div>
+  <p>Your Angular profile form does a <code>PATCH /me</code> with <code>{ "nickName": "Bobby" }</code>. The camelCase in the frontend TypeScript interface doesn't quite match the field you declared on the backend model, which is lowercase <code>nickname: str | None = None</code>. FastAPI hands the body to Pydantic. Validation passes. The handler runs. The client gets <code>200 OK</code>.</p>
+  <p>The nickname never changes, because Pydantic's <code>BaseModel</code> ignores fields it doesn't recognize by default — <code>model_config = ConfigDict(extra="ignore")</code> is the out-of-the-box behavior. <code>nickName</code> gets silently dropped as an unknown extra field. <code>nickname</code> — the field the model actually declared — was never in the request at all, so it just keeps its default of <code>None</code>. Nothing failed. Nothing was even validated wrong. The update was simply a no-op that looked, from the outside, exactly like success.</p>
+  <div class="hf-scatter">
+    <span>the 422 machinery ✓</span>
+    <span>every declared field's constraints ✓</span>
+    <span>the field the client actually sent ⚠</span>
+  </div>
+  <p class="hf-foot">Validation only ever inspects the fields your model KNOWS about. A typo doesn't fail validation — it just never enters the conversation.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make an unrecognized field a hard error</div>
+  <div class="hf-ladder">
+    <b>Set <code>model_config = ConfigDict(extra="forbid")</code> on request models</b>
+    <i>↓ now <code>nickName</code> triggers its own 422 ("extra_forbidden") instead of vanishing — the typo surfaces on the very first request</i>
+    <b>Keep <code>extra="ignore"</code> only where you mean it — e.g. models you feed a raw upstream JSON payload</b>
+    <i>↓ ignoring genuinely-optional passthrough fields is a real use case; the mistake is leaving it as the silent default on every INPUT model without deciding</i>
+    <b>Round-trip the response: return the field you just wrote, not just <code>{"ok": true}</code></b>
+    <i>↓ an endpoint that echoes back <code>{"nickname": None}</code> makes the no-op visible on the client's very next render, instead of hiding behind a bare success flag</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>"Validated" only covers what was declared, not what was sent.</b> A Pydantic model is a whitelist, not a mirror of the request body. Extra keys aren't wrong by the model's rules — they're invisible to them. Silence from the validator means "everything I was told to check passed," never "everything you sent arrived."
+</div>
+
+<div class="hf-note">A Pydantic model with default <code>extra="ignore"</code> is a <b>bouncer checking IDs at a door with no guest list posted</b> — anyone whose name isn't on the list doesn't get turned away loudly, they just don't get let in, and nobody at the door says a word about it.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I sent a PATCH with a new nickname and got 200 back. Why didn't it save?</p></div>
+  <div class="hf-bub right"><span class="who">The Pydantic model</span><p>I got a payload with a key called <code>nickName</code>. I don't have a field by that name — I have <code>nickname</code>. I quietly dropped what I didn't recognize and built myself from what was left.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Couldn't you have told me <code>nickname</code> was just... missing, then?</p></div>
+  <div class="hf-bub right"><span class="who">The Pydantic model</span><p><code>nickname</code> has a default of <code>None</code>. A missing optional field with a default isn't an error to me — it's exactly as valid as a present one. From where I sit, your request was perfectly fine.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Trace the same <code>{"nickName": "Bobby"}</code> body through three different model configurations.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>FastAPI reads the JSON body: <code>{"nickName": "Bobby"}</code></span><span class="tag">receive</span></li>
+    <li class="open"><span>Pydantic walks the model's declared fields, looking for a match for each — case-sensitively, no fuzzy matching</span><span class="tag">match fields</span></li>
+    <li><span><code>nickname</code> (declared) has no corresponding key in the body → its default, <code>None</code>, is used</span><span class="tag">default fills in</span></li>
+    <li class="open"><span><code>nickName</code> (sent) has no corresponding declared field → it is an "extra" key</span><span class="tag">extra key</span></li>
+    <li><span>With the default <code>extra="ignore"</code>, that extra key is discarded without comment</span><span class="tag">discard</span></li>
+    <li class="open"><span>The resulting object — <code>nickname=None</code> — passes every constraint it has, because it never had any on an absent optional field</span><span class="tag">valid, and wrong</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 and step 4 are the same event seen from two directions: one declared field quietly falls back to its default, one sent field quietly gets thrown away. Neither half of that trade is visible anywhere in the response.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">extra = "ignore" (the default)</span>
+      <span class="go"><em>unrecognized key arrives</em> <span class="arrow">→</span> silently dropped, 200 OK</span></div>
+    <div class="stt"><span class="nm">extra = "forbid"</span>
+      <span class="go"><em>unrecognized key arrives</em> <span class="arrow">→</span> 422, error type "extra_forbidden"</span></div>
+    <div class="stt"><span class="nm">extra = "allow"</span>
+      <span class="go"><em>unrecognized key arrives</em> <span class="arrow">→</span> kept on <code>model.model_extra</code>, still 200</span></div>
+  </div>
+  <p class="hf-annot">All three configurations are one word apart in your code and produce three completely different outcomes for the identical typo'd request. Nothing on the wire changes — only which of these three quiet policies your model happens to be running under.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A <code>PATCH /me</code> handler uses <code>class UpdateProfile(BaseModel): bio: str | None = None</code> with Pydantic's defaults. The client sends <code>{"Bio": "Full-stack CIAM engineer"}</code> (capital <code>B</code>, a frontend typo). What does the server do?</p>
+  <button type="button">Returns 422 immediately — Pydantic field matching is case-insensitive so it detects the near-miss and rejects it.</button>
+  <button type="button">Matches <code>Bio</code> to <code>bio</code> automatically, since Pydantic is lenient about casing during coercion.</button>
+  <button type="button">Returns 200 with <code>bio</code> left at its default <code>None</code>, and silently drops <code>Bio</code> as an unrecognized extra key.</button>
+  <p class="why" data-for="0">Pydantic's default field matching is case-sensitive — <code>Bio</code> and <code>bio</code> are different keys to it, full stop. There's no near-miss detection or casing tolerance built in without you adding it yourself (e.g. a custom alias generator).</p>
+  <p class="why" data-for="1">Coercion converts compatible VALUES to a field's declared type ("30" → 30) — it never renames or matches KEYS for you. Casing is part of the key, and key matching is exact unless you configure aliases.</p>
+  <p class="why" data-for="2">This is exactly what happens, and it's the trap: nothing about this request fails, because nothing about it violates any rule the model was given. The bug is in what the model was never told to check.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"A silent default filled in where a real value should have been" isn't specific to Pydantic — it's what happens anywhere a schema tolerates the unknown by default.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Jackson's default deserialization in Spring</h4>
+    <p>By default, Jackson (the JSON library behind <code>@RequestBody</code>) also ignores unknown properties unless you set <code>FAIL_ON_UNKNOWN_PROPERTIES</code> or annotate the DTO with <code>@JsonIgnoreProperties(ignoreUnknown = false)</code>. A Spring <code>UserDTO</code> and a FastAPI <code>UpdateProfile</code> model make the identical silent choice unless you flip the identical switch.</p>
+    <div class="hf-scatter"><span>unknown-field tolerance is an opt-out default in both ecosystems</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An OIDC ID token with an unrecognized custom claim</h4>
+    <p>A Ping/Entra ID token can carry a custom claim your client library's model doesn't map — a strict parser drops it into an "extra claims" bag or ignores it outright, same as <code>extra="ignore"</code>. If your authorization logic checked the WRONG claim name, you get exactly this bug: a token that "validated fine" while the actual permission it needed to see never got read.</p>
+    <div class="hf-scatter"><span>a claim you meant to read but never named right is a claim you never read</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>SQL's <code>UPDATE ... SET</code> with a misspelled column alias</h4>
+    <p>An ORM or hand-written query that silently no-ops on a column name it can't map — rather than erroring — leaves a row looking successfully written while the value never moved. Same shape: the write path reports success because nothing it checked was wrong; what was wrong was never inside anything it checked.</p>
+    <div class="hf-scatter"><span>success reported by a system only ever means "everything I checked was fine"</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> declare a Pydantic model, let FastAPI parse + coerce + validate the request body against it, and a failure becomes a structured 422 with <code>loc</code>/<code>msg</code>/<code>type</code> per field before your handler ever runs. <b>The one new sentence this block adds:</b> that safety net only catches fields the model actually declared — an unrecognized key isn't a validation failure, it's outside the net entirely, and Pydantic drops it without a sound unless you explicitly set <code>extra="forbid"</code>.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="vpSeg">
@@ -308,6 +412,7 @@ DevHubCodeWalk.mount('#cw-vp',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

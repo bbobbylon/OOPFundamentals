@@ -62,7 +62,111 @@
     <div class="intro-ciam"><span class="tag">CIAM in production:</span> Cloud SQL's Auth Proxy pattern is a direct cousin of workload identity: your Spring service authenticates to the database using the same IAM identity Cloud IAM already trusts for everything else — no separate database credential to rotate or leak, no VPC firewall rule to maintain. Firestore's strong consistency + real-time listeners make it a natural fit for session/presence data (is this device still logged in, right now) where DynamoDB's eventual consistency would need extra plumbing to get the same guarantee.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the "strongly consistent" claim above — and the one callback your own listener fires before that guarantee is even in the picture</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You write to a document you're already listening to, and the very first update you see back isn't from the server at all.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Your own listener shows you a value the server hasn't seen yet</div>
+  <p>Following section 2 above, you call <code>addSnapshotListener()</code> on <code>orders/order-9001</code> from your checkout UI, then immediately call <code>.update({status: "SHIPPED"})</code> on that same document from that same client — a completely ordinary "mark it shipped" action. Section 2 said Firestore reads are strongly consistent by default, so you assume every callback that listener fires already reflects what the server has accepted.</p>
+  <p>It doesn't — not the first one. Firestore's SDKs apply a local write to the on-device cache <em>immediately</em>, a documented feature called latency compensation, and fire every active listener on that document right away with the new value — before the write has left the device. That callback's <code>snapshot.metadata.hasPendingWrites</code> is <code>true</code>. Only once the write round-trips to the server does the listener fire again: <code>hasPendingWrites</code> flips to <code>false</code> if it was accepted, or the SDK rolls the local cache back and fires again with the previous confirmed value if it was rejected (a security rule denial, for instance). None of this makes "strongly consistent" false — it describes what the server has confirmed. It was never describing the extra, earlier callback your own write triggers on your own listener.</p>
+  <div class="hf-scatter">
+    <span>listener subscribed correctly ✓</span>
+    <span>update() call correct, document ID correct ✓</span>
+    <span>assumed every callback already reflects the server ⚠</span>
+  </div>
+  <p class="hf-foot">Strong consistency is a promise about what the server has confirmed — it says nothing about the local echo your own write fires before the server is even involved.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Check hasPendingWrites before you trust a snapshot</div>
+  <div class="hf-ladder">
+    <b>Read snapshot.metadata.hasPendingWrites on every callback</b>
+    <i>↓ false means the value has round-tripped through the server and back; true means you're looking at your own optimistic local write, which can still roll back</i>
+    <b>Style pending state visibly, don't hide it</b>
+    <i>↓ a muted color or small spinner on a "pending" order status keeps a later rollback from feeling like data corruption to the person watching the screen</i>
+    <b>Or filter it out entirely if you truly only want server-confirmed values</b>
+    <i>↓ the SDK still applies the write locally either way — an includeMetadataChanges/metadata check only controls whether your own callback fires for the pending state, not whether the local write happens</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A Firestore listener fires on your own writes before the server confirms them — <code>snapshot.metadata.hasPendingWrites</code> is the only thing telling you whether a callback is a confirmed value or an optimistic local echo that could still roll back.
+</div>
+
+<div class="hf-note">A bank teller who updates your passbook balance the instant you hand over a check, before that check has actually cleared with the other bank — if the check bounces, the teller comes back and <b>corrects what your passbook now says</b>.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I call addSnapshotListener(), then update() the same document. Section 2 said Firestore is strongly consistent — so this callback already shows confirmed data, right?</p></div>
+  <div class="hf-bub right"><span class="who">Listener</span><p>Not this first one. Your SDK applied that write to its local cache before it ever left the device — I'm showing you that, with hasPendingWrites set to true.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So when do I actually know the server agreed?</p></div>
+  <div class="hf-bub right"><span class="who">Listener</span><p>I fire again once the server responds — hasPendingWrites flips to false if it accepted the write, or the value itself reverts if it didn't.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one update() call as it fires the same listener three separate times, for three different reasons.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>addSnapshotListener() subscribes; first callback fires with the current confirmed state</span><span class="tag">subscribe</span></li>
+    <li class="open"><span>The client calls .update({status: "SHIPPED"}) — the SDK applies this to its LOCAL cache immediately, before any network call completes</span><span class="tag">local write</span></li>
+    <li><span>The listener fires again right away: status="SHIPPED", snapshot.metadata.hasPendingWrites = true</span><span class="tag">pending fire</span></li>
+    <li class="open"><span>The write is sent to the server in the background</span><span class="tag">in flight</span></li>
+    <li><span>If accepted: the listener fires a third time with the same value, now hasPendingWrites = false</span><span class="tag">confirmed</span></li>
+    <li class="open"><span>If rejected (a security rule denies it, say): the SDK rolls the local cache back and the listener fires with the previous confirmed value instead</span><span class="tag">rollback</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the whole trap. Nothing here is a bug — latency compensation is a documented, deliberate Firestore feature built for responsive UIs. The trap is assuming "strongly consistent" means every listener callback already reflects the server, when your own writes earn an extra, earlier callback that guarantee was never describing.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Client calls .update() on a document it's listening to</span>
+      <span class="go"><em>SDK applies it to the local cache</em> <span class="arrow">→</span> listener fires immediately, hasPendingWrites = true</span></div>
+    <div class="stt"><span class="nm">Write is sent to the server</span>
+      <span class="go"><em>round trip in progress</em> <span class="arrow">→</span> local cache already shows the new value, server hasn't answered yet</span></div>
+    <div class="stt"><span class="nm">Server responds</span>
+      <span class="go"><em>accepted: fires again, hasPendingWrites = false</em> <span class="arrow">→</span> rejected: fires again with the value rolled back</span></div>
+  </div>
+  <p class="hf-annot">Read left to right: the local echo and the server's answer are two separate events, and metadata is the only thing that tells them apart — nothing about the callback's shape warns you it might still be undone.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">You call addSnapshotListener() on a Firestore document, then immediately call .update() on that same document from the same client. What does the listener's very first callback after your update show you?</p>
+  <button type="button">The old, pre-update value — Firestore listeners never fire until the server has fully processed a write.</button>
+  <button type="button">The new value immediately, flagged as an unconfirmed local write via snapshot.metadata.hasPendingWrites — with a later callback confirming it or rolling it back once the server responds.</button>
+  <button type="button">A runtime error — the same client can't listen to a document it is also writing to.</button>
+  <p class="why" data-for="0">Firestore's latency compensation does the opposite — it applies your write to the local cache and fires the listener with the NEW value immediately, before the server is even involved.</p>
+  <p class="why" data-for="1">Right. This is Firestore's documented latency-compensation behavior: your own writes echo through your own listener right away, marked pending, and get confirmed or rolled back once the server responds.</p>
+  <p class="why" data-for="2">This is a completely normal, supported pattern — listening to a document you're also writing to is exactly how most Firestore-backed UIs are built.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Don't trust the first echo until something confirms it" is a lesson every optimistic-update pattern teaches, on every stack you touch.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Angular's optimistic-update pattern is something you opt into — Firestore hands it to you for free</h4>
+    <p>An Angular app chasing an instant-feeling UI usually implements optimistic updates by hand: update local component state immediately on user action, fire the HTTP request, and roll the local state back in the error handler if it fails. Firestore's listener gives you that exact behavior automatically on every write — a gift for perceived performance, but it means you inherit the "might still roll back" risk on every write, whether you designed for it or not.</p>
+    <div class="hf-scatter"><span>the same pattern, one opt-in and one automatic</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Spring's default transaction isolation blocks this exact scenario, on purpose</h4>
+    <p>A standard JDBC transaction under Postgres or MySQL's default isolation level (Read Committed or stricter) never lets one session see another transaction's uncommitted writes — preventing that "dirty read" is precisely what those isolation levels exist for. Firestore's listener makes the deliberate opposite choice: it's fine letting YOUR OWN client see YOUR OWN uncommitted write immediately, on the theory that you're the one who just made it and want to see it reflected without delay.</p>
+    <div class="hf-scatter"><span>the same question, opposite default answer</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>socket.io's emit-with-acknowledgement is the identical lesson on a raw WebSocket</h4>
+    <p><code>socket.emit('event', payload, ackCallback)</code> doesn't guarantee the other side has processed anything until <code>ackCallback</code> actually fires. Code that updates the UI right on <code>emit()</code>, instead of waiting for the ack, is trusting an event that hasn't been confirmed yet — the exact same gap between "I said it" and "the server agreed" that <code>hasPendingWrites</code> exists to close in Firestore.</p>
+    <div class="hf-scatter"><span>the same gap, reopened on a bare WebSocket</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> GCP splits "database" into three purpose-built services — Cloud SQL for transactional relational data reached through the IAM-authenticated Auth Proxy, Firestore for real-time document sync via strongly-consistent reads and push listeners, and BigQuery for serverless columnar analytics billed by bytes scanned and controlled by partitioning/clustering. <b>The one new sentence this block adds:</b> a Firestore listener's very first callback after your own write is a local, unconfirmed echo — not the strong-consistency guarantee kicking in — and only <code>snapshot.metadata.hasPendingWrites</code> tells you whether you're looking at that echo or the server's actual answer.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="dbSeg">
@@ -265,6 +369,7 @@ DevHubCodeWalk.mount('#cw-db',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -218,7 +218,113 @@ table.forEach((b, i) =>
   </div>
 
 
-    <!-- ── EXTREME-VIZ HERO ── -->
+    <p class="hf-deck">or, why <code>map.get(key)</code> can return null for the literal object you just inserted</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You can call get() with the exact same reference you put() ten seconds ago, watch the entry sit right there when you print the map, and still get null back.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The permission cache that forgot its own key</div>
+  <p>Say you build <code>Map&lt;UserKey, Session&gt; sessions</code>, where <code>UserKey</code> bundles an immutable <code>tenantId</code> and a mutable <code>Set&lt;String&gt; permissions</code>, and <code>hashCode()</code> is built from both fields — reasonable enough, since two users with identical tenant + permissions should collide on purpose. You insert one entry. Later, a scope-elevation job calls <code>key.getPermissions().add("SUPER_ADMIN")</code> on that exact same <code>UserKey</code> object, in place, to reflect a promotion.</p>
+  <p>The bucket that entry physically sits in was chosen from the hash of <code>{tenantId, permissions}</code> at insert time. The instant <code>permissions</code> changes, <code>key.hashCode()</code> changes with it. Every future <code>sessions.get(key)</code> — even passing that literal same object — recomputes the hash from the CURRENT permissions, lands on a different bucket, and finds nothing there. <code>sessions.containsKey(key)</code> says false too. But <code>sessions.entrySet()</code> walks the whole array and shows the entry, sitting exactly where you left it, unreachable by key ever again.</p>
+  <div class="hf-scatter">
+    <span>same object reference ✓</span>
+    <span>equals() would return true if compared directly ✓</span>
+    <span>entry still physically in the map ✓</span>
+    <span>hashCode changed after insertion ⚠</span>
+  </div>
+  <p class="hf-foot">The entry isn't lost. The map's own directions to it are.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Never let a key's hash move after it moves in</div>
+  <div class="hf-ladder">
+    <b>Make every field that feeds hashCode()/equals() immutable</b>
+    <i>↓ an immutable key's hash never changes, so the bucket chosen at insert time is always the bucket get() will look in later</i>
+    <b>If you must key by something mutable, key by a stable id instead and store the mutable data as the VALUE</b>
+    <i>↓ the map now only ever hashes something that can't change; the volatile data rides along safely as the value, where mutation is expected and harmless</i>
+    <b>Or, if the mutation is already live in production, defensively copy the key on insert</b>
+    <i>↓ <code>map.put(new UserKey(key), session)</code> freezes a snapshot at insert time — later mutations to the original object no longer touch the copy actually indexed</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A HashMap decides where to file an entry exactly once, at insert time, using whatever <code>hashCode()</code> returns at that moment — it never revisits that decision, so any field that can change after insertion has no business being part of a key's hash.
+</div>
+
+<div class="hf-note">This exact warning has sat in the JDK's own <code>java.util.Map</code> Javadoc for decades: <b>"great care must be exercised if mutable objects are used as map keys."</b> Nobody reads it until they've lived it.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I called get() with the literal SessionKey object I inserted five minutes ago. How is that not found?</p></div>
+  <div class="hf-bub right"><span class="who">The bucket array</span><p>I don't remember objects. I remember index numbers. The index I filed your entry under came from calling hashCode() the moment you inserted it — not the moment you're asking now.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But it's the same object. Nothing about its identity changed.</p></div>
+  <div class="hf-bub right"><span class="who">The bucket array</span><p>Identity isn't what I use. hashCode() is — and yours is built from a field someone mutated in place ten seconds after you handed it to me.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch one entry go from findable to invisible in four steps, without a single call to remove().</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>sessions.put(key, session)</code> — <code>key.hashCode()</code> is computed from <code>{tenant:"acme", permissions:{"READ"}}</code>, lands in bucket 2</span><span class="tag">insert</span></li>
+    <li class="open"><span>The entry physically sits in bucket 2's chain — that placement is fixed the moment put() returns</span><span class="tag">filed</span></li>
+    <li><span>Elsewhere: <code>key.getPermissions().add("SUPER_ADMIN")</code> mutates that same <code>key</code> object in place</span><span class="tag">mutation</span></li>
+    <li class="open"><span><code>key.hashCode()</code> now reflects <code>{"READ","SUPER_ADMIN"}</code> — a different integer than the one used at insert time</span><span class="tag">hash moved</span></li>
+    <li><span><code>sessions.get(key)</code> computes a fresh hash from the current permissions, lands on bucket 5, finds an empty chain</span><span class="tag">miss</span></li>
+    <li class="open"><span>Bucket 2 still holds the entry. Nothing will ever route a get() there again by that key</span><span class="tag">orphaned</span></li>
+  </ol>
+  <p class="hf-annot">The pivot is step 3, and it looks completely harmless in isolation — nobody reviewing "add a permission to the user's key object" would flag it as a map bug, because nothing about it mentions the map at all. That's what makes this gotcha last so long in real codebases: the line that breaks the cache is nowhere near the line that reads from it.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">get(key) needs a bucket index before it can search anything<small>same object, same tenant, same reference you inserted with</small></div>
+    <div class="arrow">index = hash(key's CURRENT field values) % capacity →</div>
+    <div class="opts">
+      <span>bucket 2 — where the entry actually lives, chosen at insert time</span>
+      <span class="on">bucket 5 — the only bucket get() will ever check, computed fresh from the mutated permissions</span>
+      <span>bucket 2 again, because "it's the same object"</span>
+    </div>
+  </div>
+  <p class="hf-annot">There is no path from "the same object" to "the bucket it was filed under." The only path a HashMap ever offers is hashCode() → index, recomputed cold every single call. If that computation's inputs moved, the answer moves with them — reference equality never enters the calculation at all.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">You have <code>Map&lt;UserKey, Session&gt; sessions</code> where <code>UserKey.hashCode()</code> is built from a mutable <code>permissions</code> set. Other code calls <code>key.getPermissions().add("SUPER_ADMIN")</code> on a key that's already stored in the map. You now call <code>sessions.get(key)</code> with that exact same object. What happens?</p>
+  <button type="button">It very likely returns null — get() recomputes the hash from the object's current state and searches a bucket the entry no longer sits in.</button>
+  <button type="button">It returns the session, because HashMap tracks entries by object reference once they're inserted, not by recomputed hash.</button>
+  <button type="button">It throws a ConcurrentModificationException, because the key was mutated while it was stored in the map.</button>
+  <p class="why" data-for="0">Right. The bucket the entry lives in was chosen once, from the hash at insert time. get() never looks that up — it always recomputes hash(key) fresh, and a changed <code>permissions</code> set almost always sends it to a different bucket than the one holding the entry.</p>
+  <p class="why" data-for="1">HashMap has no object-identity index at all. The only path from a key to a bucket is <code>hashCode() % capacity</code>, recomputed on every call — if that used to land on bucket 2 and now lands on bucket 5, being the same reference doesn't rescue you.</p>
+  <p class="why" data-for="2">Mutating a key's internal fields doesn't throw anything. <code>ConcurrentModificationException</code> is reserved for structural changes — adding or removing entries — detected while iterating, not for changes to an object's own state. This bug is dangerous precisely because it's silent, not because it's loud.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"A hash-based lookup went stale because the thing you hashed kept changing" shows up anywhere identity gets computed from mutable state.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Hibernate entities before they're persisted</h4>
+    <p>A <code>@Entity</code> whose <code>equals()</code>/<code>hashCode()</code> uses the database-generated <code>id</code> looks fine once saved — but add a brand-new entity to a <code>HashSet&lt;Order&gt;</code> before persisting (its <code>id</code> is still null), call <code>repository.save(order)</code>, and Hibernate assigns the id onto that same in-memory object. The set now hashes it somewhere else; <code>set.contains(order)</code> on that literal reference can come back false. It's exactly why JPA best practice is a stable business key, or a hashCode cached once, instead of the surrogate id column.</p>
+    <div class="hf-scatter"><span>same mechanism, one layer up the stack</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Memoized Angular services keyed by JSON.stringify(params)</h4>
+    <p>A caching interceptor that keys results as <code>cache[JSON.stringify(params)]</code> hits the identical shape of bug the moment a caller mutates <code>params</code> in place after the cache write — say, adding a field for a follow-up call instead of building a fresh object. The re-stringified key no longer matches, and you get a cache miss you'd swear is impossible, because it's "the same params object."</p>
+    <div class="hf-scatter"><span>the frontend's version of the same trap</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Sharded caches and consistent hashing</h4>
+    <p>Scale the exact bug up: a sharded cache (Redis Cluster, memcached with consistent hashing) picks a server, not a bucket, by hashing the key. Build that key from a mutable object, mutate it, and a later read hashes to a different node entirely — not a stale value, but silence, because you're now asking a machine that never received the write.</p>
+    <div class="hf-scatter"><span>one bucket becomes one whole server</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> HashMap gets O(1) average lookups by hashing a key straight to a bucket index, resolving collisions with chaining (a tree above 8 entries in one bucket), and resizing at a 0.75 load factor to keep chains short. <b>The one new sentence this block adds:</b> that bucket index is decided once, at insert time, so mutating any field a key's hashCode() depends on doesn't corrupt the map — it just makes your own entry permanently unreachable by that key.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
     <div style="margin:0 0 28px">
       <div class="rt-ctlbar">
         <span class="lbl">Scenario</span>
@@ -832,6 +938,7 @@ DevHubCodeWalk.mount('#cw-hashmap',{
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

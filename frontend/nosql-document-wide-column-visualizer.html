@@ -59,7 +59,112 @@
     </div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, the "read together" rule that grows itself right past a hard limit</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You followed the embedding rule exactly as written — reviews are read together with the product, so you embedded them — and eighteen months later every write to that product document starts failing.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The reviews array MongoDB eventually refuses to save</div>
+  <p>A product launches with three reviews, embedded right inside the product document the way the rule above says to: <code>reviews: [ {...}, {...}, {...} ]</code>. Every product read comes back with all its reviews in the same query — no second round trip. Textbook embedding win.</p>
+  <p>Fourteen months and forty thousand reviews later, <code>productService.addReview()</code> starts throwing <code>BSONObj size: 16793601 is invalid. Size must be between 0 and 16793600 (16MB)</code>. Nobody touched the code. The document just grew, one <code>$push</code> at a time, until it hit MongoDB's hard per-document ceiling — and MongoDB doesn't warn you at 15 MB, it refuses the write outright at 16.</p>
+  <div class="hf-scatter">
+    <span>the embedding decision at launch ✓</span>
+    <span>every individual $push that added one review ✓</span>
+    <span>an array with no cap on how large it can grow ⚠</span>
+  </div>
+  <p class="hf-foot">Embed what's read together — but only if it also has a natural, small ceiling on how large it can get.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Cap the embed, reference the overflow</div>
+  <div class="hf-ladder">
+    <b>Embed only a bounded slice — say, the 5 most recent or most-helpful reviews</b>
+    <i>↓ the product document now has a size ceiling that has nothing to do with how many reviews actually exist</i>
+    <b>Move every review into its own reviews collection, referenced by productId</b>
+    <i>↓ the full history still exists and is fully queryable — it's just no longer forced to travel with the product on every single read</i>
+    <b>And if the UI truly needs the full list on one screen, page it with its own query instead of growing one document forever</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Embedding is a bet that the embedded data has a natural size ceiling — a user's five most-recent logins, an order's line items at checkout — and any array whose size is really a function of "how long has this record existed" or "how popular has it become" will eventually outgrow that bet, right at the moment the record is successful enough for it to matter.
+</div>
+
+<div class="hf-note">MongoDB's own docs call this the <b>Massive Array anti-pattern</b>. The fix isn't a bigger limit — it's admitting the array was never really "read together" data. It was a growing list wearing an embedded field's clothing.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>The embedding rule said "store what's read together." Reviews are always read with the product. Why is that suddenly a problem?</p></div>
+  <div class="hf-bub right"><span class="who">MongoDB</span><p>I never promised a document could grow forever. Sixteen megabytes is a hard ceiling I enforce on every document, embedded arrays included — I don't care how sensible the relationship looked back when it had three items.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Couldn't you have warned me sooner — at 10 MB, say?</p></div>
+  <div class="hf-bub right"><span class="who">MongoDB</span><p>I do log large-document warnings in the slow-query log well before the limit. Nobody reads slow-query logs for a document that's still fast to read. The write only becomes visibly wrong the day it's finally too big.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Here's how one array field turns a perfectly healthy collection into a landmine, one <code>$push</code> at a time.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Product ships with <code>reviews: []</code> — empty, nowhere near any limit</span><span class="tag">day one</span></li>
+    <li class="open"><span>Every <code>db.products.updateOne({_id}, {$push:{reviews: newReview}})</code> appends one more subdocument</span><span class="tag">every review</span></li>
+    <li><span>The document's on-disk size grows by roughly one review's size, every single time</span><span class="tag">linear growth</span></li>
+    <li class="open"><span>MongoDB rewrites the WHOLE document on disk for every update, because a BSON document isn't a growable append-only log</span><span class="tag">full rewrite cost</span></li>
+    <li><span>Long before 16 MB, both writes and reads get slower — more bytes to read, rewrite, and replicate per operation</span><span class="tag">the slow decline</span></li>
+    <li class="open"><span>At 16,793,600 bytes, the next $push is rejected outright — not slow, just refused</span><span class="tag">the hard wall</span></li>
+  </ol>
+  <p class="hf-annot">Step four is the one people miss: this isn't only a size-limit story, it's a performance story that started long before the limit. Every write to an oversized document re-serializes the entire thing — a 12 MB document with one new review costs vastly more than a 2 KB document with one new review, even though the actual new data is identical in both cases.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">one product document in the catalog</span>
+      <div class="ring"><span class="lbl">its embedded reviews: [] array</span>
+        <div class="ring"><span class="lbl">40,000 $push operations later</span>
+          <div class="core">the 16,793,600-byte ceiling<small>MongoDB's hard limit — the write is rejected, not queued or truncated</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Read it from the outside in: a single document, containing a single array field, containing every review this product has ever received — three layers of "this seemed fine at first" wrapped around one immovable number. Nothing about the schema looked wrong at layer one; the danger was always in what layer two was allowed to become.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">A <code>users</code> collection embeds each user's full login history as an array — <code>loginHistory: [ {ip, ts}, ... ]</code> — appended to on every sign-in with <code>$push</code>. After two years of daily logins, writes to long-tenured accounts take noticeably longer than writes to brand-new accounts, well before anyone hits an actual error. Why?</p>
+  <button type="button">The document has grown large enough that MongoDB must re-serialize and rewrite the whole thing on every $push, so cost scales with total history size, not with the one new login being added</button>
+  <button type="button">MongoDB automatically re-indexes the entire collection whenever any single document crosses 1 MB, which slows every write until the rebuild finishes</button>
+  <button type="button">The $push operator gets progressively slower over time because MongoDB deduplicates array entries on every insert to help enforce the 16 MB cap</button>
+  <p class="why" data-for="0">Right. A BSON document is not a growable log file — updating it means writing the whole thing back to disk, and to every replica. A two-year-old user with 700 logins embedded pays for rewriting all 700 on login #701; a brand-new user pays almost nothing for login #1.</p>
+  <p class="why" data-for="1">MongoDB doesn't rebuild indexes because a single document grew — index maintenance is per-write and scoped to the indexed fields that changed, not to overall document size. This invents a mechanism that isn't real.</p>
+  <p class="why" data-for="2">$push appends; it does not deduplicate, and there is no background process quietly trimming arrays to respect the 16 MB cap. Once you're near the limit, MongoDB simply rejects the next write — it never tries to rescue you first.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">An unbounded array quietly living inside a fixed-size container is a shape you'll recognize outside MongoDB too.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A JWT that embeds every role a user has ever been granted</h4>
+    <p>A Spring Security <code>Authorization: Bearer &lt;jwt&gt;</code> embeds the caller's authorities as a claim so downstream services can skip a database round trip — the same "read together" bet as an embedded MongoDB array. Give an employee years of team reassignments without ever pruning stale roles, and the claims array grows until the encoded token blows past a reverse proxy's or load balancer's total request-header limit, and requests start failing with <code>431 Request Header Fields Too Large</code> before your own controller code ever runs.</p>
+    <div class="hf-scatter"><span>an identity token is still just an embedded array wearing a different file format</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Kafka's max message size rejecting an oversized event</h4>
+    <p>An event that embeds a growing list — every line item ever added to a long-lived cart, say — eventually crosses the broker's configured maximum message size and the producer gets a <code>RecordTooLargeException</code>. Same shape: a value that was "read together" data at first, denied outright once it outgrew its container's ceiling.</p>
+    <div class="hf-scatter"><span>the container enforces a hard limit; it doesn't negotiate</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>PostgreSQL TOASTing an oversized jsonb column</h4>
+    <p>A <code>jsonb</code> column holding a growing embedded array eventually gets TOASTed — Postgres's mechanism for storing oversized values out-of-line — and every update to that row still has to read and rewrite the whole TOASTed value, the identical "rewrite everything for one small change" cost that made the MongoDB document slow.</p>
+    <div class="hf-scatter"><span>relational databases hit the same wall, just with a different name for it</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> document and wide-column stores ask you to design the schema around your access patterns instead of normalizing first — embed what's read together in MongoDB, and choose a high-cardinality DynamoDB partition key so writes spread evenly instead of piling onto one hot partition.
+  <b>The one new sentence this block adds:</b> "read together" is not the same promise as "bounded in size," and an array with no natural ceiling will eventually outgrow the very document it was embedded to speed up.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
@@ -339,6 +444,7 @@ DevHubCodeWalk.mount('#cw-nosql-mount', {
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

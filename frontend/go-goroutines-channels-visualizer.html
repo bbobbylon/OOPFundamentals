@@ -55,7 +55,110 @@
     <div class="intro-ciam"><span class="tag">CIAM Go service:</span> A bulk user-export service fans out one goroutine per page fetch and a <code>WaitGroup</code> collects results into a channel (<code>go func() { wg.Wait(); close(results) }()</code>). An event pipeline has one goroutine reading Ping webhook events and another processing, with a buffered channel between. On SIGTERM, <code>cancel()</code> closes <code>ctx.Done()</code> and every watching goroutine stops cleanly. The Spring equivalent — <code>@Async</code> + <code>CompletableFuture.allOf()</code> — is more boilerplate and lower throughput.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">Or: the channel bug that never panics, never logs, and never ends.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">A nil map screams the moment you touch it. A nil channel just waits. Forever. Silently.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A goroutine that vanishes without a single log line</div>
+  <p>A struct has a <code>chan Result</code> field that's supposed to be set by a constructor, <code>NewWorker()</code> — but one code path builds the struct directly with <code>&amp;Worker{}</code> (a quick unit-test helper, or a config branch that forgot the make). The field is left at its zero value: nil.</p>
+  <p>The worker goroutine reaches <code>result := &lt;-w.resultsCh</code>. Nothing panics. Nothing errors. The goroutine just parks there — permanently. <code>runtime.NumGoroutine()</code> creeps up by one, forever, and if it's the last goroutine waiting with nothing left to run, the whole program freezes with <code>fatal error: all goroutines are asleep - deadlock!</code> instead of a stack trace pointing at the real bug.</p>
+  <div class="hf-scatter">
+    <span>compiles ✓</span>
+    <span>no panic on startup ✓</span>
+    <span>the channel was never make()'d ⚠</span>
+  </div>
+  <p class="hf-foot">A nil slice is safe to read. A nil map panics on write. A nil channel does neither — it just blocks, on send AND receive, forever.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Treat "nil channel" as a checklist item, not a runtime surprise</div>
+  <div class="hf-ladder">
+    <b>Initialize every channel field in the constructor, never leave it at the zero value</b>
+    <i>↓ make(chan T) (or , n) is what turns "blocks forever" into "blocks until someone sends"</i>
+    <b>In tests, construct through the real constructor, not a bare struct literal</b>
+    <i>↓ &amp;Worker{} silently skips every make() call the real constructor would have run</i>
+    <b>And if a goroutine looks stuck, check runtime.NumGoroutine() — a nil channel leaves no other trace</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>nil channel operations block forever — on purpose.</b> This isn't a missing nil-check the runtime forgot to add. A nil channel blocking forever is specified, deliberate Go behavior, because a select can use it as an off switch: assign <code>ch = nil</code> to a case's channel variable and that case can never be chosen again, without an extra boolean flag anywhere.
+</div>
+
+<div class="hf-note">A nil channel is a phone line that was never connected — you can pick up the receiver and "wait" as long as you like, but there's no dial tone, no busy signal, no error. Contrast that with a nil MAP, which is more like a filing cabinet with no drawers: try to file something and it screams immediately. Same nil-ness, two completely different reactions.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>If sending to a nil channel is basically a bug, why doesn't Go just panic like it does for a nil map?</p></div>
+  <div class="hf-bub right"><span class="who">The Go runtime</span><p>Because sometimes you WANT a channel operation to never fire. I let you set a channel variable to nil specifically so a select case attached to it goes silent — permanently — without an <code>if enabled</code> around every case.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So how do I tell "nil on purpose" from "nil by mistake — forgot to make() it"?</p></div>
+  <div class="hf-bub right"><span class="who">The Go runtime</span><p>I can't — that part's on you. I treat both identically: block forever. If you meant to disable a case, great. If you forgot a make(), you've built the exact same thing, and it looks like a hang, not a crash.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Watch a select loop deliberately nil out a channel to turn a case off — the same rule that hides the bug is also the intended feature.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>doneCh</code> starts non-nil, wired to a real closing signal channel</span><span class="tag">case armed</span></li>
+    <li class="open"><span><code>select { case &lt;-doneCh: cleanup(); doneCh = nil }</code> — case fires once</span><span class="tag">fires once</span></li>
+    <li><span><code>doneCh = nil</code> is the last line in that case body — deliberate</span><span class="tag">disable on purpose</span></li>
+    <li class="open"><span>Next loop iteration: select evaluates <code>case &lt;-doneCh</code> again</span><span class="tag">re-evaluated</span></li>
+    <li><span>doneCh is nil now, so that case is never ready — select simply skips it, forever</span><span class="tag">silently skipped</span></li>
+    <li class="open"><span>The other cases in the same select keep working normally — only this one is switched off</span><span class="tag">surgical disable</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is exactly the same rule that caused the bug above — "a nil channel is never ready" — except here it's load-bearing: it's the one line of Go idiom that turns off a single select case without a boolean guard cluttering every branch.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">nil (zero value)</span>
+      <span class="go"><em>send or receive attempted</em> <span class="arrow">→</span> blocks forever, no panic</span></div>
+    <div class="stt"><span class="nm">open (after make)</span>
+      <span class="go"><em>send within capacity</em> <span class="arrow">→</span> proceeds immediately</span></div>
+    <div class="stt"><span class="nm">closed</span>
+      <span class="go"><em>another send attempted</em> <span class="arrow">→</span> panics: send on closed channel</span></div>
+  </div>
+  <p class="hf-annot">Three channel states, three completely different reactions to the same "send" operation: silence forever, success, or a panic. Nowhere does the type system tell you which state a <code>chan Result</code> variable is in — that's tracked entirely at runtime, by you.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q"><code>type Worker struct { out chan int }</code>. A test builds one with <code>w := &amp;Worker{}</code> (skipping the real constructor) and starts <code>go func(){ w.out &lt;- compute() }()</code>. No make was ever called on out. What happens?</p>
+  <button type="button">The goroutine blocks on the send forever — no panic, no error, just a permanently parked goroutine.</button>
+  <button type="button">It panics immediately: send on nil channel.</button>
+  <button type="button">compute() runs, but the result is silently discarded and the goroutine exits normally.</button>
+  <p class="why" data-for="0">A nil channel is never ready for communication, in either direction. The send doesn't error — it just never proceeds, because there's no channel behind out for it to hand the value to. The goroutine leaks unless something recovers it.</p>
+  <p class="why" data-for="1">That's the nil MAP rule, not the nil channel rule — writing to a nil map panics, but sending on a nil channel is defined to block forever instead, precisely so it can be used to disable a select case on purpose.</p>
+  <p class="why" data-for="2">Nothing "discards" the value quietly — the send statement itself never completes, so the line right after it (and the rest of that goroutine) never executes either. It's stuck, not skipped.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The zero value isn't broken, it's just inert" is a recurring shape.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A Java Future that's never completed</h4>
+    <p><code>future.get()</code> on a Future nobody ever calls <code>complete()</code> on blocks forever rather than throwing — no error, no timeout, unless you pass one explicitly. Same "nothing happens, forever" shape as a nil channel.</p>
+    <div class="hf-scatter"><span>blocking is not the same failure mode as throwing</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>JavaScript Promises that never resolve or reject</h4>
+    <p><code>await somePromise</code> where the executor forgot to call resolve/reject hangs the async function forever, with no error and no timeout unless you wrap it in <code>Promise.race</code> with a timer yourself.</p>
+    <div class="hf-scatter"><span>an unfulfilled contract just waits, it doesn't complain</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A Spring @Async method with no configured executor</h4>
+    <p>Misconfigure the executor and an @Async call can silently queue and never run, rather than failing loudly at the call site — the caller expecting a background task to fire has no direct signal that it didn't.</p>
+    <div class="hf-scatter"><span>async boundaries hide "nothing is happening" especially well</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Goroutines are cheap green threads, channels are typed conduits between them (unbuffered syncs, buffered decouples), select multiplexes several channel operations, and sync covers the shared-memory cases channels don't fit. <b>The one new sentence this block adds:</b> an uninitialized (nil) channel doesn't panic like a nil map does — it silently blocks forever on every send and receive, which is exactly the mechanism select relies on when you deliberately nil out a case to switch it off.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="gcSeg">
@@ -259,6 +362,7 @@ DevHubCodeWalk.mount('#cw-goch',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

@@ -97,6 +97,184 @@
     </div>
   </section>
 
+<p class="hf-deck">or, a breakpoint pauses your thread — it does not pause the database, the load balancer, the pool, or the user</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You stopped to look at one variable for four minutes, and every clock outside that thread kept running.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">You resumed, and the exception you got was one you created by looking</div>
+  <p>The bug is reproducible locally, you know the line, and you need rich state — so the debugger is
+  the right instrument and this page told you so. You breakpoint inside a <code>@Transactional</code>
+  service method, expand the user object, read the claims map, evaluate a couple of expressions.
+  Four minutes, tops. You hit resume.</p>
+  <p>And the run window fills with things that were not your bug. A
+  <code>SQLTransientConnectionException: Connection is not available, request timed out after
+  30000ms</code> from a completely different request. A lock-wait timeout on the row you were sitting
+  on. A broken pipe writing the response, because the browser gave up two hundred and forty seconds
+  ago and closed the socket. Your pause suspended <i>your</i> thread. The connection pool's 30-second
+  acquire timeout, the database's lock-wait timeout, the HTTP client's read timeout and the user's
+  patience were all still counting the whole time — and in Spring the transaction, the leased
+  connection and the row lock were all held open by the thread you froze.</p>
+  <div class="hf-scatter">
+    <span>right instrument for the question ✓</span>
+    <span>breakpoint on exactly the right line ✓</span>
+    <span>the state you wanted, fully inspectable ✓</span>
+    <span>one pooled connection held for 4 minutes ⚠</span>
+    <span>every timeout in the system fired while you read ⚠</span>
+  </div>
+  <p class="hf-foot">You cannot debug a five-second timeout with a thirty-second look.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Decide what your pause will break before you take it</div>
+  <div class="hf-ladder">
+    <b>Ask what this line is <i>holding</i>: a transaction, a pooled connection, a lock, a single-use token, an open response stream</b>
+    <i>↓ anything with a deadline attached is a thing your breakpoint will expire, and you'll read the wreckage as evidence about the bug</i>
+    <b>Change the breakpoint's suspend policy from All threads to just this one</b>
+    <i>↓ IntelliJ suspends every thread by default, which also stops the heartbeats, schedulers and health endpoints that other systems are watching — and yes, suspending one thread instead of all of them changes the interleaving you're observing, so know which trade you took</i>
+    <b>When the question is "what is this value" rather than "what happens next", use a non-suspending logpoint instead</b>
+    <i>↓ same information, no pause, no expired anything — this is the middle instrument this page's table is really pointing at</i>
+    <b>And when you must take a long pause, raise the relevant timeouts in your local profile first, so the noise after you resume is not mistaken for the bug</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A debugger gives you a stopped picture of a system that never stopped.</b> The pause is local to
+  one thread in one process; the rest of the world — pools, locks, sockets, schedulers, token
+  lifetimes, orchestrators, the person refreshing the page — keeps its own time and keeps counting.
+  Everything you observe after a long pause is therefore a mixture of your bug and the damage the
+  pause did, and those two are indistinguishable in a log. This is the same family as the timing
+  problem this page already warns about, pointed the other way: a breakpoint doesn't only <i>hide</i>
+  concurrency bugs by changing the interleaving, it <i>manufactures</i> failures that could never
+  happen at full speed.
+</div>
+
+<p class="hf-big">Your thread stopped. Nothing else did.</p>
+
+<div class="hf-note">Pressing pause on your player does not pause the match. The ball keeps moving, the
+whistle goes, and when you press play you're behind and everyone else has moved on. <b>A breakpoint
+is a pause button on your seat, not on the game.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I only stopped for four minutes. Why is a different request throwing a connection timeout?</p></div>
+  <div class="hf-bub right"><span class="who">HikariCP</span><p>Because you're holding one of my ten connections and I can't take it back while your thread is suspended inside a transaction. Everyone else queued behind it, waited thirty seconds, and got an exception. That's my configured behaviour, not a bug.</p></div>
+  <div class="hf-bub"><span class="who">The database</span><p>And I've been sitting idle in an open transaction with a row lock held the entire time. Another session waiting on that row hit its lock-wait timeout and got rolled back. From where I sit, your debugger looks exactly like an application that hung.</p></div>
+  <div class="hf-bub right"><span class="who">The browser</span><p>I gave up long before either of them. When you resumed and wrote the response, you wrote it into a socket I'd already closed — that's the broken pipe in your log. Nobody was ever going to see that page.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">One pause, four independent clocks, and none of them is yours.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Request arrives. Spring opens a transaction, which leases a connection from a pool of ten and holds it for the whole method</span><span class="tag">the resource you're about to sit on</span></li>
+    <li class="open"><span>Your breakpoint hits at <b>t+0.2s</b>. With IntelliJ's default policy, every thread in the JVM suspends — not just this one</span><span class="tag">including schedulers and health endpoints</span></li>
+    <li><span><b>t+30s</b> — another request needs a connection, waits, and dies with <code>Connection is not available, request timed out</code>. First casualty, and it isn't even your request</span><span class="tag">pool starvation, entirely self-inflicted</span></li>
+    <li class="open"><span><b>t+50s</b> — a second session waiting on the row you locked hits the database's lock-wait timeout and gets rolled back</span><span class="tag">the DB cannot tell a debugger from a hang</span></li>
+    <li><span><b>t+60s</b> — the browser's read timeout expires and the socket closes. Whatever you were about to observe has no audience left</span><span class="tag">the response is now undeliverable</span></li>
+    <li class="open"><span><b>t+240s</b> — you resume. The method finishes correctly, then the write fails with a broken pipe, and your console is full of exceptions that describe your pause rather than your bug</span><span class="tag">four minutes of looking, zero minutes of evidence</span></li>
+  </ol>
+  <p class="hf-annot">Step 6 is the expensive one, because those exceptions are <i>plausible</i>. Pool
+  starvation and lock-wait timeouts are exactly the kind of thing you'd expect a real production bug
+  to look like, so it is very easy to spend the next hour investigating an incident you caused by
+  holding still. The rule that saves the hour: any exception that appears after a long pause is
+  suspect until you've reproduced it without the pause.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">the user's browser — read timeout counting</span>
+      <div class="ring"><span class="lbl">the Tomcat worker thread — not returned to its pool</span>
+        <div class="ring"><span class="lbl">the open transaction — one pooled connection leased out of ten</span>
+          <div class="core">one row lock<small>held for four minutes, because you wanted to look at a claims map</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Read it from the inside out and you have your pre-flight checklist. The core is
+  the cheapest thing on the screen and the outermost ring is the one with a human attached, but every
+  layer between them has an independent deadline, and your breakpoint suspends exactly one thing:
+  the code in the middle. Before any pause longer than a few seconds, ask which of these rings your
+  line is currently inside.</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">You breakpoint inside a <code>@Transactional</code> method, spend four minutes in the
+  Variables panel, and resume. The console then shows
+  <code>SQLTransientConnectionException: Connection is not available, request timed out after
+  30000ms</code> — thrown on a <i>different</i> request thread — and the browser tab that started your
+  request shows nothing at all. What have you learned about the bug you sat down to fix?</p>
+  <button type="button">Nothing about it — your paused thread held a pooled connection open, so an unrelated request starved and failed, and the browser had already given up long before you resumed</button>
+  <button type="button">That the pool is undersized for this workload: raise <code>maximum-pool-size</code></button>
+  <button type="button">That you have found a connection leak — the method is failing to release its connection, which is precisely why another request could not obtain one from the pool, and the same starvation would appear in production under sustained load</button>
+  <p class="why" data-for="0">Right, and the useful habit is to treat everything after a long pause as
+  contaminated. Both symptoms are artefacts: a pooled connection is held for the life of the
+  transaction, and the transaction lives as long as your suspended thread, so a pool of ten
+  connections effectively became a pool of nine for four minutes while everything else kept to its
+  configured timeouts. Reproduce at full speed — a logpoint, or a <code>curl</code> with timing —
+  before you believe any of it.</p>
+  <p class="why" data-for="1">Resizing a pool to accommodate a debugging session is how a local
+  workaround becomes a production config. Worse, it hides the signal: connection-acquisition timeouts
+  are one of the better early warnings you get about long-running transactions, and raising the pool
+  size until they stop is the equivalent of pulling the fuse. The number was fine; one borrower was
+  asleep.</p>
+  <p class="why" data-for="2">A real connection leak looks superficially identical, which is exactly
+  why this distractor is dangerous — and the difference is reproducibility. A leak starves the pool
+  again on the next run, with no breakpoint involved, and it shows up in Hikari's own leak-detection
+  warning (<code>leakDetectionThreshold</code>). A debugger pause starves it only while you're
+  paused. Run it once without the breakpoint before you go looking for a missing
+  <code>close()</code>.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Three other deadlines that expire while you sit on a line and read.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>The authorization code that died while you inspected it</h4>
+    <p>Debugging the OAuth callback is the classic. Ping redirects back with <code>?code=…</code>, you
+    breakpoint in the handler to inspect it, and by the time you resume the exchange fails with
+    <code>invalid_grant</code>. Authorization codes are single-use and deliberately short-lived —
+    RFC 6749 recommends a maximum of ten minutes, and real IdPs commonly use a minute or less. You
+    then spend an hour re-checking your client secret and redirect URI, both of which were always
+    correct.</p>
+    <div class="hf-scatter"><span>the credential expired inside the debugger</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>The liveness probe that restarted the pod you were attached to</h4>
+    <p>Remote-debugging a service in Kubernetes with an all-threads suspend policy means the health
+    endpoint stops answering. The kubelet's liveness probe fails its threshold, the pod is restarted,
+    and your debug session dies mid-inspection — looking, from the outside, exactly like a flaky
+    connection. A thread-only suspend policy keeps the heartbeat alive, which is one of the more
+    practical reasons to change that default.</p>
+    <div class="hf-scatter"><span>a suspended JVM reads as an unhealthy one</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>The lease that moved on without you</h4>
+    <p>Distributed locks and leader-election leases are held for a fixed duration and renewed by a
+    heartbeat — Redis with an expiry, a Kubernetes lease object, a ZooKeeper ephemeral node. Suspend
+    the thread that renews it and the lease lapses; another instance takes over, and your process
+    resumes confidently doing work it is no longer entitled to do. Same shape as the connection pool,
+    with a much worse blast radius.</p>
+    <div class="hf-scatter"><span>you resume holding a lock you no longer own</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  This page teaches instrument selection: a debugger for rich state at a known line you can reproduce
+  locally, logging for everything you cannot pause — production, timing, async, "where does it even
+  break?" — logged as decisions and ids, structured, never secrets. <b>The new sentence: a pause is
+  not free even when the debugger is the right instrument, because your thread is the only thing that
+  stops while pools, locks, sockets and token lifetimes keep counting — so anything that fails after
+  a long pause is suspect until it reproduces at full speed.</b> Now predict: you switch the
+  breakpoint to suspend only the current thread and the connection-timeout exception disappears, but
+  a <i>new</i> intermittent failure shows up that you've never seen before. What changed — and is the
+  new failure an artefact, or the real bug you came here for?
+</div>
+
   <!-- 2 INTERACTIVE -->
   <section>
     <h2>2. Interactive: which instrument fits?</h2>
@@ -261,6 +439,7 @@ answer();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

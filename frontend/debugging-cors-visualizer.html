@@ -96,6 +96,192 @@
     </div>
   </section>
 
+<p class="hf-deck">or, the CORS failure that prints no error at all — 200 OK, the header is right there in the Network tab, and your code reads <code>null</code></p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Every CORS bug on this page announces itself in red. This one hands you a successful response with a hole punched in it and says nothing.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The Network tab shows <code>Jwt-Token: eyJhbGci…</code>. Your code reads <code>null</code>. There is no console error.</div>
+  <p>Your Spring API answers <code>POST /api/auth/login</code> with <b>201</b>, a
+  <code>Location</code> header, and the freshly minted token in a <code>Jwt-Token</code> response
+  header. You open devtools, click the request, and read the header with your own eyes. Then your
+  Angular interceptor calls <code>resp.headers.get('Jwt-Token')</code> — with
+  <code>observe:&nbsp;'response'</code>, so headers are available — and gets <code>null</code>. No red
+  text. No "blocked by CORS policy". A perfectly healthy 201.</p>
+  <p>Cross-origin, the browser only lets your JavaScript read <b>seven</b> response headers:
+  <code>Cache-Control</code>, <code>Content-Language</code>, <code>Content-Length</code>,
+  <code>Content-Type</code>, <code>Expires</code>, <code>Last-Modified</code> and
+  <code>Pragma</code>. Every other header — <code>Jwt-Token</code>, <code>Location</code>,
+  <code>ETag</code>, <code>X-Total-Count</code>, <code>Retry-After</code>,
+  <code>WWW-Authenticate</code> — is filtered out of the response object handed to your code unless
+  the server names it in <code>Access-Control-Expose-Headers</code>. The Network tab is showing you
+  the real HTTP response, because devtools is not your page. Your code is being handed a redacted
+  copy, and redaction is not an error.</p>
+  <div class="hf-scatter">
+    <span>preflight passed ✓</span>
+    <span>real request returned 201 ✓</span>
+    <span>server did send the header ✓</span>
+    <span>not listed in Access-Control-Expose-Headers ⚠</span>
+    <span>filtered out silently, no console message ⚠</span>
+  </div>
+  <p class="hf-foot">Two different CORS lists, one letter apart in your config file, guarding opposite
+  directions: <code>allowedHeaders</code> is what the browser may <b>send</b>;
+  <code>exposedHeaders</code> is what your JavaScript may <b>read</b>.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Name every response header your client actually reads</div>
+  <div class="hf-ladder">
+    <b>Spot the signature: the value is visible in devtools and <code>null</code> in code, with an empty console</b>
+    <i>↓ a blocked request has no 200 row at all — this one succeeded, so the problem is in what your page is allowed to read, not in what the server allowed</i>
+    <b>Add the header to <code>CorsConfiguration.setExposedHeaders(...)</code> — the same bean where <code>setAllowedHeaders(...)</code> already lives</b>
+    <i>↓ <code>List.of("Authorization","Jwt-Token","Location","X-Total-Count")</code>: outbound, not inbound, and a separate list on purpose</i>
+    <b>Re-check with <code>curl -i</code> that the real response now carries <code>Access-Control-Expose-Headers</code>, then hard-reload past the cached preflight</b>
+    <i>↓ the exposure list is read from the actual response, not the preflight — but a stale preflight can still mask an unrelated part of your change</i>
+    <b>Then stop shipping data in headers your SPA needs: a token belongs in the response body, where no CORS list can hide it</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>CORS does not only decide whether a response arrives — it decides how much of it you may look
+  at.</b> The failures that get taught are the loud ones: a blocked preflight, a missing
+  <code>Access-Control-Allow-Origin</code>, a wildcard paired with credentials. The quiet one is that
+  a fully successful cross-origin response is handed to your code with its header list trimmed to
+  seven safe names, and the trimming produces no error because nothing went wrong — the browser did
+  exactly what the spec says. When a value you can see in devtools is missing in code, stop debugging
+  the server. Nothing is broken on that side of the wire.
+</div>
+
+<p class="hf-big">You can see it. You may not read it.</p>
+
+<div class="hf-note">Your JavaScript gets the <b>redacted</b> copy. The server filed the full document,
+devtools is holding the unredacted original up to the glass, and your page is reading a photocopy
+with a black bar over every header nobody cleared for release.
+<b><code>Access-Control-Expose-Headers</code> is the declassification list.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>The header is in the Network tab. Why is <code>headers.get('Jwt-Token')</code> null?</p></div>
+  <div class="hf-bub right"><span class="who">The Network tab</span><p>Because I'm devtools. I show you the bytes that came off the wire. I'm not subject to your page's origin rules — you are.</p></div>
+  <div class="hf-bub"><span class="who">The browser's fetch layer</span><p>And I'm the one building the response object your code touches. Cross-origin, I copy across seven safelisted headers and drop the rest, unless the server explicitly lists them in <code>Access-Control-Expose-Headers</code>. That isn't an error condition, so I don't log one.</p></div>
+  <div class="hf-bub right"><span class="who">Your Spring CORS bean</span><p>I have two lists and they sound like synonyms. <code>setAllowedHeaders</code> is about the request going out. <code>setExposedHeaders</code> is about the response coming back. You configured the first one and assumed it covered both — almost everybody does.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one successful login response from the socket to the line of code that can't see half of it.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Preflight <code>OPTIONS</code> passes — origin allowed, method allowed, <code>Authorization</code> in <code>Access-Control-Allow-Headers</code></span><span class="tag">the loud failure mode, avoided</span></li>
+    <li class="open"><span>The real <code>POST</code> goes out and Spring answers <b>201</b> with <code>Location</code> and <code>Jwt-Token</code> headers set</span><span class="tag">server side is finished and correct</span></li>
+    <li><span>Devtools records the response exactly as received — every header, visible, clickable, copyable</span><span class="tag">the evidence that misleads you</span></li>
+    <li class="open"><span>The fetch layer builds the response object for <b>your page</b>. It copies the seven CORS-safelisted headers, then checks <code>Access-Control-Expose-Headers</code> for anything else</span><span class="tag">the actual decision point</span></li>
+    <li><span>No such header on the response → nothing else is copied. <code>Jwt-Token</code> and <code>Location</code> never make it into the object your interceptor holds</span><span class="tag">filtered, not blocked</span></li>
+    <li class="open"><span><code>headers.get('Jwt-Token')</code> returns <code>null</code>, your interceptor stores <code>undefined</code>, and the next request goes out unauthenticated — surfacing hundreds of milliseconds later as a 401 on a completely different endpoint</span><span class="tag">the bug reports itself in the wrong place</span></li>
+  </ol>
+  <p class="hf-annot">Step 6 is why this one eats a whole morning. The symptom you get handed is "the
+  dashboard call 401s", so you debug the dashboard call, the token refresh, the interceptor order —
+  everything except the login response three requests earlier that quietly returned half of itself.
+  Cross-origin, a header your client depends on is a dependency you have to declare, and an
+  undeclared one fails as <code>null</code> rather than as an exception.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">your code calls <code>resp.headers.get('Jwt-Token')</code><small>same-origin this always works; cross-origin it is a permission question</small></div>
+    <div class="arrow">what the fetch layer hands back →</div>
+    <div class="opts">
+      <span>the header value, as devtools shows it</span>
+      <span class="on"><code>null</code> — silently filtered, no error</span>
+      <span>a CORS console error</span>
+    </div>
+  </div>
+  <p class="hf-annot">Only the middle option happens, and it is the one option with no diagnostic
+  attached. That is what makes it worth memorising: your instinct is to treat a silent
+  <code>null</code> as "the server didn't send it", and cross-origin that inference is simply not
+  available to you. <code>curl -i</code> settles it in one command — if the header is on the wire,
+  the conversation is about exposure, not about your backend.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">Your Spring API returns <b>201</b> with <code>Location: /api/sessions/88</code> and
+  <code>Jwt-Token: eyJhbGci…</code>. The Network tab shows both. Your Angular call already uses
+  <code>observe:&nbsp;'response'</code>, and <code>resp.headers.get('Jwt-Token')</code> returns
+  <code>null</code> with a completely clean console. What is going on?</p>
+  <button type="button">The preflight's <code>Access-Control-Request-Headers</code> didn't list <code>Jwt-Token</code>, so the server refused to include it — re-send the preflight with that header named and the response will carry it</button>
+  <button type="button">Angular's <code>HttpClient</code> strips non-standard headers from the response object</button>
+  <button type="button">The header arrived, but cross-origin your JavaScript may only read the seven safelisted response headers — anything else has to be named in <code>Access-Control-Expose-Headers</code></button>
+  <p class="why" data-for="0">This mixes up the two directions, which is exactly the trap.
+  <code>Access-Control-Request-Headers</code> (and the server's
+  <code>Access-Control-Allow-Headers</code> reply) negotiate the headers the browser is allowed to
+  <b>send</b> on the request — that is why a custom <code>Authorization</code> header triggers a
+  preflight in the first place. Neither one has any say over what comes back. The response direction
+  has its own, separate header: <code>Access-Control-Expose-Headers</code>.</p>
+  <p class="why" data-for="1">Reasonable suspicion, and there is a real Angular gotcha nearby — by
+  default <code>HttpClient</code> gives you the parsed <b>body</b>, and you need
+  <code>observe:&nbsp;'response'</code> to get an <code>HttpResponse</code> with headers at all. But
+  that is already the case here, and Angular does not filter header names; it wraps whatever the
+  browser's XHR/fetch layer exposes. The trimming happened one layer below Angular, which is why
+  switching HTTP libraries never fixes this.</p>
+  <p class="why" data-for="2">Right. The response arrived complete — devtools proves it — and the
+  browser handed your page a copy carrying only <code>Cache-Control</code>,
+  <code>Content-Language</code>, <code>Content-Length</code>, <code>Content-Type</code>,
+  <code>Expires</code>, <code>Last-Modified</code> and <code>Pragma</code>. Everything else needs an
+  explicit invitation: <code>cfg.setExposedHeaders(List.of("Jwt-Token","Location","X-Total-Count"))</code>
+  on the same <code>CorsConfiguration</code> bean that already sets <code>setAllowedHeaders</code>.
+  And note how many real APIs this silently breaks: pagination counts in <code>X-Total-Count</code>,
+  <code>ETag</code> for conditional requests, <code>Retry-After</code> on a 429, the created-resource
+  URL in <code>Location</code>.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Three more places where the data arrived intact and something between it and you decided you didn't need all of it.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>The auth error description your interceptor never sees</h4>
+    <p>A Spring resource server rejects a token with
+    <code>WWW-Authenticate: Bearer error="invalid_token", error_description="Jwt expired at …"</code>
+    — the single most useful string in the whole failure, sitting in a response header. Cross-origin
+    and unexposed, your Angular error handler gets a bare 401 with nothing attached, so your app
+    cannot tell "expired, refresh and retry" from "wrong audience, refreshing will never help". Expose
+    that header, or put the reason in the body.</p>
+    <div class="hf-scatter"><span>the most diagnostic header is never on the safelist</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Two lists in one bean, guarding opposite directions</h4>
+    <p><code>setAllowedOrigins</code>, <code>setAllowedMethods</code>, <code>setAllowedHeaders</code>,
+    <code>setAllowCredentials</code>, <code>setExposedHeaders</code> — five setters, and only the last
+    one is about the response. Every CORS config you'll copy off the internet sets the first four,
+    because the first four are what make the request go through, and "the request went through" is
+    where most snippets stop caring.</p>
+    <div class="hf-scatter"><span>the copied snippet ends where your bug begins</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>The opaque response from <code>mode:&nbsp;'no-cors'</code></h4>
+    <p>Ask <code>fetch</code> for <code>no-cors</code> and you get the extreme version of the same
+    idea: status reported as <code>0</code>, no headers, an unreadable body, and no error thrown. The
+    request really happened and the server really answered; the browser simply handed you a sealed
+    envelope. Same principle at full strength — same-origin policy withholds data quietly, because
+    "you may not read this" is not a failure of the network.</p>
+    <div class="hf-scatter"><span>success and unreadable are not opposites in a browser</span></div>
+  </div>
+</div>
+
+<div class="hf-kick">Grab a napkin</div>
+<p class="hf-say">Predict it before you scroll.</p>
+<div class="hf-napkin">
+  This page teaches that a CORS error is the browser refusing to let your JavaScript read a response
+  the server already answered — so you find the <code>OPTIONS</code> preflight, check the
+  <code>Access-Control-Allow-Origin</code> byte for byte, and never pair <code>*</code> with
+  credentials. <b>The new sentence: the browser also trims the headers of responses it lets through,
+  down to seven safelisted names, so a cross-origin value you can see in devtools and not in code is
+  a missing <code>Access-Control-Expose-Headers</code> — a CORS bug that never prints an error.</b>
+  Now predict: your paginated table renders 20 rows but the pager says "page 1 of NaN", and
+  <code>X-Total-Count</code> is plainly visible in the Network tab. Does moving the app behind the
+  Angular dev proxy make the pager work — and if it does, what exactly did the proxy change?
+</div>
+
   <!-- 2 INTERACTIVE -->
   <section>
     <h2>2. Interactive: match the console message to the fix</h2>
@@ -322,6 +508,7 @@ diagnose();
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

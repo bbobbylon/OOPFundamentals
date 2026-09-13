@@ -99,7 +99,112 @@ print("cached import is the same object:", again is my_utils)
   </div>
 
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the install that quietly downgrades itself</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You ran the exact same <code>pip install</code> command everyone else on the team ran, and got an older library — with no error, no warning, nothing.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">Everyone's <code>pip install httpx</code> installed a different version</div>
+  <p>You're still on the <code>python3.8</code> base image for a legacy CIAM sidecar. A teammate on <code>python3.12</code> runs <code>pip install httpx</code> and gets <code>httpx 0.28</code>. You run the exact same command against the exact same <code>requirements.txt</code> line and get <code>httpx 0.23</code> — an old release from over a year earlier, missing a bugfix you actually need.</p>
+  <p>Nobody typed a version number. Nobody pinned anything wrong. What happened: <code>httpx</code>'s newer releases each declare <code>Requires-Python &gt;=3.9</code> in their metadata. pip's resolver treats every release whose <code>Requires-Python</code> excludes your interpreter as if it doesn't exist, and just keeps walking backward through the version history until it finds one that does. It never tells you it skipped anything — you simply get the newest release that was willing to have you.</p>
+  <div class="hf-scatter">
+    <span>the command you typed ✓</span>
+    <span>the requirements.txt line ✓</span>
+    <span>the Python running it ⚠</span>
+  </div>
+  <p class="hf-foot">"pip install X" doesn't mean "install the latest X." It means "install the latest X that admits it works on THIS interpreter" — and it never says which releases it hid from you.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Make the interpreter mismatch loud instead of silent</div>
+  <div class="hf-ladder">
+    <b>Pin <code>requires-python</code> in YOUR <code>pyproject.toml</code> to match your real target</b>
+    <i>↓ if your service genuinely needs 3.11+, say so — pip then refuses to even try installing your package on 3.8 instead of resolving a mismatched dependency graph for it</i>
+    <b>Check what actually landed: <code>pip show httpx</code> after every install</b>
+    <i>↓ the reported version is the ground truth; a stale lockfile or a stale base image both hide behind a version number nobody looked at</i>
+    <b>Run CI on the SAME interpreter minor version as production</b>
+    <i>↓ a lockfile generated on 3.12 and installed on a 3.8 image can silently resolve to different packages for exactly this reason</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>A lockfile pins versions, not compatibility.</b> Hashing and pinning in <code>requirements.lock</code> guarantee everyone installs the identical bytes for a given resolver run — they do nothing to guarantee the resolver ran against the same Python everywhere. Two different interpreters can honestly satisfy the same pinned line with two different packages.
+</div>
+
+<div class="hf-note">A wheel's <code>Requires-Python</code> is a <b>bouncer at the door of that one release</b>, not the whole package. Get turned away at 0.28's door and pip doesn't tell you — it just walks you down the hallway to 0.23's door, which is happy to let you in.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>My requirements.txt says <code>httpx&gt;=0.20</code>. Why did I get 0.23 when the latest release is 0.28?</p></div>
+  <div class="hf-bub right"><span class="who">pip's resolver</span><p>0.28 declared <code>Requires-Python &gt;=3.9</code>. You're running 3.8. I filtered it out — along with every other release that made the same demand — before I even started comparing versions against your range.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Couldn't you have just told me that instead of silently picking something older?</p></div>
+  <div class="hf-bub right"><span class="who">pip's resolver</span><p>Run me with <code>-v</code> and I'll say "Ignoring version 0.28 ... requires a different Python". By default I stay quiet, because to me this isn't an error — it's just resolution working as designed.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Follow one <code>pip install httpx</code> through the resolver's eyes.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>pip asks PyPI for every published release of <code>httpx</code>, newest first</span><span class="tag">fetch</span></li>
+    <li class="open"><span>For each release, pip reads its <code>Requires-Python</code> metadata — e.g. <code>&gt;=3.9</code> on 0.24+</span><span class="tag">metadata</span></li>
+    <li><span>pip compares that range to the interpreter actually running pip — here, 3.8</span><span class="tag">compare</span></li>
+    <li class="open"><span>Every release that excludes 3.8 is dropped from consideration entirely, as if it were never published</span><span class="tag">filter</span></li>
+    <li><span>Your version specifier (<code>&gt;=0.20</code>) is applied only to what's left</span><span class="tag">constrain</span></li>
+    <li class="open"><span>The newest SURVIVING release — 0.23 — is installed, with no message that anything was excluded</span><span class="tag">install</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the whole story: the filtering happens before your version range is even consulted, so "newest that satisfies &gt;=0.20" quietly means "newest that satisfies &gt;=0.20 among releases that would admit your interpreter" — a smaller, unannounced pool.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">"which httpx does <code>pip install httpx&gt;=0.20</code> give me on Python 3.8?"<small>three candidate answers</small></div>
+    <div class="arrow">what actually happens →</div>
+    <div class="opts">
+      <span>the newest release ever published (0.28)</span>
+      <span class="on">the newest release whose Requires-Python admits 3.8 (0.23)</span>
+      <span>an install error telling you to upgrade Python</span>
+    </div>
+  </div>
+  <p class="hf-annot">There's no error here, and there's no "give me the true latest" either — pip's actual behavior sits in the quiet middle option, which is exactly why it surprises people who assume a bare install command means "whatever's newest."</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q">Your CI image upgrades from Python 3.9 to 3.12. The very next build of a service pinned to <code>pydantic&gt;=2.0</code> in <code>pyproject.toml</code> (no lockfile in this repo) installs a newer minor version of Pydantic than it did last week, with no code or dependency-file change. What's the most likely cause?</p>
+  <button type="button">A newer Pydantic release exists whose <code>Requires-Python</code> excluded 3.9 but admits 3.12, and the resolver can now reach it.</button>
+  <button type="button">PyPI silently re-released the same version number with different code.</button>
+  <button type="button">pip caches results per machine, and the CI runner's cache simply expired.</button>
+  <p class="why" data-for="0">Exactly this. Raising the interpreter version doesn't just let your OWN code run — it also unlocks every dependency release that had been fenced off by its <code>Requires-Python</code>, and the resolver reaches straight for the newest one it can now see.</p>
+  <p class="why" data-for="1">PyPI rejects re-uploading a version number once it's published — this is disallowed specifically so a version number always means the same bytes. The mystery here is resolver visibility, not tampered releases.</p>
+  <p class="why" data-for="2">A cache miss can change WHERE a wheel comes from, never WHICH version satisfies your constraints — resolution is deterministic given the same interpreter, index, and specifiers. The interpreter is what changed here.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The runtime silently narrows what's available to you" shows up anywhere a platform gates artifacts by a version check.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Maven's <code>&lt;maven.compiler.release&gt;</code> vs a dependency's target bytecode</h4>
+    <p>A JAR compiled for a newer bytecode target than your build's release level fails loudly with <code>UnsupportedClassVersionError</code> at RUNTIME, not resolve time — Maven doesn't filter it out for you the way pip does. The parallel is the same underlying fact (an artifact declares a minimum platform version) with the opposite failure mode: Java is loud, pip's resolver is quiet.</p>
+    <div class="hf-scatter"><span>declared platform minimums gate what you can actually use</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>npm's <code>engines</code> field</h4>
+    <p>A package.json <code>"engines": { "node": "&gt;=18" }</code> is, by default, advisory only — npm just warns (unless <code>engine-strict</code> is set). Two teammates on Node 16 and Node 20 running the same <code>npm install</code> can both silently succeed while only one of them is actually running code the author tested.</p>
+    <div class="hf-scatter"><span>a version gate nobody enforces is a version gate nobody notices breaking</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An Entra/Ping app registration's supported API version</h4>
+    <p>Calling an identity provider's newer API surface from a client library pinned to an old SDK version quietly falls back to older endpoint behavior instead of failing — the same "the newest thing that will still have you" pattern, in an auth client instead of a package manager.</p>
+    <div class="hf-scatter"><span>version-gated APIs degrade quietly unless something is built to shout</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> a venv isolates dependencies, <code>pyproject.toml</code> declares them, a lockfile with hashes pins them byte-for-byte, and <code>build</code>/<code>twine</code> ship them as a wheel or sdist. <b>The one new sentence this block adds:</b> "byte-for-byte reproducible" only holds if every machine resolves on the same Python version — because <code>Requires-Python</code> lets a release quietly disqualify itself from your interpreter, and pip never announces the ones it turned away.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="pypkgSeg">
@@ -306,6 +411,7 @@ DevHubCodeWalk.mount('#cw-pypkg',{
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

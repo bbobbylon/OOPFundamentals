@@ -59,6 +59,145 @@
     <div class="intro-ciam"><span class="tag">CIAM in production:</span> Azure's control plane is itself a big OAuth2 resource server — <code>az login</code> runs an OIDC flow against <strong>Microsoft Entra ID</strong> and every ARM call carries <code>Authorization: Bearer &lt;access token&gt;</code> with audience <code>https://management.azure.com</code>. Your day-job pattern (Entra token → API validates → roles decide) is exactly how Azure manages itself. In CI/CD, prefer <strong>workload identity federation / managed identities</strong> over client secrets — the pipeline exchanges its own identity for an Entra token, so no credential ever sits in a variable. See <code>entra-overview-visualizer.html</code> for the identity side.</div>
   </div>
 
+<p class="hf-deck">or, why "delete the group and everything inside it is deleted" is only mostly true</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You tear down the resource group, then redeploy the exact same names — and the deployment fails.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The resource group is gone. The Key Vault name still isn't yours.</div>
+  <p>You're done with the staging environment. <code>az group delete -n rg-shop-staging --yes</code> runs
+  clean, the portal spins for a minute, and the resource group disappears from the list. By this page's
+  own rule — "delete the group and everything inside it is deleted too" — you'd expect a blank slate.</p>
+  <p>Two weeks later you redeploy the identical Bicep template to rebuild staging, same vault name and
+  all. <code>az deployment group create</code> fails: <code>VaultAlreadyExists</code>. The resource group
+  is empty. The vault is nowhere in your subscription. It isn't gone — Key Vault has mandatory
+  <b>soft-delete</b>, so deleting the resource group only moved the vault into a recoverable,
+  scheduled-for-purge state, and its name (part of a globally unique DNS hostname,
+  <code>&lt;vault&gt;.vault.azure.net</code>) stays reserved until you purge it or the retention window
+  (7–90 days, configurable) runs out.</p>
+  <div class="hf-scatter">
+    <span>resource group deleted ✓</span>
+    <span>portal shows nothing there ✓</span>
+    <span>vault name still reserved ⚠</span>
+  </div>
+  <p class="hf-foot">The group's own lifecycle rule — delete it, everything inside dies — has one
+  exception baked into the platform, and it isn't listed anywhere in the resource group blade.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Fix: purge the soft-deleted vault before you reuse its name</div>
+  <div class="hf-ladder">
+    <b>az keyvault list-deleted --query "[].name"</b>
+    <i>↓ soft-deleted vaults live in a separate list, not the normal resource list</i>
+    <b>az keyvault purge -n kv-shop-staging --location eastus2</b>
+    <i>↓ this is the only way to release the name early — waiting out the retention window also works</i>
+    <b>Now the same Bicep template can recreate the vault under that name</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Resource group deletion is a lifecycle boundary, not a purge guarantee.</b> A handful of Azure
+  services — Key Vault, and others that opted into soft-delete for compliance reasons — protect
+  themselves from accidental permanent loss even when their parent resource group is deleted out from
+  under them. The resource group doesn't know or care; from its point of view, the delete succeeded.
+</div>
+
+<div class="hf-note">A resource group delete is <b>"gone from your sight," not "gone."</b> Soft-deleted
+resources are like a shredded document that a records-retention policy still requires you to keep the
+shreds of for 90 days — you can't see it on your desk, and you still can't hand that exact folder name to
+someone new until the retention clock runs out or someone signs off on destroying it early.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I deleted the whole resource group. Why does creating a vault with the same name still fail?</p></div>
+  <div class="hf-bub right"><span class="who">Key Vault</span><p>Because I never actually disappeared. Your resource group only asked ARM to remove me from the group's contents — I have my own soft-delete policy that ARM has to respect.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So where am I supposed to look for you?</p></div>
+  <div class="hf-bub right"><span class="who">Key Vault</span><p><code>az keyvault list-deleted</code> — a separate list the resource group blade never shows you.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">A vault doesn't have two states. It has three.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Vault is created inside a resource group, name reserved</span><span class="tag">active</span></li>
+    <li class="open"><span>You (or a resource group delete) delete the vault</span><span class="tag">delete</span></li>
+    <li><span>Vault enters soft-deleted state — recoverable, name still reserved</span><span class="tag">soft-deleted</span></li>
+    <li class="open"><span>You can <code>az keyvault recover</code> it back to active, or purge it</span><span class="tag">branch point</span></li>
+    <li><span>Purge — explicit, or automatic once retention (7–90 days) elapses</span><span class="tag">purge</span></li>
+    <li class="open"><span>Name finally released — only now can a new vault reuse it</span><span class="tag">gone</span></li>
+  </ol>
+  <p class="hf-annot">Step four is the one nobody plans for: a resource group delete pushes every vault
+  inside it to step three whether you meant to or not, and nothing forces you to make the step-four
+  decision before you try to redeploy.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Active</span>
+      <span class="go"><em>delete (yours, or the RG's)</em> <span class="arrow">→</span> soft-deleted</span></div>
+    <div class="stt"><span class="nm">Soft-deleted</span>
+      <span class="go"><em>recover</em> <span class="arrow">→</span> back to Active</span></div>
+    <div class="stt"><span class="nm">Purged</span>
+      <span class="go"><em>purge, or retention elapses</em> <span class="arrow">→</span> name released</span></div>
+  </div>
+  <p class="hf-annot">Read it as a loop with an exit ramp: a vault only leaves "reserved" entirely through
+  the purge state. Deleting the resource group is just one of the paths into "soft-deleted" — it isn't a
+  shortcut to "purged."</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">You deleted <code>rg-shop-staging</code> last month, including a Key Vault named
+  <code>kv-shop-staging</code>. Today's Bicep redeploy of that exact template fails with
+  <code>VaultAlreadyExists</code>, even though the resource group and everything you can see in the
+  portal is empty. What's actually going on?</p>
+  <button type="button">The Bicep template has a cached deployment lock from last month that needs to be cleared first</button>
+  <button type="button">The vault is soft-deleted, not gone — its globally unique name stays reserved until you purge it or the retention window elapses</button>
+  <button type="button">You need to re-run az login because your Entra token expired between deployments</button>
+  <p class="why" data-for="0">Deployment locks block changes to existing resources, not the creation of new ones, and they don't survive a resource group deletion — there's nothing left to lock. This doesn't explain a name-collision error on a resource group that's genuinely empty.</p>
+  <p class="why" data-for="1">Right — Key Vault's soft-delete is mandatory, so a resource group delete only moves the vault to a recoverable state; its DNS-unique name (<code>*.vault.azure.net</code>) stays reserved the whole time. Purge it, or wait out the retention window, before you can reuse the name.</p>
+  <p class="why" data-for="2">An expired token produces a 401 on the deployment call itself, not a resource-naming conflict — and <code>az deployment group create</code> would fail immediately on authentication, not partway through resolving the vault resource.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"Delete" rarely means what the UI implies it means.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A soft-deleted row in your own schema</h4>
+    <p>Plenty of Spring services do the same thing on purpose: a <code>deleted_at</code> column instead
+    of a real <code>DELETE</code>, so a unique constraint on <code>email</code> still blocks a new signup
+    with the same address until someone purges the old row. The parent "account closed" workflow looks
+    complete; the unique index doesn't agree yet.</p>
+    <div class="hf-scatter"><span>logically gone still means physically present to a constraint</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>An S3 bucket name after you delete the bucket</h4>
+    <p>S3 bucket names are also globally unique and also don't release instantly — a recently deleted
+    bucket name can stay unavailable to anyone (including you) for a stretch after deletion, for the same
+    underlying reason: the namespace is shared and the platform won't hand out a name it isn't fully
+    certain is free.</p>
+    <div class="hf-scatter"><span>global uniqueness outlives the resource that claimed it</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Revoking a user in Entra ID vs deleting their account</h4>
+    <p>Disabling a user's sign-in still leaves the object (and its object ID, group memberships, and
+    audit trail) in the tenant; only a hard delete — followed by its own 30-day recycle-bin window —
+    actually frees things like a reused UPN. "Removed from view" and "gone" are two different operations
+    with two different timelines here too.</p>
+    <div class="hf-scatter"><span>disabled, deleted, and purged are three different states</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> every Azure action flows through one front door, ARM, which
+  authenticates you via Entra ID, checks RBAC at a scope, and routes to a resource provider — and
+  resource groups give you one lifecycle unit to create and delete together. <b>The one new sentence
+  this block adds:</b> a handful of resource types opt out of that clean "delete the group, everything
+  dies" story via mandatory soft-delete, and Key Vault is the one that will bite you on a name you
+  thought you'd freed up.
+</div>
+
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
@@ -260,6 +399,7 @@ DevHubCodeWalk.mount('#cw-az',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

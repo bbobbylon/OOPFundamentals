@@ -55,7 +55,112 @@
     <div class="intro-ciam"><span class="tag">Go interfaces vs Java/Spring:</span> Java needs <code>class PingClient implements IdpClient</code>; Go needs nothing — having the right methods is enough, so you can wrap a third-party type in your own interface <em>without touching its source</em> (in Spring you'd need an adapter or subclass). TypeScript's structural typing works the same way. And mocking is trivial: define a test interface with just the method you need and implement it inline — <code>type mockIdp struct{}; func (m *mockIdp) CreateUser(...) (*User, error) { return &amp;User{}, nil }</code>.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">Or: the == that passes every test you wrote and panics on the first slice it meets.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Comparing two interface values typechecks. It even runs — for months — until one of them turns out to hold a slice.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">A settings-diff helper that panics only in production</div>
+  <p>A generic config-change detector fires a webhook to Ping/Entra whenever a tenant setting changes: <code>func changed(old, new interface{}) bool { return old != new }</code>. For months every setting flowing through it has been a string, an int, or a bool — all fine, all comparable. Local tests use exactly those types. It ships, and it works.</p>
+  <p>Then someone adds an <code>AllowedRedirectURIs []string</code> setting. The first time two configs holding that key get compared, the program panics: <code>runtime error: comparison of uncomparable type []string</code> — not a wrong answer, not a silent skip, a full panic that kills the goroutine handling the webhook dispatch.</p>
+  <div class="hf-scatter">
+    <span>compiles ✓</span>
+    <span>unit tests (string/int/bool settings) pass every run ✓</span>
+    <span>the panic is a []string value ⚠</span>
+  </div>
+  <p class="hf-foot">interface{} promises "any value." == only promises "any COMPARABLE value" — and the compiler can't tell those apart until the value shows up at runtime.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Guard interface comparisons before they reach ==</div>
+  <div class="hf-ladder">
+    <b>Check the dynamic type before comparing — a type switch, or reflect.TypeOf(v).Comparable() — for anything that arrived as interface{} from an open-ended source</b>
+    <i>↓ catches slices, maps, and funcs before they ever reach ==</i>
+    <b>Or swap == for reflect.DeepEqual when the values might not be plain-comparable</b>
+    <i>↓ DeepEqual walks the value structurally instead of using ==, so slices and maps are fine — at the cost of being slower and treating nil vs empty differently</i>
+    <b>And better still, push the check back to compile time: accept a generic comparable type parameter (Go 1.18+) instead of interface{} wherever the caller controls the type</b>
+    <i>↓ comparable as a type constraint makes an uncomparable type a build error, not a 2 a.m. page</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>== on interface values is a runtime bet, not a compile-time guarantee.</b> The compiler accepts <code>a == b</code> whenever both operands are statically interface-typed, because interface{} is nominally comparable — but it has no idea what concrete type will actually be inside at runtime. Whether that bet pays off is decided by whatever value shows up in production traffic, not by anything visible in the source you're looking at.
+</div>
+
+<div class="hf-note">Comparing two interface{} values with == is judging two mystery boxes by putting them on a scale without opening them — that works fine as long as both boxes hold something with a weight. Hand the scale a cloud of gas instead of a person (a slice, a map, a func), and it doesn't say "heavier" or "lighter" — it doesn't have an answer for that shape of thing, so it breaks instead of guessing.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>But interfaces ARE comparable — the Go spec says so. Why does my code panic then?</p></div>
+  <div class="hf-bub right"><span class="who">The Go spec</span><p>I said interface values are comparable IF their dynamic type is comparable. A slice, a map, and a function value are never comparable — in an interface or out of one. I don't check that for you at compile time, because at compile time your interface{} variable's dynamic type doesn't exist yet.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So this can pass code review, pass every test I wrote, and still blow up?</p></div>
+  <div class="hf-bub right"><span class="who">The Go spec</span><p>Yes — the moment traffic sends a type you haven't compared before. That's not a bug in your code. That's == doing exactly what I documented, on a value you didn't anticipate.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Walk what actually happens when == reaches down into two interface{} values holding a []string.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span><code>changed(old, new interface{})</code> receives two arguments, each boxed as a (type, data) pair</span><span class="tag">boxed</span></li>
+    <li class="open"><span><code>old != new</code> compiles cleanly — both operands are statically type interface{}, and interface{} claims to support ==</span><span class="tag">compiles</span></li>
+    <li><span>At runtime, Go compares the two dynamic TYPE words first: both are []string, so it proceeds to compare the dynamic values</span><span class="tag">types match</span></li>
+    <li class="open"><span>To compare the values it needs a per-type equality function — but slices were deliberately left out of == entirely, so no such function exists</span><span class="tag">no eq func</span></li>
+    <li><span>Instead of silently returning false, the runtime panics: "comparison of uncomparable type []string"</span><span class="tag">panics</span></li>
+    <li class="open"><span>The panic unwinds whatever goroutine called changed() — the webhook dispatcher handling that config update dies mid-request</span><span class="tag">goroutine dies</span></li>
+  </ol>
+  <p class="hf-annot">Step 4 is the whole story: Go doesn't defer the "is this comparable" check to compile time because it CAN'T — the static type of both operands is just interface{}. It defers the check to the exact moment two dynamic values that happen to be slices actually meet an ==, which can be the first day, the hundredth day, or never, depending purely on what data flows through.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">old != new evaluated where both hold a []string<small>changed(old, new interface{})</small></div>
+    <div class="arrow">what actually happens →</div>
+    <div class="opts">
+      <span>returns true or false, like any other interface compare</span>
+      <span class="on">panics: comparison of uncomparable type []string</span>
+      <span>the compiler catches it at build time instead</span>
+    </div>
+  </div>
+  <p class="hf-annot">There's no fourth option where this quietly does the "sensible" thing. Go's designers chose to leave slices, maps, and funcs out of == entirely — rather than defining some structural equality for them — so the interface-comparison rule stays simple: compare the dynamic types, then panic if the runtime has no equality function for that type. The panic is the honest answer; a silently wrong true/false would be the dangerous one.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A settings-diff helper does <code>func changed(old, new interface{}) bool { return old != new }</code>. It's used for months comparing strings and ints without issue. Then a caller passes two <code>[]string</code> values for a redirect-URI allowlist. What happens?</p>
+  <button type="button">It returns true, because the two slices are different objects in memory.</button>
+  <button type="button">It panics at runtime: comparison of uncomparable type []string.</button>
+  <button type="button">It returns false, because Go treats unequal slice headers as equal by default.</button>
+  <p class="why" data-for="0">That's the pointer-identity illusion — Go isn't quietly falling back to comparing memory addresses here. == on two interface values holding []string doesn't return a boolean at all; the runtime panics before it gets the chance to compare anything, because slices were deliberately left out of ==.</p>
+  <p class="why" data-for="1">Correct — the Go spec is explicit: comparing two interface values whose dynamic type is identical but not itself comparable (slices, maps, funcs) panics at runtime, not compile time. The compiler let it through because interface{} is nominally comparable — it just doesn't know yet what's inside.</p>
+  <p class="why" data-for="2">There's no silent "equal by default" behavior for slices anywhere in Go — == on slices isn't defined at all, whether direct or through an interface. If this were true, dedup logic built on it would be quietly wrong instead of loudly panicking, which is arguably worse but isn't what actually happens.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"The check only exists once the wrong kind of value shows up" is a recurring shape.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Java's unchecked generics and ClassCastException</h4>
+    <p>Casting <code>List&lt;Object&gt;</code> to <code>List&lt;String&gt;</code> compiles with an unchecked warning and runs fine — type erasure means the compiler can't verify it — until you call <code>.get(0)</code> and the actual element isn't a String, throwing a ClassCastException far from where the cast happened.</p>
+    <div class="hf-scatter"><span>the compiler defers what it can't verify to the exact moment of use</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A CIAM claims object used as a cache key without equals()/hashCode()</h4>
+    <p>A UserClaims POJO returned from Ping or Entra, used as a Map key without overriding equals()/hashCode(), silently falls back to identity comparison — every lookup misses, with no exception anywhere, unlike Go's loud panic for the same family of mistake.</p>
+    <div class="hf-scatter"><span>same root cause, quieter failure — wrong instead of crashed</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Python's unhashable types</h4>
+    <p>Putting a list into a set or using one as a dict key raises <code>TypeError: unhashable type: 'list'</code> — lists are mutable, so Python refuses to let them stand in for a hashable key, and you only find out the moment you actually try.</p>
+    <div class="hf-scatter"><span>a type-level rule enforced only when the specific incompatible value shows up</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Go interfaces are satisfied implicitly by having the right methods, an interface value is a (type, data) pair where a nil pointer inside is NOT a nil interface, and embedding gives Go composition instead of inheritance (io.Reader/io.Writer being the payoff). <b>The one new sentence this block adds:</b> comparing two interface values with == is safe only when their shared dynamic type is itself comparable — hand it a slice, a map, or a function and the panic doesn't happen at compile time, it happens the first time that exact value shows up at runtime.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="giSeg">
@@ -259,6 +364,7 @@ DevHubCodeWalk.mount('#cw-goiface',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

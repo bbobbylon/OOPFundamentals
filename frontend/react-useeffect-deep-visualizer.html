@@ -58,7 +58,111 @@
     <div class="intro-ciam"><span class="tag">CIAM React app:</span> A token-refresh interval needs cleanup: <code>useEffect(() =&gt; { const id = setInterval(refreshAccessToken, 4*60*1000); return () =&gt; clearInterval(id) }, [])</code> — without it, a logged-out component keeps refreshing a dead session forever. A real-time status WebSocket (<code>const ws = new WebSocket(url); ... return () =&gt; ws.close()</code>) must close the old socket before opening a new one when <code>url</code> changes (multi-tenant IDP switching). For plain HTTP user data, TanStack Query handles all of this — prefer it over manual <code>useEffect</code> fetching.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">Or: the ref you reached for specifically to dodge a stale closure — closed over stale anyway.</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You read the docs, you used a ref instead of state so your effect wouldn't see an old value, and your cleanup function disconnects using the OLD value anyway.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The socket that disconnects with yesterday's token</div>
+  <p>Your session token rotates every few minutes, so you store it in a ref (<code>tokenRef</code>) instead of state — refs don't trigger re-renders, and reading <code>.current</code> always gets you the live value, which is exactly what you want for a background socket connection. Inside the effect: <code>const token = tokenRef.current; const ws = connect(token); return () =&gt; disconnect(token);</code>.</p>
+  <p>The component unmounts twenty minutes later, after the token has rotated three times. The cleanup fires — and disconnects using the FIRST token, the one captured back when the effect originally ran. <code>const token = tokenRef.current</code> reads the ref's value once and copies it into a plain local variable. That variable is now just an ordinary closed-over value, frozen at effect-setup time, no different from reading <code>props.token</code> directly. The ref stopped protecting you the moment you dereferenced it into something else.</p>
+  <div class="hf-scatter">
+    <span>tokenRef stays live ✓</span>
+    <span>connect() uses the fresh token ✓</span>
+    <span>the local variable inside cleanup ⚠</span>
+  </div>
+  <p class="hf-foot">You escaped the stale-closure trap on line one and walked straight back into it on the next line.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Read <code>.current</code> again, at the moment you actually need it</div>
+  <div class="hf-ladder">
+    <b>Don't snapshot the ref into a local variable before you're done with it</b>
+    <i>↓ a local variable is a value, frozen the instant it's assigned; a ref is a box you can still open later</i>
+    <b>Read <code>tokenRef.current</code> INSIDE the cleanup function itself, at the point you call <code>disconnect()</code></b>
+    <i>↓ the cleanup closure keeps a reference to the REF OBJECT, and <code>.current</code> is read fresh when cleanup actually runs — not when it was defined</i>
+    <b>If the setup and teardown genuinely need the SAME value (not the latest one), that's a sign you want a local <code>const</code>, not a ref, at all</b>
+    <i>↓ pick the tool that matches what you actually need: ref for "always current," local variable for "frozen at this moment"</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A ref only stays "live" for as long as you keep reading <code>.current</code> through it — the instant you copy that value into a plain variable, you've made a snapshot, and a snapshot is exactly as stale as the render that took it.
+</div>
+
+<div class="hf-note">Think of a ref like a shared whiteboard, and a local variable like a photo of it. Reading <code>ref.current</code> is walking up and reading the whiteboard right now. Writing <code>const x = ref.current</code> is taking a <b>photo</b> — and a photo doesn't update when someone erases the board and writes something new.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I used a ref specifically because refs don't go stale. Why did my cleanup disconnect with the wrong token?</p></div>
+  <div class="hf-bub right"><span class="who">The ref, personified</span><p>I never went stale — I'm holding the newest token right now. But you didn't ask me for it when you needed it. You asked me once, wrote the answer down, and kept reading your own notes for the next twenty minutes.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So the closure captured my note, not you?</p></div>
+  <div class="hf-bub right"><span class="who">The cleanup closure</span><p>Exactly. I captured whatever variable was in scope when I was created. If that variable is <code>tokenRef</code> itself, I can still ask it for the latest value later. If it's <code>token</code> — a copy — I'm stuck with what it was worth back then.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Trace the token from the effect's first run to the moment it disconnects.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Component mounts; effect runs with <code>[]</code> deps (runs once)</span><span class="tag">setup #1</span></li>
+    <li class="open"><span><code>const token = tokenRef.current</code> copies the CURRENT value into a plain variable</span><span class="tag">snapshot taken</span></li>
+    <li><span>The cleanup function closes over that variable, <code>token</code> — not over <code>tokenRef</code></span><span class="tag">closure captured</span></li>
+    <li class="open"><span>Minutes pass; a refresh call does <code>tokenRef.current = newToken</code></span><span class="tag">ref mutated</span></li>
+    <li><span>The closure's copy of <code>token</code> is unaffected — it was never connected to the ref after assignment</span><span class="tag">snapshot frozen</span></li>
+    <li class="open"><span>Unmount runs the cleanup: <code>disconnect(token)</code> sends the FIRST token, hours stale</span><span class="tag">stale disconnect</span></li>
+  </ol>
+  <p class="hf-annot">Step 2 is where it goes wrong, long before anything visibly breaks. The moment you write <code>const token = tokenRef.current</code>, you've traded a live reference for a dead copy — and nothing in the syntax warns you, because reading <code>.current</code> is exactly what you're "supposed" to do with a ref. The bug is not reading it; it's reading it too early and keeping the answer around.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Ref holds live value</span>
+      <span class="go"><em>you write .current into a local var</em> <span class="arrow">→</span> value is frozen as a snapshot</span></div>
+    <div class="stt"><span class="nm">Snapshot sits in a closure</span>
+      <span class="go"><em>time passes, ref mutates elsewhere</em> <span class="arrow">→</span> snapshot never hears about it</span></div>
+    <div class="stt"><span class="nm">Closure finally runs (cleanup/unmount)</span>
+      <span class="go"><em>uses the snapshot, not the ref</em> <span class="arrow">→</span> acts on stale data</span></div>
+  </div>
+  <p class="hf-annot">A ref only pays off if every read goes through <code>.current</code> at the LAST possible moment. The instant you extract a value and hand it to a closure by name, you've re-created the exact staleness problem the ref existed to solve — the cycle above just relocates the trap from "state in a dependency array" to "a local variable inside an effect."</p>
+</div>
+
+<div class="hf-check" data-answer="0">
+  <p class="q"><code>useEffect(() =&gt; { const handler = onMessageRef.current; socket.on('msg', handler); return () =&gt; socket.off('msg', handler); }, []);</code> — <code>onMessageRef.current</code> is updated by a separate effect every render, so it should always be the newest handler. Six renders later, a message arrives. Which handler fires?</p>
+  <button type="button">The handler from render #1 — the one captured in the local variable <code>handler</code> when this effect first ran</button>
+  <button type="button">The handler from render #6 — because <code>onMessageRef.current</code> was read again by React automatically</button>
+  <button type="button">A random handler, because refs are not safe to read inside effects</button>
+  <p class="why" data-for="0">Right — <code>handler</code> is a plain local variable assigned once, at effect setup, from whatever <code>onMessageRef.current</code> happened to hold that render. <code>socket.on</code> and <code>socket.off</code> both close over that same frozen copy for the entire lifetime of this effect (which never re-runs, thanks to <code>[]</code>).</p>
+  <p class="why" data-for="1">React never re-reads anything on your behalf between effect runs — there's no re-render here to trigger that, and even if there were, this effect's <code>[]</code> deps mean it only runs once. Nothing re-executes the <code>const handler = ...</code> line after mount.</p>
+  <p class="why" data-for="2">Refs are perfectly safe to read inside effects — that's their whole purpose. The bug isn't reading the ref; it's copying its value into a variable that a later closure keeps reusing instead of reading the ref again.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">"I captured a snapshot when I meant to keep a live pointer" isn't unique to React refs.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>Angular: subscribing to a BehaviorSubject vs reading <code>.value</code> once</h4>
+    <p><code>this.latest = this.authState$.value</code> inside <code>ngOnInit</code> freezes <code>latest</code> at whatever the auth state was at startup — a login or token refresh later never touches it. Only an active <code>.subscribe()</code> (or the async pipe) keeps reading the live stream, the same way only re-reading <code>ref.current</code> keeps a closure current.</p>
+    <div class="hf-scatter"><span>a one-time read is a snapshot, not a subscription</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Spring: injecting a value instead of a provider</h4>
+    <p><code>@Value("${feature.flag}")</code> captured once at bean construction won't reflect a config change at runtime, but injecting <code>Environment</code> (or a <code>@RefreshScope</code> bean) and calling <code>.getProperty()</code> each time reads the live value — the exact "read now vs read once" split between a ref and a local variable.</p>
+    <div class="hf-scatter"><span>inject the accessor, not the snapshot, if it must stay current</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Java: caching a collection's <code>.size()</code> before a loop mutates it</h4>
+    <p><code>int n = list.size(); for (int i = 0; i &lt; n; i++) { list.remove(0); }</code> uses <code>n</code> as a frozen headcount while the list itself keeps shrinking underneath it — the loop bound is a snapshot, the list is the live thing, and mixing them up produces an off-by-many bug that "looks" correct at a glance.</p>
+    <div class="hf-scatter"><span>a captured number stops tracking the thing it was measured from</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> an effect synchronizes your component with something outside React, deps decide when it re-runs, and cleanup undoes the previous run before the next one (or on unmount) — with fetch races and dependency-identity loops as the two classic traps. <b>The one new sentence this block adds:</b> a ref only stays "live" through <code>.current</code> reads taken at the last possible moment — copy its value into a local variable early, and your cleanup closure is exactly as stale as the closure you used a ref to avoid.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
       <div class="userseg" id="ueSeg">
@@ -251,6 +355,7 @@ DevHubCodeWalk.mount('#cw-ued',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

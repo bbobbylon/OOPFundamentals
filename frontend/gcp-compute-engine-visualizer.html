@@ -59,7 +59,112 @@
     <div class="intro-ciam"><span class="tag">CIAM in production:</span> The service account attached to an Instance Template is how a fleet of VMs authenticates to the rest of GCP — Cloud SQL, Secret Manager, Pub/Sub — without a single credential ever appearing in the startup script or baked into the image. The metadata server (<code>http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token</code>) hands back a short-lived OAuth token to whatever process asks from inside the VM, the same pattern Cloud Run and GKE use — see <code>gcp-iam-secrets-visualizer.html</code> for the full identity picture.</div>
   </div>
 
-  <div style="margin:0 0 28px">
+  <p class="hf-deck">or, the identity you never configured turning out to be the most powerful one in the project</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">You never assigned this VM a service account — which is exactly why it might be the most dangerous one running in your project.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The scratch VM that "just worked" because nobody passed --service-account</div>
+  <p>You spin up a quick VM to test a batch job: <code>gcloud compute instances create scratch-vm --machine-type=e2-medium --image-family=debian-12 --image-project=debian-cloud</code>. No <code>--service-account</code> flag — you're not calling any GCP APIs from this box yet, so why bother? The VM boots, the script runs, everything works.</p>
+  <p>What actually happened: GCP silently attached the project's Compute Engine default service account to it — the same account every VM gets when you don't name one — and unless your organization has explicitly locked this down, that account carries the Editor role on the entire project. Editor can create, modify, or delete almost anything: Cloud SQL instances, Cloud Storage buckets, Pub/Sub topics, other VMs. Your "quick test box" can, by default, reach nearly every resource you own.</p>
+  <div class="hf-scatter">
+    <span>the gcloud command syntax ✓</span>
+    <span>the VM booting and running the script ✓</span>
+    <span>the identity attached to it by default ⚠</span>
+  </div>
+  <p class="hf-foot">The absence of a --service-account flag is not the absence of a service account — it's a decision, made for you, in the most permissive direction available.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Name a purpose-built, least-privilege service account every time</div>
+  <div class="hf-ladder">
+    <b>Create a dedicated service account for this workload, granted only the roles it actually needs</b>
+    <i>↓ e.g. roles/storage.objectViewer for a job that only reads one bucket — not Editor on the whole project</i>
+    <b>Attach it explicitly with --service-account and scope --scopes to match</b>
+    <i>↓ IAM role sets the ceiling; OAuth scope decides what a token issued to this VM can actually exercise — both have to agree before anything works</i>
+    <b>And where your org allows it, disable automatic Editor grants for the default account via the iam.automaticIamGrantsForDefaultServiceAccounts organization policy</b>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> Every Compute Engine VM authenticates as somebody, and if you didn't choose who, GCP chose the default service account for you — an identity built for a frictionless first tutorial, not for a production workload about to process untrusted input.
+</div>
+
+<div class="hf-note">Google's own hardening documentation has a page titled "Restrict use of the Compute Engine default service account." <b>When a platform's security guide has to tell you to stop using its own default, the default was never the safe choice.</b></div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I never granted this VM any permissions. How can it reach Cloud SQL and Pub/Sub?</p></div>
+  <div class="hf-bub right"><span class="who">The metadata server</span><p>You never asked me for a token — but if any process on this VM does, I hand back one scoped to whatever service account is attached. Nobody told me to attach anything else, so I used the default.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>But I didn't pick the default on purpose.</p></div>
+  <div class="hf-bub right"><span class="who">The project's IAM policy</span><p>Doesn't matter. The moment the Compute Engine API was enabled on this project, I already had a binding granting that default account the Editor role. Your VM inherited a decision made before you ever typed gcloud.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Two separate gates decide what a VM can actually do — and leaving either one unconfigured silently defaults to "wide open."</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The Compute Engine API is enabled on the project</span><span class="tag">project setup</span></li>
+    <li class="open"><span>GCP auto-creates PROJECT_NUMBER-compute@developer.gserviceaccount.com and, by default, binds it to the Editor role</span><span class="tag">default identity</span></li>
+    <li><span>You create a VM without --service-account</span><span class="tag">the missing flag</span></li>
+    <li class="open"><span>The VM is attached to that default account — Editor-level IAM ceiling, whether you intended it or not</span><span class="tag">silent attach</span></li>
+    <li><span>The VM's OAuth scopes, set separately at creation time, decide what a requested token can actually claim</span><span class="tag">the second gate</span></li>
+    <li class="open"><span>Broad scopes plus Editor role means a token capable of nearly anything in the project, issued to any process that simply asks the metadata server</span><span class="tag">both gates open</span></li>
+  </ol>
+  <p class="hf-annot">Step five is the one people don't expect: IAM role and OAuth scope are two independent locks, and GCP requires BOTH open before a capability is usable. A VM with Editor-level IAM but scopes limited to read-only endpoints genuinely cannot write anything — real defense in depth, right up until someone picks "Allow full access to all Cloud APIs" in the console because it made the long scope checklist disappear.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">which identity does an unconfigured VM get?<small>gcloud compute instances create, no --service-account flag</small></div>
+    <div class="arrow">what actually happens →</div>
+    <div class="opts">
+      <span>a token with zero permissions</span>
+      <span class="on">the project's default service account, Editor role attached</span>
+      <span>the request is rejected until a service account is configured</span>
+    </div>
+  </div>
+  <p class="hf-annot">There is no fourth option, and the middle one isn't a guess — it's what GCP does by default, silently, on every VM that skips the flag. The console's "Allow default access" scope setting is not the cautious-sounding option it appears to be; it's this one.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A teammate spins up a Compute Engine VM with no <code>--service-account</code> flag to "quickly test a script," planning to lock it down properly later. The VM is later compromised through an unpatched web server running on it. Assuming the org has never touched the default service account's IAM bindings, what is the actual blast radius?</p>
+  <button type="button">Nothing beyond the VM itself — GCP VMs have no network access to other GCP resources unless you explicitly configure VPC peering</button>
+  <button type="button">Only resources sharing the same network tag as this VM, since IAM roles in GCP are scoped per network tag by default</button>
+  <button type="button">Whatever the project's Editor role can reach — most Cloud SQL, Storage, Pub/Sub, and Compute resources in the project — because the VM inherited the default service account, which carries Editor unless that grant was explicitly disabled</button>
+  <p class="why" data-for="0">GCP VMs absolutely can reach other GCP resources over the internet using their attached service account's token — that token is the entire mechanism the metadata server exists to serve. Network isolation and IAM identity are two separate, independent controls.</p>
+  <p class="why" data-for="1">Network tags drive firewall rules, not IAM permissions — GCP has no concept of per-tag IAM scoping. This borrows a real GCP feature (tags) and attaches the wrong job to it.</p>
+  <p class="why" data-for="2">Exactly — a compromise inherits whatever the attached identity can do, and an unconfigured VM's identity is the default service account, Editor on the whole project by default. "I'll lock it down later" quietly becomes "the whole project, right now" the instant that VM is compromised.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A permissive default that nobody explicitly chose is one of the oldest traps in access control.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>An OAuth client that never specifies a scope parameter</h4>
+    <p>Skip the <code>scope</code> parameter on an authorization request and several identity providers — Okta and Auth0 among them — don't fail closed, they fail open: they issue a token carrying every scope configured for that client application, not the minimum the current request needs. Same shape as the default service account: omitting a choice doesn't mean "no access," it means "whatever was configured as the ceiling."</p>
+    <div class="hf-scatter"><span>identity systems default to permissive, not restrictive, when you say nothing</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Kubernetes' default ServiceAccount, auto-mounted into every pod</h4>
+    <p>Unless a pod spec sets <code>automountServiceAccountToken: false</code>, Kubernetes mounts the namespace's <code>default</code> ServiceAccount token into it automatically. In clusters where that <code>default</code> account has ever been bound to a permissive ClusterRole — common in dev clusters nobody hardened — any compromised pod can call the Kubernetes API with that identity, no extra configuration required.</p>
+    <div class="hf-scatter"><span>the platform mounts a credential whether or not the workload asked for one</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>PostgreSQL's pre-15 default PUBLIC schema privilege</h4>
+    <p>For years, every newly created PostgreSQL database granted <code>CREATE</code> on the <code>public</code> schema to the built-in <code>PUBLIC</code> role — meaning any authenticated user, with zero explicit grants, could create objects in it. PostgreSQL 15 finally reversed this default; before that, "revoke CREATE on schema public from PUBLIC" was standard hardening advice precisely because nobody had asked for that access, and it was there anyway.</p>
+    <div class="hf-scatter"><span>a default privilege is still a privilege, granted by nobody in particular</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> Instance Templates plus Managed Instance Groups turn Compute Engine into a self-healing, autoscaling fleet — templates make VMs deterministic and versioned, MIGs add autoscaling, health-check-driven auto-heal, and rolling updates, and Spot VMs trade a 30-second eviction notice for a steep discount.
+  <b>The one new sentence this block adds:</b> none of that fleet automation asks what identity each VM runs as, and the identity GCP hands you when you don't choose one is, by default, far more powerful than the workload about to use it.
+</div>
+
+<div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">scenario:</span>
       <span class="userseg" id="gceSeg">
@@ -264,6 +369,7 @@
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

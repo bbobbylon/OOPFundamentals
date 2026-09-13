@@ -101,7 +101,112 @@
     </div>
   </div>
 
-  <!-- ── EXTREME-VIZ HERO ── -->
+  <p class="hf-deck">or, how an unrelated bug in your app can hand a stranger your EC2 instance's AWS credentials</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The security group is locked down, the IAM role has exactly the permissions it needs, and none of that matters if the metadata endpoint will hand your credentials to anyone who politely asks.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">The thumbnail-preview feature that leaked the whole instance role</div>
+  <p>A Spring Boot CIAM service has an admin feature: paste a URL, and the server fetches it to generate a thumbnail preview. The security group only allows inbound traffic from the ALB. The IAM role attached to the instance follows least privilege — <code>s3:GetObject</code> on exactly one bucket, nothing else. Every control anyone checked off looks correct.</p>
+  <p>None of it matters, because IMDSv1 is still enabled, and the same metadata address this page already used to poll for a Spot interruption — <code>169.254.169.254</code> — will hand its live, temporary credentials to any plain, unauthenticated GET from inside the instance. Point the "fetch a preview from this URL" field at <code>http://169.254.169.254/latest/meta-data/iam/security-credentials/&lt;role-name&gt;</code> and the app's own server-side fetch dutifully returns the AccessKeyId, SecretAccessKey, and SessionToken straight back in the "thumbnail" response. This is the exact mechanism behind a real, well-documented breach: in 2019, a misconfigured reverse proxy was tricked into querying IMDS this way and handed over an instance role's credentials.</p>
+  <div class="hf-scatter">
+    <span>security group locked to the ALB ✓</span>
+    <span>IAM role scoped to one bucket ✓</span>
+    <span>IMDS version left on default ⚠</span>
+  </div>
+  <p class="hf-foot">The credentials were exactly as narrow as they were supposed to be. The attacker didn't need broad permissions — they needed one unauthenticated GET request to a link-local address your own app was already willing to make on someone's behalf.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Require IMDSv2 before you check anything else</div>
+  <div class="hf-ladder">
+    <b>Set HttpTokens to "required" on the instance or its Launch Template</b>
+    <i>↓ this disables IMDSv1 outright — a plain GET to the metadata endpoint is now refused</i>
+    <b>A caller must first PUT to /latest/api/token to get a session token</b>
+    <i>↓ an SSRF bug almost always lets an attacker control a GET URL, not add custom headers or switch the HTTP method — this alone blocks most real-world SSRF-to-IMDS exploits</i>
+    <b>Set HttpPutResponseHopLimit to 1</b>
+    <i>↓ this stops the token request from being proxied through an extra network hop, like a container runtime — a path some containerized workloads leave open otherwise</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> An IAM role scoped to least privilege only protects you if the credentials stay where they belong, and "stay where they belong" depends entirely on IMDSv2 being enforced — because until it is, any bug anywhere in the app that lets attacker input become a server-side URL is a straight line to those credentials, and that bug class (SSRF) is one of the most common in web applications. Least-privilege scoping limits the blast radius after a leak; it does nothing to stop the leak itself. The two protections are independent, and skipping either one leaves the other doing all the work alone.
+</div>
+
+<div class="hf-note">IMDSv1 doesn't ask who's asking. <b>IMDSv2 makes them prove it twice</b> — once for a token, once to use it.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>Our security group is locked to the ALB and this role can only touch one S3 bucket. What's actually at risk here?</p></div>
+  <div class="hf-bub right"><span class="who">The instance role's credentials</span><p>I don't check who's asking. I hand myself to whichever process on this box sends a GET — your reverse proxy, a cron job, or a stranger's URL your thumbnail feature just fetched for them.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So an SSRF bug anywhere in the app is basically a credentials leak?</p></div>
+  <div class="hf-bub right"><span class="who">IMDSv2</span><p>Only if I'm turned off. Require me, and that same SSRF bug can't add the header I need — it gets a 401 instead of your keys.</p></div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Here's the exact request path an SSRF bug walks to steal the instance role, and where IMDSv2 stands in the way.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Attacker finds a feature that fetches a URL server-side — thumbnail preview, webhook tester, PDF renderer</span><span class="tag">SSRF surface</span></li>
+    <li class="open"><span>They set that URL to the metadata endpoint's IAM credentials path for the instance's role</span><span class="tag">the payload</span></li>
+    <li><span>Under IMDSv1, the app's own server makes a plain GET — no special headers required</span><span class="tag">IMDSv1 path</span></li>
+    <li class="open"><span>IMDS returns the live AccessKeyId, SecretAccessKey, and SessionToken in the "preview" response</span><span class="tag">credentials leaked</span></li>
+    <li><span>Under IMDSv2 (HttpTokens required), that same bare GET is rejected outright</span><span class="tag">IMDSv2 path</span></li>
+    <li class="open"><span>The attacker would first need to PUT /latest/api/token with a custom header — something a typical SSRF bug simply cannot do</span><span class="tag">blocked</span></li>
+  </ol>
+  <p class="hf-annot">Compare steps 3 and 5: the SSRF bug itself is identical in both — same feature, same vulnerable code, same attacker-controlled URL. What changes is whether the metadata service accepts a bare GET, and that's a launch-time setting, not a property of how carefully the app was written.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">the security group — inbound locked to the ALB</span>
+      <div class="ring"><span class="lbl">the least-privilege IAM role — one S3 bucket, nothing else</span>
+        <div class="ring"><span class="lbl">the app code — a thumbnail-fetch feature, otherwise unrelated to security</span>
+          <div class="core">the metadata endpoint's HttpTokens setting<small>IMDSv1 (optional) vs IMDSv2 (required) — this is the layer that actually decides whether the SSRF bug walks away with real credentials</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Three layers out from the credentials all look like real security controls, because they are — but none of them is the layer an SSRF bug actually has to pass through. The bug already lives inside the innermost ring, so the security group and the IAM scoping are irrelevant to it. The only thing standing between an unrelated feature bug and a full credential leak is which mode the metadata endpoint happens to be running in.</p>
+</div>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">A Spring Boot CIAM service on EC2 has a security group that only allows inbound traffic from the ALB, and its instance role can only read from one S3 bucket. A routine pentest still walks away with the instance role's live temporary credentials. Which setting most likely let that happen?</p>
+  <button type="button">The security group's outbound rules were too permissive</button>
+  <button type="button">IMDSv1 was still enabled, and an SSRF-shaped feature in the app fetched the metadata endpoint on the attacker's behalf</button>
+  <button type="button">The IAM role had more permissions than it needed</button>
+  <p class="why" data-for="0">Outbound being wide open is the EC2 default and isn't the vector here — the credentials leaked through a GET request made from inside the instance to a link-local address, not through a gap in outbound firewall rules.</p>
+  <p class="why" data-for="1">Right. The credentials themselves were exactly as narrow as they should have been — the leak happened because IMDSv1 will answer an unauthenticated GET from any process on the box, and an SSRF-shaped feature made that GET on the attacker's behalf. IMDSv2 would have required a header no basic SSRF bug can add.</p>
+  <p class="why" data-for="2">The scenario states the role was already scoped to one bucket — so this contradicts the setup. More broadly, even a role this narrow can still be exfiltrated in full over IMDSv1; least privilege limits what an attacker can DO with stolen credentials, it does nothing to stop them being stolen in the first place.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A trusted caller with no identity check is the same bug wearing a different network address.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>An internal endpoint that trusts the VPC</h4>
+    <p>A Spring Boot service exposes <code>/internal/reset-password</code> with no auth check because "only other services inside our VPC can reach it." That's IMDSv1's exact reasoning, restated: network position stands in for identity. Anything that can reach the VPC — an SSRF bug, a compromised sidecar, a misconfigured proxy — inherits the same blanket trust the design assumed only trusted services would have.</p>
+    <div class="hf-scatter"><span>network position ≠ identity</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>The confused deputy problem</h4>
+    <p>Security's name for exactly this shape of bug: a program with more privilege than the party asking it to act gets tricked into spending that privilege on the asker's behalf. Your web server has network access to IMDS; the attacker doesn't. SSRF-to-IMDS is a confused deputy attack with a URL field as the trigger.</p>
+    <div class="hf-scatter"><span>privileged proxy, unprivileged puppeteer</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>XXE — XML external entity injection</h4>
+    <p>A server parses attacker-supplied XML and follows an external entity reference to a <code>file://</code> or internal <code>http://</code> URL, exfiltrating local files or reaching endpoints the outside world can't. Different parser, same story: the app has network or filesystem access the attacker doesn't, and a missing boundary lets attacker input redirect that access.</p>
+    <div class="hf-scatter"><span>SSRF's sibling, same root cause</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> EC2 gives you a virtual machine with a chosen instance type and AMI, a lifecycle that bills differently at each state, a user-data script to bootstrap it, and security groups to fence its network traffic. <b>The one new sentence this block adds:</b> a locked-down security group and a tightly-scoped IAM role both mean nothing if IMDSv1 is left enabled, because any SSRF-shaped bug anywhere in the app becomes a direct line to that role's live credentials — require IMDSv2 at launch, every time.
+</div>
+
+<!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
       <span class="lbl">Scenario</span>
@@ -456,6 +561,7 @@ function setEc2State(state) {
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

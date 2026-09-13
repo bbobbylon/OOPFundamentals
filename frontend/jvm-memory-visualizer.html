@@ -250,6 +250,125 @@ public class Main {
     </div>
 
     <h2>Generational GC — why it works</h2>
+<p class="hf-deck">or, exit code 137 — the out-of-memory that produces no <code>OutOfMemoryError</code></p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">The OOM panels above list four ways the JVM tells you it ran out of memory. This is the fifth way, and the JVM does not get to tell you anything.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle"><code>-Xmx</code> bounds the heap. The container limit bounds the <i>process</i>.</div>
+  <p>The pod has a 1 GB memory limit, so you set <code>-Xmx1g</code> and reason that the JVM now cannot exceed it. Then the pod dies with <b>exit code 137</b> — 128 plus signal 9, the kernel's OOM killer — and there is no stack trace, no <code>OutOfMemoryError</code>, and no heap dump, because <code>-XX:+HeapDumpOnOutOfMemoryError</code> only fires on a Java error and no Java error occurred. The process was shot.</p>
+  <p>The reason is that <code>-Xmx</code> caps one region and the kernel counts all of them. Everything else the JVM allocates is native memory outside the heap, and a modern JDK's own defaults show how much room that is: <code>ReservedCodeCacheSize = 251658240</code> — 240 MB for JIT-compiled code. <code>MaxMetaspaceSize = 18446744073709551615</code>, which is the JVM's way of writing "no limit at all". Thread stacks at roughly 1 MB each, so a 200-thread pool is another 200 MB that <code>-Xmx</code> never counted. And <code>MaxDirectMemorySize = 0</code>, meaning "default", and the default is <b>equal to the maximum heap</b> — so a Netty or NIO-heavy service can hold about <code>2 × -Xmx</code> before either limit complains.</p>
+  <p>Add them up and <code>-Xmx1g</code> in a 1 GB container is not conservative, it is an overcommit. <b>The heap graph looks perfectly healthy right up to the kill</b>, because the heap genuinely was healthy — that is the part that makes this so hard to diagnose. You are staring at the one region that was not the problem, and the region that was has no JVM metric on your dashboard at all.</p>
+  <div class="hf-scatter">
+    <span>the heap never filled ✓</span>
+    <span>GC pause times were fine ✓</span>
+    <span>no <code>OutOfMemoryError</code> anywhere ✓</span>
+    <span>native memory is outside <code>-Xmx</code> ⚠</span>
+    <span>the kernel kills, so there is no Java event ⚠</span>
+  </div>
+  <p class="hf-foot"><code>MaxRAMPercentage</code> defaults to 25 for a reason. The other 75% is not spare — it is the rest of the JVM.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">Size the process, then give the heap a share of it</div>
+  <div class="hf-ladder">
+    <b>Set <code>-XX:MaxRAMPercentage</code>, not <code>-Xmx</code>, in a container</b>
+    <i>↓ a percentage is computed from the cgroup limit the JVM actually reads, so it survives a change to the pod's limit; a hard-coded <code>-Xmx</code> silently becomes wrong the moment somebody edits the manifest, and nothing connects the two numbers</i>
+    <b>Leave real headroom — 25% to 50% depending on how much native memory the app uses</b>
+    <i>↓ a plain REST service with a small thread pool can take 75%; anything doing NIO, Netty, gRPC, compression, image work or a native driver is holding direct buffers, and those come out of the same 100%</i>
+    <b>And when it still gets killed, turn on Native Memory Tracking rather than guessing</b>
+    <i>↓ <code>-XX:NativeMemoryTracking=summary</code> plus <code>jcmd &lt;pid&gt; VM.native_memory summary</code> breaks the process down by category — heap, class, thread, code, GC, internal — which is the only view that shows the region that is actually growing</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>Every limit belongs to something, and the thing your limit belongs to is rarely the thing being killed.</b> <code>-Xmx</code> is a promise to the garbage collector about one region; the cgroup limit is a promise the kernel makes about the whole process; and the gap between them is where metaspace, thread stacks, code cache, direct buffers and the JVM's own C++ live. This is the same reasoning error as a connection-pool size that ignores the database's own connection cap, or a rate limit set per instance while the quota is per account: two numbers that look like they measure the same thing, measured at different boundaries.
+</div>
+
+<div class="hf-note"><b>Exit 137 with no stack trace is not a JVM error — it is the kernel.</b> If you are looking for an <code>OutOfMemoryError</code>, you will not find one, because nothing in Java ran after the signal.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>The limit is 1 GB and <code>-Xmx</code> is 1 GB. What else is there?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">The JVM</span>
+    <p>Metaspace, the code cache, one stack per thread, direct byte buffers, GC bookkeeping and my own native code. None of that is heap, so none of it is inside <code>-Xmx</code>. I will happily use every byte you gave the heap <i>and</i> all of those, because you told me the heap could have a gigabyte.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The kernel</span>
+    <p>And I do not know what a heap is. I count resident pages for the cgroup. When the total crosses the limit I send SIGKILL, which cannot be caught, handled or logged — that is what makes it a reliable last resort, and why you get 137 and nothing else.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Your dashboard</span>
+    <p>Worth admitting my part: I graph heap used, GC pauses and allocation rate, because those are the metrics the JVM exposes by default. Native memory is not one of them. My graphs were flat and green, which is true and completely beside the point.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps from a reasonable-looking Dockerfile to a restart loop with no error in it.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>The pod's limit is set to 1 GB, and <code>JAVA_OPTS</code> is given <code>-Xmx1g</code> to match it</span><span class="tag">looks careful</span></li>
+    <li class="open"><span>Startup: the heap reserves its space, metaspace loads the classes, and the JIT begins filling a code cache with 240 MB reserved</span><span class="tag">none of it counted by <code>-Xmx</code></span></li>
+    <li><span>Traffic arrives. The thread pool grows to 200, and each thread takes about 1 MB of stack — another 200 MB of native memory</span><span class="tag">still no heap pressure</span></li>
+    <li class="open"><span>The HTTP client allocates direct byte buffers. Their default cap is the max heap, so nothing in the JVM objects</span><span class="tag">a second gigabyte, permitted</span></li>
+    <li><span>Resident memory crosses 1 GB. The kernel sends SIGKILL, which cannot be caught — no shutdown hook, no dump, no log line</span><span class="tag">the process ends mid-instruction</span></li>
+    <li class="open"><span>The pod restarts. The dashboard shows heap at 40%, GC healthy, and a container that keeps dying for no visible reason</span><span class="tag">green graphs, dead service</span></li>
+  </ol>
+  <p class="hf-annot">Step 5 is worth understanding precisely, because it explains every missing artefact at once. SIGKILL is the one signal a process cannot install a handler for — so the JVM's shutdown hooks do not run, the heap dump on OOM does not fire, the final log lines never flush, and even the exit code has to be reconstructed by the supervisor as 128 + 9. <b>Every diagnostic you would normally reach for is implemented as "code that runs when something goes wrong", and here nothing ran at all.</b> That is why the fix has to be preventative — headroom and Native Memory Tracking before the fact — rather than forensic. There will be no evidence to examine afterwards, by design.</p>
+</div>
+
+<div class="hf-card hf-nest">
+  <p class="note">what the container limit actually contains &#8600;</p>
+  <div class="ring"><span class="lbl">cgroup memory limit — what the kernel counts and kills on</span>
+    <div class="ring"><span class="lbl">JVM process RSS — the JVM's own C++, GC structures, mapped files</span>
+      <div class="ring"><span class="lbl">native regions: metaspace (no default cap), code cache (240 MB reserved), ~1 MB per thread stack, direct byte buffers (default cap = max heap)</span>
+        <div class="core">the Java heap<small>the only ring <code>-Xmx</code> bounds — and the only one on your dashboard</small></div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Drawn this way the mistake becomes obvious in a sentence: <b>you set a limit on the innermost ring and assumed it constrained the outermost one.</b> The picture also tells you which lever to pull for each symptom — a rising heap with growing GC time is a Java memory leak and a heap dump will find it; flat heap with rising RSS is native, and only <code>jcmd VM.native_memory</code> will. And it explains why <code>-Xms</code> equal to <code>-Xmx</code> is good advice in a container for a different reason than people usually give: not just to avoid resize pauses, but so the heap's full claim is visible at startup rather than arriving later, on top of everything else that has grown since.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A Spring Boot pod has a 1 GB memory limit and runs with <code>-Xmx1g</code>. It restarts every few hours with exit code 137, and the heap graph never goes above 45%. What is happening?</p>
+  <button type="button">The heap is fragmenting, so the collector cannot satisfy a large allocation despite the used percentage looking low — the JVM throws <code>OutOfMemoryError: Java heap space</code> and the container exits</button>
+  <button type="button">A GC pause is exceeding the liveness probe timeout, so the orchestrator decides the pod is unhealthy and terminates it while the JVM is still running normally</button>
+  <button type="button">The kernel's OOM killer is sending SIGKILL because process memory — heap <i>plus</i> metaspace, code cache, thread stacks and direct buffers — crossed 1 GB, while the heap itself stayed comfortably inside <code>-Xmx</code></button>
+  <p class="why" data-for="0">Fragmentation of that kind would produce a real <code>OutOfMemoryError</code> with a stack trace and, with the flag set, a heap dump. Exit 137 means a signal, not a Java error — nothing in the JVM ran to report anything.</p>
+  <p class="why" data-for="1">A failed liveness probe is a genuine cause of mystery restarts and worth ruling out, but it terminates the container with SIGTERM first, giving shutdown hooks time to run and log. 137 specifically is SIGKILL: 128 + 9.</p>
+  <p class="why" data-for="2">Correct. Replace <code>-Xmx1g</code> with <code>-XX:MaxRAMPercentage=50</code> to leave the native regions room, and run <code>-XX:NativeMemoryTracking=summary</code> with <code>jcmd VM.native_memory summary</code> to see which one is actually growing.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">A limit set on the part, enforced on the whole.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A connection pool larger than the database allows</h4>
+    <p>Ten instances with a pool of 50 each is 500 connections against a server configured for 200. Each instance's setting is reasonable and the aggregate is not — same arithmetic error, one boundary out.</p>
+    <div class="hf-scatter"><span>per-instance ≠ per-system</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A disk quota measured before compression</h4>
+    <p>The application counts the bytes it wrote; the filesystem counts blocks, including the ones a sparse file never used and the ones a snapshot still pins. "Used" is defined by whoever enforces the limit, never by whoever produced the data.</p>
+    <div class="hf-scatter"><span>the enforcer defines the unit</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>A request timeout that does not cover retries</h4>
+    <p>A 2-second timeout with three retries and backoff is a 10-second wait for the caller, and the caller's own timeout was set against the first number. <b>Whenever two limits look like they measure the same thing, find out which one has a kernel — or a customer — behind it.</b></p>
+    <div class="hf-scatter"><span>budget the whole, not the step</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> stack is per-thread and holds frames and references; heap is shared and holds objects, split into young and old generations so that most collections only have to touch the short-lived part; the collector you pick trades pause time against throughput. The sentence worth adding: <b><code>-Xmx</code> bounds the heap, not the process</b> — metaspace, the code cache, ~1 MB per thread stack and direct buffers (whose default cap equals the heap) all live outside it, so in a container set <code>-XX:MaxRAMPercentage</code> and expect exit 137 rather than an <code>OutOfMemoryError</code> when you get it wrong.
+</div>
+
     <div class="panel">
       <p style="color: var(--muted); font-size: 14px; line-height: 1.7; margin: 0 0 10px;">
         The <b style="color: var(--accent);">weak generational hypothesis</b>: most objects die young. Loop variables,
@@ -595,6 +714,7 @@ DevHubCodeWalk.mount('#cw-jvmmem',{
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
 <script src="devhub-syntax.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>

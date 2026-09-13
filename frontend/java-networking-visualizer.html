@@ -147,6 +147,125 @@ public class Main {
   </div>
 
 
+<p class="hf-deck">or, the thread dump that says <code>HttpClient-40201-SelectorManager</code> and tells you exactly how bad it is</p>
+
+<div class="hf-kick">The problem</div>
+<p class="hf-say">Every snippet on this page starts with <code>HttpClient.newHttpClient()</code>. Put that line inside the method that makes the call and you have written a resource leak with no <code>new</code>, no array, and no cache.</p>
+
+<div class="hf-card bad">
+  <div class="hf-cardtitle">An <code>HttpClient</code> is not a request. It is a pool, an executor and a thread.</div>
+  <p>It reads like a helper. <code>HttpURLConnection</code> was per-connection, <code>RestTemplate</code> looks stateless, and <code>newHttpClient()</code> is a static factory with no arguments — everything about the shape of that call says "cheap, disposable, make one when you need one".</p>
+  <p>It is not. Each <code>HttpClient</code> owns a connection pool, an <code>Executor</code>, an SSL context, and its own NIO selector running on <b>its own thread</b>, started at construction. Build fifty of them and the JVM has fifty extra live threads <i>before a single request is sent</i> — measured, not estimated: <code>Thread.getAllStackTraces().size()</code> goes from 7 to 57, and the new threads are named <code>HttpClient-1-SelectorManager</code> through <code>HttpClient-50-SelectorManager</code>.</p>
+  <p>Now notice what that numbering gives you. The counter is global and monotonic, so a thread dump from a service that has been up for a day shows <code>HttpClient-40201-SelectorManager</code> — <b>forty thousand clients constructed, one per request</b>. They are daemon threads, so they do not keep the JVM alive, and each one is individually cheap, which is why this never fails fast. It degrades: memory climbs, TLS handshakes repeat on every call because no pooled connection is ever reused, and eventually you are out of file descriptors or out of heap, several hours after the deploy that caused it.</p>
+  <div class="hf-scatter">
+    <span>every request succeeds ✓</span>
+    <span>no exception, ever ✓</span>
+    <span>the code reads like a helper method ✓</span>
+    <span>one selector thread per construction ⚠</span>
+    <span>a fresh TLS handshake on every call ⚠</span>
+  </div>
+  <p class="hf-foot">A factory method with no arguments and no <code>close()</code> in sight is not a promise that there is nothing to close.</p>
+</div>
+
+<div class="hf-card good">
+  <div class="hf-cardtitle">One client per application, and close it if you own its lifecycle</div>
+  <div class="hf-ladder">
+    <b><code>HttpClient</code> is immutable and thread-safe — build one and share it</b>
+    <i>↓ that is the documented usage: configure it once with your timeouts, redirect policy and SSL context, then hand the same instance to every caller; in Spring that is a <code>@Bean</code>, and the connection pool it keeps is the entire reason HTTP/2 multiplexing and keep-alive do anything for you</i>
+    <b>Since JDK 21 it implements <code>AutoCloseable</code> — so a short-lived client belongs in try-with-resources</b>
+    <i>↓ <code>close()</code>, <code>shutdown()</code>, <code>shutdownNow()</code>, <code>awaitTermination()</code> and <code>isTerminated()</code> all exist now; before 21 there was no way to shut one down at all, and the selector thread lived until the client became unreachable and the collector got round to it</i>
+    <b>And when you must have several, have several <i>on purpose</i>, keyed by configuration</b>
+    <i>↓ one client per downstream trust store or proxy is a legitimate design; one client per <i>call</i> never is, and the difference is whether the count is bounded by your configuration or by your traffic</i>
+  </div>
+</div>
+
+<div class="principle" style="text-align:left">
+  <b>The cost of an object is not visible at its construction site — and a static factory with no arguments is the construction site that hides it best.</b> <code>new FileInputStream(...)</code> announces that something must be closed; <code>HttpClient.newHttpClient()</code> announces nothing, and for four JDK releases there was genuinely nothing you could have called. When you cannot tell from the call whether a thing is a value or a resource, the question to ask is not "is this expensive?" but "what does it own?" — and anything that owns a thread is a resource no matter how it is spelled.
+</div>
+
+<div class="hf-note"><b>Count the threads, not the objects.</b> <code>HttpClient-40201-SelectorManager</code> in a thread dump is not thread 40,201 — it is client 40,201.</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">You</span>
+    <p>It's one line and there's nothing to close. How is that a leak?</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who"><code>HttpClient</code></span>
+    <p>Because constructing me starts a selector thread and allocates a pool, and I am designed to be long-lived — immutable, thread-safe, shared. You built me for one request and then dropped the reference. My thread is a daemon, so nobody complains; it just sits there until the collector notices I am unreachable.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">The connection pool</span>
+    <p>And I was the point. Keep-alive, HTTP/2 multiplexing, a reused TLS session — every one of those is me remembering the last call. A new client per request means I am always empty, so every call pays a full TCP handshake plus a full TLS handshake, which is usually more time than the request itself.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">JDK 21</span>
+    <p>Worth knowing what changed with me: <code>HttpClient</code> became <code>AutoCloseable</code>, so <code>close()</code>, <code>shutdown()</code> and <code>awaitTermination()</code> exist. On 17 they do not, and a per-request client there really is unclosable — the only cleanup path is garbage collection.</p>
+  </div>
+</div>
+
+<div class="hf-kick">The mechanism</div>
+<p class="hf-say">Six steps, and the first five are a service working perfectly.</p>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>A token-refresh helper is written the obvious way: <code>HttpClient.newHttpClient()</code> on the first line of the method</span><span class="tag">reads fine in review</span></li>
+    <li class="open"><span>Constructing it starts <code>HttpClient-1-SelectorManager</code> and allocates an empty connection pool — before <code>send()</code> is called</span><span class="tag">a thread, not an object</span></li>
+    <li><span>The call succeeds. The method returns. The client becomes unreachable, and its thread waits to be collected</span><span class="tag">no error anywhere</span></li>
+    <li class="open"><span>Under load: hundreds per minute. Each pays a fresh TCP and TLS handshake, because no pooled connection survives the method</span><span class="tag">latency climbs quietly</span></li>
+    <li><span>Heap fills with clients the collector has not reached, and the thread count rises faster than it falls</span><span class="tag">a slope, not a spike</span></li>
+    <li class="open"><span>Hours later: <code>OutOfMemoryError: unable to create native thread</code>, or file-descriptor exhaustion, in a service nobody deployed today</span><span class="tag">detached from its cause</span></li>
+  </ol>
+  <p class="hf-annot">Step 3 is the one that makes this a leak rather than a bug. Nothing is broken — the client is genuinely unreachable, the thread is genuinely a daemon, and the garbage collector will genuinely clean both up. <b>The failure mode is not "the resource is never released", it is "released later than you create the next one"</b>, and that is a race you lose by simply serving more traffic. It is the same reason an unclosed <code>FileInputStream</code> under a finalizer used to work fine in tests and fail in production: correctness under load is a rate question, and a test that runs one request per second can never ask it.</p>
+</div>
+
+<div class="hf-card hf-nest">
+  <p class="note">what one <code>HttpClient.newHttpClient()</code> actually owns &#8600;</p>
+  <div class="ring"><span class="lbl">the <code>HttpClient</code> instance — immutable, thread-safe, meant to be shared</span>
+    <div class="ring"><span class="lbl">an <code>Executor</code> for async work and body handlers</span>
+      <div class="ring"><span class="lbl">a connection pool — keep-alive sockets, HTTP/2 streams, reusable TLS sessions</span>
+        <div class="core">one <code>SelectorManager</code> thread<small>started at construction, before any request; named <code>HttpClient-N-SelectorManager</code></small></div>
+      </div>
+    </div>
+  </div>
+  <p class="hf-annot">Read the rings outward and the sharing advice stops being a style preference: <b>every layer here is something that only pays off across calls.</b> A pool that is discarded before its second use is not a pool, an executor with one task is worse than the calling thread, and a TLS session cache with one entry caches nothing. The instance is the only part that looks like an object; everything it wraps is infrastructure with a warm-up cost. That is also the tell for spotting the next one of these — <code>ObjectMapper</code>, a compiled <code>Pattern</code>, a <code>SecureRandom</code>, a JDBC <code>DataSource</code>: anything whose value comes from remembering the last call is a thing you construct once.</p>
+</div>
+
+<div class="hf-check" data-answer="2">
+  <p class="q">A service calls <code>HttpClient.newHttpClient()</code> at the top of a method that runs on every request. What is the first thing that goes wrong?</p>
+  <button type="button">Requests start failing with <code>ConnectException</code> once the pool limit is reached, because each client opens its own connections and they compete for the same source ports</button>
+  <button type="button">Nothing — <code>HttpClient</code> is a lightweight value object, so the collector reclaims each one immediately after the method returns and the pattern is only slightly wasteful</button>
+  <button type="button">Nothing fails at all, which is the problem: every call succeeds while thread count and heap climb, and each request pays a full TLS handshake because no pooled connection outlives the method</button>
+  <p class="why" data-for="0">Connection exhaustion can eventually follow, but it is not first and it is not what you will see in the logs. The requests keep succeeding — the visible symptoms are latency and memory, long before anything throws.</p>
+  <p class="why" data-for="1">Each client starts its own selector thread at construction, so this is measurable rather than theoretical: constructing 50 clients takes a JVM from 7 live threads to 57, before a single request is sent. The collector does reclaim them, but only once they are unreachable <i>and</i> it gets round to it — which under load is slower than you create them.</p>
+  <p class="why" data-for="2">Correct. Build one client, configure it once, and share it — it is immutable and thread-safe. On JDK 21 or newer a genuinely short-lived client can go in try-with-resources, since <code>HttpClient</code> is now <code>AutoCloseable</code>.</p>
+</div>
+
+<div class="hf-kick">Where you have seen this before</div>
+<p class="hf-say">Objects that look like values and behave like infrastructure.</p>
+
+<div class="hf-terms">
+  <div class="hf-card hf-taped">
+    <h4>A <code>DataSource</code> versus a <code>Connection</code></h4>
+    <p>Nobody builds a connection pool per query, because the pool's name says what it is. <code>HttpClient</code> is the same object wearing a name that does not — it is the <code>DataSource</code> of HTTP, and <code>send()</code> is the connection you were thinking of.</p>
+    <div class="hf-scatter"><span>the pool is the long-lived half</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4>Jackson's <code>ObjectMapper</code></h4>
+    <p>Thread-safe once configured, and it caches a serializer per type on first use. Construct one per request and you throw away that cache every time, paying reflection costs on every call — the identical shape, with a warm cache instead of a warm socket.</p>
+    <div class="hf-scatter"><span>its value is what it remembers</span></div>
+  </div>
+  <div class="hf-card hf-taped">
+    <h4><code>Pattern.compile</code> inside a loop</h4>
+    <p>The compiled <code>Pattern</code> is the expensive part and <code>Matcher</code> is the cheap per-use one, which is exactly why the API splits them. <b>Whenever a library separates "configure" from "use", the split is telling you which half to keep.</b></p>
+    <div class="hf-scatter"><span>the API already drew the line</span></div>
+  </div>
+</div>
+
+<div class="hf-napkin">
+  <b>The whole page on a napkin:</b> <code>java.net.http.HttpClient</code> replaced <code>HttpURLConnection</code> — build a request, pick a <code>BodyHandler</code>, <code>send()</code> for sync or <code>sendAsync()</code> for a <code>CompletableFuture</code>, with HTTP/2, timeouts and redirect policy configured on the client. The sentence worth adding: <b>the client is the long-lived half</b> — it owns a connection pool, an executor and a selector thread started at construction, so build one per application (and close it with try-with-resources on JDK 21+), never one per request.
+</div>
+
   <div class="panel" style="margin-top:14px">
     <h3 style="margin:0 0 8px;color:var(--accent);font-size:17px;font-weight:800">▶ What actually happens when you call client.send()?</h3>
     <p style="color:var(--muted);font-size:13px;line-height:1.7;margin:0 0 12px">
@@ -1015,6 +1134,7 @@ function animStep(){
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
 <script src="devhub-tryit.js"></script>
+<script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>
 </html>
