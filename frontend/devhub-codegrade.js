@@ -1125,11 +1125,15 @@ __results
     const gutter = h('div', { class: 'cg-gutter' }, '1');
     const ta = h('textarea', { class: 'cg-ta', spellcheck: 'false', autocomplete: 'off', autocapitalize: 'off', wrap: 'off' });
     const editorWrap = h('div', { class: 'cg-editor' }, gutter, ta);
-    /* Monaco upgrade state. getCode/setCode are the ONE indirection point every handler
-       below goes through — grading, the coach, Reset and the language tabs never learn
-       which backend is live. Null until the CDN load lands (see the upgrade below). */
+    /* Monaco upgrade state: null until the CDN load lands (see the upgrade below), and
+       while they are null the plain textarea above is still the live editor. */
     let monacoEditor = null, monacoContainer = null;
+    /* The ONE indirection point every handler below reads the learner's code through —
+       grading, the coach, Reset and the language tabs never learn which backend is live,
+       which is what let Monaco land without touching any of them. */
     function getCode() { return monacoEditor ? monacoEditor.getValue() : ta.value; }
+    /* The writing half of getCode above. Reset restores the starter through it and the
+       language tabs swap in that language's saved buffer. */
     function setCode(v) { if (monacoEditor) monacoEditor.setValue(v); else ta.value = v; }
     const statusEl = h('span', { class: 'cg-status' });
     const runBtn = h('button', { class: 'cg-btn primary' }, '▶ Run Tests');
@@ -1292,6 +1296,10 @@ __results
       }
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runBtn.click(); }
     });
+    /* Reset is the escape hatch for a learner who has tangled the starter beyond reading.
+       It drops the saved buffer as well as the visible text — keeping the buffer would
+       restore the tangle on the next language-tab switch — and returns focus to whichever
+       editor is live so they can start typing again straight away. */
     resetBtn.onclick = () => {
       setCode(ex.starter[lang] || '');
       delete stored[lang];

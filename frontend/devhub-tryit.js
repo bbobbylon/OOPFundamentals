@@ -82,7 +82,7 @@
  * 640px), and full IntelliSense on the js/ts examples specifically (Monaco bundles an
  * actual TypeScript language service). The widget mounts a plain textarea+syntax-overlay
  * FIRST so it's usable the instant the page paints, then upgrades in place — see
- * loadMonaco/upgradeToMonaco. Offline or CDN-blocked, the load resolves false and the
+ * loadMonaco and the loadMonaco().then block in mount(). Offline or CDN-blocked, the load resolves false and the
  * widget just stays on the textarea forever; nothing else needs to know.
  */
 (function (global) {
@@ -167,7 +167,7 @@
 /* no highlighter on this page → the textarea shows its own text again */
 .dlh-tryit-edwrap.plain .dlh-tryit-ed{background:#090e1a;color:#e2e8f0}
 .dlh-tryit-edwrap.plain .dlh-tryit-hl{display:none}
-/* Monaco replaces the textarea+overlay pair once it loads (see upgradeToMonaco) —
+/* Monaco replaces the textarea+overlay pair once it loads (see loadMonaco) —
    the box it mounts into gets the border/radius the two layers used to share. */
 .dlh-tryit-monaco{min-height:170px;border:1px solid #1c2942;border-radius:8px;overflow:hidden}
 .dlh-tryit-bar{display:flex;align-items:center;gap:8px;padding:10px 14px;flex-wrap:wrap}
@@ -649,11 +649,15 @@ window.addEventListener('unhandledrejection', e=>{ __send('line',{text:'Unhandle
       hlPre.scrollLeft = ed.scrollLeft;
     });
 
-    /* Monaco upgrade state. getCode/setCode are the ONE indirection point every other
-       handler below goes through, so Run/Reset/autosize/save don't care which backend is
-       live — see upgradeToMonaco for how the swap happens mid-flight. */
+    /* Monaco upgrade state: null until the CDN load lands (the loadMonaco().then block
+       below), and while they are null the textarea above is still the live editor. */
     let monacoEditor = null, monacoContainer = null;
+    /* The ONE indirection point every other handler reads through, so Run/Reset/autosize/
+       save never learn which backend is live — that is what lets the upgrade swap the
+       editor out mid-flight without touching any of them. */
     function getCode() { return monacoEditor ? monacoEditor.getValue() : ed.value; }
+    /* The writing half of getCode above: Reset restores the original snippet through it,
+       and the upgrade uses it to carry the learner's text across into Monaco. */
     function setCode(v) { if (monacoEditor) monacoEditor.setValue(v); else ed.value = v; }
 
     let saved = null;
