@@ -26,120 +26,88 @@
   <h1>React Performance &amp; Rendering</h1>
   <p class="sub">React.memo, useMemo, useCallback, Suspense for code splitting, and startTransition for keeping the UI responsive — measurable wins, not premature optimization.</p>
 
-    <p class="hf-deck">or, the cache React explicitly reserves the right to throw away</p>
+    <p class="hf-deck">or, what a "memoized" calculation still costs you when Suspense throws the attempt away</p>
 
-  <div class="hf-kick">The problem</div>
-  <p class="hf-say">You wrote a pure, cheap, correctly-memoized calculation — and React still ran it twice before a single pixel changed.</p>
+  <p class="hf-say">On a 200-row audit log, <code>buildAuditSummary</code> should cost about 80 ms, once. It actually cost you 160 ms &mdash; because React ran it twice, on the exact same <code>logs</code> array.</p>
 
-  <div class="hf-card bad">
-    <div class="hf-cardtitle">The audit summary that computes itself twice on a page that never re-rendered</div>
-    <p>Your admin dashboard's <code>AuditSummaryWidget</code> sits inside a <code>&lt;Suspense&gt;</code> boundary. It reads the audit logs through a Suspense-integrated hook — the same shape as <code>useSuspenseQuery</code> or React's own <code>use(promise)</code> — so the fallback spinner shows until the logs arrive. Underneath that you compute <code>const summary = useMemo(() =&gt; buildAuditSummary(logs), [logs])</code>. You did everything the section above told you to: an expensive calculation, a correct deps array, recompute only when <code>logs</code> changes.</p>
-    <p>Then, chasing an unrelated bug, you drop a <code>console.log</code> inside <code>buildAuditSummary</code> — and watch it print <em>twice</em> before the widget ever shows a second render, with the exact same <code>logs</code> array both times. <code>logs</code> never changed. Your deps array is airtight. React ran your "memoized" calculation twice anyway.</p>
-    <div class="hf-scatter">
-      <span>the deps array is correct ✓</span>
-      <span>buildAuditSummary is genuinely pure ✓</span>
-      <span>the calculation reran with unchanged deps ⚠</span>
-    </div>
-    <p class="hf-foot">useMemo was never a promise that your function runs once — it's a cache React is explicitly allowed to empty.</p>
+  <div class="hf-receipt">
+    <div class="hf-receipt-head">AuditSummaryWidget &mdash; worked example, 200 rows @ 0.4 ms/row</div>
+    <div class="row"><span>Attempt 1 &mdash; useMemo runs</span><span>80 ms</span></div>
+    <div class="row"><span>Suspense throws, attempt discarded</span><span>wasted</span></div>
+    <div class="row"><span>Attempt 2 &mdash; useMemo reruns</span><span>80 ms</span></div>
+    <div class="row total"><span>Total, one calculation</span><span>160 ms</span></div>
   </div>
 
-  <div class="hf-card good">
-    <div class="hf-cardtitle">Read the actual guarantee, not the one you assumed</div>
-    <div class="hf-ladder">
-      <b>Open the useMemo reference docs and read the caveats, not just the signature</b>
-      <i>&darr; React states outright that it may discard the cache and recompute, on purpose</i>
-      <b>Check whether the component can suspend during its initial mount</b>
-      <i>&darr; that's the one case documented to happen in production, not just a dev safety net</i>
-      <b>Keep the calculation pure and cheap enough that running it twice is a non-event</b>
+  <div class="hf-arrow">that first 80&nbsp;ms bought you nothing &mdash; it was computed, then thrown in the trash before a single pixel used it</div>
+
+  <div class="hf-vs">
+    <div class="bad">
+      <h5>160 ms, twice</h5>
+      <p><code>AuditSummaryWidget</code> suspends on its first mount, so React discards the whole attempt &mdash; memo cache included &mdash; and reruns <code>buildAuditSummary</code> cold once the data lands. Same <code>logs</code> array, full price paid twice.</p>
+    </div>
+    <div class="good">
+      <h5>80 ms, once</h5>
+      <p>Read the Suspense-integrated data <em>before</em> you compute anything expensive. If that read throws, execution never reaches <code>useMemo</code> &mdash; so the attempt React is about to discard <span class="hf-mark">never paid for the calculation in the first place</span>.</p>
     </div>
   </div>
 
-  <div class="principle" style="text-align:left">
-    <b>useMemo is a performance hint, not a semantic guarantee.</b> React's own documentation says it may discard a memoized value and recompute it — deliberately, in development to catch impurities, and in production whenever the component suspends during its initial mount. Treat the cache as a "maybe," and never rely on the calculation running exactly once.
+  <div class="hf-kick">Why the order of two lines is the whole fix</div>
+  <p class="hf-say">A component's function body runs top to bottom like any other function &mdash; a line that hasn't executed yet can't have spent anything.</p>
+
+  <div class="hf-chain">
+    <span class="n">Mount attempt 1</span><span class="a">&rarr;</span>
+    <span class="n">read suspends</span><span class="a">&rarr;</span>
+    <span class="n">attempt discarded</span><span class="a">&rarr;</span>
+    <span class="n">Mount attempt 2</span><span class="a">&rarr;</span>
+    <span class="n">useMemo runs once</span>
   </div>
 
-  <div class="hf-note">Think of useMemo as a whiteboard note, not a filing cabinet. A whiteboard note says "don't bother recalculating this, I already worked it out" — and anyone in the room is allowed to wipe it clean and ask for the math again if things get rearranged. A filing cabinet promises the paper stays exactly where you put it. <b>React handed you the whiteboard.</b></div>
-
-  <div class="hf-talk">
-    <div class="hf-bub">
-      <span class="who">You</span>
-      <p>My deps array has one entry, and it didn't change between these two log lines. Why did my "memoized" function run twice on the exact same input?</p>
-    </div>
-    <div class="hf-bub right">
-      <span class="who">useMemo, personified</span>
-      <p>Because I never promised "once." I promise "not more often than your deps change — usually." There was always fine print you skipped past.</p>
-    </div>
-    <div class="hf-bub">
-      <span class="who">The widget's first mount attempt</span>
-      <p>That one's actually on me. I suspended — the data wasn't ready — so React threw my whole attempt away, cache included, and started me over from line one once the data showed up.</p>
-    </div>
-    <div class="hf-bub right">
-      <span class="who">React's own reference docs</span>
-      <p>I say this on my own page: I may throw away previously memoized values, and I already do it today whenever a component suspends during its initial mount. Read the caveats section, not just the example at the top.</p>
-    </div>
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Attempt 1 (mount)</span><span class="go"><em>function runs top to bottom</em> <span class="arrow">&rarr;</span> read suspends before useMemo is ever reached</span></div>
+    <div class="stt"><span class="nm">Suspended</span><span class="go"><em>promise thrown</em> <span class="arrow">&rarr;</span> whole attempt discarded &mdash; nothing was cached yet, so nothing is lost</span></div>
+    <div class="stt"><span class="nm">Attempt 2 (retry)</span><span class="go"><em>promise resolves</em> <span class="arrow">&rarr;</span> function reruns from the top, read succeeds, useMemo finally runs</span></div>
   </div>
 
-  <div class="hf-kick">The mechanism</div>
-  <p class="hf-say">Follow one widget from its first render attempt to the one your users actually see.</p>
+  <pre>function AuditSummaryWidget({ auditLogsPromise }) {
+  // Read first. If the data isn't ready yet, this line
+  // throws a pending promise and Suspense catches it --
+  // nothing below this point runs on this attempt.
+  const logs = use(auditLogsPromise);
 
-  <div class="hf-card">
-    <ol class="hf-steps">
-      <li><span><code>AuditSummaryWidget</code> mounts for the first time; its function body starts running top to bottom</span><span class="tag">attempt 1</span></li>
-      <li class="open"><span>It reaches <code>useMemo(() =&gt; buildAuditSummary(logs), [logs])</code>, runs the calculation, and caches the result against the deps array</span><span class="tag">memo runs</span></li>
-      <li><span>A few lines later it reads the audit logs through the Suspense-integrated hook — the data isn't back from the server yet</span><span class="tag">read pending data</span></li>
-      <li class="open"><span>That read throws a pending promise; Suspense catches it and shows the fallback. React discards this entire render attempt — the memo cache it just built included</span><span class="tag">suspend + discard</span></li>
-      <li><span>The promise resolves once the logs arrive from the server</span><span class="tag">data ready</span></li>
-      <li class="open"><span>React treats the retry as a fresh initial mount, not a resume — it reruns the function from the top, hits <code>useMemo</code> again, and recomputes, because the earlier cache no longer exists</span><span class="tag">attempt 2</span></li>
-    </ol>
-    <p class="hf-annot">Step 4 is the one worth rereading. It isn't that <code>useMemo</code> "reran because the deps looked different" — the deps array was never even compared. The whole first attempt, cache included, was thrown out before a comparison could happen. What you're seeing on the second run isn't a cache miss. It's a cache that was never given the chance to exist.</p>
+  // Only reached on an attempt that did NOT suspend, so
+  // buildAuditSummary never runs on the attempt React
+  // is about to throw away.
+  const summary = useMemo(() =&gt; buildAuditSummary(logs), [logs]);
+
+  return &lt;SummaryView summary={summary} /&gt;;
+}</pre>
+  <div class="hf-arrow up">this line moved to the top of the function &mdash; it's the only line that can throw, so it has to go first</div>
+  <div class="hf-arrow">still the exact same useMemo call from the top of this page &mdash; the deps array never needed to change, just its position</div>
+  <div class="hf-arrow rose">and this still reruns on attempt 2 &mdash; the fix isn't "never twice", it's "never pay for the half that gets thrown away"</div>
+
+  <div class="hf-brain">
+    <div class="hf-brain-head">Brain Power</div>
+    <p>Reorder the two lines like the code above, and <code>AuditSummaryWidget</code> still suspends on its very first mount. How many times does <code>buildAuditSummary</code> actually run before the widget shows real data &mdash; zero, one, or two?</p>
   </div>
 
-  <div class="hf-card">
-    <div class="hf-cycle">
-      <div class="stt on"><span class="nm">Attempt 1 — first mount</span>
-        <span class="go"><em>function body runs</em> <span class="arrow">&rarr;</span> useMemo computes and caches <code>summary</code></span></div>
-      <div class="stt"><span class="nm">Suspended</span>
-        <span class="go"><em>data read throws a pending promise</em> <span class="arrow">&rarr;</span> React discards attempt 1 whole, cache included</span></div>
-      <div class="stt"><span class="nm">Attempt 2 — retry mount</span>
-        <span class="go"><em>promise resolves</em> <span class="arrow">&rarr;</span> function reruns top to bottom; useMemo recomputes from scratch</span></div>
-    </div>
-    <p class="hf-annot">There's no arrow back to Attempt 1 — this isn't a loop the component revisits over and over, it happens once, on mount, and only if the mount actually suspends. A widget whose data is already warm and never suspends skips the middle state entirely, and its useMemo behaves exactly the way you'd expect. This gotcha only bites the moment a Suspense boundary is genuinely doing its job.</p>
+  <div class="hf-one">
+    <div class="callers"><span>suspends on initial mount (production)</span><span>Strict Mode double-invoke (development)</span></div>
+    <div class="funnel">both treat the memoized value as disposable, on purpose &darr;</div>
+    <div class="instance">buildAuditSummary runs more than once<small>same hint-not-a-contract rule, two different triggers</small></div>
+  </div>
+  <p class="hf-annot">Two unrelated mechanisms funnel into the same bill. A component that actually suspends during its first mount gets its whole attempt discarded in production &mdash; that's the 80&nbsp;ms you just watched get thrown away. Strict Mode deliberately double-invokes the same calculation in development, for a different reason: to catch impurities you didn't know you had. Neither is a bug; both trade your CPU budget for a cache React can trust. <span class="hf-mark r">In CIAM apps you've already met this trade</span> &mdash; an authorization service invalidates a cached permission set mid-session the moment a role changes, on purpose, because a stale approval would be a security hole, not just a slow request. React choosing correctness over your CPU budget at work is the same instinct, just smaller stakes.</p>
+
+  <div class="hf-check" data-answer="1">
+    <p class="q">The same <code>AuditSummaryWidget</code> mounts again later in the session &mdash; this time the logs are already warm in the data layer, so the Suspense-integrated read returns immediately with no throw. Does useMemo's cache get discarded on this mount too?</p>
+    <button type="button">Yes &mdash; any component behind a &lt;Suspense&gt; boundary loses its memo cache on every mount.</button>
+    <button type="button">No &mdash; the discard rule only fires when the mount actually suspends, and this one didn't, so the cache holds.</button>
+    <button type="button">It depends on whether React is running in development or production mode, since Strict Mode's double-invoke behavior for catching impurities only exists in dev builds.</button>
+    <p class="why" data-for="0">Being behind a &lt;Suspense&gt; boundary isn't what triggers the discard &mdash; actually suspending during that mount is. Plenty of components render inside Suspense their entire life without ever throwing a promise, and this rule never touches their memo cache.</p>
+    <p class="why" data-for="1">Right &mdash; the documented rule keys off whether the mount actually suspended, not whether the component happens to sit inside a boundary. No throw this time, so <code>buildAuditSummary</code> never even makes it onto the bill.</p>
+    <p class="why" data-for="2">That's a mix-up with a different rule. Strict Mode double-invokes your calculation in development specifically to catch impurities &mdash; but the suspend-during-initial-mount discard is documented behavior in both development and production. It's not a dev safety net; it's what your users actually pay for.</p>
   </div>
 
-  <div class="hf-check" data-answer="0">
-    <p class="q">The same <code>AuditSummaryWidget</code> mounts again later in the session — this time the logs are already warm in the data layer, so the Suspense-integrated read returns immediately with no throw. Does useMemo's cache get discarded on this mount too?</p>
-    <button type="button">No — the discard rule only fires when the component actually suspends during that mount; a mount that never suspends keeps its cache exactly as documented</button>
-    <button type="button">Yes — every component wrapped in a &lt;Suspense&gt; boundary has its memo caches cleared on every mount, whether it suspends or not</button>
-    <button type="button">It depends on whether React is running in development or production mode</button>
-    <p class="why" data-for="0">Right — the documented rule is "if your component suspends during the initial mount," not "if it's inside a Suspense boundary." No suspend, no discard; useMemo behaves exactly the way the earlier section of this page described.</p>
-    <p class="why" data-for="1">Being inside a Suspense boundary isn't what triggers the discard — actually suspending is. Plenty of components render inside Suspense boundaries their whole life without ever throwing a promise, and this rule never touches their memo cache.</p>
-    <p class="why" data-for="2">That's a mix-up with a different rule: React double-invokes your calculation in development's Strict Mode specifically to catch impurities. The suspend-during-initial-mount discard is documented to happen in both development and production — it's not a dev safety net, it's real behavior your users hit too.</p>
-  </div>
-
-  <div class="hf-kick">Where you have seen this before</div>
-  <p class="hf-say">The same "cache is a hint, not a promise" shape, three more places.</p>
-
-  <div class="hf-terms">
-    <div class="hf-card hf-taped">
-      <h4>A CPU's branch predictor</h4>
-      <p>It caches "last time we hit this branch, it went this way" — but a context switch or a cold cache line throws that history out, and the CPU recomputes the guess from scratch. The prediction was always an optimization, never a contract.</p>
-      <div class="hf-scatter"><span>a hint the hardware is free to discard</span></div>
-    </div>
-    <div class="hf-card hf-taped">
-      <h4>An HTTP response with a generous <code>Cache-Control: max-age</code></h4>
-      <p>The browser's disk cache fills up and evicts your response before it expires anyway. The header states an intent, not a guarantee — the cache is always allowed to forget early.</p>
-      <div class="hf-scatter"><span>the header requests, it doesn't promise</span></div>
-    </div>
-    <div class="hf-card hf-taped">
-      <h4>A CIAM permission cache flushed mid-session</h4>
-      <p>An authorization service caches a user's resolved permission set for speed — then a role gets reassigned mid-session, and the cache is invalidated early, on purpose, so a stale "yes" can never outlive the reason it was true.</p>
-      <div class="hf-scatter"><span>correctness beats the cache, every time</span></div>
-    </div>
-  </div>
-
-  <div class="hf-napkin">
-    <b>The whole page on a napkin:</b> React re-renders by default, and React.memo, useMemo, useCallback, code-splitting, and startTransition each trade a bit of complexity for skipping or deferring work you've measured to be expensive. <b>The one new sentence this block adds:</b> useMemo's cache is a hint you're allowed to lose, not a contract — and the one case React documents as happening for real in production, not just in a dev safety net, is exactly the Suspense pattern already on this page: the moment a component actually suspends on its first mount.
-  </div>
+  <p class="hf-big">React doesn't bill you once. It bills you per attempt.</p>
 
 
 <!-- ── INTRO ── -->
@@ -368,6 +336,7 @@ DevHubCodeWalk.mount('#cw-rperf',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-syntax.js"></script>
 <script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>

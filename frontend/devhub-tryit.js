@@ -76,6 +76,14 @@
  * Output pacing: lines that arrive in one burst are revealed with a stepped
  * delay (see appendLine) so a result "walks in" — the same step-pacing idea as
  * the animated visualizers, capped so long output never stalls the learner.
+ *
+ * Editor: Monaco (VS Code's real editor component), loaded lazily from CDN and swapped in
+ * once ready — real bracket matching, Ctrl+F find, multi-cursor, minimap (hidden below
+ * 640px), and full IntelliSense on the js/ts examples specifically (Monaco bundles an
+ * actual TypeScript language service). The widget mounts a plain textarea+syntax-overlay
+ * FIRST so it's usable the instant the page paints, then upgrades in place — see
+ * loadMonaco/upgradeToMonaco. Offline or CDN-blocked, the load resolves false and the
+ * widget just stays on the textarea forever; nothing else needs to know.
  */
 (function (global) {
   'use strict';
@@ -99,6 +107,16 @@
    * ceiling for every Try It example. Fetched once, then served from Cache Storage.
    */
   const JAVA_TOOLS_JAR = 'https://raw.githubusercontent.com/leaningtech/javafiddle/0d847f83f11607623187340e4d12efb494f64e80/static/tools.jar';
+  /**
+   * Monaco Editor (the real VS Code editor component) CDN base. MUST match the pin in
+   * devhub-codegrade.js — same rule as TS_CDN/PY_BASE above: bump one, bump both. Monaco's
+   * own min/vs bundle ships Monarch tokenizers for js/ts/python/java out of the box (real
+   * TS gets full IntelliSense via Monaco's bundled language service; python/java get
+   * syntax highlighting + bracket matching, not semantic completion — there's no language
+   * server for those here, and that's fine, it's still real editing, not a fake overlay).
+   */
+  const MONACO_CDN = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.56.0/min/vs';
+  const MONACO_LANG = { js: 'javascript', ts: 'typescript', python: 'python', java: 'java' };
 
   /**
    * Per-language display + editor settings. `indent` drives the Tab key; `dark` picks the
@@ -149,6 +167,9 @@
 /* no highlighter on this page → the textarea shows its own text again */
 .dlh-tryit-edwrap.plain .dlh-tryit-ed{background:#090e1a;color:#e2e8f0}
 .dlh-tryit-edwrap.plain .dlh-tryit-hl{display:none}
+/* Monaco replaces the textarea+overlay pair once it loads (see upgradeToMonaco) —
+   the box it mounts into gets the border/radius the two layers used to share. */
+.dlh-tryit-monaco{min-height:170px;border:1px solid #1c2942;border-radius:8px;overflow:hidden}
 .dlh-tryit-bar{display:flex;align-items:center;gap:8px;padding:10px 14px;flex-wrap:wrap}
 .dlh-tryit-run{padding:7px 18px;background:var(--accent,#22d3ee);color:#0f172a;border:none;border-radius:8px;cursor:pointer;font-weight:800;font-size:13px}
 .dlh-tryit-run:disabled{opacity:.5;cursor:wait}
@@ -191,6 +212,50 @@
       document.head.appendChild(s);
     });
     return tsLoading;
+  }
+
+  /* Monaco Editor (loaded once per page, shared by every Try It widget) */
+  /**
+   * In-flight Monaco load, shared by every widget on the page — mirrors tsLoading's
+   * dedupe-the-download shape. Resolves true once window.monaco is usable, false on any
+   * failure (offline, CDN blocked); NEVER rejects, so a widget's upgrade attempt can just
+   * `if (!ok) return` and stay on its textarea fallback.
+   */
+  let monacoLoading = null;
+  /**
+   * One custom dark theme, defined once Monaco is up. The editor pane stays dark-terminal
+   * styled regardless of the site's cream/dark toggle — same as the textarea fallback
+   * above, which hardcodes #090e1a/#e2e8f0 unconditionally; matching that on purpose rather
+   * than adding theme-sync plumbing for a pane that was never themed to begin with.
+   */
+  function defineMonacoTheme() {
+    global.monaco.editor.defineTheme('dlh-dark', {
+      base: 'vs-dark', inherit: true, rules: [],
+      colors: {
+        'editor.background': '#090e1a',
+        'editor.foreground': '#e2e8f0',
+        'editorLineNumber.foreground': '#334155',
+        'editorLineNumber.activeForeground': '#94a3b8',
+        'editor.lineHighlightBackground': '#101b30',
+        'editorCursor.foreground': '#e2e8f0',
+        'editorIndentGuide.background': '#1c2942',
+      },
+    });
+  }
+  /**
+   * Load the Monaco AMD loader, then require its editor.main module. Uses loadScript (below)
+   * for the first hop since that already dedupes/promise-wraps a <script src>; the AMD
+   * require() call needs its own promise because success/failure arrive as two callbacks,
+   * not a script load event.
+   */
+  function loadMonaco() {
+    if (global.monaco) return Promise.resolve(true);
+    if (monacoLoading) return monacoLoading;
+    monacoLoading = loadScript(MONACO_CDN + '/loader.js').then(() => new Promise(resolve => {
+      global.require.config({ paths: { vs: MONACO_CDN } });
+      global.require(['vs/editor/editor.main'], () => { defineMonacoTheme(); resolve(true); }, () => resolve(false));
+    })).catch(() => false);
+    return monacoLoading;
   }
 
   /* Pyodide (one interpreter per page, reused across widgets and runs) */
@@ -584,6 +649,13 @@ window.addEventListener('unhandledrejection', e=>{ __send('line',{text:'Unhandle
       hlPre.scrollLeft = ed.scrollLeft;
     });
 
+    /* Monaco upgrade state. getCode/setCode are the ONE indirection point every other
+       handler below goes through, so Run/Reset/autosize/save don't care which backend is
+       live — see upgradeToMonaco for how the swap happens mid-flight. */
+    let monacoEditor = null, monacoContainer = null;
+    function getCode() { return monacoEditor ? monacoEditor.getValue() : ed.value; }
+    function setCode(v) { if (monacoEditor) monacoEditor.setValue(v); else ed.value = v; }
+
     let saved = null;
     try { saved = localStorage.getItem(lsKey); } catch (e) { /* ignore */ }
     ed.value = saved != null ? saved : original;
@@ -592,20 +664,68 @@ window.addEventListener('unhandledrejection', e=>{ __send('line',{text:'Unhandle
 
     /**
      * Grow the editor with its content between 6 and 30 lines so a short example does not
-     * sit in a tall empty box and a long one does not need an inner scrollbar.
+     * sit in a tall empty box and a long one does not need an inner scrollbar. Targets
+     * whichever backend is live: the textarea's own minHeight, or the Monaco container's
+     * height (Monaco's automaticLayout then resizes the instance to fill it).
      */
     function autosize() {
-      const lines = ed.value.split('\n').length;
-      ed.style.minHeight = Math.min(30, Math.max(6, lines + 1)) * 1.7 * 12.5 + 24 + 'px';
+      const lines = getCode().split('\n').length;
+      const px = Math.min(30, Math.max(6, lines + 1)) * 1.7 * 12.5 + 24;
+      if (monacoEditor) monacoContainer.style.height = px + 'px';
+      else ed.style.minHeight = px + 'px';
     }
     ed.addEventListener('input', () => {
       try { localStorage.setItem(lsKey, ed.value); } catch (e) { /* ignore */ }
       autosize();
       syncHl();
     });
+
+    /**
+     * Attempt the Monaco upgrade in the background — never blocks first paint, since the
+     * textarea above is already fully usable the instant the widget mounts. On any failure
+     * (offline, CDN blocked) loadMonaco resolves false and this widget simply stays on the
+     * textarea path forever; nothing else has to know the upgrade didn't happen.
+     */
+    loadMonaco().then(ok => {
+      if (!ok || monacoEditor) return;
+      const isNarrow = host.getBoundingClientRect().width < 640;
+      const hadFocus = document.activeElement === ed;
+      const currentCode = getCode();
+      monacoContainer = document.createElement('div');
+      monacoContainer.className = 'dlh-tryit-monaco';
+      monacoContainer.title = 'Tab indents — press Ctrl+M to toggle Tab-moves-focus mode';
+      edwrap.innerHTML = '';
+      edwrap.appendChild(monacoContainer);
+      monacoEditor = global.monaco.editor.create(monacoContainer, {
+        value: currentCode,
+        language: MONACO_LANG[lang] || 'plaintext',
+        theme: 'dlh-dark',
+        automaticLayout: true,
+        minimap: { enabled: !isNarrow },
+        fontSize: 12.5,
+        lineHeight: 21,
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+        tabSize: meta.indent,
+        insertSpaces: true,
+        scrollBeyondLastLine: false,
+        renderLineHighlight: 'line',
+        padding: { top: 10, bottom: 10 },
+        scrollbar: { alwaysConsumeMouseWheel: false },
+      });
+      monacoEditor.onDidChangeModelContent(() => {
+        try { localStorage.setItem(lsKey, getCode()); } catch (e) { /* ignore */ }
+        autosize();
+      });
+      monacoEditor.addCommand(global.monaco.KeyMod.CtrlCmd | global.monaco.KeyCode.Enter, () => runBtn.click());
+      autosize();
+      if (hadFocus) monacoEditor.focus();
+    });
     // Tab indents, Esc-then-Tab leaves — same escape hatch as the graded IDE
     // (devhub-codegrade.js): a Tab-capturing editor with no way out is a
-    // keyboard trap on all 119 Try It pages.
+    // keyboard trap on all 119 Try It pages. Only reached on the textarea
+    // fallback — once Monaco is live this handler sits on a detached node and
+    // never fires; Monaco's own Ctrl+M (toggleTabFocusMode) is the escape hatch
+    // there, surfaced via monacoContainer.title above.
     let tabEscapes = false;
     ed.addEventListener('keydown', e => {
       if (e.key === 'Escape') { tabEscapes = true; return; }
@@ -622,7 +742,7 @@ window.addEventListener('unhandledrejection', e=>{ __send('line',{text:'Unhandle
     ed.title = 'Tab indents — press Esc then Tab to move focus out';
 
     resetBtn.addEventListener('click', () => {
-      ed.value = original;
+      setCode(original);
       try { localStorage.removeItem(lsKey); } catch (e) { /* ignore */ }
       out.classList.remove('show');
       out.innerHTML = '';
@@ -664,7 +784,7 @@ window.addEventListener('unhandledrejection', e=>{ __send('line',{text:'Unhandle
       const t0 = performance.now();
       let outcome;
       try {
-        outcome = await RUNNERS[lang](ed.value, appendLine, msg => { statusEl.textContent = msg; });
+        outcome = await RUNNERS[lang](getCode(), appendLine, msg => { statusEl.textContent = msg; });
       } catch (e) {
         outcome = { error: String(e && e.message || e) };
       }

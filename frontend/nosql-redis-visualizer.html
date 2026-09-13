@@ -70,129 +70,68 @@
     </div>
   </div>
 
-  <p class="hf-deck">or, the SETNX lock you were sure protected that payment, until a GC pause proved otherwise</p>
+<p class="hf-deck">or, the SETNX lock you were sure protected that payment, until a GC pause proved otherwise</p>
 
-<div class="hf-kick">The problem</div>
-<p class="hf-say">A Redis lock's TTL measures a clock, not a heartbeat — and Redis cannot tell "still working" apart from "already dead."</p>
+<p class="hf-big">"I promised 5000 milliseconds — not forever."</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">Your payment worker double-charged the same order</div>
-  <p>You add a lock before charging a card: <code>SET lock:order-991 token-A NX PX 5000</code> grabs a 5-second lock, the worker calls the payment gateway, then <code>DEL</code>s the key when it's done. Textbook mutual exclusion — one worker at a time touches order 991.</p>
-  <p>One night the JVM hits a 6-second garbage-collection pause right after the charge call goes out over the network. The worker is still alive, still holding what it thinks is an exclusive lock — it just isn't scheduled to run any code for 6 seconds. Redis doesn't know that. Redis only knows a countdown it started when <code>SET</code> ran, and at the 5-second mark it deletes <code>lock:order-991</code> exactly on schedule. A retry of the same job now acquires the lock cleanly with <code>token-B</code> and starts the identical charge. When the GC pause ends, Worker A resumes, finishes its own charge call, and returns success — never having checked whether it still held anything. The card is now charged twice, and both workers logged a clean, lock-protected success.</p>
-  <div class="hf-scatter">
-    <span>SET NX for mutual exclusion ✓</span>
-    <span>PX 5000 so a crashed worker doesn't lock the order forever ✓</span>
-    <span>DEL on completion ✓</span>
-    <span>nothing checks the lock is still yours before acting on it ⚠</span>
-  </div>
-  <p class="hf-foot">Every individual command did exactly what it promises. The bug lives in the gap between "I set a lock" and "I am still the only one who believes I have it."</p>
+<p class="hf-say">Redis is holding a countdown, Worker A is frozen mid-charge, and Worker B is about to walk in and take what looks like an empty seat.</p>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">Worker A</span><p>I called <code>SET lock:order-991 token-A NX PX 5000</code>. Nobody else can be touching order 991 right now.</p></div>
+  <div class="hf-bub right"><span class="who">Redis</span><p>I gave you that key for <span class="hf-mark">5000 milliseconds</span>, and not one millisecond more. I never promised your code would be done by then.</p></div>
+  <div class="hf-bub"><span class="who">Worker A</span><p>I'm not done. I'm still waiting on the payment gateway to answer — that usually takes 200ms, not 5000.</p></div>
+  <div class="hf-bub right"><span class="who">Redis</span><p>"Usually" isn't in my contract. At millisecond 5000 I ran exactly what <code>PX 5000</code> told me to run: <code>DEL lock:order-991</code>.</p></div>
+  <div class="hf-bub"><span class="who">Worker B</span><p>The key was gone when I looked, so I set it again with <code>token-B</code>. Every rule I know says that makes it mine.</p></div>
+  <div class="hf-bub right"><span class="who">Worker A</span><p><span class="hf-mark">Nothing has told me to stop.</span> I'm still holding what I think is the only lock on this order.</p></div>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Stop trusting "I still hold the lock" and start proving it</div>
-  <div class="hf-ladder">
-    <b>Give every lock acquisition a unique token, and release with compare-then-delete</b>
-    <i>↓ a Lua script that checks the token before deleting stops you from ever releasing a lock someone ELSE now holds — but it does nothing about the double acquisition itself</i>
-    <b>Attach a monotonically increasing fencing token to every successful acquisition</b>
-    <i>↓ the protected resource (the payment gateway call, the database write) rejects any fencing token lower than the highest one it has already accepted — so Worker A's late, stale write gets refused even though Worker A still thinks it owns the lock</i>
-    <b>Or renew the lease instead of setting-and-forgetting it</b>
-    <i>↓ a watchdog thread that extends the TTL every second while the holder is genuinely still running (Redisson's pattern) means the lock only expires when the holder actually stops responding, not just when it's slow</i>
-  </div>
+<div class="hf-brain">
+  <div class="hf-brain-head">Brain Power</div>
+  <p>Redis kept its word. Worker A kept doing exactly what it was told. Worker B followed the rules to the letter. Three parties, zero mistakes — so who actually caused the double charge?</p>
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">Redis</span><p>Don't look at me. I don't track who's "still working" — I only track keys and milliseconds. That's the entire interface.</p></div>
+  <div class="hf-bub right"><span class="who">Worker A</span><p>Don't look at me either. There's no callback that fires when a lock I'm holding gets taken away. I find out the same way you'd notice your parking spot is gone: too late.</p></div>
+  <div class="hf-bub"><span class="who">Worker B</span><p>And I did nothing wrong — <code>SET NX</code> told me the space was free, so I took it. That's the entire point of <code>NX</code>.</p></div>
+  <div class="hf-bub right"><span class="who">You</span><p>You're all right, and <span class="hf-r">order 991 got charged twice anyway</span>. The bug was never any one of you — it's that nobody agreed on what "I still hold the lock" means at the one moment it actually mattered.</p></div>
 </div>
 
 <div class="principle" style="text-align:left">
-  <b>The one-sentence rule.</b> A lock's TTL only measures elapsed time, never the health of whoever
-  is holding it, so anything where "only one worker acts" is a hard correctness requirement — money,
-  inventory, a single write — needs a second, independent check made at the moment of the actual
-  effect, not just at the moment the lock was acquired.
+  <b>The one-sentence rule.</b> A lock's TTL only measures elapsed time, never the health of whoever is holding it, so anywhere "only one worker acts" is a hard correctness requirement — money, inventory, a single write — needs a second, independent check made at the moment of the actual effect, not just at the moment the lock was acquired. Give every acquisition a <span class="hf-mark">fencing token</span> that only ever increases, and make the protected write itself reject anything lower than the highest token it has already accepted. <b>At work</b>, this is the same reasoning behind re-checking a session at the point of the actual write instead of trusting that a token valid at request-start is still valid 400ms later — <b>in CIAM</b>, an access token that expires mid-request is this exact bug wearing a different hat.
+</div>
+
+<div class="hf-cast">
+  <div class="subject">lock:order-991's TTL hits 0 and Redis deletes the key<small>an internal housekeeping event — Redis announces this to no one</small></div>
+  <div class="fan">who finds out ↓</div>
+  <div class="obs">
+    <span>Worker B's next <code>SET NX</code> — succeeds, exactly as designed</span>
+    <span>Redis itself — deleted a key, moves on to the next command</span>
+    <span class="new">Worker A — nothing. It is mid-network-call and has no way to learn its lock is gone</span>
+  </div>
+</div>
+<p class="hf-annot">Read the fan-out from the surprising side: two things react to the expiry exactly the way you'd expect, and the one thing that actually needed to know — the worker still relying on the lock — never hears about it at all. There is no callback, no exception, no notification into Worker A's stack. It finds out the same way you'd find out you lost a parking spot: by noticing someone else's car is already there, if you notice at all.</p>
+
+<div class="hf-one">
+  <div class="callers"><span>a 6-second GC pause</span><span>a TTL that can't sense liveness</span><span>no check before the charge fires</span></div>
+  <div class="funnel">same missing piece ↓</div>
+  <div class="instance">Order #991 charged twice<small>three unrelated-looking causes, one missing fencing check</small></div>
+</div>
+<p class="hf-annot">Swap the GC pause for a slow disk write or a dropped network packet and the story replays identically — the specific stall never mattered. What mattered is that nothing re-verified "am I still the lock holder?" at the one moment it counted: right before the charge actually fired.</p>
+
+<div class="hf-check" data-answer="1">
+  <p class="q">Your worker locks an order with <code>SET lock:order-991 token-A NX PX 5000</code>, then a GC pause freezes it for 6 seconds mid-charge. What does Redis actually do to that lock while your worker is stalled?</p>
+  <button type="button">It extends the TTL automatically — <code>PX</code> is a minimum, not a hard limit.</button>
+  <button type="button">Nothing to do with your worker's health: at exactly 5000ms Redis deletes <code>lock:order-991</code> on schedule, whether or not the process that set it is still working.</button>
+  <button type="button">Redis notices the client hasn't sent a heartbeat in the expected window, marks the connection stalled, and holds the lock open past its TTL until the worker responds or the connection itself times out.</button>
+  <p class="why" data-for="0">Redis has no "give it more time" behavior built into <code>PX</code> — the value you pass is the exact TTL, full stop. The only way to extend it is a watchdog explicitly renewing the key yourself, like Redisson's lock does.</p>
+  <p class="why" data-for="1">Right. Redis's countdown is attached to the key, not to any notion of the client's liveness — it has no idea your worker is mid-GC, mid-network-call, or dead. At 5000ms the key is gone, full stop.</p>
+  <p class="why" data-for="2">Redis doesn't track per-connection heartbeats for key expiry — that's a mental model borrowed from something like a TCP keepalive, and it doesn't apply here. The TTL countdown runs purely off the clock, deaf to whatever the client is doing.</p>
 </div>
 
 <div class="hf-note">Think of the TTL as a parking meter, not a bouncer at a door. A meter running out
 doesn't tow your car — it just makes the spot legally available to someone else. <b>Two cars can be
 "parked" in the same spot at once</b>, and nobody finds out until they both try to leave.</div>
-
-<div class="hf-talk">
-  <div class="hf-bub"><span class="who">You</span><p>I called SET with PX 5000 before touching the order. Nobody else can be running this charge right now.</p></div>
-  <div class="hf-bub right"><span class="who">Redis</span><p>I only promised you the key for up to 5000 milliseconds. I never promised your code would finish inside that window.</p></div>
-  <div class="hf-bub"><span class="who">Worker B</span><p>The key was gone when I checked, so I set it fresh with my own token. As far as I can tell, I'm the only one here.</p></div>
-  <div class="hf-bub right"><span class="who">You (mid-GC-pause, unaware)</span><p>I'm still running the exact same charge call I started five seconds ago. Nothing has told me to stop.</p></div>
-</div>
-
-<div class="hf-kick">The mechanism</div>
-<p class="hf-say">Follow the lock's key through Redis while Worker A is frozen mid-charge — nobody has to do anything wrong for this to happen.</p>
-
-<div class="hf-card">
-  <ol class="hf-steps">
-    <li><span>Worker A: <code>SET lock:order-991 token-A NX PX 5000</code> succeeds — the key didn't exist</span><span class="tag">acquire</span></li>
-    <li class="open"><span>Worker A calls the payment gateway to charge $49.99 — normally a ~200ms round trip</span><span class="tag">normal path</span></li>
-    <li><span>A stop-the-world GC pause freezes Worker A's thread for 6 seconds — 1 second past the lock's TTL</span><span class="tag">the stall</span></li>
-    <li class="open"><span>Redis's countdown has nothing to do with Worker A's pause — at 5000ms it deletes <code>lock:order-991</code> on schedule</span><span class="tag">auto-expire</span></li>
-    <li><span>A retry of the same job runs on Worker B: <code>SET lock:order-991 token-B NX PX 5000</code> succeeds, because the key is gone</span><span class="tag">reacquire</span></li>
-    <li class="open"><span>GC ends; Worker A resumes, its payment gateway call completes, it returns success — Worker B is now doing the identical charge in parallel</span><span class="tag">double execution</span></li>
-  </ol>
-  <p class="hf-annot">Step 4 is the whole bug. Redis isn't confused and isn't misbehaving — it is doing precisely
-  what <code>PX 5000</code> asked it to do. The mistake happened earlier, when the design assumed a TTL
-  expiring meant "the holder is dead" instead of what it actually means: "5000 milliseconds have
-  passed." Those are only the same thing if the holder is guaranteed to always finish well inside the
-  TTL — a guarantee no GC pause, network retry, or slow disk respects.</p>
-</div>
-
-<div class="hf-card">
-  <div class="hf-cast">
-    <div class="subject">lock:order-991's TTL hits 0 and Redis deletes the key<small>an internal housekeeping event — Redis announces this to no one</small></div>
-    <div class="fan">who finds out ↓</div>
-    <div class="obs">
-      <span>Worker B's next SET NX — succeeds, exactly as designed</span>
-      <span>Redis itself — deleted a key, moves on to the next command</span>
-      <span class="new">Worker A — nothing. It is mid-network-call and has no way to learn its lock is gone</span>
-    </div>
-  </div>
-  <p class="hf-annot">Read the fan-out from the surprising side: two things "react" to the expiry in the
-  way you'd expect, and the one thing that actually needed to know — the worker still relying on the
-  lock — never hears about it at all. There is no callback, no notification, no exception thrown into
-  Worker A's stack. It finds out it lost the lock the same way you'd find out you lost your parking
-  spot: by noticing someone else's car is already there, if you notice at all.</p>
-</div>
-
-<div class="hf-check" data-answer="0">
-  <p class="q">You lock an order with <code>SET lock:order-991 token NX PX 5000</code> before charging a card. A GC pause stalls your worker for 6 seconds right after the charge call goes out. What actually happens to your lock while you're paused?</p>
-  <button type="button">The lock silently expires at the 5-second mark and is gone — a second worker can now acquire the same key and start the same charge, while your original worker is still running and has no idea it lost the lock.</button>
-  <button type="button">Redis pauses the TTL countdown while your client is unresponsive, so the lock is still yours when execution resumes.</button>
-  <button type="button">The SET call itself blocks and keeps retrying until your worker resumes, so no other worker can acquire the lock in the meantime.</button>
-  <p class="why" data-for="0">Right. Redis's TTL clock runs independently of any client's health — it has no concept of "this caller is just slow, not dead." At exactly 5000ms it deletes the key, whether or not the process that set it is still doing useful work.</p>
-  <p class="why" data-for="1">Redis isn't watching your process at all, so it has no way to notice a pause and nothing to pause on your behalf. The countdown it's running is attached to the key, not to your worker's liveness.</p>
-  <p class="why" data-for="2">There's no such blocking behavior in the plain <code>SET NX PX</code> pattern — the original <code>SET</code> already succeeded once, back when the lock was first acquired. The TTL that follows counts down inside Redis, completely detached from whatever your worker's thread is doing.</p>
-</div>
-
-<div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">"Expiry measures time, not death" is the same gap every lease-based system has to close somehow.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>JPA optimistic locking (<code>@Version</code>)</h4>
-    <p>A stale in-memory <code>Order</code> entity tries to <code>UPDATE</code> a row whose <code>version</code> column has since moved on — Hibernate's generated <code>WHERE version = ?</code> matches zero rows and throws <code>OptimisticLockException</code> instead of silently overwriting someone else's change. That version column is exactly a fencing token: it doesn't stop the stale write from being attempted, it stops the database from accepting it.</p>
-    <div class="hf-scatter"><span>the fencing-token fix, already built into JPA</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Kubernetes leader-election leases</h4>
-    <p>A controller pod renews a <code>Lease</code> object before it expires to keep acting as leader. If the pod is CPU-starved and misses a renewal, Kubernetes elects a new leader — but the old pod, once it gets scheduled again, doesn't instantly know it lost leadership and can keep issuing writes for a moment until it notices the lease is gone. Same shape: the lease's expiry measured elapsed time, not whether the old leader had actually stopped.</p>
-    <div class="hf-scatter"><span>the identical gap, one layer up in the infrastructure</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>An OAuth2 access token expiring mid-request</h4>
-    <p>A resource server checks a bearer token's <code>exp</code> claim when a request arrives, then spends 400ms doing real work. Most resource servers never re-check <code>exp</code> mid-flight — if the token expired at millisecond 200 of that 400ms request, the request still completes on authority that technically ran out while it was still executing.</p>
-    <div class="hf-scatter"><span>the CIAM version of a permission window outliving its own deadline</span></div>
-  </div>
-</div>
-
-<div class="hf-napkin">
-  <b>The whole page on a napkin:</b> Redis trades durability for RAM speed, and its single-threaded
-  execution makes commands like <code>INCR</code> and cache-aside's GET/SET atomic and TTLs a clean
-  way to let cached data and sessions self-expire. <b>The one new sentence this block adds:</b> the
-  same TTL mechanic, repurposed as a distributed lock, only ever measures elapsed time — it can't tell
-  a worker that's merely slow from one that's actually gone, so two workers can end up certain, at the
-  same moment, that each is the only one holding the lock.
-</div>
 
 <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">

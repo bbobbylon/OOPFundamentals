@@ -3,9 +3,15 @@
  *
  * One engine, many exercise banks. A page supplies a bank of exercises (a
  * prompt + starter code + hidden test cases per language); this file renders
- * the whole experience: an exercise list with solved-state, a textarea+gutter
- * code editor per language, a Run Tests button, and a pass/fail results panel
- * with per-test args/expected/got.
+ * the whole experience: an exercise list with solved-state, a real code editor
+ * per language, a Run Tests button, and a pass/fail results panel with per-test
+ * args/expected/got.
+ *
+ * The editor mounts as a textarea+gutter pair so it is usable at first paint,
+ * then upgrades in place to Monaco (VS Code's editor component) once the CDN
+ * load lands — see loadMonaco and the upgrade inside renderExercise. Offline or
+ * CDN-blocked, the upgrade never happens and the textarea stays for good;
+ * getCode/setCode are the only things that know which backend is live.
  *
  * Execution is 100% client-side, reusing the exact engines already proven in
  * this repo's playground pages — no new infra, no server required:
@@ -138,6 +144,13 @@
   /* javac lives in tools.jar (the JDK-8 compiler jar JavaFiddle ships) — pinned to a
    * commit SHA so an upstream change can never silently break grading. */
   const JAVA_TOOLS_JAR = 'https://raw.githubusercontent.com/leaningtech/javafiddle/0d847f83f11607623187340e4d12efb494f64e80/static/tools.jar';
+  /** Monaco (the real VS Code editor component). MUST match the pin in devhub-tryit.js —
+   *  same rule as TS_CDN above: bump one, bump both, or two editors on the same site load
+   *  two different editor builds. The bank's language keys are already Monaco's own
+   *  language ids for three of the four, so MONACO_LANG only exists to spell out that
+   *  mapping rather than rely on the coincidence. */
+  const MONACO_CDN = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.56.0/min/vs';
+  const MONACO_LANG = { javascript: 'javascript', typescript: 'typescript', python: 'python', java: 'java' };
 
   /** Tiny DOM builder used for every element this engine renders: h(tag, props, ...kids).
    *  `class` → className, `html` → innerHTML (trusted engine markup only), `onX` → listener,
@@ -302,6 +315,9 @@
     border-right:1px solid var(--cg-border);white-space:pre;overflow:hidden;border-radius:0 0 0 8px}
 .cg-ta{flex:1;background:transparent;color:#dbe4f0;border:none;outline:none;resize:vertical;padding:12px 14px;
     font-family:inherit;font-size:inherit;line-height:inherit;white-space:pre;overflow-x:auto;tab-size:2;min-height:200px}
+/* Monaco replaces the gutter+textarea pair once it loads (see the upgrade in
+   renderExercise) — it brings its own gutter, so the box only supplies the frame. */
+.cg-monaco{height:320px;border:1px solid var(--cg-border);border-radius:0 8px 8px 8px;overflow:hidden}
 .cg-toolbar{display:flex;align-items:center;gap:10px;margin:12px 0}
 .cg-btn{font:inherit;font-size:13.5px;font-weight:700;border-radius:9px;padding:9px 18px;cursor:pointer;
     border:1px solid var(--cg-border);background:#0b1426;color:var(--cg-text);transition:all .12s}
@@ -361,6 +377,42 @@
     });
     return tsLoading;
   }
+  /* ---- lazy-load Monaco (one loader per page, shared by every exercise render) ---- */
+  /** In-flight Monaco load, shared across exercise switches — mirrors tsLoading's
+   *  dedupe-the-download shape. Resolves true once global.monaco is usable, false on any
+   *  failure (offline, CDN blocked); NEVER rejects, so a caller can `if (!ok) return` and
+   *  leave the textarea in place. */
+  let monacoLoading = null;
+  /** The editor pane is dark-terminal styled in both site themes, matching .cg-editor's
+   *  hardcoded #04070f — the graded IDE was never themed with the rest of the page, and
+   *  syncing it now would be a different change than this one. */
+  function defineMonacoTheme() {
+    global.monaco.editor.defineTheme('dlh-dark', {
+      base: 'vs-dark', inherit: true, rules: [],
+      colors: {
+        'editor.background': '#04070f',
+        'editor.foreground': '#dbe4f0',
+        'editorLineNumber.foreground': '#3b4a63',
+        'editorLineNumber.activeForeground': '#94a3b8',
+        'editor.lineHighlightBackground': '#0b1426',
+        'editorCursor.foreground': '#dbe4f0',
+        'editorIndentGuide.background': '#16233a',
+      },
+    });
+  }
+  /** Load Monaco's AMD loader, then its editor.main module. The require() call needs its
+   *  own promise because success and failure arrive as two callbacks rather than as a
+   *  script load event. */
+  function loadMonaco() {
+    if (global.monaco) return Promise.resolve(true);
+    if (monacoLoading) return monacoLoading;
+    monacoLoading = loadScript(MONACO_CDN + '/loader.js').then(() => new Promise(resolve => {
+      global.require.config({ paths: { vs: MONACO_CDN } });
+      global.require(['vs/editor/editor.main'], () => { defineMonacoTheme(); resolve(true); }, () => resolve(false));
+    })).catch(() => false);
+    return monacoLoading;
+  }
+
   /** TS → ES2020 JS, type errors IGNORED (transpileModule never type-checks). Grading
    *  is behavioural: a solution with a type error that still passes the tests passes. */
   function transpileTs(code) {
@@ -1073,6 +1125,12 @@ __results
     const gutter = h('div', { class: 'cg-gutter' }, '1');
     const ta = h('textarea', { class: 'cg-ta', spellcheck: 'false', autocomplete: 'off', autocapitalize: 'off', wrap: 'off' });
     const editorWrap = h('div', { class: 'cg-editor' }, gutter, ta);
+    /* Monaco upgrade state. getCode/setCode are the ONE indirection point every handler
+       below goes through — grading, the coach, Reset and the language tabs never learn
+       which backend is live. Null until the CDN load lands (see the upgrade below). */
+    let monacoEditor = null, monacoContainer = null;
+    function getCode() { return monacoEditor ? monacoEditor.getValue() : ta.value; }
+    function setCode(v) { if (monacoEditor) monacoEditor.setValue(v); else ta.value = v; }
     const statusEl = h('span', { class: 'cg-status' });
     const runBtn = h('button', { class: 'cg-btn primary' }, '▶ Run Tests');
     const resetBtn = h('button', { class: 'cg-btn ghost' }, 'Reset');
@@ -1122,7 +1180,7 @@ __results
      *  `coachSeen` before display so it can never repeat, even across reloads. */
     function evaluateCoach() {
       if (!coachEnabled() || !ex.coach || !ex.coach.length) return;
-      const code = ta.value, starterCode = ex.starter[lang] || '';
+      const code = getCode(), starterCode = ex.starter[lang] || '';
       if (code.trim() === starterCode.trim()) return;
       const seen = (progress[ex.id] && progress[ex.id].coachSeen) || [];
       for (const c of ex.coach) {
@@ -1137,8 +1195,10 @@ __results
       }
     }
 
-    /** Renumber the fake gutter to match the textarea's line count. */
+    /** Renumber the fake gutter to match the textarea's line count. A no-op once Monaco
+     *  is live: it renders a real gutter, and the fake one is no longer in the document. */
     function refreshGutter() {
+      if (monacoEditor) return;
       const n = ta.value.split('\n').length;
       let g = ''; for (let i = 1; i <= n; i++) g += i + (i < n ? '\n' : '');
       gutter.textContent = g || '1';
@@ -1149,7 +1209,10 @@ __results
     function loadLang(l) {
       lang = l; ex.__lastLang = l;
       sigEl.textContent = ex.signature[l] || '';
-      ta.value = stored[l] || ex.starter[l] || '';
+      setCode(stored[l] || ex.starter[l] || '');
+      /* Monaco keeps syntax rules per MODEL, not per editor, so switching tabs has to
+         retag the model — otherwise the Python buffer keeps being highlighted as Java. */
+      if (monacoEditor) global.monaco.editor.setModelLanguage(monacoEditor.getModel(), MONACO_LANG[l] || 'plaintext');
       refreshGutter();
       tabsEl.querySelectorAll('.cg-tab').forEach(b => b.classList.toggle('on', b.dataset.lang === l));
       const solved = progress[ex.id] && progress[ex.id].solved;
@@ -1160,21 +1223,58 @@ __results
       tabsEl.appendChild(h('button', { class: 'cg-tab', 'data-lang': l, onclick: () => loadLang(l) }, label));
     });
 
-    ta.addEventListener('input', () => {
+    /** One edit — from either backend. Saves the buffer per language and re-arms the
+     *  coach's 900ms debounce. */
+    function onEdit() {
       refreshGutter();
-      stored[lang] = ta.value;
+      stored[lang] = getCode();
       progress[ex.id] = progress[ex.id] || {};
       progress[ex.id].code = stored;
       saveProgress(bank.id, progress);
       clearTimeout(coachTimer);
       coachTimer = setTimeout(evaluateCoach, 900); // same step-pacing the site's animations use
-    });
+    }
+    ta.addEventListener('input', onEdit);
     ta.addEventListener('scroll', () => { gutter.scrollTop = ta.scrollTop; });
+
+    /* Upgrade to Monaco in the background. The textarea above is already fully usable at
+       first paint, so nothing waits on this; if the CDN is blocked or the learner is
+       offline, loadMonaco resolves false and this exercise stays on the textarea for
+       good. Same resilience shape as the TS/Pyodide/CheerpJ runtimes. */
+    loadMonaco().then(ok => {
+      /* replaceWith is a no-op on a parentless node, which would strand a live editor in
+         a detached div — so skip the upgrade entirely rather than half-do it. */
+      if (!ok || monacoEditor || !editorWrap.parentNode) return;
+      const hadFocus = document.activeElement === ta;
+      const code = getCode();
+      monacoContainer = h('div', { class: 'cg-monaco' });
+      editorWrap.replaceWith(monacoContainer);
+      monacoEditor = global.monaco.editor.create(monacoContainer, {
+        value: code,
+        language: MONACO_LANG[lang] || 'plaintext',
+        theme: 'dlh-dark',
+        automaticLayout: true,
+        minimap: { enabled: false },   // the panel is narrow and these are 20-line exercises
+        fontSize: 13,
+        lineHeight: 20,
+        fontFamily: "'Cascadia Code', ui-monospace, Consolas, monospace",
+        tabSize: (lang === 'python' || lang === 'java') ? 4 : 2,
+        insertSpaces: true,
+        scrollBeyondLastLine: false,
+        renderLineHighlight: 'line',
+        padding: { top: 10, bottom: 10 },
+        scrollbar: { alwaysConsumeMouseWheel: false },
+      });
+      monacoEditor.onDidChangeModelContent(onEdit);
+      monacoEditor.addCommand(global.monaco.KeyMod.CtrlCmd | global.monaco.KeyCode.Enter, () => runBtn.click());
+      if (hadFocus) monacoEditor.focus();
+    });
     // Tab indents — but with an escape hatch. Without one this textarea is a
     // keyboard trap: focus lands here and 15 Tab presses later is still here,
     // having typed indentation into the code, with Run and the language tabs
     // unreachable. Esc arms ONE focus-moving Tab (the standard editor pattern);
-    // any other key re-arms indentation capture.
+    // any other key re-arms indentation capture. Textarea path only — once Monaco is
+    // live this listener sits on a detached node and Monaco's Ctrl+M is the way out.
     /** Armed by Esc: the NEXT Tab moves focus instead of indenting (see the note below). */
     let tabEscapes = false;
     ta.addEventListener('keydown', e => {
@@ -1192,7 +1292,12 @@ __results
       }
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runBtn.click(); }
     });
-    resetBtn.onclick = () => { ta.value = ex.starter[lang] || ''; delete stored[lang]; refreshGutter(); ta.focus(); };
+    resetBtn.onclick = () => {
+      setCode(ex.starter[lang] || '');
+      delete stored[lang];
+      refreshGutter();
+      if (monacoEditor) monacoEditor.focus(); else ta.focus();
+    };
 
     /** Grade the current attempt: disable the button (a second click mid-run would race
      *  two runtimes over one results pane), route to the per-language runner, then render
@@ -1207,11 +1312,11 @@ __results
       let outcome;
       try {
         if (lang === 'python') {
-          outcome = await runPython(ta.value, ex.functionName.python, ex.tests, ex.argShapes, ex.resultShape);
+          outcome = await runPython(getCode(), ex.functionName.python, ex.tests, ex.argShapes, ex.resultShape);
         } else if (lang === 'java') {
-          outcome = await runJava(ta.value, ex, msg => { statusEl.textContent = msg; });
+          outcome = await runJava(getCode(), ex, msg => { statusEl.textContent = msg; });
         } else {
-          let code = ta.value, fnName = ex.functionName[lang];
+          let code = getCode(), fnName = ex.functionName[lang];
           if (lang === 'typescript') {
             const ok = await loadTs();
             if (!ok) { statusEl.textContent = 'offline — could not load the TypeScript compiler'; runBtn.disabled = false; return; }
@@ -1288,7 +1393,10 @@ __results
     panel.appendChild(tabsEl);
     panel.appendChild(sigEl);
     panel.appendChild(editorWrap);
-    panel.appendChild(h('div', { class: 'cg-keytab' }, 'Tab inserts indentation · Esc then Tab moves focus out · Ctrl/⌘ + Enter runs the tests'));
+    /* Both escape hatches are named because either editor may be the live one: Esc-then-Tab
+       is the textarea's, Ctrl+M is Monaco's own toggleTabFocusMode. A Tab-capturing editor
+       with no way out is a keyboard trap. */
+    panel.appendChild(h('div', { class: 'cg-keytab' }, 'Tab inserts indentation · Esc then Tab (or Ctrl+M) moves focus out · Ctrl/⌘ + Enter runs the tests'));
     panel.appendChild(h('div', { class: 'cg-toolbar' }, runBtn, resetBtn, statusEl));
     panel.appendChild(resultsEl);
     panel.appendChild(hintsWrap);

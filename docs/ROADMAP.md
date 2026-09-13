@@ -813,6 +813,68 @@ Still genuinely missing sitewide: **static annotated diagrams between sections**
 visualizers carry most of the visual load, and `visual` is the weakest dimension after
 `explain`.
 
+### 1b. Head First block variety — pages read as templated (Bobby's feedback, 2026-09-12)
+After item 1 shipped, Bobby looked at the live `nosql-redis-visualizer.html` and called it out:
+every swept page runs the exact same section order — deck line, problem card, fix card,
+principle callout, sticky note, four-bubble dialogue, mechanism steps, one diagram, knowledge
+check, "seen this before" cards, napkin summary — because `docs/HEADFIRST-BLOCK-RECIPE.md`
+mandates that one shape verbatim on all 474 pages. The content (the gotcha, the diagram pick)
+varies; the skeleton never does, which is why back-to-back pages read as copy-paste. Real Head
+First spreads vary WHICH device leads a given page — sometimes just one big diagram, sometimes
+just a Brain Power question, sometimes just the dialogue — not one-of-everything every time.
+
+**Real lever found, not yet used:** `devhub.css` already ships several fully-styled devices that
+never made it into the recipe's one shape: `.hf-brain` (Brain Power — dashed-border "stop and
+think" box), `.hf-qa` (`<dl class="hf-qa">` — "There Are No Dumb Questions" Q/A sidebar, Q:/A:
+prefixes added by CSS), `.hf-vs` (exaggerated before/after two-column contrast grid), `.hf-big`
+(one giant gradient-text sentence), `.hf-arrow` (handwritten arrow annotation pointing at the
+content above/below it — `.up` variant points up), plus the inline `.hf-mark`/`.hf-g/r/a/v/c`
+color utilities. None of these are in the current recipe at all.
+
+**✅ PILOT BUILT 2026-09-13 — 8 pages, 4 shapes, uncommitted and waiting on Bobby's verdict.**
+
+Four alternate shapes were designed from the unused kit and each piloted on two already-authored
+pages by a parallel agent, re-staging the page's EXISTING gotcha rather than writing a new one:
+
+| shape | silhouette | pilot pages | score |
+| --- | --- | --- | --- |
+| **A — There Are No Dumb Questions** | `hf-big` → `hf-qa` sidebar carries the whole lesson → two diagrams → check | typescript-generics · spring-boot-bean-lifecycle | 81.8→84.4 · 93.8→96.5 |
+| **B — The Receipt** | `hf-receipt` tally → `hf-vs` → `hf-chain` → code + `hf-arrow` scribbles → check → closing `hf-big` | aws-cost · react-performance | 93.8→**100** · 93.8→99.7 |
+| **C — The Whiteboard** | one big figure + 3 handwritten `hf-arrow` call-outs, prose serving the figure | entra-oauth-oidc · ds-hash-tables | 93.8→96.5 · 91.3→94.0 |
+| **D — The Argument** | 8–10 `hf-talk` bubbles split around an `hf-brain`, no cards at all | nosql-redis · angular-change-detection | 97.3→**100** · 86.2→87.7 |
+
+Every page scored HIGHER than the templated block it replaced, `tmp_vcheck` passes (537 pages),
+all 8 smoke clean at 320px, and cream contrast is clean — which matters because `hf-qa`,
+`hf-receipt`, `hf-chain` and `hf-hand` had never rendered on any page in either theme. Blocks
+also got shorter: 5.8–8.2 KB against the template's 13.5 KB.
+
+**Four findings the pilot produced, all of which outrank the shapes themselves:**
+
+1. **Every shape cut `hf-terms`** — the "where you have seen this before" cross-references —
+   and four agents independently named that the biggest loss (the Redis page gave up its JPA
+   `@Version` / Kubernetes-lease / OAuth-`exp` trio). The sameness was the problem, not the
+   device. It should become an optional closing beat any shape may use when the parallels are
+   genuinely strong, not something the shape bans.
+2. **Four shapes on 466 pages is four templates, not variety.** The two Shape A pages came out
+   with near-identical device order. A retrofit only works if the shape is chosen by what the
+   gotcha IS (misconception → A, cost → B, structure → C, two-parties-both-right → D) with
+   latitude to drop or add one device per page.
+3. **A shape that introduces a `<pre>` must also add `devhub-syntax.js`.** Shape B put the first
+   code block on `aws-cost-visualizer.html`, which had never had one, and the page silently lost
+   25 structure points until the script tag was added. Any Receipt-shaped retrofit needs that
+   one-line include folded into the swap.
+4. **The dialogue was carrying the second-person voice.** Removing `hf-talk` dropped
+   spring-boot-bean-lifecycle's `voice` score to 62 mid-draft; it had to be recovered by
+   deliberately threading "you/your" through the Q&A prose. Any shape that drops the bubbles has
+   to pay that back somewhere else.
+
+Minor, worth fixing if the shapes ship: `hf-big` renders SMALLER than the `hf-say` line beneath
+it in cream, so Shape D's "one giant sentence" opening is the second-loudest thing on screen.
+
+**Still open (Bobby's call):** retrofit the 466 other swept pages, apply variety only to new
+pages, or keep the single shape. The pilot is local-only — compare the eight pages above against
+any untouched page (e.g. `spring-boot-caching-visualizer.html`) before deciding.
+
 ### 2. Line-by-line code annotation audit (Bobby has asked "many many many times")
 Every static code snippet must teach each line — via the Code Walkthrough widget, an adjacent
 per-line annotation column, or inline `.hf-arrow` notes. A one-sentence intro above a 20-line
@@ -854,6 +916,25 @@ Bobby asked if a package/dependency exists to make live coding feel like StackBl
 - **Recommendation:** Monaco + our existing runners = StackBlitz-feel (IntelliSense,
   minimap, real editor UX) without licensing or header constraints; consider WebContainers
   later only for the Node track where real `npm install` matters.
+
+**✅ BUILT 2026-09-13 (uncommitted) — both editors now run Monaco.** `devhub-tryit.js` (the "Try
+It Live" widget on 119 lesson pages) and `devhub-codegrade.js` (the graded "Code With Me" IDE on
+9 practice pages) each mount their original textarea first, so the widget is usable at first
+paint, then **upgrade in place** once Monaco loads from the CDN (`monaco-editor@0.56.0`, pinned
+in BOTH files — bump one, bump both). If the CDN is blocked or the learner is offline the load
+resolves false and the textarea simply stays forever; nothing else has to know. `getCode()` /
+`setCode()` are the single indirection point, so Run, Reset, the language tabs, the saved
+buffer and the pair-programming coach never learn which backend is live.
+
+Verified in a real browser, not code-read: real gutter and syntax colouring, language tabs
+retag the Monaco model (JS → Python → Java each load their own starter and highlighting),
+edits persist to `localStorage`, Run Tests graded 3/3, the coach still fired, Reset restored
+the starter. Two details worth keeping: Monaco owns the gutter so `refreshGutter()` is a no-op
+once it is live, and the keyboard-trap escape hatch is now BOTH `Esc`-then-`Tab` (textarea) and
+Monaco's own `Ctrl+M` — the hint line names both because either editor may be the live one.
+
+Still open: WebContainers for the Node track, and Monaco's real IntelliSense is only meaningful
+on the js/ts examples (Python and Java get syntax + bracket matching, no language server).
 
 ### 4. "Code With Me" guided-coding sections — ✅ COMPLETE (engine 2026-09-06, all 9 banks 2026-09-07)
 Pair-programming simulation on top of the graded IDE: as the student types, checkpoint-based

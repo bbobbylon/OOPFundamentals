@@ -185,62 +185,29 @@
     </div>
   </div>
 
-  <p class="hf-deck">or, why calling one @Bean method from another stopped giving you the singleton</p>
+<p class="hf-deck">or, why calling one @Bean method from another stopped giving you the singleton</p>
 
-<div class="hf-kick">The problem</div>
-<p class="hf-say">You added <code>proxyBeanMethods = false</code> for a faster startup, following the exact pattern Spring Boot's own autoconfiguration classes use. You quietly tripled your outbound connection pools doing it.</p>
+<p class="hf-big">Two @Bean methods calling each other still share one instance.</p>
+<p class="hf-say">Every other line in a <code>@Configuration</code> class quietly routes through the container's singletons, so a direct call from one <code>@Bean</code> method to another looks like it should behave the same way — until you turn off the one thing that made that true.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">restTemplate() called twice gives you two different RestTemplates</div>
-  <p><code>ClientConfig</code> declares one <code>RestTemplate</code> bean and two clients that both need it:</p>
-  <p><code>@Configuration(proxyBeanMethods = false)<br>public class ClientConfig {<br>&nbsp;&nbsp;@Bean public RestTemplate restTemplate() { return new RestTemplateBuilder().build(); }<br>&nbsp;&nbsp;@Bean public PaymentGatewayClient paymentGatewayClient() { return new PaymentGatewayClient(restTemplate()); }<br>&nbsp;&nbsp;@Bean public ShippingRateClient shippingRateClient() { return new ShippingRateClient(restTemplate()); }<br>}</code></p>
-  <p>Every method here compiles clean and every bean gets created without a single error. But <code>paymentGatewayClient()</code> and <code>shippingRateClient()</code> each call <code>restTemplate()</code> as a plain Java method call — and because this class opted OUT of CGLIB enhancement, nothing intercepts that call and swaps in the container's singleton. Each call runs <code>restTemplate()</code>'s full body again, from scratch. The result is three separate <code>RestTemplate</code> objects: the one actually registered as the <code>restTemplate</code> bean (built once, during the container's own bean-creation pass), plus two more that <code>paymentGatewayClient</code> and <code>shippingRateClient</code> built for themselves — each with its own unshared, unpooled <code>HttpClient</code> underneath.</p>
-  <div class="hf-scatter">
-    <span>restTemplate() bean definition looks completely normal ✓</span>
-    <span>paymentGatewayClient and shippingRateClient both compile clean ✓</span>
-    <span>the thing that is not ⚠ them sharing the same RestTemplate or its connection pool</span>
-  </div>
-  <p class="hf-foot">Nothing crashes. Your app just quietly opens three separate connection pools where you designed exactly one.</p>
-</div>
+<dl class="hf-qa">
+  <dt>A <code>@Bean</code> method is still just a Java method to you. Why would calling it directly ever return something different from what <code>@Autowired</code> gives you?</dt>
+  <dd>Because under the default <code>proxyBeanMethods = true</code>, your <code>@Configuration</code> class never actually runs — Spring runs a generated CGLIB subclass of it instead, and that subclass intercepts every call from one <code>@Bean</code> method to another and redirects it to the container's singleton. <span class="hf-mark">Turn that subclass off, and there is nothing left standing between your code and a plain method call.</span></dd>
+  <dt><code>paymentGatewayClient()</code> and <code>shippingRateClient()</code> both compile clean in your build, and the app boots with zero errors. Doesn't that mean you're fine?</dt>
+  <dd>A clean compile only proves your Java is legal — and three separate <code>RestTemplate</code> objects are exactly as legal as one. <code>proxyBeanMethods = false</code> isn't a compile error, it's a silent behavior change on a line of code you used to be able to call directly without a second thought.</dd>
+  <dt>So why does <code>proxyBeanMethods = false</code> exist at all, if it breaks something this basic for you?</dt>
+  <dd>It doesn't break anything for a class that never calls one <code>@Bean</code> method from another — it just skips generating the CGLIB subclass, and that's a real win: faster startup, less memory, exactly why Spring Boot's own autoconfiguration classes use it everywhere. It only turns dangerous the moment you opt in and still leave a direct sibling call inside your class.</dd>
+  <dt>If you take <code>RestTemplate</code> as a method parameter instead of calling <code>restTemplate()</code> yourself, does that still work with the subclass turned off?</dt>
+  <dd>Yes — <span class="hf-mark">parameter injection was never something <code>proxyBeanMethods</code> controlled</span>. <code>paymentGatewayClient(RestTemplate restTemplate)</code> gets resolved from the container's bean definitions no matter which mode your class is in, because that path runs through the <code>ApplicationContext</code>, not through a plain Java call.</dd>
+  <dt>Is this a toy-example bug, or does it actually show up in a config class you'd write at your own job?</dt>
+  <dd>At work this is the exact shape of a shared <code>RestTemplate</code> or <code>WebClient.Builder</code> that three or four downstream clients all wire up from one <code>@Configuration</code> class — in CIAM, that's the config building one token-exchange client for every downstream API, and lite mode quietly hands each caller its own unpooled <code>HttpClient</code> instead of the one shared connection pool you designed.</dd>
+  <dt>You've heard a <code>final @Bean</code> method can bite you the exact same way, even with <code>proxyBeanMethods</code> left at its default. Same bug?</dt>
+  <dd>Same root cause wearing a different hat. CGLIB proxies work by subclassing your class, and a subclass can never override a <code>final</code> method — so a <code>final @Bean</code> method has nothing intercepting it either, even in full proxy mode. Lite mode removes the subclass entirely; a <code>final</code> method just makes one method un-overridable by a subclass that's still there. Either way, the fix doesn't change for you: stop calling the sibling method directly.</dd>
+</dl>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Let Spring inject it — never call the sibling method directly</div>
-  <div class="hf-ladder">
-    <b>Take the dependency as a method parameter instead</b>
-    <i>↓ public PaymentGatewayClient paymentGatewayClient(RestTemplate restTemplate) — Spring resolves this from the container regardless of proxy mode, because parameter injection was never the thing proxyBeanMethods controls</i>
-    <b>Or drop back to the default, proxyBeanMethods = true</b>
-    <i>↓ if the class genuinely needs direct inter-bean method calls to behave like injection, keep the CGLIB subclass that makes that safe</i>
-    <b>And grep every @Bean method body in any lite-mode class for calls to its sibling @Bean methods</b>
-    <i>↓ every single one of those calls is silently wrong the moment proxyBeanMethods is false — there is no partial-safety here</i>
-  </div>
-</div>
-
-<div class="principle" style="text-align:left">
-  <b>The one-sentence rule.</b> <code>@Configuration(proxyBeanMethods = false)</code> — "lite mode" — tells Spring not to generate the CGLIB subclass that normally intercepts a call from one <code>@Bean</code> method to another and redirects it to the container's singleton; without that interception, calling a sibling <code>@Bean</code> method directly is just an ordinary Java method call, and an ordinary method call runs its full body and constructs a new object every single time. Spring Boot's own autoconfiguration classes use lite mode everywhere for the real startup-time and memory savings it buys at scale — which is exactly why copying that annotation onto your own hand-written config, without also removing any direct method-to-method calls already inside it, is such an easy trap to walk into.
-</div>
-
-<div class="hf-note">"<b>Lite mode means no stunt double.</b>" The CGLIB proxy was the stunt double catching every direct call and swapping in the singleton for you. Turn proxyBeanMethods off, and the real, un-doubled method just runs — in full, every time you call it.</div>
-
-<div class="hf-talk">
-  <div class="hf-bub"><span class="who">You</span><p>paymentGatewayClient() and shippingRateClient() both call restTemplate(). Shouldn't they get the same bean back?</p></div>
-  <div class="hf-bub right"><span class="who">The @Configuration class, personified</span><p>Only in full mode. You marked me proxyBeanMethods = false, so Spring never wrapped me in a CGLIB subclass — there's nothing left standing between your code and a plain method call to intercept it.</p></div>
-  <div class="hf-bub"><span class="who">You</span><p>So what actually happens when paymentGatewayClient() calls restTemplate()?</p></div>
-  <div class="hf-bub right"><span class="who">The @Configuration class, personified</span><p>Exactly what any Java method call does: it runs the body again, top to bottom, and hands back whatever that produces. This time, that's a second RestTemplate the container has never heard of and will never manage.</p></div>
-</div>
-
-<div class="hf-kick">The mechanism</div>
-<p class="hf-say">Follow both calls from container startup to the two rogue instances.</p>
-
-<div class="hf-card">
-  <ol class="hf-steps">
-    <li><span>@Configuration(proxyBeanMethods = false) → Spring skips generating a CGLIB subclass of ClientConfig</span><span class="tag">lite mode</span></li>
-    <li class="open"><span>Container calls restTemplate() once during startup to register the real bean definition</span><span class="tag">one real singleton</span></li>
-    <li><span>Container calls paymentGatewayClient(); its body calls restTemplate() directly</span><span class="tag">plain Java call</span></li>
-    <li class="open"><span>No proxy is intercepting this call → the full method body runs again → a brand-new RestTemplate is built</span><span class="tag">rogue instance #1</span></li>
-    <li><span>Container calls shippingRateClient(); same direct call, same thing happens</span><span class="tag">rogue instance #2</span></li>
-    <li class="open"><span>Result: one registered singleton, plus two separate unmanaged RestTemplates, all disconnected from each other</span><span class="tag">three, not one</span></li>
-  </ol>
-  <p class="hf-annot">Step 4 is where the assumption quietly breaks. In full mode (the default), this exact same line of code — <code>restTemplate()</code>, called directly — would have been caught by the generated CGLIB subclass and redirected to the container's singleton. Nothing about the calling code changed between the two modes; only whether anything was watching for that call did.</p>
+<div class="hf-brain">
+  <div class="hf-brain-head">Brain Power</div>
+  <p>If <code>paymentGatewayClient()</code> took <code>RestTemplate restTemplate</code> as a parameter instead of calling <code>restTemplate()</code> itself, would leaving <code>proxyBeanMethods = false</code> on still be safe?</p>
 </div>
 
 <div class="hf-card">
@@ -251,43 +218,27 @@
       </div>
     </div>
   </div>
-  <p class="hf-annot">Read it from the outside in: the outer setting is what removes the only thing that could have redirected the inner call. Once that layer is gone, whatever a direct method call would normally construct is exactly what you get — unmanaged, unshared, and invisible to anyone who asks the ApplicationContext for "the" RestTemplate bean.</p>
+  <p class="hf-annot">Read it from the outside in. The outer layer is the setting that removed the only thing capable of catching the inner call. Once that layer is gone, a plain Java method call does exactly what a plain Java method call always does — it runs the full body and hands back a new object. You never asked for a second <code>RestTemplate</code>; the container simply has no way to know one exists, even though you're the one paying for it.</p>
 </div>
 
-<div class="hf-check" data-answer="0">
+<div class="hf-slot">
+  <div class="ctx">restTemplate() called from inside paymentGatewayClient()<small>same line of source code, every single time</small></div>
+  <div class="arrow">what it resolves to depends on →</div>
+  <div class="opts"><span>proxyBeanMethods = true → container's singleton</span><span class="on">proxyBeanMethods = false → brand-new object, every call</span><span>RestTemplate as a method parameter → always the singleton</span></div>
+</div>
+<div class="hf-arrow up">the middle option is the one actually wired up in ClientConfig — that's the one building two extra RestTemplates you never asked for</div>
+
+<div class="hf-check" data-answer="1">
   <p class="q"><code>@Configuration(proxyBeanMethods = false) class ClientConfig</code> declares <code>@Bean RestTemplate restTemplate()</code> and <code>@Bean PaymentGatewayClient paymentGatewayClient()</code>, where <code>paymentGatewayClient()</code>'s body calls <code>restTemplate()</code> directly. Does <code>paymentGatewayClient()</code> receive the same <code>RestTemplate</code> instance that's registered as the <code>restTemplate</code> bean in the <code>ApplicationContext</code>?</p>
-  <button type="button">No — proxyBeanMethods=false means this direct call just runs restTemplate()'s body again and constructs a brand-new instance</button>
-  <button type="button">Yes — Spring always intercepts calls between @Bean methods in the same class, proxy or not</button>
-  <button type="button">Yes, but only the first time paymentGatewayClient() runs; later calls return a cached copy</button>
-  <p class="why" data-for="0">Right — with no CGLIB subclass generated for this class, calling restTemplate() from inside paymentGatewayClient() is an ordinary Java method call. It runs the entire method body again and returns an object the ApplicationContext never registered.</p>
-  <p class="why" data-for="1">That interception is exactly what the CGLIB subclass under proxyBeanMethods=true (the default) provides — and this class explicitly opted out of it with proxyBeanMethods=false. Without that subclass, nothing is left to intercept the call.</p>
-  <p class="why" data-for="2">There's no caching for a directly-called method like this — caching a singleton instance across calls is precisely the job the now-disabled CGLIB proxy would have done. A plain method call has no memory of ever being called before.</p>
+  <button type="button">Yes — @Bean calls are always intercepted, proxy or not.</button>
+  <button type="button">No — it builds a brand-new RestTemplate; nothing intercepts the call in lite mode.</button>
+  <button type="button">Yes, but only on the very first call — after that, paymentGatewayClient() reuses whatever restTemplate() returned last time, like a cached result.</button>
+  <p class="why" data-for="0">Interception is exactly what the CGLIB subclass under the default proxyBeanMethods=true provides. This class explicitly opted out of it, so there is no subclass left to catch the call for you.</p>
+  <p class="why" data-for="1">Right — with no CGLIB subclass generated for this class, calling restTemplate() from inside paymentGatewayClient() is an ordinary Java method call. It runs the entire method body again and returns an object the ApplicationContext never registered, even though you only wrote one @Bean method for it.</p>
+  <p class="why" data-for="2">There's no caching here — caching a singleton instance across calls is precisely the job the now-disabled CGLIB proxy would have done. A plain method call has no memory of you ever calling it before; it rebuilds a whole new RestTemplate every single time.</p>
 </div>
 
-<div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">"No proxy standing between the call and the code" is a shape you have already run into once on this page, and it shows up elsewhere in Spring too.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>Calling new Foo() yourself always bypasses the container</h4>
-    <p>Nobody's surprised that <code>new PaymentGatewayClient(new RestTemplate())</code> written by hand skips Spring entirely. <code>proxyBeanMethods = false</code> just makes an accidental, internal version of that exact thing happen invisibly, inside code that otherwise looks fully container-managed.</p>
-    <div class="hf-scatter"><span>same bypass, just harder to see</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>CGLIB can't override a final method either</h4>
-    <p>A <code>final @Bean</code> method in an ordinary, fully-proxied <code>@Configuration</code> class has the identical failure — no subclass can override a final method, so there's nothing to intercept the call and swap in the singleton, even though <code>proxyBeanMethods</code> is left at its default.</p>
-    <div class="hf-scatter"><span>different trigger, same missing subclass</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>This page's own self-invocation gotcha</h4>
-    <p>A bean calling its own <code>@Transactional</code> or <code>@Async</code> method via <code>this.otherMethod()</code> skips its AOP proxy for the same root reason: a direct, in-JVM call that no proxy ever gets a chance to intercept. Same cause, applied to advice instead of to bean definitions.</p>
-    <div class="hf-scatter"><span>one root cause, two very different symptoms</span></div>
-  </div>
-</div>
-
-<div class="hf-napkin">
-  <b>The whole page on a napkin:</b> the container builds a bean once — scan, instantiate, populate, initialize — and normally guarantees you get that same singleton back everywhere you ask for it, including from inside another <code>@Bean</code> method, because a generated CGLIB subclass intercepts that call for you. <b>The one new sentence this block adds:</b> <code>@Configuration(proxyBeanMethods = false)</code> turns that interception off, so a direct call from one <code>@Bean</code> method to another in the same lite-mode class stops being dependency injection and becomes a plain method call that builds a brand-new, unmanaged object every time it runs.
-</div>
+<div class="hf-note">"<b>Lite mode means no stunt double.</b>" The CGLIB proxy was the stunt double catching every direct call and swapping in the singleton for you. Turn proxyBeanMethods off, and the real, un-doubled method just runs — in full, every time you call it.</div>
 
 <!-- SECTION 2: Bean lifecycle -->
   <h2>2 — Full Bean Lifecycle — Watch the Container Build a Bean</h2>
