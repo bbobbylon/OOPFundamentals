@@ -111,6 +111,18 @@ standing goal, not a one-time task. The full Head First rollout state lives in
   It scores every lesson page against the nine-point standard above and ranks the thinnest
   first. It reads MARKUP, not meaning — a low score means "go look", never a verdict, and a
   high score means "has the parts", never "is good".
+- **The Pages deploy runs FOUR gates, not one** (`.github/workflows/deploy.yml`): `tmp_vcheck.mjs`,
+  `tmp_doccheck.mjs`, `tmp_assetcheck.mjs origin/<base_ref>`, and a `tracks-data.js` load test.
+  Run all four before pushing — a green vcheck is not a green deploy.
+- **`tmp_doccheck.mjs` is the one that gets forgotten.** It demands a doc comment ending on the line **directly above** every
+  named function in the shared `frontend/*.js` engines (plus a `WHAT IT CANNOT SEE` banner
+  on every `tmp_*.mjs` gate, and Javadoc on backend types/public methods). "Directly above"
+  is literal: one intervening line breaks the association and fails, on purpose — a
+  `let state = null;` slipped between a comment and the two functions it described, and the
+  deploy went red on an engine whose doc comment was already written. Write WHY and who
+  calls it, never a restatement of the signature. It cannot see whether a comment is TRUE:
+  three comments pointed at an `upgradeToMonaco()` that was never written under that name,
+  and it passed them all.
 - Long tokens must WRAP in prose and SCROLL in code blocks. `:not(pre) > code` wraps inline
   chips; `<pre>` and `.cw-code` keep `overflow-x:auto`. Text clipped inside a non-scrolling
   box is invisible to a page-level overflow check — tmp_smoke.mjs reports it separately.
@@ -121,6 +133,19 @@ standing goal, not a one-time task. The full Head First rollout state lives in
 - Screenshot design changes with `node frontend/tmp_shot.mjs <page.html>` (phone + desktop).
 - Opt a page into the Head First kit with `node frontend/tmp_hfapply.mjs <page.html>`
   (`--check` dry-runs, `--revert` undoes).
+- **A Head First block has a SHAPE, and `docs/HEADFIRST-SHAPES.md` is the contract.** Eleven
+  shapes (`tour`, `questions`, `receipt`, `whiteboard`, `argument`, `exhibit`, `assembly`,
+  `timelapse`, `twodoors`, `mnemonic`, `autopsy`), each triggered by the KIND of gotcha —
+  a misconception, a cost, a structure, a gap between two correct parties — **never by the
+  topic**. "It's a Spring page so it gets the Argument" is the same mistake one rung up.
+  Every block declares its own: `<p class="hf-deck" data-shape="receipt">`. Check with
+  `node frontend/tmp_variety.mjs` (`--track=`, `--unshaped`, `--manifest=`), which fails on
+  a shape over 18% of a track (25% for `tour`) and on a block whose declaration its devices
+  don't back. It is the ONLY gate that looks across pages instead of at one — vcheck says
+  they're valid, smoke says they run, hfaudit says they have the parts, and they can still
+  all be the same page. 474 shipped that way because the recipe said "in this order:".
+  A page that genuinely earns `tour` keeps it — but it must SAY `data-shape="tour"`;
+  `unshaped` and earned-`tour` look identical on the page and opposite in the manifest.
 - AUTHORING a Head First block onto a page: `docs/HEADFIRST-BLOCK-RECIPE.md` is the exact
   markup contract (every `hf-*` shape, verbatim) plus the method and the gates — follow it
   rather than copying markup off a page, because a wrong class name (`.lvl` for `.ring`)
@@ -142,6 +167,16 @@ standing goal, not a one-time task. The full Head First rollout state lives in
   that a bare root selector plus a light-only rule, so the cream half matches nothing and
   the declarations leak onto `<html>`. It silently killed the entire component half of the
   cream variant once already.
+- **A lesson's shell is `.page` OR `.container`, and rules must name both.** `devhub.css`
+  treats them as one selector (`.page,.container{max-width:clamp(...)}`), but
+  `devhub-hf.css`'s book column said `.container` alone — so the 104 pages using
+  `<div class="page">` (the angular `-deep` set, the playgrounds, the debugging track) ran
+  edge to edge on a wide window while the prose inside them stayed capped (`.hf-say` 20ch,
+  `.hf-big` 30ch, an `.intro` card 1386px wide holding a 609px paragraph). Bobby's report
+  was *"the alignment is all off"*, and nothing was broken — half the page obeyed a measure
+  and half did not. It is now `[data-hf] :is(.container,.page)`. **No gate can see this**:
+  vcheck passes, smoke only checks overflow at 390px, contrast only checks colour. When you
+  write a shell-level rule, `grep -c '<div class="page"'` before you ship it.
 - The cream theme has THREE homes: `devhub-hf.css`'s cream block + repair layer
   (shared components); the runtime pass in `devhub-hf-theme.js` (per-page
   `<style>` blocks, which CSS cannot reach because it cannot query a computed

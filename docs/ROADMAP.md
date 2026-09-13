@@ -2203,6 +2203,288 @@ both were Bobby's call). **All three are now closed, 2026-09-11:**
 
 ---
 
+### 16. Git/GitHub, the shells, and AWS — tutorials + a cheat-sheet page TYPE (Bobby, 2026-09-13)
+
+Bobby: *"do we have documentation and also a tutorial on how to get the github pages up and
+running? … Everything github related. Version control, quick commands, etc. Do we have the same
+for shell, powershell cmd, and bash too? I want to have actual examples that one could look at,
+as well as a 'cheat sheet' for important cli commands. Same for AWS."*
+
+**First, the answer to the question half — mostly YES, at beginner depth.** Inventoried
+2026-09-13; do NOT rebuild any of this:
+
+| Topic | What already exists | Track |
+|---|---|---|
+| Git | `git-visualizer` (basics, incl. an "Oh no" recovery table), `git-branching`, `git-collaboration` (owns the PR workflow), `git-rebase` (incl. `reflog`), `git-advanced` (incl. `bisect`) | `tools` |
+| Git drill | `exam-git.html`, `flashcards-git.html` (28 cards) | `exam-prep` |
+| Bash / shells | `shell-cli-basics`, `shell-bash`, `shell-powershell`, `shell-cmd` | `shell` |
+| Cloud CLIs | `shell-aws-cli`, `shell-azure-cli`, `shell-gcloud-cli` (item 13, landed 2026-09-04) | `shell` |
+| GitHub Actions | `devops-cicd-pipeline-visualizer.html` — the ONLY page that owns Actions | `devops` |
+| AWS services | 15 `aws-*` pages (+7 Azure, +7 GCP) — services, not CLI | `cloud` |
+
+**The gaps that are actually real:**
+
+1. **There is no cheat-sheet page TYPE on this site.** Not a missing page — a missing *format*.
+   What exists is flip-card decks (`devhub-flashcards.js`, drill not reference) and in-lesson
+   `<table class="ref">` blocks buried inside lessons you must already be reading. No standalone,
+   one-screen, scannable, Ctrl-F-able reference page exists, and no `*-cheatsheet*.html` naming
+   convention. **Highest leverage, zero duplication risk.**
+2. **GitHub Pages deployment has ZERO teaching content** — two incidental prose mentions
+   sitewide, despite being how this very site ships. The repo's own
+   `.github/workflows/deploy.yml` (4 gates: vcheck, doccheck, assetcheck, tracks-data) is a
+   ready-made worked example, including how to read a failed deploy.
+3. **GitHub-the-platform is nearly absent.** PR *reviews*, CODEOWNERS, required checks, draft
+   PRs, squash-vs-merge, workflow YAML depth, matrix builds, secrets/OIDC, reusable workflows —
+   none taught. `git-collaboration` covers the PR *flow*, not the platform.
+4. **Git remotes / the distributed model** — `fetch` vs `pull` vs `push`, `origin`/`upstream`,
+   tracking branches, forks. No page owns it; it survives only as flashcards and asides.
+   The most common real-world confusion in Git, and it is the thinnest spot.
+5. **Bash beyond script anatomy** — no pipes/redirection lesson, no `grep`/`sed`/`awk`/`find`/
+   `xargs` toolbelt, no permissions, `ssh`, job control, or `PATH`/dotfiles.
+6. **PowerShell depth** — one page on cmdlets + the object pipeline; no scripting, error
+   handling, modules, remoting, or `Invoke-RestMethod`.
+
+**The design insight — these are TWO page types, and mixing them ruins both:**
+
+- **Tutorial** = narrative, one job start to finish, full Head First standard applies. "Get
+  GitHub Pages running" is the model: init → the `gh-pages` vs `/docs` vs Actions choice → the
+  workflow file → a red deploy and how to read it.
+- **Cheat sheet** = scannable reference for someone who already knows what they want and needs
+  the exact flag. The Head First devices mostly DO NOT apply — no dialogue, no predict-then-
+  reveal. Forcing `hf-talk` into a reference table is how this goes wrong. Needs its own thin
+  CSS contract and its own audit treatment (`tmp_hfaudit` would score it as a thin lesson
+  forever; decide whether to exempt it by filename, the way `SKIP` already exempts `*-index`).
+- The cross-shell comparison (`ls` / `Get-ChildItem` / `dir`) belongs in the CHEAT SHEET, where
+  the side-by-side IS the value. As *lessons* the shells must stay split: PowerShell pipes
+  objects, bash pipes text, and that divergence is a teaching beat, not a syntax note.
+
+**Suggested order** (cheapest-highest-value first): the cheat-sheet type + 3–4 sheets (git,
+bash, PowerShell/cmd, aws) → GitHub Pages tutorial → Git remotes lesson → GitHub platform page →
+Bash toolbelt → PowerShell depth.
+
+**✅ DECIDED by Bobby 2026-09-13: both get their own track.**
+
+**(a) Git track — BUILT the same day.** `id: 'git'`, 🌿 **Git & GitHub**, under *DevOps, Cloud &
+Data*. The 5 existing pages moved out of `tools` (whose `desc` dropped "Git"); all 5 retagged
+`<body class="track-git">`; palette added in BOTH themes — `devhub.css` `--accent:#f05033`
+(the Git logo orange) + the `::before` glow, and `devhub-hf.css` cream `--hf-track:#b83318`.
+Site is now **35 tracks**, counts bumped in README + DEVHUB-GUIDE. Gates green: vcheck,
+doccheck, practice-map, contrast (both themes), smoke.
+  - **One real bug fell out of it, now fixed at the cause.** `.hf-slot .ctx` paints its own
+    light-brown ground, and a `<code>` chip inside it was taking the page's *track* accent —
+    a colour picked to sit on the dark page, not on that brown. Git orange measured **1.57:1**.
+    `.hf-slot .ctx code` is now pinned to its own ink, so it holds for every track including
+    ones not invented yet. The cream repair layer (`--accent`/`--accent2` rebound per
+    container) is **cream-only**; dark has no equivalent, which is why this needed pinning
+    rather than a variable. Any FUTURE warm-accent track would have hit the same thing, on
+    112 `hf-slot` pages.
+
+**(b) Cheat-sheet track — ONE track for all of them**, Bobby 2026-09-13: *"another cheatsheet
+in its own track, for all cheatsheets stuff for coding, VSCode, IntelliJ, AWS commands, Github
+commands, and so forth… Oh and powershell, CMD, etc etc. Stuff for pc/coding."*
+Palette is already in place (`track-cheatsheets`, highlighter yellow `#facc15`, cream
+`--hf-track:#8a6410`), but the **track is NOT registered yet** — a track with zero pages has
+nothing to list, so it registers with its first sheets.
+  - Sheet list so far: **Git/GitHub commands, VS Code, IntelliJ, AWS CLI, PowerShell, CMD,
+    bash/shell**, plus general "coding". Bobby will add more.
+  - These **complement** item 9 (IDE mastery), they do not collide: item 9 is a *lesson* track
+    that teaches the IDE; these are *reference* — the shortcut you forgot. Build both.
+  - Still to design before the first sheet: the page TYPE — its CSS contract, and whether
+    `tmp_hfaudit` exempts `*-cheatsheet*.html` by filename the way its `SKIP` already exempts
+    `*-index`. Without that, every sheet scores as a permanently thin lesson.
+
+**(c) Still open:** is the AWS ask CLI depth (`--query`/JMESPath, profiles, SSO — check
+`shell-gcloud-cli` first, it deliberately teaches `--format`/`--filter` vs `--query` as a
+contrast) or an AWS *services* cheat sheet? The cheat-sheet track now gives the second reading
+a home, so this may simply be both.
+
+**Overlaps to respect:** item 5 still lists Shell as a thin track (its count "4" is stale — it
+is 7) and nothing has landed against that line. Item 9 (IDE mastery) already claims a "git
+integration" beat per IDE — keep it about the IDE's git UI, not Git concepts, or the two
+collide.
+
+---
+
+### 17. Head First SHAPES — killing the cookie-cutter (Bobby, 2026-09-13) — IN PROGRESS
+
+**The complaint.** Bobby, after the 474-page Head First sweep: *"right now its all the same
+boring setup"*, then later *"we cant cookie-cutter everything for this app. it needs to be
+fresh. it needs to standout!"* and *"last time I trusted you to do this, you did the same
+cookie cutter shape for hundreds of pages. lol"*.
+
+**The cause, and it is not carelessness.** `docs/HEADFIRST-BLOCK-RECIPE.md` opened its markup
+section with **"Your block, in this order:"** and listed one order. Every page followed it.
+The devices work; the variety did not survive being scaled. Measured before any fix:
+
+| on ~every page | | on almost none |
+|---|---|---|
+| `hf-deck` 475 · `hf-say` 474 · `hf-check` 474 | | `hf-qa` 0 · `hf-chain` 0 · `hf-receipt` 0 · `hf-hand` 0 |
+| `hf-talk` 466 · `hf-annot` 462 · `hf-napkin`/`hf-terms` 458 | | `hf-brain` 2 · `hf-vs` 2 |
+
+**Landed 2026-09-13:**
+
+- **`docs/HEADFIRST-SHAPES.md`** — eleven shapes (`tour`, `questions`, `receipt`,
+  `whiteboard`, `argument`, `exhibit`, `assembly`, `timelapse`, `twodoors`, `mnemonic`,
+  `autopsy`). Each has a TRIGGER keyed to the kind of gotcha (a misconception / a cost / a
+  structure / a gap between two correct parties / a googleable error / …), a silhouette, and
+  the devices it must and must not have. Assignment is by gotcha, never by topic — "it's a
+  Spring page so it gets the Argument" is the same failure one rung up.
+- **`data-shape` on the `hf-deck` line** — the block declares its own shape. Layout-neutral;
+  it exists so the shape is a fact the build can check, not an impression while scrolling.
+- **`frontend/tmp_variety.mjs`** — fails on (a) skew: any shape over 18% of a track, 25% for
+  `tour`; (b) a dead shape once the sweep is done; (c) **a lie**: a block claiming `receipt`
+  with no `hf-receipt`, or carrying a device its shape forbids. (c) is the load-bearing one —
+  declaring variety is free, and this makes the declaration cost something. It is the only
+  gate in the repo that looks ACROSS pages; every existing gate passes 474 identical pages.
+- **The recipe's "in this order:" is gone**, replaced by a parts-catalogue banner pointing at
+  the shapes doc.
+- The 8 pilot pages now declare their shapes: `questions` = spring-boot-bean-lifecycle,
+  typescript-generics · `receipt` = aws-cost, react-performance · `whiteboard` =
+  entra-oauth-oidc, ds-hash-tables · `argument` = nosql-redis, angular-change-detection.
+
+**A finding from the gate's first run**, kept because it is the failure mode in miniature:
+it flagged both `questions` pilots for carrying `hf-card`. Wrong — that card was a bare frame
+around a diagram, which is fine. The Tour's spine is the VERDICT pair (`hf-card bad` +
+`hf-card good` with titles), so the ban is now `hf-verdict`, synthesised in the gate. Banning
+the container would have pushed authors away from framing figures, i.e. toward less variety.
+
+**STEP 1 DONE — all eleven shapes now exist on a real page.** Seven were specs; each got one
+exemplar, so every contract has been tested against a page instead of against itself:
+
+| shape | page | the gotcha that chose it |
+|---|---|---|
+| `tour` | `debugging-jwt` | declared, not rewritten — it already earns all four parts |
+| `exhibit` | `debugging-stack-traces` | two log entries for one exception, one with 40 frames and one with none |
+| `assembly` | `spring-boot-security-filter-chain-deep` | `matches()` — first yes wins — reads like routing and IS the decision |
+| `timelapse` | `java-datetime` | 23:41:02 → 09:14, same jar, same line, two answers |
+| `twodoors` | `spring-boot-microservices` | relay the user's JWT **or** Client Credentials; both right, somewhere |
+| `mnemonic` | `big-o` | *"Compute it, halve it, or walk it."* |
+| `autopsy` | `nosql-document-wide-column` | `WriteError{code=17419, …larger than 16777216}`, climbed backwards |
+
+**And a real bug the exemplars surfaced, which was never about the shapes.** Bobby on the
+`exhibit` and `tour` pages: *"the alignment is all off - hopefully just because of the current
+size of my window."* It was not the window. `devhub-hf.css`'s book column was
+`[data-hf] .container{max-width:820px}` — and those two pages, plus **102 others**, wrap their
+content in `<div class="page">`. `devhub.css:93` already treats the two shells as one selector;
+the HF layer did not. So at 1440px those 104 pages ran 1386px edge to edge while the prose
+inside them stayed capped — `.hf-say` at 20ch, `.hf-big` at 30ch, an `.intro` card 1386px wide
+with a 609px paragraph in it and a 700px void to its right. Now `[data-hf] :is(.container,.page)`,
+and all three measured pages report an identical `left=288 w=865` at 1440. The affected set is
+the angular `-deep` pages, the playgrounds and the debugging track; spot-checked the two most
+width-hungry (`jwt-playground`, `angular-rxjs-operators-lab`) and their two-column tools still
+lay out correctly at 820. **No gate could see it** — vcheck passes, smoke only looks for
+overflow at 390px, contrast only reads colour. Noted in `CLAUDE.md`.
+
+Three things the build taught that the spec had not:
+
+- **Five shapes ban `hf-napkin`, and the tooling assumed every block ended in one.**
+  `blockshot.mjs` cropped on the napkin and silhouetted a finished `timelapse` at 81px.
+  Anything that walks a block must find its end by "the last `hf-*` sibling before the
+  visualiser". Fixed there; noted in the shapes doc for whatever walks a block next.
+- **A shape can need CSS that does not exist.** `twodoors` was unbuildable out of `hf-vs`,
+  whose children stamp ❌/✅ — the exact framing the shape refuses. Added `.hf-vs > .door`
+  (two accent tints + a `Door 1 ·` counter) to `devhub.css`, with a cream repair in
+  `devhub-hf.css`. Likewise `.hf-big` is sitewide *smaller* than `.hf-say` (27px vs 38px),
+  which is fine everywhere except the one shape that is nothing but the hook — so
+  `.hf-deck[data-shape="mnemonic"] ~ .hf-big` is bumped to 44px. Both verified in-browser.
+- **Re-staging costs teaching.** Every re-stage shrank its block (14.1k→10.5k, 9.8k→9.1k,
+  14.1k→11.0k, 11.4k→8.6k, 11.0k→9.1k) because the banned devices took real paragraphs with
+  them. Correct when the page's gotcha genuinely is the new shape; wrong when the page is
+  already a good `tour` — which is why `debugging-jwt`, the obvious `timelapse` by gotcha,
+  was declared instead of rewritten, and `java-datetime` took the slot.
+
+**Still open:**
+- **459 pages `unshaped`.** Each needs a shape assigned and its block re-staged — or a
+  deliberate `data-shape="tour"` when it genuinely earns one (Bobby: *"If some pages are
+  perfect with the current view … we can leave it"*). Leaving it undeclared is NOT the same
+  as declaring `tour`; the manifest is the audit trail.
+- **The manifest review (step 2, next).** `tmp_variety.mjs --manifest=` per track, with a
+  reason column, for Bobby to spot-check BEFORE the re-staging — the point is that a wrong
+  call shows up in a 459-line file rather than in 459 rewritten pages.
+- **Step 3** — the bulk re-stage, track by track, against the reviewed manifest.
+
+**What the gate cannot see** (stated because the last mechanism failed by being trusted past
+its limits): whether a shape SUITS its page. A `receipt` on a lesson with no cost in it passes
+every check and is still wrong. It stops a relapse into one shape; it cannot tell you the
+eleven are well matched. That is what reading the manifest is for.
+
+---
+
+### 18. Go GRANULAR on the eight core tracks before scaffolding anything new (Bobby, 2026-09-13)
+
+> *"for the angular and spring boot, maven, docker, shell, aws, idm, and infrastructure items,
+> how much more detailed can we get with every concept? How much more granular can we get?
+> … I really want to strengthen on them, after that is done, we can scaffold the rest."*
+
+**Sequencing decision (Bobby's):** depth on these eight comes BEFORE breadth. That explicitly
+defers item 16's cheat-sheet track and any other new-track scaffolding until this lands.
+
+**Measured inventory (2026-09-13, from `tracks-data.js`):**
+
+| area | track | pages | sections |
+|---|---|---|---|
+| Angular | `angular` | 74 | 11 |
+| Spring Boot | `spring-boot` | 53 | 7 |
+| IDM / identity | `identity` | 19 | 6 |
+| AWS | `cloud` | 15 | 2 |
+| Docker | inside `tools` | 6 | — |
+| Maven | inside `tools` | 5 | — |
+| Shell | `shell` | 7 | 3 |
+| Infrastructure | `devops` 7 + `kubernetes` 7 + `azure` 7 + `gcp` 7 | 28 | — |
+
+Note Docker and Maven are **sections of `tools`, not tracks**. If either grows past ~10 pages
+it wants promoting, the same way Git did on 2026-09-13 (item 16).
+
+**Verified gaps — these filenames returned NOTHING on a sitewide search:**
+
+- **Angular** — SSR / hydration; i18n; accessibility. (`angular-testing` DOES exist.)
+- **AWS** — messaging entirely (SQS / SNS / EventBridge); DynamoDB as its own page; Secrets
+  Manager + SSM Parameter Store; CloudFront / Route 53; **App Runner** — which is what this
+  very repo deploys on (see "AWS App Runner hardening"), so the platform we use is the one
+  we do not teach; Step Functions; ECR.
+- **Docker** — volumes / persistence; multi-stage builds and image size; layer caching;
+  healthchecks; registries and tagging; rootless / scanning.
+- **Maven** — `dependency:tree` and conflict resolution; BOM / `dependencyManagement`;
+  `settings.xml`, mirrors and private-repo auth; the wrapper; release / versioning.
+- **Shell** — text processing is the whole missing half: `grep` / `sed` / `awk` / `jq`; pipes
+  and redirection in depth; exit codes and `set -euo pipefail`; traps and argument parsing;
+  **`ssh` / `scp`**; job and process control; permissions; cron and scheduled tasks.
+- **IDM** — **SAML**; **SCIM**; **MFA / step-up**; session management and SSO across apps;
+  token exchange; PKCE in depth; device flow; CIBA; JML lifecycle; consent; audit. This is
+  Bobby's actual day job (CIAM, Ping + Entra) and it is the thinnest relative to its
+  importance — 19 pages, of which 9 are Ping product pages.
+- **Infrastructure** — observability as a subject (logs / metrics / traces, OpenTelemetry);
+  **GitHub Actions** in depth, which is what gates this repo's own Pages deploy; secrets in
+  CI; artifact registries; IaC state and drift (only `devops-iac-terraform` exists);
+  environment promotion; rollback; load testing; incident response.
+
+**The granularity question, answered as axes rather than a wishlist.** "More detailed" can
+mean four different things, and they are not interchangeable:
+
+1. **Split a page that teaches two things.** Cheapest real depth. A page covering both "what
+   it is" and "how it fails in production" is two pages.
+2. **Add a `-deep` companion.** The pattern the Angular and Spring tracks already use
+   (`angular-change-detection` → `angular-change-detection-deep`). 74 Angular pages exist
+   largely because this was done consistently; the thin tracks are thin because it wasn't.
+3. **Add the missing SUBJECT.** The verified list above. This is where the real gaps are —
+   no amount of depth on `aws-s3` produces a page about SQS.
+4. **Add the operational layer.** Most tracks teach the happy path. "What it looks like when
+   it breaks, and what you type" is a whole missing dimension — and it is the one closest to
+   Bobby's job.
+
+**Do this first:** a per-track inventory pass that lists every concept the track SHOULD cover
+against what it does, rather than building from the gap list above — that list is what one
+search turned up, not a curriculum. `tmp_hfaudit.mjs --track=` ranks the thin pages inside a
+track; it cannot see a subject that has no page at all, which is exactly what this item is
+about.
+
+**Interaction with item 17 (shapes):** these two touch the same pages. Re-staging a page's
+block and deepening its content should happen in ONE visit per page, not two — otherwise the
+second pass re-opens every file the first one just closed. Sequence per page: decide the
+shape, write/deepen the content, stage it in that shape, gate it.
+
+---
+
 ## Done — design-system v2 + press pulse (landed 2026-08-30)
 
 Bobby's second review round ("it should be hip, should be poppin, should be electric"), with a

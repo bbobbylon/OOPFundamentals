@@ -43,10 +43,30 @@ page does **not** already cover.
 
 ## The exact markup (copy these shapes precisely — they are the site's CSS contract)
 
-Your block, in this order:
+> ### ⚠ THIS IS A PARTS CATALOGUE, NOT AN ORDER
+>
+> This section used to open with **"Your block, in this order:"** followed by the sequence
+> below. That one sentence is why 474 lesson pages shipped looking identical — every page
+> followed it faithfully, and the variety that makes Head First readable did not survive
+> being scaled. `hf-qa`, `hf-chain`, `hf-receipt` and `hf-hand` ended up on **zero** pages
+> while eight other devices were on ~470 each.
+>
+> **Which devices your page gets, and in what order, is decided by
+> [`docs/HEADFIRST-SHAPES.md`](HEADFIRST-SHAPES.md) — read that first.** It defines eleven
+> shapes, each triggered by the KIND of gotcha the page teaches, each with devices it must
+> have and devices it must not. `frontend/tmp_variety.mjs` fails the build when one shape
+> takes over a track.
+>
+> What follows is the verbatim markup for each device — the CSS contract, so a wrong class
+> name does not render as unstyled text. Take the parts your shape calls for. The sequence
+> below happens to be the `tour` shape's order; it is one of eleven, not the default.
+
+The markup for each device:
 
 ```html
-<p class="hf-deck">or, a one-line subtitle in the Head First voice</p>
+<p class="hf-deck" data-shape="tour">or, a one-line subtitle in the Head First voice</p>
+<!-- data-shape is REQUIRED and names the shape from HEADFIRST-SHAPES.md. It styles
+     nothing; it exists so tmp_variety.mjs can check the claim against the devices. -->
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">One vivid sentence stating the surprise.</p>
@@ -80,6 +100,21 @@ Your block, in this order:
 
 <div class="hf-note">A sticky-note memory hook — an analogy or catchphrase, with <b>bold</b> on the
 part to remember.</div>
+
+<!-- hf-vs, the exaggerated before/after. .bad and .good stamp ❌ and ✅ via ::before. -->
+<div class="hf-vs">
+  <div class="bad"><h5>40,000 queries</h5><p>…</p></div>
+  <div class="good"><h5>1 query</h5><p>…</p></div>
+</div>
+
+<!-- the SAME grid with no verdict, for the `twodoors` shape — both answers are
+     defensible, so neither panel may be stamped wrong. .door draws two accent tints
+     and a "Door 1 · " / "Door 2 · " counter in place of the ❌/✅ glyph. Do not mix
+     .door with .bad/.good inside one hf-vs. -->
+<div class="hf-vs">
+  <div class="door"><h5>Relay the caller's JWT</h5><p>What it buys. When to choose it. What it costs.</p></div>
+  <div class="door"><h5>Request a Client Credentials token</h5><p>Same three, honestly.</p></div>
+</div>
 
 <div class="hf-talk">
   <div class="hf-bub"><span class="who">You</span><p>The naive question.</p></div>

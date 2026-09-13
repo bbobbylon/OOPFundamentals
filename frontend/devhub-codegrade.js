@@ -255,11 +255,19 @@
 
   /** "Learn more" navigation. When this page is inside app.html's iframe, the parent
    *  listens for the `dlh-navigate` message and swaps the lesson in place (keeping the
-   *  hub's sidebar/progress). The plain `location.href` after it is the standalone
-   *  fallback — postMessage to a non-listening parent is a no-op, so both run. */
+   *  hub's sidebar/progress); the plain `location.href` is the standalone path.
+   *  They are EXCLUSIVE, not a message plus a fallback. Running both is what made a
+   *  "Learn more" link load the lesson TWICE inside the hub — the parent swapped the
+   *  frame, then this document navigated the same frame again on top of it. The old
+   *  comment here claimed postMessage to a non-listening parent is a no-op and both
+   *  were therefore safe; the first half is true and the second does not follow.
+   *  devhub-quiz.js, devhub-notebook-review.js and devhub-chapters.js all already
+   *  branched this way — this engine was the only one that did not. */
   function gotoPage(file) {
-    try { global.parent.postMessage({ type: 'dlh-navigate', file: file }, '*'); }
-    catch (e) { /* not embedded — ignore */ }
+    if (global.parent !== global) {
+      try { global.parent.postMessage({ type: 'dlh-navigate', file: file }, '*'); return; }
+      catch (e) { /* cross-origin parent cannot be messaged — navigate ourselves */ }
+    }
     global.location.href = file;
   }
 
@@ -309,15 +317,21 @@
 .cg-tab{font:inherit;font-size:12.5px;font-weight:700;border-radius:7px 7px 0 0;padding:7px 14px;cursor:pointer;
     border:1px solid var(--cg-border);border-bottom:none;background:#0b1426;color:var(--cg-muted)}
 .cg-tab.on{background:#04070f;color:var(--cg-accent);border-color:var(--cg-accent)}
+/* Editor height: a graded exercise is written here, not glanced at — 200px showed about
+   nine lines, so a solution scrolled before it was finished. Sized off the VIEWPORT so it
+   grows on a desktop and still leaves room for the toolbar and results on a laptop, with a
+   floor for short windows. Drag-to-resize stays available on the textarea path. */
 .cg-editor{display:flex;background:#04070f;font-family:'Cascadia Code',ui-monospace,Consolas,monospace;
-    font-size:13px;line-height:1.55;min-height:200px;border:1px solid var(--cg-border);border-radius:0 8px 8px 8px}
+    font-size:13px;line-height:1.55;min-height:clamp(340px,52vh,620px);border:1px solid var(--cg-border);border-radius:0 8px 8px 8px}
 .cg-gutter{padding:12px 8px 12px 12px;text-align:right;color:var(--cg-muted);user-select:none;background:#060b16;
     border-right:1px solid var(--cg-border);white-space:pre;overflow:hidden;border-radius:0 0 0 8px}
 .cg-ta{flex:1;background:transparent;color:#dbe4f0;border:none;outline:none;resize:vertical;padding:12px 14px;
-    font-family:inherit;font-size:inherit;line-height:inherit;white-space:pre;overflow-x:auto;tab-size:2;min-height:200px}
+    font-family:inherit;font-size:inherit;line-height:inherit;white-space:pre;overflow-x:auto;tab-size:2;min-height:clamp(340px,52vh,620px)}
 /* Monaco replaces the gutter+textarea pair once it loads (see the upgrade in
-   renderExercise) — it brings its own gutter, so the box only supplies the frame. */
-.cg-monaco{height:320px;border:1px solid var(--cg-border);border-radius:0 8px 8px 8px;overflow:hidden}
+   renderExercise) — it brings its own gutter, so the box only supplies the frame.
+   resize:vertical works here because the upgrade sets automaticLayout, so Monaco
+   re-measures itself when the learner drags the box taller. */
+.cg-monaco{height:clamp(340px,52vh,620px);border:1px solid var(--cg-border);border-radius:0 8px 8px 8px;overflow:hidden;resize:vertical}
 .cg-toolbar{display:flex;align-items:center;gap:10px;margin:12px 0}
 .cg-btn{font:inherit;font-size:13.5px;font-weight:700;border-radius:9px;padding:9px 18px;cursor:pointer;
     border:1px solid var(--cg-border);background:#0b1426;color:var(--cg-text);transition:all .12s}
@@ -408,9 +422,24 @@
     if (monacoLoading) return monacoLoading;
     monacoLoading = loadScript(MONACO_CDN + '/loader.js').then(() => new Promise(resolve => {
       global.require.config({ paths: { vs: MONACO_CDN } });
-      global.require(['vs/editor/editor.main'], () => { defineMonacoTheme(); resolve(true); }, () => resolve(false));
+      global.require(['vs/editor/editor.main'], () => { defineMonacoTheme(); unblockMonacoCss(); resolve(true); }, () => resolve(false));
     })).catch(() => false);
     return monacoLoading;
+  }
+  /**
+   * Move Monaco's own stylesheet out of <head> after its AMD css plugin injects it there.
+   *
+   * Rendering WAITS on a head stylesheet, and this one is cross-origin — the structure that
+   * put angular-material-cdk at a 13s first paint on a slow host, which is why tmp_smoke.mjs
+   * fails a page for it. Monaco loads lazily so it never blocks the FIRST paint here, but a
+   * CDN stylesheet left in <head> re-creates the shape of that bug for later navigations and
+   * for anyone on a blocked host. The same <link> at the end of <body> still applies its
+   * rules and is no longer render-blocking.
+   */
+  function unblockMonacoCss() {
+    for (const l of document.querySelectorAll('head link[rel="stylesheet"]')) {
+      if (l.href && l.href.indexOf('monaco-editor') !== -1) document.body.appendChild(l);
+    }
   }
 
   /** TS → ES2020 JS, type errors IGNORED (transpileModule never type-checks). Grading

@@ -117,126 +117,87 @@
     <div class="intro-ciam"><span class="tag">Debug filter issues:</span> Set <code>logging.level.org.springframework.security=DEBUG</code> and read one line per decision — "BearerTokenAuthenticationFilter: Found Bearer token", "JWT validated: sub=user-42", "Authorization filter: access granted". "Access denied: anonymous" = the JWT never reached the auth filter (wrong position); "JWT expired" = it failed in the bearer filter; "Access is denied" = auth passed but authorization failed in <code>AuthorizationFilter</code>.</div>
   </div>
 
-<p class="hf-deck">or, the chain with your <code>permitAll()</code> in it was never even asked</p>
+<p class="hf-deck" data-shape="assembly">or, the chain with your <code>permitAll()</code> in it was never even asked</p>
 
-<div class="hf-kick">The problem</div>
-<p class="hf-say">You wrote a whole second <code>SecurityFilterChain</code> to make one endpoint public. It 401s anyway, and that bean never ran.</p>
+<div class="hf-kick">The line your request actually travels</div>
+<p class="hf-say">Six stations. Five of them do exactly what the documentation says. One of them ends the journey while looking like it is merely forwarding it.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">Two valid chains, and the public endpoint still returns 401</div>
-  <p>Your API chain is <code>@Order(1)</code>: <code>securityMatcher("/api/**")</code>, stateless,
-  <code>oauth2ResourceServer</code>, <code>.anyRequest().authenticated()</code>. Then the health
-  team asks for an unauthenticated probe endpoint, so you add a second bean —
-  <code>@Order(2)</code>, <code>securityMatcher("/api/public/**")</code>,
-  <code>.anyRequest().permitAll()</code> — because a separate chain feels cleaner than threading
-  another <code>requestMatchers</code> line into the first one.</p>
-  <p>The app starts. Both beans are created; you can see them both in the startup log.
-  <code>curl https://api.contoso.com/api/public/health</code> returns <b>401</b>. You re-read the
-  second chain a dozen times, check the pattern, check the slash, check the order annotations — all
-  correct. What you cannot see from the code is that <code>/api/public/health</code> also matches
-  <code>/api/**</code>, and <code>FilterChainProxy</code> walks its list in order and uses
-  <b>only the first chain that matches</b>. Chain 2 is not a fallback. It is not consulted, merged,
-  or even asked. For this request it does not exist.</p>
-  <div class="hf-scatter">
-    <span>both beans created ✓</span>
-    <span>@Order values correct ✓</span>
-    <span>the pattern really does match ✓</span>
-    <span>a broader chain already claimed the request ⚠</span>
-  </div>
-  <p class="hf-foot">The assumption underneath: that chains compose, the way a stack of middleware
-  does. They don't. Exactly one chain handles a request, start to finish.</p>
+<div class="hf-chain">
+<span class="n">GET /api/public/health</span><span class="a">&rarr;</span>
+<span class="n">DelegatingFilterProxy</span><span class="a">&rarr;</span>
+<span class="n">FilterChainProxy</span><span class="a">&rarr;</span>
+<span class="n">matches()? — first yes wins</span><span class="a">&rarr;</span>
+<span class="n">chain 1's filters, to completion</span><span class="a">&rarr;</span>
+<span class="n">401</span>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Order chains narrowest-first, or keep the rule inside the chain that owns the path</div>
-  <div class="hf-ladder">
-    <b>@Order(1) securityMatcher("/api/**") · @Order(2) securityMatcher("/api/public/**")</b>
-    <i>↓ the broad chain is asked first, says yes, and the narrow one never gets a turn — specificity counts for nothing here, only position</i>
-    <b>Swap them: @Order(1) on "/api/public/**", @Order(2) on "/api/**"</b>
-    <i>↓ now the narrow matcher is asked first and the public path peels off before the authenticated chain sees it</i>
-    <b>Or simpler: delete the second bean and add <code>.requestMatchers("/api/public/**").permitAll()</code> above <code>.anyRequest().authenticated()</code> in the chain that already owns <code>/api/**</code></b>
+<div class="hf-arrow up">Station four is the liar. It reads like a routing step on the way to somewhere else. It is the <span class="hf-mark">whole decision</span> — after it, the outcome is fixed and chain 2 is no longer part of this request's story.</div>
+
+<div class="hf-card">
+  <ol class="hf-steps">
+    <li><span>Two beans exist and both are built. <code>@Order(1)</code>: <code>securityMatcher("/api/**")</code>, stateless, <code>oauth2ResourceServer</code>, <code>.anyRequest().authenticated()</code>. <code>@Order(2)</code>: <code>securityMatcher("/api/public/**")</code>, <code>.anyRequest().permitAll()</code></span><span class="tag">both in the startup log — you can see them</span></li>
+    <li class="open"><span>The request reaches <code>DelegatingFilterProxy</code> in the servlet container, which hands it to Spring's <code>FilterChainProxy</code></span><span class="tag">one entry point</span></li>
+    <li><span><code>FilterChainProxy</code> iterates its ordered list, calling <code>matches(request)</code> on each chain. The order comes from the beans' <code>@Order</code> — <b>not</b> from how specific the patterns look</span><span class="tag">position, not precision</span></li>
+    <li class="open"><span>Chain 1's matcher <code>/api/**</code> returns true, because <code>/api/public/health</code> is also under <code>/api/**</code>. <span class="hf-mark r">Iteration stops here.</span> This is now the only chain that will run for this request</span><span class="tag">◀ THE LIAR — the decision, before any filter</span></li>
+    <li><span>Chain 1's filters execute. <code>BearerTokenAuthenticationFilter</code> finds no <code>Authorization</code> header and simply leaves the <code>SecurityContext</code> empty — an absent token is not an error at this station</span><span class="tag">anonymous, not rejected yet</span></li>
+    <li class="open"><span><code>AuthorizationFilter</code> evaluates <b>chain 1's</b> rules against an anonymous principal and throws <code>AccessDeniedException</code>; <code>ExceptionTranslationFilter</code> calls the entry point and returns <code>401</code></span><span class="tag">textbook — for the rules it was given</span></li>
+  </ol>
+  <p class="hf-annot">Station 4 is the whole lesson, and its <i>timing</i> is what makes it invisible. The chain is chosen <b>before a single filter runs</b>, so nothing downstream is in a position to reconsider — and "chain 2 was not selected" is not an event, so it appears in no log at any level. You can turn on <code>DEBUG</code> for all of Spring Security and still not see the line you want, because there is no line: not running isn't something that happens.</p>
+</div>
+
+<div class="hf-brain">
+  <div class="hf-brain-head">Brain Power</div>
+  <p>You swap the <code>@Order</code> values so the narrow matcher goes first, and <code>/api/public/health</code> starts returning 200. Now: what happens to a request for <code>/api/orders</code>, and why is that safe?</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-slot">
+    <div class="ctx">GET /api/public/health<small>no Authorization header</small></div>
+    <div class="arrow">FilterChainProxy picks exactly one &rarr;</div>
+    <div class="opts">
+      <span class="on">@Order(1) /api/** — authenticated()</span>
+      <span>@Order(2) /api/public/** — permitAll()</span>
+    </div>
   </div>
+  <p class="hf-annot">One slot, two candidates, and the one that plugs in is decided by position in a list. Read the unselected option carefully: it is not wrong, not misconfigured, and not a fallback. It is <i>correct and unreachable</i> — which is the hardest failure to debug, because every instinct you have says to go re-read the thing that isn't working.</p>
+</div>
+
+<p class="hf-big">Chains don't compose. Exactly one runs, start to finish.</p>
+
+<div class="hf-kick">Two ways out</div>
+<p class="hf-say">Both are one line. The second is the one your future self can read.</p>
+
+<div class="hf-card">
+  <pre><code>// (a) order the NARROW matcher first, so the public path peels off
+//     before the authenticated chain is ever asked
+@Bean @Order(1) SecurityFilterChain publicChain(HttpSecurity http) { ... securityMatcher("/api/public/**") ... }
+@Bean @Order(2) SecurityFilterChain apiChain(HttpSecurity http)    { ... securityMatcher("/api/**")        ... }
+
+// (b) or delete the second bean entirely and put the rule inside the
+//     chain that already owns the path
+http.authorizeHttpRequests(a -> a
+    .requestMatchers("/api/public/**").permitAll()
+    .anyRequest().authenticated());</code></pre>
+  <div class="hf-arrow">In (b), order still decides — <code>authorizeHttpRequests</code> rules are evaluated top-down in <b>declaration</b> order, so a broad <code>/api/**</code> written above a narrow <code>/api/public/**</code> shadows it exactly as thoroughly, one level down.</div>
+  <div class="hf-arrow rose">The one shadowing the framework refuses outright is declaring matchers <i>after</i> <code>anyRequest()</code>. Everything else it will let you shadow in silence.</div>
 </div>
 
 <div class="principle" style="text-align:left">
   <b>One request is handled by exactly one <code>SecurityFilterChain</code> — the first in the
   ordered list whose matcher says yes — and every other chain is irrelevant for the whole of that
-  request.</b> <code>FilterChainProxy</code> holds a
-  <code>List&lt;SecurityFilterChain&gt;</code>, asks each one <code>matches(request)</code> in turn,
-  and runs the filters of the first hit. There is no fallthrough after a denial and no merging of
-  rules across chains: a <code>permitAll()</code> in chain 2 cannot loosen chain 1, and an
-  <code>oauth2ResourceServer</code> in chain 1 cannot protect chain 2. This is also why a chain with
-  no <code>securityMatcher</code> is a catch-all that swallows everything below it, and why your
-  <code>@Order</code> annotations are not documentation — they are the entire routing logic.
+  request.</b> <code>FilterChainProxy</code> holds a <code>List&lt;SecurityFilterChain&gt;</code>,
+  asks each one <code>matches(request)</code> in turn, and runs the filters of the first hit. There
+  is no fallthrough after a denial and no merging of rules across chains: a <code>permitAll()</code>
+  in chain 2 cannot loosen chain 1, and an <code>oauth2ResourceServer</code> in chain 1 cannot
+  protect chain 2. This is also why a chain with no <code>securityMatcher</code> is a catch-all that
+  swallows everything below it, and why your <code>@Order</code> annotations are not documentation —
+  they are the entire routing logic.
 </div>
 
 <div class="hf-note">Walk through arrivals and you are waved into the first desk whose sign applies
-to you. The desk further down marked "Crew — straight through" was closer to what you needed and
-perfectly correct, and you will never reach it, because the first sign said "All arrivals."
+to you. The desk further down marked <b>"Crew — straight through"</b> was closer to what you needed
+and perfectly correct, and you will never reach it, because the first sign said "All arrivals."
 <b>First match wins, and there is no second look.</b></div>
-
-<div class="hf-talk">
-  <div class="hf-bub">
-    <span class="who">You</span>
-    <p>I wrote a chain with <code>permitAll()</code> for that path. Why is it still 401?</p>
-  </div>
-  <div class="hf-bub right">
-    <span class="who">FilterChainProxy</span>
-    <p>Because I never got to it. I walk my list in order and ask each chain whether it matches.
-    Your <code>/api/**</code> chain said yes, so I ran its filters and stopped. I'm not a pipeline
-    of chains — I'm a router that picks one.</p>
-  </div>
-  <div class="hf-bub">
-    <span class="who">Chain 2, the permitAll one</span>
-    <p>I'm right here. Fully built, correct matcher, <code>permitAll()</code> and everything. I've
-    simply never been handed a request that reaches me, and nothing in the logs will tell you that
-    because not running isn't an event.</p>
-  </div>
-  <div class="hf-bub right">
-    <span class="who">Chain 1's ExceptionTranslationFilter</span>
-    <p>And on my side this was routine. My <code>AuthorizationFilter</code> threw
-    <code>AccessDeniedException</code>, the principal was anonymous, so I called the entry point and
-    returned 401. Textbook behaviour — for the rules I was given.</p>
-  </div>
-</div>
-
-<div class="hf-kick">The mechanism</div>
-<p class="hf-say">One unauthenticated <code>GET /api/public/health</code>, two chains, and the decision that happens before any filter runs.</p>
-
-<div class="hf-card">
-  <ol class="hf-steps">
-    <li><span>The request reaches <code>DelegatingFilterProxy</code> in the servlet container, which hands it to Spring's <code>FilterChainProxy</code></span><span class="tag">one entry point</span></li>
-    <li class="open"><span><code>FilterChainProxy</code> iterates its ordered list of chains, calling <code>matches(request)</code> on each. Ordering comes from the beans' <code>@Order</code> — not from how specific the patterns look</span><span class="tag">position, not precision</span></li>
-    <li><span>Chain 1's matcher <code>/api/**</code> returns true. Iteration stops immediately. This is now the only chain that will run for this request — no later chain is a fallback</span><span class="tag">the decision, before any filter</span></li>
-    <li class="open"><span>Chain 1's filters execute. <code>BearerTokenAuthenticationFilter</code> finds no <code>Authorization</code> header, so it simply leaves the <code>SecurityContext</code> empty — an absent token isn't an error here</span><span class="tag">anonymous, not rejected yet</span></li>
-    <li><span><code>AuthorizationFilter</code>, last in the chain, evaluates <b>chain 1's</b> rules — <code>.anyRequest().authenticated()</code> — against an anonymous principal and throws <code>AccessDeniedException</code></span><span class="tag">chain 1's rules only</span></li>
-    <li class="open"><span><code>ExceptionTranslationFilter</code> sees an unauthenticated principal, calls the entry point, and returns <b>401</b>. Chain 2 is still sitting in the list, still matching, still permitting — and still never asked</span><span class="tag">401, from the other chain</span></li>
-  </ol>
-  <p class="hf-annot">Step 3 is the whole lesson, and its timing is what makes it so hard to see:
-  the chain is chosen <i>before a single security filter executes</i>, purely by matcher order. By
-  the time anything interesting appears in your DEBUG log, the decision that caused the bug has
-  already been made and left no trace of the road not taken. Turn on
-  <code>logging.level.org.springframework.security=DEBUG</code> and the startup output lists every
-  chain with its matcher in order — read that list top to bottom and ask "which of these claims my
-  URL first?" That question, not the contents of any one chain, is what you are debugging.</p>
-</div>
-
-<div class="hf-card">
-  <div class="hf-cast">
-    <div class="subject">GET /api/public/health<small>no Authorization header</small></div>
-    <div class="fan">which chain gets to handle it ↓</div>
-    <div class="obs">
-      <span class="new">@Order(1) "/api/**" — matches first, handles everything</span>
-      <span>@Order(2) "/api/public/**" — matches, never asked</span>
-      <span>@Order(3) no matcher — matches, never asked</span>
-    </div>
-  </div>
-  <p class="hf-annot">All three of these chains match this URL. That is the uncomfortable part:
-  matching is not rare or special, and in a codebase with four or five chains most requests match
-  several of them. Only position on this list decides anything, which is why adding a chain to fix a
-  behaviour is so often a no-op — you added a fourth candidate to a competition that was already
-  decided in row one.</p>
-</div>
 
 <div class="hf-check" data-answer="1">
   <p class="q">Two beans. <code>@Order(1)</code>: <code>securityMatcher("/api/**")</code> with
@@ -270,45 +231,12 @@ perfectly correct, and you will never reach it, because the first sign said "All
   opinion.</p>
 </div>
 
-<div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">Three other ordered lists where the first match ends the conversation.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>Angular's Router</h4>
-    <p>Routes are matched in array order and the first match wins, which is why
-    <code>{ path: '**' }</code> goes last and why a broad <code>'admin'</code> route declared above
-    <code>'admin/users'</code> quietly swallows it. Same failure, same fix, same lack of any warning
-    — your component is registered, correct, and unreachable.</p>
-    <div class="hf-scatter"><span>array order is the routing logic</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>An AWS network ACL</h4>
-    <p>Rules are evaluated in rule-number order and the first match decides, so an ALLOW at rule 200
-    under a DENY at rule 100 is dead text. Security groups work the opposite way — they evaluate
-    every rule — which is exactly why people mix the two up and spend an afternoon debugging a
-    subnet that "clearly allows the traffic."</p>
-    <div class="hf-scatter"><span>ordered list ≠ union of rules</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>An nginx <code>location</code> block</h4>
-    <p>One location block is selected per request and only that block's directives apply. Set
-    <code>proxy_read_timeout</code> in a sibling block and it does nothing — not because the syntax
-    is wrong, but because that block was never chosen. Configuration that lives in the branch you
-    didn't take is indistinguishable from configuration you never wrote.</p>
-    <div class="hf-scatter"><span>the unchosen branch is silent</span></div>
-  </div>
-</div>
-
 <div class="hf-napkin">
-  <b>The whole page on a napkin:</b> Spring Security is an ordered pipeline of servlet filters in
-  front of your <code>DispatcherServlet</code> — early filters authenticate and put an
-  <code>Authentication</code> in the <code>SecurityContext</code>, the final
-  <code>AuthorizationFilter</code> decides and throws <code>AccessDeniedException</code>, and
-  <code>ExceptionTranslationFilter</code> turns that into 401 for an anonymous caller or 403 for an
-  authenticated one. <b>The new sentence: there can be several such chains, and
-  <code>FilterChainProxy</code> runs exactly one of them — the first whose matcher hits — so a
-  perfectly correct chain further down the list is simply never asked.</b>
+  <b>The whole page on a napkin:</b> Spring Security is a chain of filters in a fixed order, and
+  <code>SecurityFilterChain</code> beans configure which filters run and what they enforce.
+  <b>The one new sentence this block adds:</b> multiple chains do not layer — <code>FilterChainProxy</code>
+  is a router that picks the first one whose matcher says yes, so <code>@Order</code> is the routing
+  logic and a correct chain placed after a broader one is unreachable, silently.
 </div>
 
   <!-- ── EXTREME-VIZ HERO ── -->

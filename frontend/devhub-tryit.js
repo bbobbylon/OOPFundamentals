@@ -154,7 +154,7 @@
 .dlh-tryit-predict.done{opacity:.55}
 .dlh-tryit-predict.done b{color:#4ade80}
 .dlh-tryit-edwrap{position:relative;margin:10px 14px 0}
-.dlh-tryit-ed{display:block;position:relative;z-index:2;width:100%;min-height:120px;resize:vertical;background:transparent;color:transparent;caret-color:#e2e8f0;border:1px solid #1c2942;padding:12px 14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.7;tab-size:4;white-space:pre;overflow:auto;outline:none;margin:0;border-radius:8px}
+.dlh-tryit-ed{display:block;position:relative;z-index:2;width:100%;min-height:clamp(260px,38vh,460px);resize:vertical;background:transparent;color:transparent;caret-color:#e2e8f0;border:1px solid #1c2942;padding:12px 14px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.7;tab-size:4;white-space:pre;overflow:auto;outline:none;margin:0;border-radius:8px}
 .dlh-tryit-ed:focus{border-color:var(--accent,#22d3ee)}
 .dlh-tryit-ed::selection{background:rgba(56,189,248,.28);color:transparent}
 /* the syntax layer behind the transparent textarea — identical box metrics
@@ -169,7 +169,9 @@
 .dlh-tryit-edwrap.plain .dlh-tryit-hl{display:none}
 /* Monaco replaces the textarea+overlay pair once it loads (see loadMonaco) —
    the box it mounts into gets the border/radius the two layers used to share. */
-.dlh-tryit-monaco{min-height:170px;border:1px solid #1c2942;border-radius:8px;overflow:hidden}
+/* 170px was about eight lines — enough to read the example, not enough to edit it.
+   automaticLayout is on, so resize:vertical lets the learner drag it taller. */
+.dlh-tryit-monaco{min-height:clamp(260px,38vh,460px);border:1px solid #1c2942;border-radius:8px;overflow:hidden;resize:vertical}
 .dlh-tryit-bar{display:flex;align-items:center;gap:8px;padding:10px 14px;flex-wrap:wrap}
 .dlh-tryit-run{padding:7px 18px;background:var(--accent,#22d3ee);color:#0f172a;border:none;border-radius:8px;cursor:pointer;font-weight:800;font-size:13px}
 .dlh-tryit-run:disabled{opacity:.5;cursor:wait}
@@ -253,9 +255,25 @@
     if (monacoLoading) return monacoLoading;
     monacoLoading = loadScript(MONACO_CDN + '/loader.js').then(() => new Promise(resolve => {
       global.require.config({ paths: { vs: MONACO_CDN } });
-      global.require(['vs/editor/editor.main'], () => { defineMonacoTheme(); resolve(true); }, () => resolve(false));
+      global.require(['vs/editor/editor.main'], () => { defineMonacoTheme(); unblockMonacoCss(); resolve(true); }, () => resolve(false));
     })).catch(() => false);
     return monacoLoading;
+  }
+  /**
+   * Move Monaco's own stylesheet out of <head> after its AMD css plugin injects it there.
+   *
+   * Rendering WAITS on a head stylesheet, and this one is cross-origin: that structure is
+   * what put angular-material-cdk at a 13s first paint on a slow host (tmp_smoke.mjs flags
+   * it for exactly that reason). Monaco loads lazily here so it never actually blocks the
+   * FIRST paint — but leaving a CDN stylesheet in <head> re-creates the shape of the bug for
+   * every later navigation and every reader on a blocked host. Moving the same <link> to the
+   * end of <body> keeps the rules applying, drops it out of the render-blocking set, and
+   * costs nothing: by the time it exists the page has long since painted.
+   */
+  function unblockMonacoCss() {
+    for (const l of document.querySelectorAll('head link[rel="stylesheet"]')) {
+      if (l.href && l.href.indexOf('monaco-editor') !== -1) document.body.appendChild(l);
+    }
   }
 
   /* Pyodide (one interpreter per page, reused across widgets and runs) */

@@ -432,7 +432,7 @@ window.DEVHUB_TRACKS = [
   },
   {
     id: 'tools', icon: '🛠️', label: 'Dev Tools',
-    desc: 'Docker, Maven, Git, HTTP, and SQL essentials',
+    desc: 'Docker, Maven, HTTP, and SQL essentials',
     sections: [
       { label: 'Docker', pages: [
         { title: 'Docker Concepts',         file: 'docker-concepts-visualizer.html',            level: 'beginner' },
@@ -449,17 +449,23 @@ window.DEVHUB_TRACKS = [
         { title: 'Plugins',                 file: 'maven-plugins-visualizer.html',              level: 'intermediate' },
         { title: 'Multi-module Projects',   file: 'maven-multimodule-visualizer.html',          level: 'advanced' },
       ]},
+      { label: 'Web & DB', pages: [
+        { title: 'HTTP & REST',             file: 'http-rest-visualizer.html',                  level: 'beginner' },
+        { title: 'SQL',                     file: 'sql-visualizer.html',                        level: 'beginner' },
+        { title: 'System Design',           file: 'system-design-visualizer.html',              level: 'advanced' },
+      ]},
+    ]
+  },
+  {
+    id: 'git', icon: '🌿', label: 'Git & GitHub',
+    desc: 'Version control, branching, collaboration, and shipping on GitHub',
+    sections: [
       { label: 'Git', pages: [
         { title: 'Git Basics',              file: 'git-visualizer.html',                        level: 'beginner' },
         { title: 'Branching',               file: 'git-branching-visualizer.html',              level: 'beginner' },
         { title: 'Collaboration',           file: 'git-collaboration-visualizer.html',          level: 'intermediate' },
         { title: 'Rebase',                  file: 'git-rebase-visualizer.html',                 level: 'advanced' },
         { title: 'Advanced Git',            file: 'git-advanced-visualizer.html',               level: 'advanced' },
-      ]},
-      { label: 'Web & DB', pages: [
-        { title: 'HTTP & REST',             file: 'http-rest-visualizer.html',                  level: 'beginner' },
-        { title: 'SQL',                     file: 'sql-visualizer.html',                        level: 'beginner' },
-        { title: 'System Design',           file: 'system-design-visualizer.html',              level: 'advanced' },
       ]},
     ]
   },
