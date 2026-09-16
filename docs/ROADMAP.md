@@ -1183,6 +1183,60 @@ treatment's real per-block cost is substantially more authoring than one session
 **This remains a standing auto-continuing sweep**: further batches proceed on the same
 worst-first, same-rules, same-gates basis without a per-batch go-ahead.
 
+**Batch 8 (2026-09-16), same session, auto-continued per the standing approval** — five
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `angular-pagination-deep-visualizer.html` (6→0) — client-side vs server-side pagination
+  components, the `pageNumbers()` ellipsis-gap algorithm, the pager template, the RxJS
+  `page$`/`size$` declarative paging pattern, and the `IntersectionObserver` infinite-scroll
+  component.
+- `angular-performance-visualizer.html` (6→0) — `angular.json` bundle budgets, standalone
+  lazy-loading routes (`loadComponent`/`loadChildren`), `PreloadAllModules` wiring,
+  `NgOptimizedImage`, the `trackBy` `$index`-vs-`id` comparison, the pure-pipe-vs-method-call-
+  vs-computed-signal trio, and the Web Worker round trip.
+- `angular-di-advanced-visualizer.html` (6→0) — the DI lookup pseudo-code walk, the full
+  `InjectionToken` worked example (basic/factory/complex-type tokens), `useFactory` with
+  `deps`, `@Self`/`@SkipSelf`/`@Host` decorators, built-in `PLATFORM_ID`/`DOCUMENT` tokens,
+  and old-style constructor injection.
+- `angular-communication-visualizer.html` (6→0) — the full parent/child
+  `@Input()`/`@Output()` worked example (both components), the `[(x)]`/`xChange` two-way
+  custom-output pattern, the shared-service sibling "chat" pattern, content projection
+  (`<ng-content select=...>`), and `TemplateRef`/`*ngTemplateOutlet` with a generic
+  `ListComponent<T>`.
+- `typescript-functions-visualizer.html` (6→0) — `withLog<A, R>()` generic rest-arg
+  forwarding, a hybrid call-signature `Counter` type, construct-signature `Ctor<T>`, a typed
+  `this` parameter, polymorphic `this` return type on a class, and predicate/assertion return
+  functions (`isString`/`assertString`).
+
+One bug caught before shipping this batch: an edit to `angular-communication-visualizer.html`'s
+`TemplateRef`/`ngTemplateOutlet` block needed to split a single JS template-literal `.str` span
+into three separate spans (to interleave `.cm` comments between lines of the template string) —
+verified the open/close tag count stayed balanced by hand and via a clean `tmp_vcheck.mjs`
+before moving on, since an unbalanced split there would silently mis-color the rest of the block
+without throwing anything.
+
+Same treatment as batches 1–7 throughout: trailing inline comments in each page's own comment
+class, never a new device invented. All five passed the full gate suite (`tmp_vcheck`,
+`tmp_doccheck`, `tmp_assetcheck` against `origin/claude/multi-repo-continuation-l6xwuq`,
+`tmp_codecheck`, `tmp_smoke` — both per-page and a full 537-page sweep before pushing — and
+`tmp_contrast --theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 8** (via `tmp_annotationcheck.mjs`, whole site):
+**234 bare blocks across 101 pages** (30 blocks fixed across these 5 pages: 6+6+6+6+6=30,
+matching exactly — cross-checked against `--top=15` after every single page). **101 pages with
+a bare count remain** for a future pass — worst next: `angular-events-deep` 6/13 ·
+`typescript-narrowing` 6/15 · `typescript-async-patterns` 6/16 · `angular-state-patterns` 5/8 ·
+`angular-pipes` 5/10 · `angular-pwa` 5/10 · `typescript-utility-types` 5/12 ·
+`typescript-type-patterns` 5/13 · `angular-components` 5/14 · `angular-signals-deep` 5/14.
+Re-run `node frontend/tmp_annotationcheck.mjs` for the current top of the list before picking
+up where this pass left off — it will have moved.
+
+Not started this pass either, same reason as batch 7: the remaining page count (101) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead.
+
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
 - **StackBlitz WebContainers** (`@webcontainer/api`) — real Node.js in the browser. Needs
