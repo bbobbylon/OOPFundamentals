@@ -944,27 +944,53 @@ Every finished page follows the worked sample's exact treatment: trailing `<span
 one or more `.hf-arrow` notes synthesizing the block for the idea underneath it — never a new
 device. `devhub-syntax.js` was already included on all 11 (checked, not assumed).
 
-**Sitewide count as of this pass** (via `tmp_annotationcheck.mjs`, whole site):
-**545 bare blocks across 139 pages.** An earlier draft of this same scan, run before any page
-in this pass was touched, found ~698 bare blocks across ~149 pages — so this pass's own
-before/after is roughly 150 blocks fixed net of the 11 pages above, consistent with those 11
-pages' individual before-counts (~152). That 698/149 baseline is this session's own measurement,
-not the original ~353/~72 pass above, which scanned a narrower page set by a different method —
-the two are not directly comparable, only the six worst pages they agree on are. **139 pages
-with a bare count remain** for a future pass — worst next:
-`angular-routing-advanced` 13/27 · `config-app-config-providers` 12/24 ·
-`angular-template-forms` 11/17 · `angular-rxjs` 11/21 · `angular-directives` 10/15 ·
-`angular-http` 10/16 · `angular-control-flow` 10/18 · `angular-functional-guards` 10/19 ·
-`config-tsconfig-advanced` 10/21 · `angular-testing` 9/9. Re-run
-`node frontend/tmp_annotationcheck.mjs` for the current top of the list before picking up
-where this pass left off — it will have moved.
+**Batch 2 (2026-09-16), same session, five more pages, 0 bare remaining on each** — the
+coordinator's explicit standing rule going forward: never sacrifice per-page annotation quality
+to hit a page count, and stop whenever quality can no longer be maintained rather than aiming
+for a fixed batch size. Verified with `tmp_annotationcheck.mjs --page=` plus a full by-hand read
+of every touched block, same as batch 1:
 
-Not started this pass, and why: the remaining page count (139) at this treatment's real
+- `angular-routing-advanced-visualizer.html` (13→0) — also flagged a genuine pre-existing bug in
+  the page's own sample code via an `.hf-arrow` note rather than silently fixing or glossing over
+  it: the class-based `AuthGuard.canActivate()` reads `this.auth.isLoggedIn` (no call parens)
+  against a signal-based `AuthService.isLoggedIn` accessor, so the check is always truthy.
+- `config-app-config-providers-visualizer.html` (12→0)
+- `angular-template-forms-visualizer.html` (11→0)
+- `angular-directives-visualizer.html` (10→0)
+- `angular-http-visualizer.html` (10→0) — also fixed a pre-existing malformed-HTML comment
+  (`<ty>HttpClient<ty>` instead of `<span class="ty">HttpClient</span>`) found while annotating
+  the exact line it sat on.
+
+Same treatment as batch 1 throughout: trailing `<span class="cm">` (this set's own comment
+class in every case) inline comments on the lines that carry meaning, plus `.hf-arrow` notes
+synthesizing each block for the idea underneath it — no new device invented. All five passed the
+full gate suite (`tmp_vcheck`, `tmp_doccheck`, `tmp_assetcheck` against
+`origin/claude/multi-repo-continuation-l6xwuq`, `tmp_codecheck`, `tmp_smoke` — both per-page and
+a full 537-page sweep before pushing — and `tmp_contrast --theme=cream`/`--theme=dark`).
+
+**A real gate bug was found and fixed this batch, too**: `tmp_annotationcheck.mjs`'s
+`stripStyleBlocks` replaced an entire `<style>` block with a single line of spaces, collapsing
+its internal newlines and throwing off every `--page=` line number reported for content after
+it in the file (sitewide bare/substantial totals were unaffected — only the reported line
+numbers were wrong). Fixed to blank every character except newlines, so line numbers after a
+`<style>` block now match the real file. See the fix's own doc comment in
+`frontend/tmp_annotationcheck.mjs` for detail.
+
+**Sitewide count after batch 2** (via `tmp_annotationcheck.mjs`, whole site):
+**489 bare blocks across 134 pages** (down from the batch-1 baseline of 545/139 — 56 blocks
+fixed across these 5 pages, matching their individual before-counts of 13+12+11+10+10=56
+exactly). **134 pages with a bare count remain** for a future pass — worst next:
+`angular-rxjs` 11/21 · `angular-control-flow` 10/18 · `angular-functional-guards` 10/19 ·
+`config-tsconfig-advanced` 10/21 · `angular-testing` 9/9 · `angular-change-detection` 9/12 ·
+`angular-cli-project` 9/13 · `angular-routing` 9/14 · `angular-custom-form-controls` 9/17 ·
+`config-app-config` 9/19. Re-run `node frontend/tmp_annotationcheck.mjs` for the current top of
+the list before picking up where this pass left off — it will have moved.
+
+Not started this pass, and why: the remaining page count (134) at this treatment's real
 per-block cost (each line needs an actually-true explanation, not a template) is substantially
-more authoring than one session covers; this pass prioritized worst-first by bare count
-(matching this item's own stated ordering method) and stopped once it had verified the
-treatment holds up cleanly across all four gates on every page it touched, rather than
-spreading thinner across more pages with less care per block.
+more authoring than one session covers; this pass (like batch 1) prioritized worst-first by bare
+count and stopped once per-page quality could no longer be maintained at the same depth, per the
+standing rule above — not at a fixed page count.
 
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
