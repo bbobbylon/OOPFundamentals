@@ -1237,6 +1237,56 @@ treatment's real per-block cost is substantially more authoring than one session
 **This remains a standing auto-continuing sweep**: further batches proceed on the same
 worst-first, same-rules, same-gates basis without a per-batch go-ahead.
 
+**Batch 9 (2026-09-16), same session, auto-continued per the standing approval** — five
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `angular-events-deep-visualizer.html` (6→0) — the EditorComponent binding-target class,
+  passing extra args alongside `$event`, the three `@HostListener` examples (global keydown,
+  `window:scroll`, host click), a click-outside directive, the classic
+  `@Output()`/`EventEmitter` child→parent rating component, and the RxJS debounced-search
+  pattern.
+- `typescript-narrowing-visualizer.html` (6→0) — the `in` operator (Fish|Bird), a
+  discriminated-union `Shape`/`area()`, a named user-defined type guard (`isUser`), an
+  assertion function (`assertString`), a plain-truthiness assertion
+  (`assert`/`head<T>()`), and `never`-based exhaustiveness checking (`assertNever`).
+- `typescript-async-patterns-visualizer.html` (6→0) — `Promise.race` `withTimeout()`, the
+  no-throw `Result<T,E>` `safeGet()` pattern, `retry()` with exponential backoff, an
+  `AsyncGenerator`-backed `fromEvent()` plus a `ReadableStream` reader loop, typed errors in
+  `catch` (`unknown` → `instanceof` → custom `ApiError` guard), and `mapWithLimit()` bounded
+  concurrency.
+- `angular-state-patterns-visualizer.html` (5→0) — the same todo-app state modeled five ways:
+  RxJS `BehaviorSubject` service, plain signal-based store, classic NgRx (actions/reducer/
+  selectors/effects), `ComponentStore`, and `@ngrx/signals` SignalStore — each a large,
+  complete worked example (42–51 lines).
+- `angular-pipes-visualizer.html` (5→0) — manual subscribe/unsubscribe vs the async pipe, the
+  `as user` single-subscription trick (`*ngIf` and the new `@if` control flow), the
+  `keyvalue` pipe over a plain object and over a `Map` with a custom comparator, and a
+  standalone pipe using `inject()` for DI.
+
+Same treatment as batches 1–8 throughout: trailing inline comments in each page's own comment
+class, never a new device invented. All five passed the full gate suite (`tmp_vcheck`,
+`tmp_doccheck`, `tmp_assetcheck` against `origin/claude/multi-repo-continuation-l6xwuq`,
+`tmp_codecheck`, `tmp_smoke` — both per-page and a full 537-page sweep before pushing — and
+`tmp_contrast --theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 9** (via `tmp_annotationcheck.mjs`, whole site):
+**206 bare blocks across 96 pages** (28 blocks fixed across these 5 pages: 6+6+6+5+5=28,
+matching exactly — cross-checked against `--top=15` after every single page). **96 pages with
+a bare count remain** for a future pass — worst next: `angular-pwa` 5/10 ·
+`typescript-utility-types` 5/12 · `typescript-type-patterns` 5/13 · `angular-components` 5/14 ·
+`angular-signals-deep` 5/14 · `config-tsconfig` 5/14 · `config-angular-json-advanced` 5/19 ·
+`config-package-json-advanced` 5/19 · `angular-route-guards-deep` 4/4 ·
+`spring-boot-api-design-deep` 4/4. Re-run `node frontend/tmp_annotationcheck.mjs` for the
+current top of the list before picking up where this pass left off — it will have moved.
+
+Not started this pass either, same reason as batch 8: the remaining page count (96) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide progress
+across this session's batches 7–9: 317 → 206 bare blocks (111 fixed), 114 → 96 pages with a
+bare count remaining.
+
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
 - **StackBlitz WebContainers** (`@webcontainer/api`) — real Node.js in the browser. Needs
