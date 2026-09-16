@@ -3717,6 +3717,73 @@ pages shrank as banned devices took real paragraphs with them. Treat per-page co
 comparable to authoring a new block from the recipe, not cheaper, despite the head start of an
 existing gotcha.
 
+**2026-09-16 — scale-up batch: 26 more pages (22 → 48 shaped sitewide), after Bobby chose a
+smaller target over the full ~251-page rollout.** Given the honest cost estimate above, the
+target was cut down to "roughly 2 shaped pages per track" rather than half the site. Same
+method as the calibration batch throughout: read the page's existing (pre-shapes-system) HF
+block first, pick a shape by the KIND of gotcha it already tells — never by topic — re-stage
+its devices to that shape's must-have/must-not list, verify any factual claim empirically
+where the sandbox allows it rather than trusting memory, then run the full gate loop
+(`tmp_variety.mjs --track=`, `tmp_vcheck.mjs`, `tmp_doccheck.mjs`, `tmp_hfaudit.mjs`,
+`tmp_smoke.mjs`, `tmp_contrast.mjs --theme=cream/dark`) and commit individually before moving
+on. 26 pages landed, one per commit:
+
+`python-generators` (autopsy), `go-interfaces` (whiteboard), `csharp-async` (argument),
+`kubernetes-fundamentals` (questions), `node-express` (assembly), `docker-dockerfile`
+(exhibit) — these 6 were the original calibration batch, already logged above —
+`interview-linked-lists` (autopsy), `interview-system-design` (timelapse), `config-pom-xml`
+(questions), `config-package-json-advanced` (whiteboard), `datasci-numpy-pandas` (exhibit),
+`datasci-model-evaluation` (questions), `genai-how-llms-work` (questions),
+`genai-embeddings-vector-db` (receipt), `ping-oauth` (whiteboard), `ping-integration`
+(timelapse), `shell-bash` (exhibit), `shell-powershell` (argument), `azure-cosmos` (exhibit),
+`azure-containers` (receipt), `devops-cicd-pipeline` (assembly), `devops-deployment-strategies`
+(argument), `gcp-gke` (timelapse), `gcp-storage` (twodoors), `angular-signals` (questions),
+`typescript-async-patterns` (receipt), `react-useeffect-deep` (questions),
+`python-context-managers` (timelapse), `go-sync` (exhibit), `aws-s3` (mnemonic),
+`maven-dependencies` (whiteboard), `rbac-deep` (timelapse) — 26 new pages beyond the
+calibration 6.
+
+**Two real, pre-existing factual errors were found and fixed while fact-checking, not just
+authoring around them:**
+- `python-context-managers-visualizer.html` claimed reusing an exhausted `@contextmanager`
+  object raises `RuntimeError: generator didn't yield`. Verified live across python3.10
+  through 3.13: it actually raises `AttributeError: '_GeneratorContextManager' object has no
+  attribute 'args'`, because CPython's real `contextlib.py` (`inspect.getsource`) shows
+  `__enter__`'s first line is `del self.args, self.kwds, self.func`, which fails on reuse
+  before the generator itself is ever touched — confirmed `RuntimeError: generator didn't
+  yield` is real, but for a different bug entirely (a generator that never reaches `yield`).
+  Every instance of the wrong claim (the bad card, the quiz, the closing line) was corrected.
+- `go-sync-visualizer.html`'s planned content assumed a recursive-RLock RWMutex deadlock would
+  print Go's `fatal error: all goroutines are asleep - deadlock!`. Built and ran three Go 1.24.7
+  repros (the last channel-synchronized + `kill -QUIT` for a real goroutine dump) and found the
+  runtime prints **nothing** — `main()`'s own live timer keeps the process "alive" from the
+  runtime's global deadlock-detector, so the two blocked goroutines hang forever silently. Used
+  the real captured goroutine dump as the exhibit artifact instead of the assumed crash message.
+
+`tmp_variety.mjs` also caught one of my own authoring mistakes as designed: on
+`python-context-managers`, it reported `LIES … missing required devices: hf-cycle + hf-ladder`
+after I'd added the ladder but forgotten the cycle — fixed by adding the missing `hf-cycle`
+before re-running, which then passed clean.
+
+**Sitewide shape count after this batch: 48 shaped / 427 unshaped / 62 no-block, 0 declaration
+lies** (`node frontend/tmp_variety.mjs`). Full distribution: `questions` 8, `exhibit` 6,
+`whiteboard` 6, `timelapse` 6, `argument` 5, `receipt` 5, `assembly` 3, `autopsy` 3, `tour` 2,
+`mnemonic` 2, `twodoors` 2 — all eleven alive, no dead shape. Every track this batch touched
+now carries 1-3 shaped pages, still well inside the "early rollout, cap math is unavoidable at
+this count" regime the calibration batch's note already covers — `tmp_variety.mjs --track=`
+was run before every page to make sure the CHOICE was the track's least-used shape, not to
+chase a currently-unreachable green cap state. Tracks still at 0 shaped pages:
+`ai-dev`, `playground`, `git`, `php`, `mulesoft`, `stacks`, `ruby`, `rust`, `springboot` (note:
+distinct body-class spelling from `spring`, which has 3 — a naming quirk for a future session
+to either reconcile or just remember), `web-fundamentals`. Tracks still at exactly 1: `csharp`,
+`kubernetes`, `nodejs`.
+
+**Per this task's own standing instruction, this batch stops here** (~40-50 total shaped pages
+sitewide was the requested landing zone; 48 lands inside it) rather than continuing toward the
+full remaining ~427-page sweep — that remains future work, not started, per the honest cost
+estimate above (roughly a page per read-verify-restage-gate-commit cycle, not a batch
+operation).
+
 ---
 
 ### 18. Go GRANULAR on the eight core tracks before scaffolding anything new (Bobby, 2026-09-13)
