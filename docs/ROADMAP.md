@@ -1075,17 +1075,46 @@ and was reworded before committing.
 
 **Sitewide count after batch 5** (via `tmp_annotationcheck.mjs`, whole site):
 **353 bare blocks across 119 pages** (41 blocks fixed across these 5 pages: 9+8+8+8+8=41,
-matching exactly). **119 pages with a bare count remain** for a future pass — worst next:
-`typescript-mapped-types` 8/17 · `angular-interceptors-advanced` 7/7 ·
-`angular-dynamic-components` 7/11 · `angular-rxjs-custom-operators` 7/11 ·
-`angular-view-encapsulation` 7/13 · `typescript-template-literal-types` 7/14 ·
-`config-angular-json` 7/16 · `typescript-generics` 7/16 · `angular-lifecycle` 7/17 ·
-`angular-workspace-libraries` 7/18. Re-run `node frontend/tmp_annotationcheck.mjs` for the
-current top of the list before picking up where this pass left off — it will have moved.
+matching exactly).
 
-Not started this pass, and why: the remaining page count (119) at this treatment's real
+**Batch 6 (2026-09-16), same session, auto-continued per the standing approval** — five more
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `typescript-mapped-types-visualizer.html` (8→0) — syntax/keyof/T[K], readonly/? modifiers,
+  stripping with `-`, key remapping with `as`, key filtering via `never`, and five practical
+  mapped types (NonNullableFields, PickByType, Setters, form-error fields, reducer action map).
+- `angular-interceptors-advanced-visualizer.html` (7→0, every substantial block on the page was
+  bare) — class-based vs functional comparison, `HttpContextToken`, the token-refresh-with-
+  `shareReplay` pattern, a cache interceptor, exponential-backoff retry, request deduplication.
+- `angular-dynamic-components-visualizer.html` (7→0) — the full `createComponent()` workflow,
+  `NgComponentOutlet`, scoped environment injectors, content projection via
+  `projectableNodes`, and three real-world patterns (modal/dialog service, toast service, tabs).
+- `angular-rxjs-custom-operators-visualizer.html` (7→0) — the universal pipeable-operator
+  template, composing with `pipe()`, and the `debug`/`tapOnce`/`retryWithDelay`/
+  `distinctUntilKeysChanged`/`throttleMap` custom operators.
+- `angular-view-encapsulation-visualizer.html` (7→0) — Emulated/`None`/`ShadowDom` compared,
+  `:host`/`:host()`/`:host-context()`, `::ng-deep`, the `host` property, and
+  `@HostBinding`/`@HostListener`.
+
+Same treatment as batches 1–5 throughout: trailing inline comments in each page's own comment
+class, never a new device invented. All five passed the full gate suite (`tmp_vcheck`,
+`tmp_doccheck`, `tmp_assetcheck` against `origin/claude/multi-repo-continuation-l6xwuq`,
+`tmp_codecheck`, `tmp_smoke` — both per-page and a full 537-page sweep before pushing — and
+`tmp_contrast --theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 6** (via `tmp_annotationcheck.mjs`, whole site):
+**317 bare blocks across 114 pages** (36 blocks fixed across these 5 pages: 8+7+7+7+7=36,
+matching exactly). **114 pages with a bare count remain** for a future pass — worst next:
+`typescript-template-literal-types` 7/14 · `config-angular-json` 7/16 · `typescript-generics`
+7/16 · `angular-lifecycle` 7/17 · `angular-workspace-libraries` 7/18 · `design-patterns` 6/7 ·
+`angular-ngrx` 6/8 · `angular-ngrx-signal-store` 6/9 · `angular-pagination-deep` 6/10 ·
+`angular-performance` 6/10. Re-run `node frontend/tmp_annotationcheck.mjs` for the current top
+of the list before picking up where this pass left off — it will have moved.
+
+Not started this pass, and why: the remaining page count (114) at this treatment's real
 per-block cost (each line needs an actually-true explanation, not a template) is substantially
-more authoring than one session covers; each batch (1–5) prioritized worst-first by bare count
+more authoring than one session covers; each batch (1–6) prioritized worst-first by bare count
 and stopped once per-page quality could no longer be maintained at the same depth, per the
 standing rule above — not at a fixed page count. **This remains a standing auto-continuing
 sweep** (per the user's 2026-09-16 approval): further batches proceed on the same worst-first,
