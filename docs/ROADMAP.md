@@ -1287,6 +1287,69 @@ worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide
 across this session's batches 7–9: 317 → 206 bare blocks (111 fixed), 114 → 96 pages with a
 bare count remaining.
 
+**Batch 10 (2026-09-16), same session, auto-continued per the standing approval** — five
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `angular-pwa-visualizer.html` (5→0) — `provideServiceWorker()` registration wiring,
+  `manifest.webmanifest`, `AppUpdateService`'s `versionUpdates`/`SwUpdate` detect-and-prompt
+  flow, a manual `checkForUpdate()` call, and `PushService`'s subscribe/listen `SwPush`
+  pattern.
+- `typescript-utility-types-visualizer.html` (5→0) — `Required<T>`, `Parameters<F>` + a
+  generic `withLog()` wrapper, `ConstructorParameters<C>`/`InstanceType<C>` + a generic
+  factory function, `ReturnType`+`Awaited` chained to derive a resolved async return shape,
+  and a hand-rolled `PickByValue<T, V>`.
+- `typescript-type-patterns-visualizer.html` (5→0) — branded types (`UserId`/`PostId` + the
+  generic `Brand<T,B>` helper), the phantom-type `QueryBuilder` type-state builder, the core
+  `Result<T,E>` discriminated union, railway-oriented Result chaining (`andThen`/`mapOk`/
+  `ResultChain`), and a strongly-typed generic `TypedEmitter<Events>`.
+- `angular-components-visualizer.html` (5→0) — `counter.component.css` (scoped `:host`
+  styles), `app.component.ts` connecting a child via selector, `stepper.component.ts`'s
+  `model()` two-way binding, the NgModule-vs-standalone comparison pair, and `main.ts`'s
+  `bootstrapApplication()` entry point.
+- `angular-signals-deep-visualizer.html` (5→0) — `effect()` tracked-vs-untracked signal
+  reads, the advanced object-form `linkedSignal()`, `rxResource()` for RxJS-based loaders,
+  `afterNextRender()`/`afterRender()`, and a hand-rolled `CartStore` SignalStore-equivalent
+  service.
+
+Two out-of-scope pre-existing `tmp_smoke.mjs` text-clip notices (on `typescript-utility-types`
+and `angular-components`) were confirmed via `git stash` to predate these edits, not caused by
+them. One bug caught before shipping batch 10: an added comment on
+`angular-signals-deep-visualizer.html`'s `rxResource` block read "no async/await needed
+here", which trips `tmp_codecheck.mjs`'s C#-exclusion heuristic
+(`/\bawait\s+\w+/`, meant to rule out C# snippets) and silently dropped the whole block from
+TypeScript classification (671→670 blocks, 481→480 TS sitewide) with **no error reported** —
+caught only by re-running `tmp_codecheck.mjs` and diffing against a `git stash`ed baseline,
+fixed by rewording to "no async keyword" so "await" is never followed by whitespace + a word.
+**Lesson for future batches: a teaching comment that happens to use the word "await" in
+prose can silently defeat this gate's language detection — reread `tmp_codecheck.mjs`'s
+`NOT_CODE` list before writing a comment that mentions async/await, Console.Write, `var x =
+new`, or any of its other C#-exclusion phrases near a TS block.**
+
+Same treatment as batches 1–9 throughout: trailing inline comments in each page's own comment
+class, never a new device invented. All five passed the full gate suite (`tmp_vcheck`,
+`tmp_doccheck`, `tmp_assetcheck` against `origin/claude/multi-repo-continuation-l6xwuq`,
+`tmp_codecheck`, `tmp_smoke` — both per-page and a full 537-page sweep before pushing — and
+`tmp_contrast --theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 10** (via `tmp_annotationcheck.mjs`, whole site):
+**181 bare blocks across 91 pages** (25 blocks fixed across these 5 pages: 5+5+5+5+5=25,
+matching exactly — cross-checked against `--top=15` after every single page). **91 pages with
+a bare count remain** for a future pass — worst next: `config-tsconfig` 5/14 ·
+`config-angular-json-advanced` 5/19 · `config-package-json-advanced` 5/19 ·
+`angular-route-guards-deep` 4/4 · `spring-boot-api-design-deep` 4/4 ·
+`spring-boot-http-exchange-deep` 4/4 · `angular-ssr-hydration` 4/6 ·
+`angular-forms-data-deep` 4/8 · `angular-vitest` 4/8 · `spring-boot-di-ioc` 4/8. Re-run
+`node frontend/tmp_annotationcheck.mjs` for the current top of the list before picking up
+where this pass left off — it will have moved.
+
+Not started this pass either, same reason as batch 9: the remaining page count (91) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide progress
+across this session's batches 7–10: 317 → 181 bare blocks (136 fixed), 114 → 91 pages with a
+bare count remaining.
+
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
 - **StackBlitz WebContainers** (`@webcontainer/api`) — real Node.js in the browser. Needs
