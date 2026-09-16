@@ -1121,6 +1121,68 @@ sweep** (per the user's 2026-09-16 approval): further batches proceed on the sam
 same-rules, same-gates basis without a per-batch go-ahead, reporting back only at a natural
 checkpoint or when a decision needs the user.
 
+**Batch 7 (2026-09-16), same session, auto-continued per the standing approval** — eight
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `typescript-template-literal-types-visualizer.html` (7→0) — mapped-type key remapping
+  (`Getters`, prefixed Redux/NgRx action types), the `RouteParams` recursive-`infer` worked
+  example, `SnakeToCamel`, `Split`, `Join`, and a type-safe SQL-fragment `SelectStmt` sketch.
+- `config-angular-json-visualizer.html` (7→0, largest single block on the page was 81 lines) —
+  the full `angular.json` anatomy (build/serve/extract-i18n/test/lint targets), a
+  `proxy.conf.json`, `environment.ts`/`environment.prod.ts`, `fileReplacements`, using
+  environments in code, and the `scripts` array.
+- `typescript-generics-visualizer.html` (7→0) — multi-param generic functions (`pair`/`zip`),
+  a default type parameter (`ApiResponse<T = unknown>`), a default referencing an earlier
+  param (`Result<T, E = Error>`), a generic `Repository` interface + `Dict`/`Pair` aliases,
+  a fully-typed `EventBus`, `groupBy`, and `once()`.
+- `angular-lifecycle-visualizer.html` (7→0) — constructor-vs-`ngOnInit` DI timing, the
+  `@ViewChild` wrong/right timing pair, the memory-leak fix trio (manual unsubscribe,
+  `takeUntil`, `takeUntilDestroyed`/`DestroyRef`), `afterNextRender()`, and the
+  `ExpressionChangedAfterItHasBeenCheckedError` `setTimeout`/`detectChanges` fix.
+- `angular-workspace-libraries-visualizer.html` (7→0) — `tsconfig.json` path aliases, using a
+  workspace library like an npm package, and the tree-explorer's `angular.json`/
+  `package.json`/project-tree/`ng-package.json`/`my-lib.module.ts` panels.
+- `design-patterns-visualizer.html` (6→0) — Singleton (classic + enum), Factory, Builder
+  (fluent chain + skeleton), Observer, and Strategy (classes + lambda-as-strategy).
+- `angular-ngrx-visualizer.html` (6→0) — the full classic-NgRx todo feature (actions, reducer,
+  selectors, effects, store wiring, component dispatch) plus its `@ngrx/signals` SignalStore
+  rewrite.
+- `angular-ngrx-signal-store-visualizer.html` (6→0) — the traditional-NgRx-vs-SignalStore
+  counter comparison, `withState`/`withComputed`/`withMethods` core-API examples, and the
+  69-line `withEntities()` CRUD `TodoStore` worked example.
+
+Two bugs caught before shipping this batch (both by the gates, not by luck):
+`angular-workspace-libraries-visualizer.html` had two added comments use literal backticks
+(`` `ng run ...` ``, `` `npm start` ``) inside a JS template-literal string (the tree-explorer's
+`content:` values) — `tmp_vcheck.mjs` caught the resulting broken inline-`<script>` parse
+immediately, fixed by switching those two comments to double-quoted mentions instead of
+backticks. `design-patterns-visualizer.html` had an edit drop the closing `</pre>` tag off the
+Builder fluent-chain block, silently merging it into the next block's line count —
+`tmp_annotationcheck.mjs`'s substantial-block count dropping from 7 to 6 was the tell; fixed by
+restoring the tag and re-verifying.
+
+Same treatment as batches 1–6 throughout: trailing inline comments in each page's own comment
+class, never a new device invented. All eight passed the full gate suite (`tmp_vcheck`,
+`tmp_doccheck`, `tmp_assetcheck` against `origin/claude/multi-repo-continuation-l6xwuq`,
+`tmp_codecheck`, `tmp_smoke` — both per-page and a full 537-page sweep before pushing — and
+`tmp_contrast --theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 7** (via `tmp_annotationcheck.mjs`, whole site):
+**264 bare blocks across 106 pages** (53 blocks fixed across these 8 pages: 7+7+7+7+7+6+6+6=53,
+matching exactly — cross-checked against `--top=15` after every single page, not just at the
+end). **106 pages with a bare count remain** for a future pass — worst next:
+`angular-pagination-deep` 6/10 · `angular-performance` 6/10 · `angular-di-advanced` 6/11 ·
+`angular-communication` 6/12 · `typescript-functions` 6/12 · `angular-events-deep` 6/13 ·
+`typescript-narrowing` 6/15 · `typescript-async-patterns` 6/16 · `angular-state-patterns` 5/8 ·
+`angular-pipes` 5/10. Re-run `node frontend/tmp_annotationcheck.mjs` for the current top of the
+list before picking up where this pass left off — it will have moved.
+
+Not started this pass either, same reason as batch 6: the remaining page count (106) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead.
+
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
 - **StackBlitz WebContainers** (`@webcontainer/api`) — real Node.js in the browser. Needs
