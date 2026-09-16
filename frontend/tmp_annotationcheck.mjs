@@ -81,7 +81,13 @@ const BARE_DENSITY = 0.25;
 const NEARBY_WINDOW = 2500; // chars either side of the block — see WHAT IT CANNOT SEE
 
 // Comment span classes actually in use across the site as of the 2026-09-16 sweep.
-const COMMENT_CLASSES = ['cm', 'cmt', 'xc'];
+// 'com' added same day: big-o-visualizer.html/concurrency-visualizer.html/inheritance-
+// visualizer.html use it for real syntax-highlighted comments, but their trailing
+// mid-line annotations (code; // note) were under-counted — the marker-text fallback
+// requires "//" immediately followed by a non-space char, which a normal "// note" never
+// satisfies. Recognizing the class directly (like cm/cmt/xc) fixes it for all three pages
+// at once, per this file's own documented fix path (see WHAT IT CANNOT SEE above).
+const COMMENT_CLASSES = ['cm', 'cmt', 'xc', 'com'];
 
 /** Strips <style>…</style> blocks so a CSS comment mentioning the text "<pre>" can never be
  *  mistaken for a real opening <pre> tag (the false positive the 2026-09-16 sweep hit on
