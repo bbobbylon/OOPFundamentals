@@ -1924,6 +1924,95 @@ up: `abstraction` 1/2 · `angular-auth-state-signals-deep` 1/2 ·
 the current top before picking up — it will have moved. **Still a standing
 auto-continuing sweep**, every remaining page needs exactly one fix.
 
+**Batch 22 (2026-09-16), same session, continuing the standing auto-continue approval** —
+nine pages (every remaining 1/2 page), 0 bare remaining on each, re-verified with
+`tmp_annotationcheck.mjs --page=` plus a full by-hand read of every touched block, one
+commit per page:
+
+- `abstraction-visualizer.html` (1→0) — the template-method `DataExporter` example.
+- `angular-auth-state-signals-deep-visualizer.html` (1→0, 0%→58%) — the `AuthStore`
+  signal-store: why `_user` is the sole write path and `login()`/`logout()` are its only
+  two call sites.
+- `angular-control-flow-internals-deep-visualizer.html` (1→0, 0%→57%) — `@for`'s
+  contextual variables and `@empty`.
+- `angular-signals-rxjs-interop-deep-visualizer.html` (1→0, 11%→78%) — the
+  `toObservable()`/`pipe()`/`toSignal()` round-trip.
+- `graph-visualizer.html` (1→0, 7%→79%) — the Dijkstra pseudocode block, walked line by
+  line (priority-queue pop, relaxation check, why `prev[]` matters).
+- `shell-gcloud-cli-visualizer.html` (1→0) — a real `gcloud config list` terminal
+  transcript inside the page's `hf-walk` scenario device. Inline comments would have
+  corrupted a copy-pasteable output block, so this used an `.hf-arrow` note instead (the
+  other CLAUDE.md-sanctioned device) explaining the output and the actual gotcha
+  (`gcloud config set project` vs. `configurations activate`).
+- `spring-boot-cors-deep-visualizer.html` (1→0, 10%→80%) — the global
+  `WebMvcConfigurer` CORS bean.
+- `spring-boot-jpa-fetching-deep-visualizer.html` (1→0, 0%→86%) — the `@Query` DTO
+  projection JPQL text block.
+- `typescript-top-bottom-types-deep-visualizer.html` (1→0, 22%→44%) — the exhaustiveness
+  switch, narrowing on the discriminated union's `kind` tag.
+
+Same treatment throughout: trailing comments in each page's own established class, or an
+`.hf-arrow` note where the block is a literal transcript rather than authored code. All
+nine passed `tmp_vcheck`/`tmp_doccheck`/`tmp_codecheck` (671/481 baseline unchanged after
+every page) and `tmp_contrast --theme=cream`/`--theme=dark` per page.
+
+**Sitewide count after batch 22** (via `tmp_annotationcheck.mjs`, whole site):
+**23 bare blocks across 23 pages** (9 fixed, every remaining 1/2 page cleared: 32→23).
+Next up: `exceptions` 1/3 · `genai-embeddings-vector-db` 1/3 · `genai-rag` 1/3 · `git` 1/3
+· `kubernetes-deployments` 1/3 · `kubernetes-fundamentals` 1/3 · `python-async` 1/3 ·
+`spring-boot-caching-internals-deep` 1/3 · `spring-boot-security-filter-chain-deep` 1/3,
+then a 1/4–1/14 tail.
+
+**Batch 23 (2026-09-16), same session, continuing the standing auto-continue approval** —
+nine pages (every remaining 1/3 page), 0 bare remaining on each, re-verified with
+`tmp_annotationcheck.mjs --page=` plus a full by-hand read of every touched block, one
+commit per page:
+
+- `exceptions-visualizer.html` (1→0, 20%→47%) — the `InsufficientFundsException`
+  custom-exception example.
+- `genai-embeddings-vector-db-visualizer.html` (1→0, 14%→71%) — the brute-force
+  cosine-similarity search (the formula, then running it against every stored vector).
+- `genai-rag-visualizer.html` (1→0, 22%→39%) — the minimal RAG pipeline function; the
+  `tenant_id` filter line got the most attention (skip it and retrieval can leak another
+  tenant's private documents into the generated answer).
+- `git-visualizer.html` (1→0, 13%→50%) — the merge-conflict-markers example. Its existing
+  `// ← your version`-style annotations ride on `.hlbad` spans and don't satisfy the
+  gate's marker-fallback (a space right after `//` intentionally fails that check, to
+  avoid false-positiving on ordinary prose) — added real `.cm` comments alongside instead.
+- `kubernetes-deployments-visualizer.html` (1→0, 8%→36%) — the Deployment manifest:
+  `replicas`, `selector.matchLabels`, `strategy.type`, and — the important contrast — what
+  actually happens when a liveness probe fails (kill+restart) vs. a readiness probe
+  (pulled from load balancing, not restarted).
+- `kubernetes-fundamentals-visualizer.html` (1→0, 6%→38%) — the minimal Pod manifest:
+  `labels`, `image`, `containerPort`, and `requests` (drives scheduling) vs. `limits`
+  (OOMKilled on memory, throttled on CPU).
+- `python-async-visualizer.html` (1→0, 14%→36%) — the `asyncio.gather()` concurrency
+  example: calling an `async def` doesn't run its body, and `asyncio.run()` is the one
+  sync-to-async entry point.
+- `spring-boot-caching-internals-deep-visualizer.html` (1→0, 17%→50%) — the
+  self-invocation `@Cacheable` trap: `@Cacheable` only fires through the Spring proxy,
+  never via a bare `this.method()` call.
+- `spring-boot-security-filter-chain-deep-visualizer.html` (1→0, 0%→50%) — the
+  `SecurityFilterChain` bean: request-matcher rules are evaluated top-down, and
+  `oauth2ResourceServer`'s JWT config is the `AuthenticationProvider` from the diagram in
+  the adjacent card.
+
+Same treatment throughout: trailing comments in each page's own established class, never
+a new device invented. All nine passed the full per-page gate suite plus a full 537-page
+`tmp_smoke.mjs` sweep and `tmp_assetcheck.mjs origin/claude/multi-repo-continuation-l6xwuq`
+(both clean) before pushing.
+
+**Sitewide count after batch 23** (via `tmp_annotationcheck.mjs`, whole site):
+**14 bare blocks across 14 pages** (9 fixed, every remaining 1/3 page cleared: 23→14).
+Next up: `angular-change-detection-deep` 1/4 · `encapsulation` 1/4 ·
+`kubernetes-config-secrets` 1/4 · `kubernetes-rbac` 1/4 · `nosql-document-wide-column` 1/4
+· `spring-boot-auto-configuration-deep` 1/4 · `sql-advanced-queries` 1/4 ·
+`sql-fundamentals` 1/4 · `sql` 1/4 · `typescript-structural-typing-deep` 1/4, then
+`python-oop` 1/5 · `angular-build-esbuild` 1/6 · `typescript-functions-overloads-deep` 1/8
+· `typescript-conditional-types` 1/14. Re-run `node frontend/tmp_annotationcheck.mjs`
+before picking up — it will have moved. **Still a standing auto-continuing sweep**; 14
+pages remain, each needing exactly one fix.
+
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
 - **StackBlitz WebContainers** (`@webcontainer/api`) — real Node.js in the browser. Needs
