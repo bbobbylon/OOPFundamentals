@@ -87,7 +87,11 @@ const COMMENT_CLASSES = ['cm', 'cmt', 'xc'];
  *  mistaken for a real opening <pre> tag (the false positive the 2026-09-16 sweep hit on
  *  angular-custom-directives-visualizer.html — see WHAT IT CANNOT SEE). */
 function stripStyleBlocks(html) {
-  return html.replace(/<style[^>]*>[\s\S]*?<\/style>/g, (m) => ' '.repeat(m.length));
+  // Blank every character except newlines, so line NUMBERS after the stripped block still
+  // match the real file — replacing the whole match with a single space (an earlier version
+  // of this gate did that) silently collapsed every <style> block to one line and threw off
+  // every --page= line number reported for content after it in the file.
+  return html.replace(/<style[^>]*>[\s\S]*?<\/style>/g, (m) => m.replace(/[^\n]/g, ' '));
 }
 
 /** Splits a <pre> block's inner HTML into rendered text lines, trimming one leading/trailing
