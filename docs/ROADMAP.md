@@ -1455,6 +1455,70 @@ worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide
 across this session's batches 7–12: 317 → 130 bare blocks (187 fixed), 114 → 79 pages with a
 bare count remaining.
 
+**Batch 13 (2026-09-16), same session, auto-continued per the standing approval** — five
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `typescript-arrays-tuples-visualizer.html` (4→0) — labeled tuples, rest-tuple types
+  (`[string, ...number[]]`), the `defer<A,R>` argument-forwarding generic, and
+  `readonly`-array API design.
+- `typescript-classes-visualizer.html` (4→0) — a typed `Animal` class, the abstract
+  `Shape`/`Circle`/`Square` hierarchy, `implements` vs `extends`
+  (`Serializable`/`Cloneable<T>`/`Entity`/`User`), and the generic `Repository<T>` class.
+- `big-o-visualizer.html` (3→0) — binary search's halving, merge sort's split/merge, and
+  the nested-loop O(n²) duplicate check.
+- `bst-visualizer.html` (3→0) — in-order, pre-order, and post-order traversal, using the
+  page's own already-styled-but-never-used `.cm` class.
+- `head-first-state-visualizer.html` (3→0) — the if/else gumball machine's raw `int`
+  state, the `State` interface + `GumballMachine` context, and the `NoQuarterState`
+  concrete state.
+
+**A real gate bug found and fixed mid-batch**: `tmp_annotationcheck.mjs`'s `COMMENT_CLASSES`
+list (`cm`, `cmt`, `xc`) didn't include `com` — the pre-existing comment span class on
+`big-o-visualizer.html`/`concurrency-visualizer.html`/`inheritance-visualizer.html` (all
+three link `devhub-syntax.js` and syntax-color Java `//` comments with it already). The
+gate's marker-text fallback for an unrecognized class only matches `//` when it's
+**immediately** followed by a non-space character (`/\s(\/\/…)\S/`); a normal `// note`
+with a space after the slashes never satisfies it, so `big-o-visualizer.html`'s newly-added
+trailing comments kept scoring 0% density no matter how many were added. Fixed by adding
+`'com'` to `COMMENT_CLASSES`, exactly the maintenance path the gate's own
+"WHAT IT CANNOT SEE" banner documents for this situation — confirmed as a strict
+improvement (zero regressions: `concurrency-visualizer.html`/`inheritance-visualizer.html`
+both already had 0 substantial blocks, so the fix only ever helps, never hides a real bare
+block elsewhere).
+
+No repeat of batch 10's "await"-phrasing `tmp_codecheck.mjs` false-positive: the two
+TypeScript-heavy pages in this batch were checked by eye before writing, and the
+671-block/481-TypeScript baseline was re-confirmed unchanged after every single page.
+
+Same treatment as batches 1–12 throughout: trailing inline comments in each page's own
+comment class (`.cmt` on the two TypeScript pages, `.com` on `big-o`, `.cm` on `bst` and
+`head-first-state`), never a new device invented — `bst-visualizer.html`'s `.cm` was
+already defined in its local `<style>` block but had never actually been used in its code,
+which is the same "reuse what's declared, don't invent" rule applied to a class that
+existed in CSS but not yet in markup. All five passed the full gate suite (`tmp_vcheck`,
+`tmp_doccheck`, `tmp_assetcheck` against `origin/claude/multi-repo-continuation-l6xwuq`,
+`tmp_codecheck`, `tmp_smoke` — both per-page and a full 537-page sweep before pushing — and
+`tmp_contrast --theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 13** (via `tmp_annotationcheck.mjs`, whole site):
+**113 bare blocks across 74 pages** (17 blocks fixed across these 5 pages: 4+4+3+3+3=17,
+matching exactly — cross-checked against `--top=15` after every single page). **74 pages with
+a bare count remain** for a future pass — worst next:
+`spring-boot-async-threads-deep` 3/5 · `spring-boot-idm-oauth2-deep` 3/5 ·
+`angular-lazy-loading` 3/6 · `head-first-command` 3/6 · `angular-zoneless-mode` 3/9 ·
+`angular-rxjs-multicasting` 3/10 · `typescript-maps-sets` 3/10 · `config-index-html` 3/16 ·
+`searching` 2/2 · `spring-boot-dtos-mapping-deep` 2/2. Re-run
+`node frontend/tmp_annotationcheck.mjs` for the current top of the list before picking up
+where this pass left off — it will have moved.
+
+Not started this pass either, same reason as batch 12: the remaining page count (74) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide progress
+across this session's batches 7–13: 317 → 113 bare blocks (204 fixed), 114 → 74 pages with a
+bare count remaining.
+
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
 - **StackBlitz WebContainers** (`@webcontainer/api`) — real Node.js in the browser. Needs
