@@ -1792,6 +1792,56 @@ across this session's batches 7–18: 317 → 55 bare blocks (262 fixed), 114 �
 bare count remaining — 83% of the original bare blocks fixed, 57% of the original pages
 cleared entirely.
 
+**Batch 19 (2026-09-16), same session, auto-continued per the standing approval** — five
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `head-first-template-method-visualizer.html` (2→0) — Coffee's and Tea's near-identical
+  `prepareRecipe()` methods (Act 1's "two recipes, 80% identical" setup).
+- `typescript-classes-internals-deep-visualizer.html` (2→0) — the parameter-property
+  constructor shorthand and the polymorphic `this`-return `Builder`/`FormBuilder` example.
+- `angular-binding-visualizer.html` (2→0) — the double-subscription async-pipe trap
+  without `as`, and the decorator-style `HostBinding`/`HostListener` `CardComponent`.
+- `config-package-json-visualizer.html` (2→0) — the pre/post npm-script lifecycle hooks
+  and the `package-lock.json` v3 `"packages"` flat-map anatomy.
+- `typescript-declarations-visualizer.html` (2→0) — the `vendor.d.ts` ambient module
+  declarations and the `globals.d.ts` global-scope/`process.env` extensions.
+
+No new gate gaps found this batch — every page used a comment class already inside
+`COMMENT_CLASSES` (`.cm` on four pages, `.cmt` on `typescript-declarations`). The
+671-block/481-TypeScript `tmp_codecheck.mjs` baseline was re-confirmed unchanged after
+every single page, including the two TypeScript-heavy pages in this batch.
+
+Same treatment as batches 1–18 throughout: trailing inline comments in each page's own
+comment class, never a new device invented. All five passed the full gate suite
+(`tmp_vcheck`, `tmp_doccheck`, `tmp_assetcheck` against
+`origin/claude/multi-repo-continuation-l6xwuq`, `tmp_codecheck`, `tmp_smoke` — both
+per-page and a full 537-page sweep before pushing — and `tmp_contrast
+--theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 19** (via `tmp_annotationcheck.mjs`, whole site):
+**45 bare blocks across 44 pages** (10 blocks fixed across these 5 pages: 2+2+2+2+2=10,
+matching exactly — cross-checked against `--top=20` after every single page). **44 pages
+with a bare count remain** for a future pass — worst next: `angular-signals` 2/14, then an
+almost entirely 1-bare tail (`angular-debugging-rxjs-deep`, `angular-e2e-playwright`,
+`angular-rxjs-operators-lab`, `angular-token-lifecycle-deep`, `angular-zoneless-deep`,
+`datasci-visualization`, `maven-plugins`, `nosql-redis`, `spring-boot-grpc`,
+`spring-boot-rate-limiting-deep`, `streams`, and dozens more at 1/1 through 1/2). Re-run
+`node frontend/tmp_annotationcheck.mjs` for the current top of the list before picking up
+where this pass left off — it will have moved. **The worklist has now moved past every
+2-bare page except `angular-signals`** — essentially all remaining pages need exactly one
+fix each, so a future pass's per-page yield is now consistently 1 (occasionally 2), a real
+shift from earlier batches' 2-5-per-page average.
+
+Not started this pass either, same reason as batch 18: the remaining page count (44) at this
+treatment's real per-block cost is substantially more authoring than one session covers,
+though each remaining page is now individually cheap (1 fix, not several).
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide progress
+across this session's batches 7–19: 317 → 45 bare blocks (272 fixed), 114 → 44 pages with a
+bare count remaining — 86% of the original bare blocks fixed, 61% of the original pages
+cleared entirely.
+
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
 - **StackBlitz WebContainers** (`@webcontainer/api`) — real Node.js in the browser. Needs
