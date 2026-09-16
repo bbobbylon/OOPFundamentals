@@ -629,6 +629,19 @@ visualizers).
   `WHAT IT CANNOT SEE` for the gap and the one false-positive class (a CSS
   comment inside `<style>` mentioning the text "&lt;pre&gt;") it was written to
   stop tripping on. See `docs/ROADMAP.md` item 2 for the sweep's progress.
+- **Head First SHAPE variety** (`frontend/tmp_variety.mjs`) — the only gate that looks
+  ACROSS pages instead of at one. `docs/HEADFIRST-SHAPES.md` gives a lesson's opening
+  Head First block one of eleven shapes, declared as `<p class="hf-deck"
+  data-shape="…">`; this reads that declaration, checks the block's actual devices
+  against the shape's own must-have/must-not list (a `data-shape="receipt"` block with
+  no `hf-receipt` in it is a LIE, and this is the only thing that catches it), and
+  reports each track's shape distribution against the 18%/25% caps
+  `docs/HEADFIRST-SHAPES.md` sets, denominated against that track's shaped pages only —
+  which means a track's first shaped page is always its own 100%, unavoidably, until
+  several more land. `--track=`, `--unshaped`, `--manifest=out.json`. Not wired into
+  `.github/workflows/deploy.yml` — an authoring aid, like `tmp_hfaudit.mjs`, not a merge
+  gate. See `docs/ROADMAP.md` item 17 for the sweep this feeds and a full account of why
+  it had to be rebuilt once already (a prior session's copy was never committed).
 - **Cream contrast repair** (in
   [`frontend/devhub-hf-theme.js`](../frontend/devhub-hf-theme.js)) — the part CSS
   structurally cannot reach. 513 pages carry their own `<style>` block that

@@ -3586,19 +3586,136 @@ Three things the build taught that the spec had not:
   was declared instead of rewritten, and `java-datetime` took the slot.
 
 **Still open:**
-- **459 pages `unshaped`.** Each needs a shape assigned and its block re-staged — or a
+- **453 pages `unshaped`.** Each needs a shape assigned and its block re-staged — or a
   deliberate `data-shape="tour"` when it genuinely earns one (Bobby: *"If some pages are
   perfect with the current view … we can leave it"*). Leaving it undeclared is NOT the same
   as declaring `tour`; the manifest is the audit trail.
-- **The manifest review (step 2, next).** `tmp_variety.mjs --manifest=` per track, with a
-  reason column, for Bobby to spot-check BEFORE the re-staging — the point is that a wrong
-  call shows up in a 459-line file rather than in 459 rewritten pages.
-- **Step 3** — the bulk re-stage, track by track, against the reviewed manifest.
+- **The manifest review (step 2).** `tmp_variety.mjs --manifest=` per track, with a
+  reason column, for Bobby to spot-check BEFORE the next big re-staging push — the point is
+  that a wrong call shows up in a short file rather than in hundreds of rewritten pages.
+- **Step 3** — the bulk re-stage, track by track, against the reviewed manifest. A first,
+  small (6-page) slice of this shipped 2026-09-16 — see below — as a calibration batch to
+  measure real per-page cost before committing to pacing for the remaining ~447.
 
 **What the gate cannot see** (stated because the last mechanism failed by being trusted past
 its limits): whether a shape SUITS its page. A `receipt` on a lesson with no cost in it passes
 every check and is still wrong. It stops a relapse into one shape; it cannot tell you the
 eleven are well matched. That is what reading the manifest is for.
+
+**2026-09-16 — `tmp_variety.mjs` had to be REBUILT; the prior "Landed 2026-09-13" entry above
+overstated what survived.** The 2026-09-13 session ("8 agents running simultaneously") that
+wrote `docs/HEADFIRST-SHAPES.md` and `docs/HEADFIRST-BLOCK-RECIPE.md` also built
+`tmp_variety.mjs` and `tmp_hfsplice.mjs` and used them to ship the 9 non-pilot exemplar pages
+(`abstraction`, `debugging-jwt`, `debugging-stack-traces`, `ds-hash-tables`,
+`entra-oauth-oidc`, `java-datetime`, `nosql-document-wide-column`, `nosql-redis`,
+`polymorphism` — wait, **not** `polymorphism`: it has an `hf-deck` with no `data-shape` at
+all, so it is `unshaped`, not the ninth exemplar it looked like at a glance. A loose
+`grep -o 'data-shape="[a-z]*"'` on that page instead matches an UNRELATED
+`<div class="shape-card" data-shape="circle">` used by its own Shape-classes demo — a real
+trap for any future tool that greps for `data-shape=` sitewide instead of anchoring the match
+to `<p class="hf-deck" ...>` specifically). Neither `tmp_variety.mjs` nor `tmp_hfsplice.mjs`
+was ever committed, and that session ended before they were — so both were gone for the next
+session to find, silently, the exact failure mode `CLAUDE.md` now calls out by name (the
+`upgradeToMonaco()` warning, same shape of mistake). `tmp_variety.mjs` has been rebuilt from
+scratch against `docs/HEADFIRST-SHAPES.md`'s own contract, verified line-for-line against the
+real markup on the (correctly counted) 16 already-shaped pilot/exemplar pages before being
+trusted, and is now committed with a `.gitignore` allowlist line so this cannot happen again
+to this specific file. `tmp_hfsplice.mjs` was **not** rebuilt this pass — see below.
+
+**What the rebuilt `tmp_variety.mjs` actually does**, precisely, because the original's exact
+behavior is unrecoverable and future sessions should trust THIS description over the
+2026-09-13 entry above: it locates each page's `<p class="hf-deck" data-shape="…">` tag,
+takes the shape's `data-shape` value (or reports `unshaped` if absent, `no-block` if the page
+has no `hf-deck` at all), and scans forward from there to the page's next `<h2` (capped at
+40,000 characters) as a heuristic block boundary — there is no reliable closing marker, since
+five of the eleven shapes forbid `hf-napkin`, the device every block used to end on. Inside
+that window it checks the declared shape's device inventory against hardcoded
+must-have/must-not rules transcribed from `docs/HEADFIRST-SHAPES.md` (thresholds like
+`argument`'s ">=8 hf-bub" or `questions`'s ">=5 dt/dd" came from measuring the real pilot
+pages, not just the prose). It reports per-track shape distribution against the 18%/25% caps,
+denominated against that track's SHAPED pages only (per CLAUDE.md's own wording) — which
+means, honestly, that at this early stage (1-3 shaped pages in most tracks) the cap is
+close to mathematically unsatisfiable in isolation: one page in a previously-unshaped track is
+always 100% of that track's shaped total, no matter which of the eleven shapes it takes. This
+is expected, not a bug in the gate — see the calibration-batch report below. It does **not**
+run in `.github/workflows/deploy.yml`; it is an authoring aid, same tier as `tmp_hfaudit.mjs`,
+not a merge gate. Full `WHAT IT CANNOT SEE` banner is in the file itself per `tmp_doccheck.mjs`
+convention.
+
+**Calibration batch — 6 pages re-staged, 6 different shapes, 6 different tracks, 2026-09-16.**
+Chosen from the 453 `unshaped` pages (every one of which already carries a FULL old-recipe
+block — confirmed by inventory-diffing five candidate pages before touching any of them, all
+five carried the identical old-recipe device set: `hf-card`×7, `hf-scatter`×4, `hf-bub`×4,
+`hf-taped`×3, `hf-say`×3, `hf-kick`×3, `hf-check`×2, `hf-cardtitle`×2, `hf-annot`×2,
+`hf-terms`/`hf-talk`/`hf-steps`/`hf-note`/`hf-napkin`/`hf-ladder`/`hf-foot`×1). This makes
+"retrofitting" a RE-STAGE, not fresh authoring: the gotcha is already written and already
+fact-checked from the earlier sweep — the job is recognizing the KIND of gotcha already on
+the page and reshaping its device set to match, per `docs/HEADFIRST-SHAPES.md`'s own method
+("read the block that is already on the page… find that sentence in the trigger column").
+Two early candidates were rejected for a real reason worth recording: `python-functions` was
+initially planned around its "mutable default argument" trap, but the page's EXISTING block
+already teaches that trap exhaustively (the intro card, the animated scenario, a callout, AND
+a loop-closure variant) — re-staging it would have meant inventing a second angle rather than
+recognizing the one already there, which the method explicitly forbids.
+
+| page | track | shape chosen | why (the KIND of gotcha, not the topic) |
+|---|---|---|---|
+| `python-generators` | python | `autopsy` | surfaces as a real, empirically-verified error message (`RuntimeError: generator raised StopIteration`, PEP 479) the learner would paste into a search box |
+| `go-interfaces` | go | `whiteboard` | structural — a compile-time check and a runtime check answering two different questions about `==` on `interface{}` |
+| `csharp-async` | csharp | `argument` | two individually-correct parties (`SynchronizationContext` and `.Result`) meeting on one thread |
+| `kubernetes-fundamentals` | kubernetes | `questions` | pure misconception — "I thought `:latest` meant always fetch the newest one" |
+| `node-express` | nodejs | `assembly` | a middleware pipeline where the registration-time `fn.length` stage silently misfiles a correctly-shaped handler |
+| `docker-dockerfile` | tools | `exhibit` | visible in one real artifact the learner will actually run themselves (`docker history --no-trunc`) |
+
+Every fact re-verified, not assumed: the Python traceback was reproduced and captured from a
+real `python3` run in this session (not written from memory) before being used verbatim in the
+`autopsy` re-stage; the Go/`.Result`/`kubectl apply`/Express-arity/Docker-build-history claims
+were all already correct in the pages' pre-existing, previously-shipped content and were kept
+verbatim or lightly restructured, not rewritten from scratch. `tmp_hfsplice.mjs` was not
+rebuilt — each page was small enough (one existing block, being reshaped in place, not a fresh
+insertion into a page with none) that plain `Edit`-tool replacements on the exact existing text
+were safer than reconstructing an unverified splice tool; every file was confirmed LF-only
+(`grep -c $'\r'` = 0) before editing and every diff was confirmed to touch only the block region
+(`git diff --stat` + the hunk header line numbers) afterward. One real regression was caught
+and fixed mid-batch: the first `csharp-async` `hf-big` draft clipped at 390px (a long unbroken
+identifier inside large type) — `tmp_smoke.mjs` on that one page caught it, and it was
+reworded and reverified clean. One real, unrelated vcheck warning was caught and fixed on
+`docker-dockerfile`: adding the page's first-ever `<pre>` tripped CLAUDE.md rule 8 (a page
+showing code must load `devhub-syntax.js`) — the rest of that page's code had always used
+hand-styled spans instead of `<pre>`, so the page had simply never needed the script before.
+
+**Sitewide shape count after this batch: 22 shaped / 453 unshaped / 62 no-block, 0 declaration
+lies.** Full distribution (`node frontend/tmp_variety.mjs`): `questions` 3, `whiteboard` 3,
+`argument` 3, `receipt` 2, `exhibit` 2, `assembly` 2, `autopsy` 2, `tour` 2, `timelapse` 1,
+`twodoors` 1, `mnemonic` 1 — all eleven still alive, closest to even yet. Every track touched
+this batch went from 0 shaped pages to 1 (100% skew, unavoidable at this count per the cap-math
+note above); `tmp_variety.mjs --track=<x>` was run before each page to confirm the CHOICE was
+still the track's least-habitual shape, not to chase a currently-unreachable green state.
+
+**Next-worst worklist for a future batch** (not committed to specific shapes yet — pick per
+the method, not this list): the two biggest tracks are the furthest from shaped by volume and
+worth prioritizing for raw count — `angular` (74 pages, 1 shaped) and `spring-boot`/`spring`
+(53 pages, 3 shaped) — followed by `java` (43, 2) and `ts` (31, 1). Candidate pages spotted
+but NOT yet read closely enough to commit a shape (re-verify each against its own existing
+block before assigning, per method step 1): `python-context-managers` (`__exit__` return-True
+swallowing — likely `exhibit` or `mnemonic`, needs its own read), `python-errors` (already a
+`finally`-wins-over-an-in-flight-exception gotcha — possibly already earns `tour`, needs the
+earning check), `python-decorators` ("crashes on an integer that appears nowhere in your
+code" — sounds `exhibit`-shaped), any Angular `OnPush`/change-detection-adjacent page other
+than the one already-shaped `angular-change-detection-visualizer`, and any Spring page beyond
+the three already shaped.
+
+**Honest per-page cost estimate for the remaining ~447, at this quality bar:** this batch's 6
+pages, including building and verifying `tmp_variety.mjs` itself from nothing, took a full
+session. With the tool now built and reusable, a single page (read existing block → pick shape
+→ re-stage → the 8-gate verification loop → commit) is the bulk of the recurring cost — the
+tool-build cost will not repeat. Do not read that as "therefore fast at scale": every page
+above needed real, individual fact-checking (one traceback was verified by actually running
+Python) and a genuine gotcha-to-shape judgment call, not a mechanical transform, and the
+2026-09-13 session's own note that "re-staging costs teaching" held again here — several
+pages shrank as banned devices took real paragraphs with them. Treat per-page cost as roughly
+comparable to authoring a new block from the recipe, not cheaper, despite the head start of an
+existing gotcha.
 
 ---
 
