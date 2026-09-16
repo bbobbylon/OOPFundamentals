@@ -1842,6 +1842,24 @@ across this session's batches 7–19: 317 → 45 bare blocks (272 fixed), 114 �
 bare count remaining — 86% of the original bare blocks fixed, 61% of the original pages
 cleared entirely.
 
+**Batch 20 (2026-09-16) — one page, `angular-signals-visualizer.html` (2→0)**, the last
+page in the worklist needing more than one fix: annotated the `signal()`/`computed()`
+`Counter` component (why `count` is the source of truth and `double` only recomputes when
+read) and the `@for`/`@empty` control-flow block (`@empty` renders only on a genuinely empty
+array). Verified with `tmp_annotationcheck.mjs --page=` (0/14 bare), and the full gate suite
+run directly rather than by an agent this time — `tmp_vcheck` (537/521), `tmp_doccheck`
+(340/0 undocumented), `tmp_codecheck` (671 blocks, 0 errors, 671/481 baseline unchanged),
+`tmp_contrast --theme=cream`/`--theme=dark` on this page (both clean), and a full
+`tmp_smoke.mjs` sweep (537/537 clean — only the expected sandbox-network and pre-existing
+text-clip notices, unrelated to this page). **Sitewide after batch 20: 43 bare blocks across
+43 pages** — every remaining page needs exactly one fix. Same worklist as batch 19's tail
+(`angular-debugging-rxjs-deep`, `angular-e2e-playwright`, `angular-rxjs-operators-lab`,
+`angular-token-lifecycle-deep`, `angular-zoneless-deep`, `datasci-visualization`,
+`maven-plugins`, `nosql-redis`, `spring-boot-grpc`, `spring-boot-rate-limiting-deep`,
+`streams`, and dozens more at 1/1–1/2) — re-run `tmp_annotationcheck.mjs` before picking up,
+the exact order shifts as pages are fixed. **Still a standing auto-continuing sweep**; 43
+pages remain, each now cheap.
+
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
 - **StackBlitz WebContainers** (`@webcontainer/api`) — real Node.js in the browser. Needs
