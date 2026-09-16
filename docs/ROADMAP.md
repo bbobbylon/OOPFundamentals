@@ -2013,6 +2013,89 @@ Next up: `angular-change-detection-deep` 1/4 · `encapsulation` 1/4 ·
 before picking up — it will have moved. **Still a standing auto-continuing sweep**; 14
 pages remain, each needing exactly one fix.
 
+**Batch 24 (2026-09-16), same session, continuing the standing auto-continue approval** —
+ten pages (every remaining 1/4 page), 0 bare remaining on each, re-verified with
+`tmp_annotationcheck.mjs --page=` plus a full by-hand read of every touched block, one
+commit per page:
+
+- `angular-change-detection-deep-visualizer.html` (1→0, 13%→50%) — the `markForCheck()`
+  WebSocket-feed example: why the callback needs it (Zone.js never patched it, and the
+  mutation is in place).
+- `encapsulation-visualizer.html` (1→0, 19%→38%) — the `GoodAccount` validating-methods
+  example, naming the rule each guard clause enforces.
+- `kubernetes-config-secrets-visualizer.html` (1→0, 13%→33%) — the ConfigMap manifest: a
+  simple key vs. the `|` block scalar embedding a whole file, plus the `---` separator.
+- `kubernetes-rbac-visualizer.html` (1→0, 5%→33%) — the Role + RoleBinding manifest: the
+  core API group, the verbs allow-list, and that a Role alone grants nothing.
+- `nosql-document-wide-column-visualizer.html` (1→0, 13%→38%) — the embedded-document
+  example, naming `lineItems` as the data that used to be its own collection.
+- `spring-boot-auto-configuration-deep-visualizer.html` (1→0, 0%→43%) —
+  `DataSourceAutoConfiguration`: `@ConditionalOnClass`/`@ConditionalOnMissingBean`.
+- `sql-advanced-queries-visualizer.html` (1→0, 6%→31%) — the multi-CTE query, why the
+  join is LEFT.
+- `sql-fundamentals-visualizer.html` (1→0, 0%→100%) — the basic SELECT/WHERE/ORDER
+  BY/LIMIT, every clause commented for the execution order that actually matters.
+- `sql-visualizer.html` (1→0, 14%→59%) — the JDBC transaction example, walked through
+  try-with-resources, both placeholder bindings, `getGeneratedKeys()`, and commit/rollback.
+- `typescript-structural-typing-deep-visualizer.html` (1→0, 14%→43%) — the branded-type
+  `UserId`/`OrderId` example.
+
+Same treatment throughout: trailing comments in each page's own established class. All
+ten passed `tmp_vcheck`/`tmp_doccheck`/`tmp_codecheck` (671/481 baseline unchanged after
+every page) and `tmp_contrast --theme=cream`/`--theme=dark` per page.
+
+**Sitewide count after batch 24** (via `tmp_annotationcheck.mjs`, whole site):
+**4 bare blocks across 4 pages** (10 fixed, every remaining 1/4 page cleared: 14→4). Next
+up: `python-oop` 1/5 · `angular-build-esbuild` 1/6 ·
+`typescript-functions-overloads-deep` 1/8 · `typescript-conditional-types` 1/14.
+
+**Batch 25 (2026-09-16), same session — the last four pages in the sweep**, 0 bare
+remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full by-hand
+read of every touched block, one commit per page:
+
+- `python-oop-visualizer.html` (1→0, 10%→50%) — the Singleton-via-`__new__` example:
+  why `__new__` runs before `__init__` and decides whether a new object gets made at all.
+- `angular-build-esbuild-visualizer.html` (1→0, 24%→30%) — the `angular.json` production
+  configuration block was one comment line short of the 25% floor; added the two missing
+  comments on the `budgets` array (`initial` vs. `anyComponentStyle`).
+- `typescript-functions-overloads-deep-visualizer.html` (1→0, 20%→40%) — the `format()`
+  overload-vs-implementation-signature example: why the implementation uses `unknown` and
+  that the `instanceof` narrowing happens at runtime, not from the overloads.
+- `typescript-conditional-types-visualizer.html` (1→0, 11%→67%) — the last bare block
+  sitewide: `Promisify<F>`'s `extends`/`infer` tuple and match branch, explaining what `A`
+  and `R` each infer to.
+
+Same treatment throughout: trailing comments in each page's own established class (`.cm`
+on three pages, `.cmt` on `typescript-conditional-types`), never a new device invented.
+All four passed the full per-page gate suite, plus a final full 537-page `tmp_smoke.mjs`
+sweep and `tmp_assetcheck.mjs origin/claude/multi-repo-continuation-l6xwuq` (both clean)
+before pushing.
+
+**✅ SWEEP COMPLETE (2026-09-16).** `node frontend/tmp_annotationcheck.mjs` now reports
+**0 bare blocks across 0 pages**, down from the 2026-09-16-morning baseline of 43
+bare/43 pages (batches 21–25, this session) and the original ~353/~72-page by-hand count
+that opened this item on 2026-09-04. Final whole-site gate pass, run directly (not by an
+agent): `tmp_vcheck` (537/521 registered), `tmp_doccheck` (340 symbols, 0 undocumented),
+`tmp_codecheck` (671 blocks — 481 TypeScript, 190 Java — 0 errors, baseline unchanged
+across all 25 batches), `tmp_assetcheck.mjs origin/claude/multi-repo-continuation-l6xwuq`
+(no teaching assets lost), and a full `tmp_smoke.mjs` sweep (537/537 clean — only the
+expected sandbox-network failures and the same pre-existing text-clip notices flagged and
+left out-of-scope in earlier batches). Every one of the 25 batches' touched blocks was
+also read by hand against the "genuinely true, specific" bar — the gate counts markup,
+not meaning, so that hand-read is the actual quality control, not the automated 0.
+
+**What's still open, for a future pass, not part of this item's scope:** the gate's own
+`WHAT IT CANNOT SEE` section — it is a static-source proxy, not the rendered-DOM check the
+original 2026-09-04 note called for, and it cannot tell a genuinely explanatory comment
+from a restated one. A handful of pre-existing, out-of-scope issues were flagged and left
+alone during this sweep rather than fixed in an annotation-only pass: a low-contrast
+marble bead on `angular-rxjs-visualizer.html` (batch 3), two pre-existing text-clip
+notices on `angular-routing-visualizer.html`/`angular-custom-form-controls-visualizer.html`
+(batch 4), and a genuine `AuthGuard.canActivate()` bug on
+`angular-routing-advanced-visualizer.html` flagged via `.hf-arrow` rather than silently
+fixed (batch 2, same session). None of these are annotation gaps; they're separate,
+smaller findings a future sweep can pick up.
+
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
 - **StackBlitz WebContainers** (`@webcontainer/api`) — real Node.js in the browser. Needs
