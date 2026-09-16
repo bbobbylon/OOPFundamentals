@@ -1350,6 +1350,60 @@ worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide
 across this session's batches 7–10: 317 → 181 bare blocks (136 fixed), 114 → 91 pages with a
 bare count remaining.
 
+**Batch 11 (2026-09-16), same session, auto-continued per the standing approval** — seven
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `config-tsconfig-visualizer.html` (5→0) — the strict-flag shorthand, `paths`/`baseUrl`
+  aliasing, a root solution-style `tsconfig.json`, an app `tsconfig.json` referencing a
+  library project, and an Angular shared-base `tsconfig.json`.
+- `config-angular-json-advanced-visualizer.html` (5→0) — the `build`/`configurations`
+  architect-target structure, a `fileReplacements` entry, `environment.ts`,
+  `environment.prod.ts`, and a multi-configuration staging setup.
+- `config-package-json-advanced-visualizer.html` (5→0) — `$npm_package_version` in a script,
+  conditional `exports`, sub-path `exports`, `overrides` for a transitive dependency, and
+  `package-lock.json`'s v3 anatomy.
+- `angular-route-guards-deep-visualizer.html` (4→0) — the `authGuard`/`roleGuard` functional
+  `CanActivateFn`s, the `canActivate`/`canMatch` routes array, the `HasRoleDirective`
+  structural directive, and the `@if` vs `*appHasRole` template-usage comparison.
+- `spring-boot-api-design-deep-visualizer.html` (4→0) — the paginated `@GetMapping` endpoint,
+  the `Page<T>` JSON response envelope, the RFC 7807 `ApiExceptionHandler`, and the
+  `ProblemDetail` JSON response body.
+- `spring-boot-http-exchange-deep-visualizer.html` (4→0) — imperative `RestClient`-by-hand vs
+  the declarative `@HttpExchange` interface, the `@Bean` proxy-wiring method, the
+  on-behalf-of identity block, and the client-credentials identity block.
+- `angular-ssr-hydration-visualizer.html` (4→0) — `app.config.ts`'s hydration providers, the
+  `server.ts` Express entry point, the manual `TransferState` API, and the per-route
+  prerendering config (`app.routes.server.ts`).
+
+No repeat of batch 10's "await"-phrasing `tmp_codecheck.mjs` false-positive: every added
+comment was checked by eye against the `NOT_CODE` C#-exclusion phrases before writing, and
+`tmp_codecheck.mjs`'s 671-block/481-TypeScript baseline was re-confirmed unchanged after
+every single page in this batch, not just at batch close.
+
+Same treatment as batches 1–10 throughout: trailing inline comments in each page's own
+comment class (`.cm` on all seven pages), never a new device invented. All seven passed the
+full gate suite (`tmp_vcheck`, `tmp_doccheck`, `tmp_assetcheck` against
+`origin/claude/multi-repo-continuation-l6xwuq`, `tmp_codecheck`, `tmp_smoke` — both per-page
+and a full 537-page sweep before pushing — and `tmp_contrast --theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 11** (via `tmp_annotationcheck.mjs`, whole site):
+**150 bare blocks across 84 pages** (31 blocks fixed across these 7 pages: 5+5+5+4+4+4+4=31,
+matching exactly — cross-checked against `--top=15` after every single page). **84 pages with
+a bare count remain** for a future pass — worst next: `angular-forms-data-deep` 4/8 ·
+`angular-vitest` 4/8 · `spring-boot-di-ioc` 4/8 · `typescript-why` 4/9 ·
+`typescript-modules` 4/10 · `typescript-arrays-tuples` 4/13 · `typescript-classes` 4/13 ·
+`big-o` 3/3 · `bst` 3/3 · `head-first-state` 3/4. Re-run `node frontend/tmp_annotationcheck.mjs`
+for the current top of the list before picking up where this pass left off — it will have
+moved.
+
+Not started this pass either, same reason as batch 10: the remaining page count (84) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide progress
+across this session's batches 7–11: 317 → 150 bare blocks (167 fixed), 114 → 84 pages with a
+bare count remaining.
+
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
 - **StackBlitz WebContainers** (`@webcontainer/api`) — real Node.js in the browser. Needs
