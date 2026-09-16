@@ -1042,16 +1042,50 @@ by these edits, left as-is (out of scope for an annotation-only pass).
 
 **Sitewide count after batch 4** (via `tmp_annotationcheck.mjs`, whole site):
 **394 bare blocks across 124 pages** (45 blocks fixed across these 5 pages: 9+9+9+9+9=45,
-matching exactly). **124 pages with a bare count remain** for a future pass — worst next:
-`typescript-fundamentals` 9/33 · `angular-animations` 8/9 · `solid` 8/10 · `angular-v21` 8/14 ·
-`angular-viewchild` 8/14 · `typescript-mapped-types` 8/17 · `angular-interceptors-advanced` 7/7
-· `angular-dynamic-components` 7/11 · `angular-rxjs-custom-operators` 7/11 ·
-`angular-view-encapsulation` 7/13. Re-run `node frontend/tmp_annotationcheck.mjs` for the
+matching exactly).
+
+**Batch 5 (2026-09-16), same session, auto-continued per the standing approval** — five more
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `typescript-fundamentals-visualizer.html` (9→0) — type guards, assertion functions,
+  discriminated unions, exhaustiveness checking, generics, declaration files.
+- `angular-animations-visualizer.html` (8→0) — fade/state/transition, enter/leave, stagger,
+  keyframes, route transitions, animation events. One block's added comments sat inside a JS
+  template-literal string as raw HTML comments outside any `class="cm"` span, so the gate's
+  density check couldn't see them (same class of gap batch 4 hit on config-tsconfig-advanced's
+  `.bad`/`.good` spans) — fixed by wrapping them in `<span class="cm">` to match the page's own
+  convention.
+- `solid-visualizer.html` (8→0) — all five SOLID principle before/after pairs.
+- `angular-v21-visualizer.html` (8→0) — `resource()`/`rxResource()`, `linkedSignal()`,
+  incremental hydration, signal-based forms, `effect()` cleanup callbacks, `allowSignalWrites`
+  stabilization.
+- `angular-viewchild-visualizer.html` (8→0) — `@ViewChildren`/`QueryList`, `@ContentChild`/
+  `@ContentChildren`, the four signal-based query functions (Angular 17+), and four real-world
+  patterns (focus-on-open, calling a child method, measuring DOM, reading a projected form).
+
+Same treatment as batches 1–4 throughout: trailing inline comments in each page's own comment
+class plus `.hf-arrow` notes where useful, never a new device invented. All five passed the full
+gate suite (`tmp_vcheck`, `tmp_doccheck`, `tmp_assetcheck` against
+`origin/claude/multi-repo-continuation-l6xwuq`, `tmp_codecheck`, `tmp_smoke` — both per-page and
+a full 537-page sweep before pushing — and `tmp_contrast --theme=cream`/`--theme=dark`). One
+comment in `typescript-fundamentals-visualizer.html` initially tripped `tmp_codecheck.mjs`'s
+XMARK counter-example heuristic (the same `"Error —"` pattern batch 2's angular-http page hit)
+and was reworded before committing.
+
+**Sitewide count after batch 5** (via `tmp_annotationcheck.mjs`, whole site):
+**353 bare blocks across 119 pages** (41 blocks fixed across these 5 pages: 9+8+8+8+8=41,
+matching exactly). **119 pages with a bare count remain** for a future pass — worst next:
+`typescript-mapped-types` 8/17 · `angular-interceptors-advanced` 7/7 ·
+`angular-dynamic-components` 7/11 · `angular-rxjs-custom-operators` 7/11 ·
+`angular-view-encapsulation` 7/13 · `typescript-template-literal-types` 7/14 ·
+`config-angular-json` 7/16 · `typescript-generics` 7/16 · `angular-lifecycle` 7/17 ·
+`angular-workspace-libraries` 7/18. Re-run `node frontend/tmp_annotationcheck.mjs` for the
 current top of the list before picking up where this pass left off — it will have moved.
 
-Not started this pass, and why: the remaining page count (124) at this treatment's real
+Not started this pass, and why: the remaining page count (119) at this treatment's real
 per-block cost (each line needs an actually-true explanation, not a template) is substantially
-more authoring than one session covers; each batch (1–4) prioritized worst-first by bare count
+more authoring than one session covers; each batch (1–5) prioritized worst-first by bare count
 and stopped once per-page quality could no longer be maintained at the same depth, per the
 standing rule above — not at a fixed page count. **This remains a standing auto-continuing
 sweep** (per the user's 2026-09-16 approval): further batches proceed on the same worst-first,
