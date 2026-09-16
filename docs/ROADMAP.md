@@ -979,18 +979,56 @@ numbers were wrong). Fixed to blank every character except newlines, so line num
 **Sitewide count after batch 2** (via `tmp_annotationcheck.mjs`, whole site):
 **489 bare blocks across 134 pages** (down from the batch-1 baseline of 545/139 — 56 blocks
 fixed across these 5 pages, matching their individual before-counts of 13+12+11+10+10=56
-exactly). **134 pages with a bare count remain** for a future pass — worst next:
-`angular-rxjs` 11/21 · `angular-control-flow` 10/18 · `angular-functional-guards` 10/19 ·
-`config-tsconfig-advanced` 10/21 · `angular-testing` 9/9 · `angular-change-detection` 9/12 ·
-`angular-cli-project` 9/13 · `angular-routing` 9/14 · `angular-custom-form-controls` 9/17 ·
-`config-app-config` 9/19. Re-run `node frontend/tmp_annotationcheck.mjs` for the current top of
-the list before picking up where this pass left off — it will have moved.
+exactly).
 
-Not started this pass, and why: the remaining page count (134) at this treatment's real
+**Batch 3 (2026-09-16), same session — the user approved auto-continuing the sweep batch by
+batch without a go-ahead each time; per-page quality self-limiting stays the permanent rule.**
+Five more pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=`
+plus a full by-hand read of every touched block:
+
+- `angular-rxjs-visualizer.html` (11→0)
+- `angular-control-flow-visualizer.html` (10→0)
+- `angular-functional-guards-visualizer.html` (10→0)
+- `config-tsconfig-advanced-visualizer.html` (10→0) — this page's existing `.bad`/`.good` inline
+  annotation spans (e.g. `// Error: not initialized`) look like comments but don't satisfy the
+  gate: its comment-density check only counts the page's own `.cm`/`.cmt`/`.xc` classes plus a
+  marker regex that requires NO space right after `//`/`<!--` — `// Error: not initialized` (space
+  after `//`) doesn't match either path. Added real `.cm`-classed trailing comments alongside the
+  existing `.bad`/`.good` spans rather than reformatting them, since those spans are a distinct,
+  deliberate correct/incorrect device on this page, not this project's comment convention.
+- `angular-testing-visualizer.html` (9→0) — every single substantial block on the page was bare
+  (9/9); the largest blocks ran 37–50 lines of Jasmine/TestBed/Playwright code, so density-25%
+  comments were added at the API-call level (what each TestBed/fixture/httpMock/spy call actually
+  does and why) rather than truly every line, matching the density used elsewhere on the site
+  (28–58% per block) rather than over-commenting boilerplate braces.
+
+Same treatment as batches 1–2 throughout: trailing inline comments in each page's own comment
+class plus `.hf-arrow` notes synthesizing a block for the idea underneath it — no new device
+invented. All five passed the full gate suite (`tmp_vcheck`, `tmp_doccheck`, `tmp_assetcheck`
+against `origin/claude/multi-repo-continuation-l6xwuq`, `tmp_codecheck`, `tmp_smoke` — both
+per-page and a full 537-page sweep before pushing — and `tmp_contrast --theme=cream`/`--theme=dark`).
+Noted but out of scope (pre-existing, confirmed via `git stash` to predate this batch, unrelated
+to the annotation edits): `angular-rxjs-visualizer.html` has a low-contrast marble bead
+(`.marble-track div.bead.err`, ~1.2:1 cream / ~1.62:1 dark) — flagged here for a future contrast
+pass rather than fixed in an annotation-only batch.
+
+**Sitewide count after batch 3** (via `tmp_annotationcheck.mjs`, whole site):
+**439 bare blocks across 129 pages** (50 blocks fixed across these 5 pages: 11+10+10+10+9=50,
+matching exactly). **129 pages with a bare count remain** for a future pass — worst next:
+`angular-change-detection` 9/12 · `angular-cli-project` 9/13 · `angular-routing` 9/14 ·
+`angular-custom-form-controls` 9/17 · `config-app-config` 9/19 · `typescript-fundamentals` 9/33 ·
+`angular-animations` 8/9 · `solid` 8/10 · `angular-v21` 8/14 · `angular-viewchild` 8/14. Re-run
+`node frontend/tmp_annotationcheck.mjs` for the current top of the list before picking up where
+this pass left off — it will have moved.
+
+Not started this pass, and why: the remaining page count (129) at this treatment's real
 per-block cost (each line needs an actually-true explanation, not a template) is substantially
-more authoring than one session covers; this pass (like batch 1) prioritized worst-first by bare
-count and stopped once per-page quality could no longer be maintained at the same depth, per the
-standing rule above — not at a fixed page count.
+more authoring than one session covers; each batch (1–3) prioritized worst-first by bare count
+and stopped once per-page quality could no longer be maintained at the same depth, per the
+standing rule above — not at a fixed page count. **This is now a standing auto-continuing sweep**
+(per the user's 2026-09-16 approval): further batches proceed on the same worst-first, same-rules,
+same-gates basis without a per-batch go-ahead, reporting back only at a natural checkpoint or when
+a decision needs the user.
 
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
