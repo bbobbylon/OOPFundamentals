@@ -1627,6 +1627,63 @@ across this session's batches 7–15: 317 → 85 bare blocks (232 fixed), 114 �
 bare count remaining — 73% of the original bare blocks fixed, 44% of the original pages
 cleared entirely.
 
+**Batch 16 (2026-09-16), same session, auto-continued per the standing approval** — five
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `spring-boot-method-security-deep-visualizer.html` (2→0) — the `@PreAuthorize`
+  scope/ownership checks on `UserService` and the `@AuthenticationPrincipal Jwt` endpoint.
+- `spring-boot-multi-idm-claims-deep-visualizer.html` (2→0) — the multi-issuer
+  `JwtIssuerAuthenticationManagerResolver` and the `EntraAuthoritiesConverter`
+  claim-melting converter.
+- `genai-tool-calling-agents-visualizer.html` (2→0) — the tool definition + first
+  tool-call response, and the agent plan/act/observe loop. This page has no manual
+  syntax-highlighting spans at all (plain `<pre><code>`, colorized at runtime by
+  `devhub-syntax.js`), so the annotations are standalone `#` comment lines matching the
+  page's own existing style rather than trailing `.cm`-classed spans.
+- `head-first-strategy-visualizer.html` (2→0) — Act 1's abstract `Duck` class and the
+  `FlyBehavior`/`FlyWithWings` behavior family.
+- `angular-error-handling-deep-visualizer.html` (2→0) — the `ProblemDetail`/`ApiError`
+  typed models and the centralized `errorInterceptor`.
+
+No repeat of any prior gate gap: every added comment on `genai-tool-calling-agents` (a
+plain-Python page with no comment span at all) was verified by eye against the marker-text
+fallback's actual matching rules before writing, since a multi-word trailing `# comment`
+fails that fallback the same way a multi-word `// comment` or `<!-- comment -->` does —
+standalone comment lines were used instead, which the fallback already handles correctly.
+The 671-block/481-TypeScript `tmp_codecheck.mjs` baseline was re-confirmed unchanged after
+every single page (Python isn't compiled by that gate at all, so this page couldn't have
+moved it either way).
+
+Same treatment as batches 1–15 throughout: trailing inline comments in each page's own
+comment class (`.cm` on four of the five pages) or, where no class exists at all,
+standalone lines matching the page's own established plain-text convention — never a new
+device invented. All five passed the full gate suite (`tmp_vcheck`, `tmp_doccheck`,
+`tmp_assetcheck` against `origin/claude/multi-repo-continuation-l6xwuq`, `tmp_codecheck`,
+`tmp_smoke` — both per-page and a full 537-page sweep before pushing — and `tmp_contrast
+--theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 16** (via `tmp_annotationcheck.mjs`, whole site):
+**75 bare blocks across 59 pages** (10 blocks fixed across these 5 pages: 2+2+2+2+2=10,
+matching exactly — cross-checked against `--top=15` after every single page). **59 pages
+with a bare count remain** for a future pass — worst next: `head-first-observer` 2/4 ·
+`kubernetes-spring-boot` 2/4 · `typescript-narrowing-cfa-deep` 2/4 ·
+`genai-llm-api-integration` 2/5 · `head-first-adapter-facade` 2/5 ·
+`head-first-factory` 2/5 · `head-first-iterator-composite` 2/5 ·
+`python-fastapi-deep` 2/5 · `typescript-discriminated-unions` 2/5 ·
+`angular-signal-store-patterns-deep` 2/6. Re-run `node frontend/tmp_annotationcheck.mjs`
+for the current top of the list before picking up where this pass left off — it will have
+moved.
+
+Not started this pass either, same reason as batch 15: the remaining page count (59) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide progress
+across this session's batches 7–16: 317 → 75 bare blocks (242 fixed), 114 → 59 pages with a
+bare count remaining — 76% of the original bare blocks fixed, 48% of the original pages
+cleared entirely. Remaining pages are now overwhelmingly 2-bare (most of the 3- and 4-bare
+pages are cleared), so the per-page fix cost has been dropping batch over batch.
+
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
 - **StackBlitz WebContainers** (`@webcontainer/api`) — real Node.js in the browser. Needs
