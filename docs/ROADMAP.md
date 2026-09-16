@@ -1567,6 +1567,66 @@ worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide
 across this session's batches 7–14: 317 → 98 bare blocks (219 fixed), 114 → 69 pages with a
 bare count remaining — under 100 bare blocks and past 60% of pages cleared.
 
+**Batch 15 (2026-09-16), same session, auto-continued per the standing approval** — five
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `angular-rxjs-multicasting-visualizer.html` (3→0) — `multicast(Subject) + refCount()`,
+  the HTTP-caching `UserService` (`shareReplay`/`startWith`/`switchMap`), and the
+  `AppComponent` consuming its shared/cached `user$`.
+- `typescript-maps-sets-visualizer.html` (3→0) — the `memoize<K,V>` Map-as-cache function,
+  the frequency counter, and the pre-`#` `WeakMap` private-instance-data pattern.
+- `config-index-html-visualizer.html` (3→0) — the `APP_BASE_HREF` provider, Angular's
+  `Title`/`Meta` services, and the self-hosted-fonts `preload` example.
+- `searching-visualizer.html` (2→0) — linear search and binary search, reusing the
+  sitewide `.cm` convention available via the page's already-linked `devhub.css` (no
+  local comment class had ever been defined on this page).
+- `spring-boot-dtos-mapping-deep-visualizer.html` (2→0) — the `CreateUserRequest`
+  allow-list record and the `UserResponse` mapping record.
+
+**A second real gate bug found and fixed**, same shape as batch 13's `.com` fix:
+`tmp_annotationcheck.mjs`'s `COMMENT_CLASSES` list didn't include `hc`,
+`config-index-html-visualizer.html`'s own local `<style>`-block comment span
+(`.hc{color:#546e7a;font-style:italic;} /* comment */`, used for its HTML/markup code
+blocks alongside `.cm` for its JS/shell ones). Same root cause as `.com`: the marker-text
+fallback needs `<!--`/`//` immediately followed by a non-space character, which a normal
+`<!-- note -->` trailing comment never satisfies. Fixed by adding `'hc'` to
+`COMMENT_CLASSES`; confirmed a strict improvement with zero regressions (it's used on only
+this one page sitewide, so no other page's count could shift).
+
+No repeat of the "await"-phrasing `tmp_codecheck.mjs` false-positive: the TypeScript-heavy
+page in this batch was checked by eye, and the 671-block/481-TypeScript baseline plus the
+(now five-class) `COMMENT_CLASSES` list were re-confirmed correct after every single page.
+
+Same treatment as batches 1–14 throughout: trailing inline comments in each page's own
+comment class (`.cm` on four of the five pages), never a new device invented —
+`searching-visualizer.html`'s case is the same "reuse what's already available, don't
+invent" principle as batch 13's `bst-visualizer.html`, just via the shared `devhub.css`
+rule instead of a page-local one. All five passed the full gate suite (`tmp_vcheck`,
+`tmp_doccheck`, `tmp_assetcheck` against `origin/claude/multi-repo-continuation-l6xwuq`,
+`tmp_codecheck`, `tmp_smoke` — both per-page and a full 537-page sweep before pushing —
+and `tmp_contrast --theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 15** (via `tmp_annotationcheck.mjs`, whole site):
+**85 bare blocks across 64 pages** (13 blocks fixed across these 5 pages: 3+3+3+2+2=13,
+matching exactly — cross-checked against `--top=15` after every single page). **64 pages
+with a bare count remain** for a future pass — worst next:
+`spring-boot-method-security-deep` 2/2 · `spring-boot-multi-idm-claims-deep` 2/2 ·
+`genai-tool-calling-agents` 2/3 · `head-first-strategy` 2/3 ·
+`angular-error-handling-deep` 2/4 · `head-first-observer` 2/4 ·
+`kubernetes-spring-boot` 2/4 · `typescript-narrowing-cfa-deep` 2/4 ·
+`genai-llm-api-integration` 2/5 · `head-first-adapter-facade` 2/5. Re-run
+`node frontend/tmp_annotationcheck.mjs` for the current top of the list before picking up
+where this pass left off — it will have moved.
+
+Not started this pass either, same reason as batch 14: the remaining page count (64) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide progress
+across this session's batches 7–15: 317 → 85 bare blocks (232 fixed), 114 → 64 pages with a
+bare count remaining — 73% of the original bare blocks fixed, 44% of the original pages
+cleared entirely.
+
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
 - **StackBlitz WebContainers** (`@webcontainer/api`) — real Node.js in the browser. Needs
