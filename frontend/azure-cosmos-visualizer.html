@@ -62,34 +62,31 @@
     <div class="intro-ciam"><span class="tag">CIAM in production:</span> Cosmos is a natural fit for identity-adjacent data — sessions, user profiles, consent records — because <code>/userId</code> (the token's <code>sub</code>/<code>oid</code> claim) is a textbook partition key: high cardinality, evenly spread, and present in every query your API makes on behalf of that user. Point-read the profile by <code>(id, userId)</code> for ~1 RU per request. Auth follows the same pattern as Blob Storage: <code>DefaultAzureCredential</code> + Cosmos data-plane RBAC roles (<code>Cosmos DB Built-in Data Contributor</code>) — no connection strings in config.</div>
   </div>
 
-  <p class="hf-deck">or, the ORDER BY that ran fine for months and throws a 400 the day someone adds a tiebreaker column</p>
+  <p class="hf-deck" data-shape="exhibit">or, the ORDER BY that ran fine for months and throws a 400 the day someone adds a tiebreaker column</p>
 
-<div class="hf-kick">The problem</div>
-<p class="hf-say">Cosmos indexes every property automatically — this page already told you that — but automatic indexing only covers sorting by ONE property at a time.</p>
+<div class="hf-kick">Exhibit A</div>
+<p class="hf-say">Same query, one added tiebreaker column, no change to the WHERE clause. Read the response before any explanation.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">Your dashboard query 400s the moment a second sort column ships</div>
-  <p>A dashboard query has run in production for months: <code>SELECT * FROM o WHERE o.status = "OPEN" ORDER BY o.orderDate</code>. It works because a single-property <code>ORDER BY</code> is covered by the automatic per-property range index every container gets by default — nothing special was ever configured for it, and nothing needed to be.</p>
-  <p>Then product asks for a completely reasonable tiebreaker: when two orders share a date, sort by <code>customerId</code> too. The change looks trivial — <code>ORDER BY o.orderDate, o.customerId</code> — same table, same properties, already both indexed individually. Cosmos's own indexing-policy documentation says otherwise: an <code>ORDER BY</code> across <strong>two or more properties</strong> requires an explicit <strong>composite index</strong> defined in the container's indexing policy. The automatic range index that silently handled the single-column sort does not extend to multi-column sorts — that's a separate, opt-in feature. Without a composite index covering exactly <code>(orderDate, customerId)</code>, the query doesn't get slower or cost more RUs. It fails outright with a <code>400 Bad Request</code>, before it ever reaches a single partition.</p>
-  <div class="hf-scatter">
-    <span>single-column ORDER BY worked fine for months ✓</span>
-    <span>query syntax is completely valid ✓</span>
-    <span>the WHERE clause on status is untouched ✓</span>
-    <span>no composite index defined for (orderDate, customerId) ⚠</span>
-  </div>
-  <p class="hf-foot">This isn't a performance cliff like the cross-partition fan-out earlier on this page — that query still runs, just expensively. A missing composite index is a hard stop: the query doesn't run at all.</p>
+<div class="hf-card">
+  <pre><code>&gt; SELECT * FROM o WHERE o.status = "OPEN" ORDER BY o.orderDate
+&lt; 200 OK  (worked fine for months — single-property sort)
+
+&gt; SELECT * FROM o WHERE o.status = "OPEN" ORDER BY o.orderDate, o.customerId
+&lt; <span class="hf-mark r">400 Bad Request</span>
+&lt; {"Errors":["<span class="hf-mark">Order-by item requires a corresponding composite index
+&lt;  that it can be served from.</span>"]}</code></pre>
+  <div class="hf-arrow up">The only thing that changed between the two requests is one extra column in <code>ORDER BY</code>. The <code>WHERE</code> clause, the container, the data — none of it moved.</div>
+  <div class="hf-arrow">No degraded response, no slow response, no partial results. <span class="hf-mark r">A hard 400</span>, before the query ever reaches a single partition to actually sort anything.</div>
+  <div class="hf-arrow rose">The error names the exact shape of the fix: a "corresponding composite index." Cosmos indexes every property automatically for a single-column sort — that's the built-in range index. Ordering by TWO properties needs a separate, opt-in structure that nobody defined for <code>(orderDate, customerId)</code>.</div>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Define the composite index before the second ORDER BY column ships</div>
-  <div class="hf-ladder">
-    <b>Add an explicit composite index entry to the indexing policy</b>
-    <i>&darr; a compositeIndexes entry listing /orderDate then /customerId, in that exact order, is what the multi-property sort needs to find before it will run</i>
-    <b>Match the ORDER BY direction to the index definition exactly</b>
-    <i>&darr; a composite index defined ascending/ascending will not serve ORDER BY orderDate ASC, customerId DESC — direction is part of the match, not just the property list</i>
-    <b>Treat a new ORDER BY column as an indexing-policy change, not just a query change</b>
-    <i>&darr; review the query and the container's indexing policy together, since one can ship cleanly on its own and only fail the first time real multi-column ordering is attempted</i>
-  </div>
+<div class="hf-brain">
+  <div class="hf-brain-head">Brain Power</div>
+  <p>Before you scroll: both <code>orderDate</code> and <code>customerId</code> are already individually indexed by Cosmos's default policy. Does adding a composite index for the PAIR make the single-column query from before faster too, or does it only affect queries that sort by both?</p>
+</div>
+
+<div class="hf-card">
+  <p><b>Only the pair.</b> A composite index on <code>(orderDate, customerId)</code> serves an <code>ORDER BY</code> that matches that exact property list and direction — it does nothing for a query that only sorts by <code>orderDate</code> alone, which was already covered by the automatic range index and stays exactly as fast as it always was. Add an explicit <code>compositeIndexes</code> entry listing <code>/orderDate</code> then <code>/customerId</code>, in that order, matching the <code>ASC</code>/<code>DESC</code> direction of the real query — a composite index defined ascending/ascending will not serve <code>ORDER BY orderDate ASC, customerId DESC</code>, direction is part of the match, not just the property list. Treat any new <code>ORDER BY</code> column as an indexing-policy change, not just a query change, since one can ship cleanly on its own and only fail the first time real multi-column ordering is attempted.</p>
 </div>
 
 <div class="principle" style="text-align:left">
@@ -97,13 +94,6 @@
 </div>
 
 <div class="hf-note">Cosmos indexing every property by default feels like a restaurant that seats a table of one or two the moment you walk in. Ask for a table sorted two ways at once, and you find out that specific arrangement needed a reservation nobody made.</div>
-
-<div class="hf-talk">
-  <div class="hf-bub"><span class="who">You</span><p>My ORDER BY on orderDate alone has worked in production for months. I added customerId as a tiebreaker and now every request 400s. I didn't touch the WHERE clause at all.</p></div>
-  <div class="hf-bub right"><span class="who">Cosmos</span><p>Sorting by one property is covered by the range index every property gets automatically. Sorting by two or more is a different feature — a composite index — and nobody defined one for (orderDate, customerId).</p></div>
-  <div class="hf-bub"><span class="who">You</span><p>But it's still just an ORDER BY. Why does one more column change anything?</p></div>
-  <div class="hf-bub right"><span class="who">Cosmos</span><p>Because ordering by two properties at once needs the values pre-combined into a single sortable structure ahead of time — that doesn't happen unless you ask for it. I'd rather fail loudly right now than quietly ignore your second sort key.</p></div>
-</div>
 
 <div class="hf-kick">The mechanism</div>
 <p class="hf-say">Follow the exact same query as it gains one column and loses the ability to run at all.</p>
@@ -141,27 +131,6 @@
   <p class="why" data-for="0">Multi-property ORDER BY isn't just slower under the default policy — it's unsupported by the automatic per-property range index entirely. There's no degraded-but-working path here.</p>
   <p class="why" data-for="1">Cosmos doesn't silently guess at an order for the second column or return partially-sorted results — it refuses to run the query at all rather than return something that doesn't actually honor the ORDER BY clause as written.</p>
   <p class="why" data-for="2">Right. The default indexing policy's automatic range indexes cover a single-property sort only. The instant an ORDER BY spans two or more properties, Cosmos requires a composite index defined for that exact property list and direction — without it, the query is rejected outright with a 400, before it ever reaches a partition.</p>
-</div>
-
-<div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">"The simple case is automatic, the compound case needs an explicit opt-in" shows up everywhere a query engine sits on top of an index.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>A relational database sorting on the "wrong" index</h4>
-    <p>PostgreSQL or MySQL has the same underlying problem — a single-column index on <code>status</code> doesn't efficiently serve <code>ORDER BY orderDate, customerId</code> either — but the consequence is different in kind: the planner falls back to an in-memory or on-disk sort and the query still returns, just slower. Cosmos's hard refusal is the more unusual choice, not the missing-index problem itself.</p>
-    <div class="hf-scatter"><span>the same missing index, a gentler failure mode elsewhere</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Elasticsearch sorting on a field without doc_values</h4>
-    <p>Elasticsearch indexes text fields for searching by default, but sorting requires <code>doc_values</code> to be enabled for that field — a separate, opt-in structure. Try to sort on a field that lacks it and Elasticsearch doesn't degrade gracefully; it throws a search-phase execution exception outright, the same hard-stop shape as Cosmos's missing composite index.</p>
-    <div class="hf-scatter"><span>a different search engine, the identical hard-stop shape</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>MongoDB's in-memory sort limit</h4>
-    <p>Sort a MongoDB query on an unindexed field and it works fine — right up until the working set crosses the server's in-memory sort limit, at which point MongoDB throws an outright error ("Sort exceeded memory limit") instead of quietly spilling to disk, unless <code>allowDiskUse</code> was explicitly requested ahead of time. An assumption that held at small scale becomes a hard failure with zero code change, the same way Cosmos's single-column sort stopped covering a second column.</p>
-    <div class="hf-scatter"><span>an implicit limit that only announces itself by failing</span></div>
-  </div>
 </div>
 
 <div class="hf-napkin">
@@ -390,5 +359,6 @@ DevHubCodeWalk.mount('#cw-co',{
 <script src="devhub-notebook.js"></script>
 <script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-syntax.js"></script>
 </body>
 </html>
