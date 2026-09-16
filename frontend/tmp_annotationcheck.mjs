@@ -87,7 +87,11 @@ const NEARBY_WINDOW = 2500; // chars either side of the block — see WHAT IT CA
 // requires "//" immediately followed by a non-space char, which a normal "// note" never
 // satisfies. Recognizing the class directly (like cm/cmt/xc) fixes it for all three pages
 // at once, per this file's own documented fix path (see WHAT IT CANNOT SEE above).
-const COMMENT_CLASSES = ['cm', 'cmt', 'xc', 'com'];
+// 'hc' added same day: config-index-html-visualizer.html's own local <style> block defines
+// `.hc{color:#546e7a;font-style:italic;} /* comment */` as its HTML-comment span — same
+// under-counting bug as 'com' (a trailing `<!-- note -->` with a space after `<!--` never
+// satisfies the marker regex either).
+const COMMENT_CLASSES = ['cm', 'cmt', 'xc', 'com', 'hc'];
 
 /** Strips <style>…</style> blocks so a CSS comment mentioning the text "<pre>" can never be
  *  mistaken for a real opening <pre> tag (the false positive the 2026-09-16 sweep hit on
