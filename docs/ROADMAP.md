@@ -1738,6 +1738,60 @@ across this session's batches 7–17: 317 → 65 bare blocks (252 fixed), 114 �
 bare count remaining — 79% of the original bare blocks fixed, 53% of the original pages
 cleared entirely, crossing the halfway mark on pages cleared.
 
+**Batch 18 (2026-09-16), same session, auto-continued per the standing approval** — five
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `head-first-factory-visualizer.html` (2→0) — the `NYPizzaStore`/`ChicagoPizzaStore`
+  Factory Method overrides and the `PizzaIngredientFactory` Abstract Factory.
+- `head-first-iterator-composite-visualizer.html` (2→0) — the common `Iterator`
+  interface and the one `printMenu` loop that works for every menu.
+- `python-fastapi-deep-visualizer.html` (2→0) — the Spring Boot `UserController` vs
+  FastAPI `create_user` side-by-side comparison, matching the page's own inline
+  `<code class="cm">`-tag comment convention (not a trailing `<span>`, which this page
+  had never used).
+- `typescript-discriminated-unions-visualizer.html` (2→0) — the exhaustive switch with a
+  `never` fallthrough, and the Redux/NgRx action reducer + WebSocket message union.
+- `angular-signal-store-patterns-deep-visualizer.html` (2→0) — the `rxMethod` debounced
+  search and the `withEntities` normalized collection.
+
+No new gate gaps found this batch — every page used a comment class already inside
+`COMMENT_CLASSES` (`.cm`), including the `<code class="cm">` pattern on
+`python-fastapi-deep-visualizer.html`, which the class-name match already recognizes
+regardless of tag. The 671-block/481-TypeScript `tmp_codecheck.mjs` baseline was
+re-confirmed unchanged after every single page, including the Java/Python comparison page.
+
+Same treatment as batches 1–17 throughout: trailing inline comments (or, on pages with a
+tag-wrapped convention, matching that tag) in each page's own comment class, never a new
+device invented. All five passed the full gate suite (`tmp_vcheck`, `tmp_doccheck`,
+`tmp_assetcheck` against `origin/claude/multi-repo-continuation-l6xwuq`, `tmp_codecheck`,
+`tmp_smoke` — both per-page and a full 537-page sweep before pushing — and `tmp_contrast
+--theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 18** (via `tmp_annotationcheck.mjs`, whole site):
+**55 bare blocks across 49 pages** (10 blocks fixed across these 5 pages: 2+2+2+2+2=10,
+matching exactly — cross-checked against `--top=15` after every single page). **49 pages
+with a bare count remain** for a future pass — worst next: `head-first-template-method`
+2/6 · `typescript-classes-internals-deep` 2/9 · `angular-binding` 2/12 ·
+`config-package-json` 2/12 · `typescript-declarations` 2/12 · `angular-signals` 2/14, plus
+a long tail of 1-bare pages (`angular-debugging-rxjs-deep`, `angular-e2e-playwright`,
+`angular-rxjs-operators-lab`, `angular-token-lifecycle-deep`, `angular-zoneless-deep`,
+`datasci-visualization`, `maven-plugins`, `nosql-redis`, `spring-boot-grpc`, and more).
+Re-run `node frontend/tmp_annotationcheck.mjs` for the current top of the list before
+picking up where this pass left off — it will have moved. The worklist has now moved past
+every 2-bare page with 6 or fewer substantial blocks; what remains is a mix of a handful of
+higher-substantial-count 2-bare pages and a large tail of 1-bare pages, so a future pass's
+per-page yield will be lower (1 fix per page on most remaining pages) even though the
+remaining page count (49) is still sizable.
+
+Not started this pass either, same reason as batch 17: the remaining page count (49) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide progress
+across this session's batches 7–18: 317 → 55 bare blocks (262 fixed), 114 → 49 pages with a
+bare count remaining — 83% of the original bare blocks fixed, 57% of the original pages
+cleared entirely.
+
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
 - **StackBlitz WebContainers** (`@webcontainer/api`) — real Node.js in the browser. Needs
