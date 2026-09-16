@@ -619,11 +619,16 @@ visualizers).
   cheatsheet, a list of functional-interface shapes) is scored as though each
   were an unexplained program. `streams-visualizer.html` scores 25/100 on it and
   has exactly *one* substantial code block; `typescript-fundamentals` scores
-  worst on the whole site and has 7 bare blocks out of 32. To find the real
-  worklist, count blocks of **6+ lines** with no CodeWalk or annotation nearby
-  and under 25% comment density — by that measure the site has ~353 genuinely
-  bare blocks across ~72 authored pages, and the ranking is completely different
-  from the score's.
+  worst on the whole site and has 7 bare blocks out of 32. The real worklist —
+  blocks of **6+ lines** with no CodeWalk or annotation nearby and under 25%
+  comment density — used to mean opening pages by hand to count; it is now
+  `frontend/tmp_annotationcheck.mjs` (`node frontend/tmp_annotationcheck.mjs`
+  for the ranked worklist, `--page=foo.html` for one page's block-by-block
+  detail, `--json=out.json` for the raw numbers). It is a static-source scan,
+  not the rendered-DOM check the ROADMAP item calls for — see its own
+  `WHAT IT CANNOT SEE` for the gap and the one false-positive class (a CSS
+  comment inside `<style>` mentioning the text "&lt;pre&gt;") it was written to
+  stop tripping on. See `docs/ROADMAP.md` item 2 for the sweep's progress.
 - **Cream contrast repair** (in
   [`frontend/devhub-hf-theme.js`](../frontend/devhub-hf-theme.js)) — the part CSS
   structurally cannot reach. 513 pages carry their own `<style>` block that

@@ -902,7 +902,69 @@ score-ranked list.
 
 A worked sample of the treatment is on `angular-standalone-migration-visualizer.html` (commit
 `b823165`): inline comments carrying the per-line meaning, plus an `.hf-arrow up` note tying
-the block to the idea underneath it. Awaiting Bobby's go-ahead on the volume.
+the block to the idea underneath it.
+
+**🚧 IN PROGRESS (2026-09-16) — Bobby gave the go-ahead on the full volume, sweep started.**
+The by-hand count above is now a real gate, `frontend/tmp_annotationcheck.mjs` — run
+`node frontend/tmp_annotationcheck.mjs` for the ranked worklist or `--page=foo.html` for one
+page's block-by-block detail. It is a static-source scan (not the rendered-DOM check this item
+originally called for — its own `WHAT IT CANNOT SEE` explains the gap and the one real
+false-positive class it fixes: a `<style>` block's own CSS comment mentioning the text
+`<pre>`, which had inflated `angular-custom-directives-visualizer.html`'s raw count before
+`<style>` blocks were stripped from the scan). Its numbers **do not match the ~353/~72 figures
+above 1:1** — it scans all 484 site pages rather than only the "97 at-bar" set the original
+by-hand pass scoped to, and a page's exact bare-count can shift by a block or two depending on
+which comment-span class it uses — but before any pages were touched this session it named the
+SAME six worst pages (plus `angular-forms-visualizer.html`, which slots in at #3 by this gate's
+count and was not in the original six), each within 1-2 blocks of the original figure, which is
+the cross-check that matters.
+
+**11 pages finished, 0 bare blocks remaining on each** (verified with
+`tmp_annotationcheck.mjs --page=`, plus a full read of every touched block by hand — the
+gate counts markup, not meaning):
+
+- `angular-standalone-migration-visualizer.html` — the worked-sample page above, finished (18→0)
+- `angular-material-cdk-visualizer.html` (16→0)
+- `angular-forms-visualizer.html` (16→0)
+- `angular-content-projection-visualizer.html` (15→0)
+- `config-environment-runtime-visualizer.html` (14→0)
+- `config-pom-xml-visualizer.html` (14→0, using the page's own `.xc`/`.xb`/`.xt`/`.xv` XML
+  token classes rather than `.cm` — matched the page's existing highlighting convention rather
+  than inventing a new one)
+- `angular-custom-directives-visualizer.html` (13→0, incl. the interactive playground's
+  duplicate quick-reference snippets, which render into a separate DOM node from the main
+  teaching blocks and so needed their own annotation)
+- `angular-form-array-visualizer.html` (12→0)
+- `angular-services-visualizer.html` (12→0)
+- `typescript-type-guards-visualizer.html` (12→0, using the page's `.cmt` class)
+- `typescript-decorators-visualizer.html` (10→0, using `.cmt`)
+
+Every finished page follows the worked sample's exact treatment: trailing `<span class="cm">`
+(or the page's own comment-span class) inline comments on the lines that carry meaning, plus
+one or more `.hf-arrow` notes synthesizing the block for the idea underneath it — never a new
+device. `devhub-syntax.js` was already included on all 11 (checked, not assumed).
+
+**Sitewide count as of this pass** (via `tmp_annotationcheck.mjs`, whole site):
+**545 bare blocks across 139 pages.** An earlier draft of this same scan, run before any page
+in this pass was touched, found ~698 bare blocks across ~149 pages — so this pass's own
+before/after is roughly 150 blocks fixed net of the 11 pages above, consistent with those 11
+pages' individual before-counts (~152). That 698/149 baseline is this session's own measurement,
+not the original ~353/~72 pass above, which scanned a narrower page set by a different method —
+the two are not directly comparable, only the six worst pages they agree on are. **139 pages
+with a bare count remain** for a future pass — worst next:
+`angular-routing-advanced` 13/27 · `config-app-config-providers` 12/24 ·
+`angular-template-forms` 11/17 · `angular-rxjs` 11/21 · `angular-directives` 10/15 ·
+`angular-http` 10/16 · `angular-control-flow` 10/18 · `angular-functional-guards` 10/19 ·
+`config-tsconfig-advanced` 10/21 · `angular-testing` 9/9. Re-run
+`node frontend/tmp_annotationcheck.mjs` for the current top of the list before picking up
+where this pass left off — it will have moved.
+
+Not started this pass, and why: the remaining page count (139) at this treatment's real
+per-block cost (each line needs an actually-true explanation, not a template) is substantially
+more authoring than one session covers; this pass prioritized worst-first by bare count
+(matching this item's own stated ordering method) and stopped once it had verified the
+treatment holds up cleanly across all four gates on every page it touched, rather than
+spreading thinner across more pages with less care per block.
 
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
