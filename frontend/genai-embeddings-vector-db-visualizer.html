@@ -64,33 +64,37 @@
     <div class="intro-ciam"><span class="tag">CIAM tie-in:</span> <code>pgvector</code> means you don't need a separate vector-DB service — the same Postgres instance backing your <code>users</code> table can hold a <code>support_ticket_embeddings</code> table for semantic ticket search, or embed OAuth scope descriptions so a "what does <code>read:profile</code> mean?" search works in plain English. This DevHub's own backend already uses <a href="app.html">JDBC + Postgres</a>; adding <code>pgvector</code> is a schema change, not a new system.</div>
   </div>
 
-  <p class="hf-deck">or, the 20% speed win that quietly changed what "closest" means</p>
+  <p class="hf-deck" data-shape="receipt">or, the 20% speed win that quietly changed what "closest" means</p>
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">You swap the exact same <code>cosine_sim</code> function above for a raw dot product because it's one fewer division per comparison — and suddenly an off-topic document starts beating the actually-relevant one to the top of every search.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">The wrong document wins, and every step of the swap looked correct</div>
-  <p>Look back at the <code>cosine_sim</code> function two sections up: <code>np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))</code>. A teammate profiles the search path, notices that norm calculation running on every comparison, and "optimizes" it away — or picks a vector DB's inner-product index type instead of its cosine index type, because the docs say it's faster. The code still compiles, the query still returns results ranked highest-to-lowest, and nothing errors.</p>
-  <p>But cosine similarity and a raw dot product are only the same ranking when every vector happens to have the same length. Drop the <code>/ (norm(a) * norm(b))</code> term and you're no longer measuring "which direction is closest to the query" — you're measuring "which vector has the biggest dot product," and a longer vector wins that contest even when it points in a worse direction. Not every embedding model guarantees unit-length output vectors (some do — OpenAI's <code>text-embedding-3</code> models are documented as pre-normalized — but plenty of open-source sentence-transformer models are not, unless you explicitly call a normalize step). Once vector lengths vary across your corpus, magnitude becomes a second, unwanted variable riding along in every ranking.</p>
-  <div class="hf-scatter">
-    <span>query embedded correctly ✓</span>
-    <span>candidate vectors embedded correctly ✓</span>
-    <span>no normalization before the dot product ⚠</span>
-  </div>
-  <p class="hf-foot">The direction of the vector is still the meaning. The length was never supposed to be a vote — and now it is one.</p>
+<div class="hf-receipt">
+  <div class="hf-receipt-head">Two candidates, one query — real computed scores, not invented ones</div>
+  <div class="row"><span>Candidate A — 15&deg; off-topic direction, norm 1.0 — dot product score</span><span>0.9659</span></div>
+  <div class="row"><span>Candidate B — 50&deg; off-topic direction, norm 1.6 — dot product score</span><span>1.0285</span></div>
+  <div class="row total"><span>Raw dot product's winner</span><span>B &mdash; the WRONG one</span></div>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Decide on purpose whether magnitude should count</div>
-  <div class="hf-ladder">
-    <b>If you want cosine similarity, normalize the vectors to unit length ONCE, at write time</b>
-    <i>&darr; do it when you store the embedding, not on every query — then a plain dot product at search time IS cosine similarity, correctly and cheaply</i>
-    <b>If you switch a vector DB's metric type, re-check what it assumes</b>
-    <i>&darr; an "inner product" index and a "cosine" index are not interchangeable performance knobs — they answer a different question, even against the exact same stored vectors</i>
-    <b>Never assume a third-party embedding model normalizes for you</b>
-    <i>&darr; check the model's docs (or just measure <code>norm(vec)</code> across a sample) instead of assuming every provider behaves like the one you tested with first</i>
-  </div>
+<div class="hf-arrow up">Same two vectors, same query, worked with Python's <code>math</code> module to four decimal places. <span class="hf-mark">B is 3.3&times; further off-topic than A (50&deg; vs 15&deg;) and still wins</span> — because raw dot product never divides by anything; a bigger vector always gets a bigger number, direction or no direction.</div>
+
+<div class="hf-vs">
+  <div class="bad"><h5>Dot product: 1.0285 vs 0.9659</h5><p>No division by the norms, so B's <code>1.6&times;</code> length inflates its score past A's — the ranking now answers "which vector is longer AND roughly pointing the right way," not "which is closest."</p></div>
+  <div class="good"><h5>Cosine similarity: 0.9659 vs 0.6428</h5><p>The exact same two vectors, divided by their own norms first. Direction only. A — genuinely closer to the query — wins by a wide, correct margin.</p></div>
+</div>
+
+<div class="hf-chain">
+  <span class="n">cosine_sim() divides by norm(a)&times;norm(b) on every comparison</span><span class="a">&rarr;</span>
+  <span class="n">a profiler flags that division as the hot line</span><span class="a">&rarr;</span>
+  <span class="n">division removed, or the vector DB's index type switched to inner-product</span><span class="a">&rarr;</span>
+  <span class="n">every comparison is now a raw dot product</span><span class="a">&rarr;</span>
+  <span class="n">vector magnitude becomes a silent, unrequested second vote</span>
+</div>
+
+<p><b>Not every embedding model guarantees unit-length output</b> — some do (OpenAI's <code>text-embedding-3</code> models are documented as pre-normalized), but plenty of open-source sentence-transformer models are not, unless you explicitly call a normalize step. Once vector lengths vary across your corpus, magnitude rides along in every ranking whether you wanted it there or not.</p>
+
+<div class="hf-card">
+  <p><b>Decide on purpose whether magnitude should count.</b> If you want cosine similarity, normalize the vectors to unit length ONCE, at write time — do it when you store the embedding, not on every query, and a plain dot product at search time then IS cosine similarity, correctly and cheaply. If you switch a vector DB's metric type, re-check what it assumes: an "inner product" index and a "cosine" index are not interchangeable performance knobs, they answer a different question against the exact same stored vectors. And never assume a third-party embedding model normalizes for you — check the docs, or just measure <code>norm(vec)</code> across a sample.</p>
 </div>
 
 <div class="principle" style="text-align:left">
@@ -98,13 +102,6 @@
 </div>
 
 <div class="hf-note">Picture two arrows pointing in nearly the exact same direction — same meaning, same "topic" — but one is drawn twice as long. Cosine similarity says <b>they're both about equally close</b>, because it only reads the angle. Raw dot product says <b>the longer one wins</b>, because it also reads the ruler.</div>
-
-<div class="hf-talk">
-  <div class="hf-bub"><span class="who">You</span><p>I swapped cosine for dot product and got the exact same top result on my test query. Why would that ever break?</p></div>
-  <div class="hf-bub right"><span class="who">The dot product, personified</span><p>Because your test query happened to compare vectors of similar length. I don't check that — I never have. I just multiply and add. Whether that number means "similar meaning" or "similar meaning, boosted by size" depends entirely on whether someone normalized me first.</p></div>
-  <div class="hf-bub"><span class="who">You</span><p>So it's not that I did the math wrong.</p></div>
-  <div class="hf-bub right"><span class="who">Cosine similarity, personified</span><p>You did the math right for a different question. I answer "which way is this pointing." Plain dot product answers "how far in that general direction, times how far in the other direction." Those only agree when both vectors are the same length — which nobody guaranteed you.</p></div>
-</div>
 
 <div class="hf-kick">The mechanism</div>
 <p class="hf-say">Follow the exact same two candidate vectors through both formulas and watch where they stop agreeing.</p>
@@ -142,27 +139,6 @@
   <p class="why" data-for="0">Right — cosine similarity divides out magnitude specifically so only direction (meaning) decides the ranking. A raw dot product doesn't do that division, so a vector with a larger norm can win purely on size, regardless of how well it actually matches.</p>
   <p class="why" data-for="1">Nothing in this scenario touched the embedding model — the same vectors, computed the same way, are simply being compared with a different formula. The model isn't the variable here.</p>
   <p class="why" data-for="2">ANN's approximate recall trade-off (already covered above) causes occasional near-misses at random — it doesn't produce a consistent, explainable bias toward specific documents the way an unnormalized magnitude does.</p>
-</div>
-
-<div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">A shortcut that's mathematically valid only under an assumption nobody wrote down shows up far outside of vector search.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>Comparing password hashes with <code>==</code> instead of a constant-time compare</h4>
-    <p>Both approaches return "equal" or "not equal" correctly on the happy path. The shortcut (<code>==</code>) is only safe when you don't care that comparison time leaks how many leading bytes matched — an assumption that's fine for two arbitrary strings and a timing-attack vulnerability for a password hash.</p>
-    <div class="hf-scatter"><span>correct on the happy path isn't the same as safe under the real conditions</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Summing JWT scopes as a bitmask instead of a set</h4>
-    <p>If every scope maps to a unique power-of-two bit, OR-ing bitmasks together works exactly like a set union — until two features grab the same bit by accident, and now two unrelated scopes silently combine into a token that grants both without anyone requesting it that way.</p>
-    <div class="hf-scatter"><span>an optimization is only equivalent under the assumption that made it valid</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Comparing floating-point account balances with <code>==</code></h4>
-    <p><code>0.1 + 0.2 == 0.3</code> is <code>false</code> in most languages' floating-point arithmetic. Code that "obviously" checks whether a balance matches an expected value works for round numbers in testing and silently fails for the first value that isn't exactly representable in binary.</p>
-    <div class="hf-scatter"><span>works in your test cases isn't the same as correct in general</span></div>
-  </div>
 </div>
 
 <div class="hf-napkin">
