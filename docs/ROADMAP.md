@@ -1860,6 +1860,70 @@ text-clip notices, unrelated to this page). **Sitewide after batch 20: 43 bare b
 the exact order shifts as pages are fixed. **Still a standing auto-continuing sweep**; 43
 pages remain, each now cheap.
 
+**Batch 21 (2026-09-16), new session (the retired agent's harness anomaly was unrelated to
+work quality — every prior batch stayed gate-verified and pushed), continuing the same
+standing auto-continue approval** — eleven pages (every remaining 1/1 page in one pass),
+0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block, **one commit per page** per the standing instruction:
+
+- `angular-debugging-rxjs-deep-visualizer.html` (1→0) — the numbered-`tap()` debugging
+  chain. No comment class existed on the page at all; added trailing `.cm` spans
+  (devhub.css's default, matching `devhub-syntax.js`'s own output class) explaining each
+  probe's position relative to `debounceTime`/`switchMap`.
+- `angular-e2e-playwright-visualizer.html` (1→0) — the `LoginPage` Page Object Model
+  example. Already used `.cm` on its leading line; extended it across the constructor,
+  both locators, and the `loginAs()` body.
+- `angular-rxjs-operators-lab-visualizer.html` (1→0) — the typeahead-search hero pipeline.
+  No comment class existed; added `.cm` spans per operator.
+- `angular-token-lifecycle-deep-visualizer.html` (1→0, 19%→75% density) — the
+  `authInterceptor` functional interceptor. Already used `.cm` on 3 of 16 lines; extended
+  to the signature, injection, clone/ternary, and the 401-vs-other-error branch.
+- `angular-zoneless-deep-visualizer.html` (1→0, 17%→67%) — the `provideZonelessChangeDetection()`
+  bootstrap snippet. Extended the page's existing `.cm` use from 1 line to 4.
+- `datasci-visualization-visualizer.html` (1→0) — the Figure/Axes two-panel Matplotlib
+  example. Matched the page's own `<code class="cm">` tag convention (not a `<span>`) on
+  every remaining line, naming which Axes (`ax1`/`ax2`) each call targets.
+- `maven-plugins-visualizer.html` (1→0, 0%→31%) — the `maven-compiler-plugin`
+  `<configuration>` XML block. This page's own comment convention is `.xml-cm` (used
+  elsewhere on the page), which is **not** one of `tmp_annotationcheck.mjs`'s recognized
+  `COMMENT_CLASSES` (`cm`/`cmt`/`xc`/`com`/`hc`) — added standalone `<!-- -->` lines in
+  that class, confirmed via the gate's own marker-text fallback (a line that *starts* with
+  `&lt;!--` after tag-stripping is counted regardless of class name) rather than adding a
+  new class to the gate or inventing a different convention for one block.
+- `nosql-redis-visualizer.html` (1→0, 22%→56%) — the cache-aside `RedisTemplate` example.
+  Extended the page's existing `.cm` use to the key-build, `get()`, and `set()` lines.
+- `spring-boot-grpc-visualizer.html` (1→0, 20%→60%) — the `.proto` service contract.
+  Extended `.cm` to the `service`/`rpc`/field-tag lines.
+- `spring-boot-rate-limiting-deep-visualizer.html` (1→0, 0%→86%) — the bucket4j
+  token-bucket example. No comment class existed; added `.cm` spans on 6 of 7 lines
+  (capacity vs. refill rate, what `tryConsume`'s boolean means, why 429 + `Retry-After`).
+- `streams-visualizer.html` (1→0, 18%→76%) — the imperative-vs-stream before/after.
+  Extended the page's existing `.cm` use across both versions, naming each stream step
+  (`filter`/`filter`/`mapToInt`/`sum`) against the imperative loop's buried, hand-mutated
+  equivalent.
+
+Same treatment as every prior batch: trailing (or, on `maven-plugins`, standalone) comments
+in each page's own established convention, never inventing a new device. Every page passed
+the full per-page gate suite (`tmp_annotationcheck.mjs --page=`, `tmp_vcheck`, `tmp_doccheck`,
+`tmp_codecheck` — 671/481 baseline unchanged after every single page — `tmp_contrast
+--theme=cream`/`--theme=dark`), plus a full 537-page `tmp_smoke.mjs` sweep and
+`tmp_assetcheck.mjs origin/claude/multi-repo-continuation-l6xwuq` (both clean) before
+pushing. One real gate-interaction detail found and worked around, not a bug in the gate
+itself: `maven-plugins-visualizer.html`'s pre-existing `.xml-cm` class is invisible to
+`COMMENT_CLASSES`'s exact-string match (`class="cm"` is not a substring of
+`class="xml-cm"`), so the fix leaned on the documented marker-text fallback instead of
+touching the gate or breaking the page's own convention.
+
+**Sitewide count after batch 21** (via `tmp_annotationcheck.mjs`, whole site):
+**32 bare blocks across 32 pages** (11 blocks fixed, all pages fully cleared: 43→32). Next
+up: `abstraction` 1/2 · `angular-auth-state-signals-deep` 1/2 ·
+`angular-control-flow-internals-deep` 1/2 · `angular-signals-rxjs-interop-deep` 1/2 ·
+`graph` 1/2 · `shell-gcloud-cli` 1/2 · `spring-boot-cors-deep` 1/2 ·
+`spring-boot-jpa-fetching-deep` 1/2 · `typescript-top-bottom-types-deep` 1/2 ·
+`exceptions` 1/3, and more at 1/3–1/14. Re-run `node frontend/tmp_annotationcheck.mjs` for
+the current top before picking up — it will have moved. **Still a standing
+auto-continuing sweep**, every remaining page needs exactly one fix.
+
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
 - **StackBlitz WebContainers** (`@webcontainer/api`) — real Node.js in the browser. Needs
