@@ -56,43 +56,36 @@
     <div class="intro-ciam"><span class="tag">CIAM async gateway:</span> A token-validating gateway is almost pure I/O — verify a JWT, fetch the JWKS (cached), call <code>/userinfo</code>, hit a session store. Writing each step as <code>await</code> keeps the thread free during every network hop, so a small thread pool serves huge concurrency. <code>Task.WhenAll</code> fans out independent calls (userinfo + entitlements) to cut latency. The one rule: never <code>.Result</code>/<code>.Wait()</code> on an async call inside a request — it ties up a pool thread and can deadlock under load.</div>
   </div>
 
-<p class="hf-deck">or, why the exact same <code>.Result</code> call is harmless in one app and fatal in another</p>
+<p class="hf-deck" data-shape="argument">or, why the exact same <code>.Result</code> call is harmless in one app and fatal in another</p>
 
 <div class="hf-kick">The problem</div>
-<p class="hf-say">You copy a method between two C# hosts, change nothing, and one of them hangs forever.</p>
+<p class="hf-say">You copy a method between two C# hosts, change nothing, and one of them hangs forever. Neither side of this deadlock is doing anything wrong.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">It worked in the Web API. It deadlocks in the desktop app.</div>
-  <p>You write a small helper in a shared library: <code>public Task&lt;User&gt; GetUserAsync(int id)</code>,
-  with an <code>await</code> inside it hitting the database. Somewhere convenient you call it as
-  <code>var user = GetUserAsync(id).Result;</code> instead of awaiting it — a shortcut, but your ASP.NET
-  Core controller action calls it, the request completes, tests pass. You ship it.</p>
-  <p>Then someone wires the same library method into a WPF button-click handler, or an old ASP.NET
-  (System.Web) action, and it hangs. Forever — not slow, <em>frozen</em>. Nothing in the code changed
-  between the two callers except which application hosts it, and that's exactly the variable that
-  matters: ASP.NET Core has no <code>SynchronizationContext</code>, so <code>.Result</code> blocking a
-  thread there is merely wasteful. WPF and classic ASP.NET both install one, and that context is what
-  actually deadlocks — the continuation after your library's <code>await</code> needs to resume on that
-  same captured context, but the only thread allowed to run it is the one <code>.Result</code> is
-  currently blocking.</p>
-  <div class="hf-scatter">
-    <span>library code unchanged ✓</span>
-    <span>ASP.NET Core caller: fine ✓</span>
-    <span>WPF / classic ASP.NET caller: frozen ⚠</span>
-  </div>
-  <p class="hf-foot">The bug isn't in the method you wrote. It's in the assumption that "it worked when I
-  tested it" tells you anything about a host you didn't test it in.</p>
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I tested this exact method — <code>var user = GetUserAsync(id).Result;</code> — in my ASP.NET Core API. It's fine. Why is it hanging forever in the WPF button handler?</p></div>
+  <div class="hf-bub right"><span class="who">SynchronizationContext</span><p>Because ASP.NET Core never installs me at all. Your test proved nothing about a host that does — and WPF does.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Fine. So what does WPF's context actually DO that ASP.NET Core's absence doesn't?</p></div>
+  <div class="hf-bub right"><span class="who">SynchronizationContext</span><p>The instant your library's <code>await</code> runs, I capture whatever thread called it. I don't just note it — I insist the continuation after that <code>await</code> resumes back on that exact thread, and no other.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Insist all you like — <code>.Result</code> is just a blocking wait. Why would waiting ever deadlock anything?</p></div>
+  <div class="hf-bub right"><span class="who">The UI thread</span><p>Because I'm the thread SynchronizationContext just promised your continuation to. I'm also the exact thread your <code>.Result</code> call parked on, doing nothing but waiting for that same continuation to finish.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So I'm blocked waiting on a result that can't arrive until I stop blocking?</p></div>
+  <div class="hf-bub right"><span class="who">The UI thread</span><p>Correct. I cannot run your continuation and sit frozen on the outcome of that continuation at the same time. Neither of us broke a promise — SynchronizationContext kept its word, I kept mine — and together that's a deadlock forever, not a slow response.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Then why did this exact same library method just... work... back in ASP.NET Core?</p></div>
+  <div class="hf-bub right"><span class="who">SynchronizationContext</span><p>Because there, I don't exist. <code>.Result</code> there just burns a thread-pool thread and eventually gets its answer back — wasteful, but survivable. It takes a context that insists on ONE specific thread to turn "wasteful" into "forever."</p></div>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Fix: library code awaits with <code>ConfigureAwait(false)</code>, always</div>
-  <div class="hf-ladder">
-    <b>await _db.Users.FindAsync(id).ConfigureAwait(false);</b>
-    <i>↓ tells the continuation it doesn't need the original context back — any thread pool thread can run it</i>
-    <b>Do this on every await inside library/shared code, not just the risky-looking ones</b>
-    <i>↓ you don't control who calls your library or from which kind of host, so assume the worst context</i>
-    <b>And still fix the real bug: never call .Result or .Wait() on an async call — await it, all the way up</b>
-  </div>
+<div class="hf-card">
+  <p><b>Neither party is the bug.</b> <code>SynchronizationContext</code> correctly captures the calling
+  thread so UI code can safely touch UI controls after an <code>await</code> — that's the entire reason
+  it exists. <code>.Result</code> correctly blocks the calling thread until the <code>Task</code>
+  completes — that's the entire reason a blocking call blocks. The deadlock lives in the gap between two
+  individually correct behaviors meeting on the one thread that's on the hook for both of them.</p>
+  <p><b>The fix lives in your library, not the argument above.</b> <code>await
+  _db.Users.FindAsync(id).ConfigureAwait(false);</code> on every <code>await</code> inside shared/library
+  code tells the continuation it doesn't need the original context back, so any thread-pool thread can
+  run it — you don't control who calls your library or from which kind of host, so assume the worst
+  context every time. And fix the real habit too: never call <code>.Result</code>/<code>.Wait()</code>
+  on an async call; <code>await</code> it, all the way up the call stack.</p>
 </div>
 
 <div class="principle" style="text-align:left">
@@ -108,13 +101,6 @@ WPF's UI thread, or classic ASP.NET's request context. <code>await</code> withou
 <code>ConfigureAwait(false)</code> promises to hand the mic back to whoever was holding it. Block that
 same holder with <code>.Result</code> while it's waiting for the mic back, and the show can never
 resume.</div>
-
-<div class="hf-talk">
-  <div class="hf-bub"><span class="who">You</span><p>I tested this exact method in my ASP.NET Core API. It's fine. Why is it hanging in the WPF app?</p></div>
-  <div class="hf-bub right"><span class="who">SynchronizationContext</span><p>Because ASP.NET Core never installs me at all — your test proved nothing about a host that does.</p></div>
-  <div class="hf-bub"><span class="who">You</span><p>So what changed in the WPF app specifically?</p></div>
-  <div class="hf-bub right"><span class="who">SynchronizationContext</span><p>I capture the UI thread before your <code>await</code>, and I insist the continuation runs back on it. Your <code>.Result</code> call is sitting on that exact thread, refusing to let go until the continuation finishes — which can't happen until the thread is free. That's the whole deadlock.</p></div>
-</div>
 
 <div class="hf-kick">The mechanism</div>
 <p class="hf-say">Same code, same await, two different hosts, two different endings.</p>
@@ -161,44 +147,7 @@ resume.</div>
   <p class="why" data-for="2">JIT compilation doesn't introduce non-determinism like this, and this deadlock reproduces reliably every single time under the same conditions — it isn't a flaky, compilation-order-dependent bug.</p>
 </div>
 
-<div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">Code that behaves differently depending on who calls it is a context problem, not a code problem.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>A Spring <code>@Transactional</code> method called from within itself</h4>
-    <p>The self-invocation gotcha is the same shape: identical method, identical annotation, and it
-    silently stops working the moment the call doesn't go through the Spring-managed proxy — because the
-    proxy, not the method, is what implements the behavior. The code you're staring at was never the whole
-    story either time.</p>
-    <div class="hf-scatter"><span>the framework's plumbing around the code decides the outcome</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>An Angular <code>HttpClient</code> call outside <code>NgZone</code></h4>
-    <p>Fire a request from inside a raw DOM event listener instead of an Angular-managed one and change
-    detection never fires when it resolves — the component's data updates, the screen doesn't, and the
-    fix is the same category of move as <code>ConfigureAwait(false)</code>: explicitly opt back into (or
-    out of) the zone the framework assumes you're in.</p>
-    <div class="hf-scatter"><span>whether you're "inside the zone" changes what happens next</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Token refresh from inside an Entra ID auth interceptor</h4>
-    <p>Block synchronously waiting for a refreshed access token from inside the very interceptor that's
-    supposed to attach it to outgoing calls, and you can starve the thread that would have delivered the
-    refreshed token — the same "the thing I'm blocking on needs the thing I'm blocking" shape as the
-    <code>.Result</code> deadlock, just in an HTTP pipeline instead of a UI thread.</p>
-    <div class="hf-scatter"><span>blocking inside the very pipeline stage that would unblock you</span></div>
-  </div>
-</div>
-
-<div class="hf-napkin">
-  <b>The whole page on a napkin:</b> <code>await</code> frees the thread instead of blocking it, the
-  compiler turns your method into a state machine around a continuation, and the one hard rule is never
-  block on async with <code>.Result</code>/<code>.Wait()</code>. <b>The one new sentence this block
-  adds:</b> whether breaking that rule merely wastes a thread or deadlocks the process entirely depends
-  on a <code>SynchronizationContext</code> your test host might not even have — which is exactly why
-  library code should <code>ConfigureAwait(false)</code> and never assume its caller's context.
-</div>
+<p class="hf-big">Two correct behaviors, one thread, forever.</p>
 
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
