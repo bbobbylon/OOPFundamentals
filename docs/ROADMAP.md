@@ -1404,6 +1404,57 @@ worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide
 across this session's batches 7–11: 317 → 150 bare blocks (167 fixed), 114 → 84 pages with a
 bare count remaining.
 
+**Batch 12 (2026-09-16), same session, auto-continued per the standing approval** — five
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `angular-forms-data-deep-visualizer.html` (4→0) — reactive-forms validation + submit
+  (`nonNullable.group`, the `showError` helper, `onSubmit`), the `FormData` file-upload
+  builder, `HttpClient` upload-progress tracking (`reportProgress`/`observe: 'events'`), and
+  file-input validation + `FileReader` preview.
+- `angular-vitest-visualizer.html` (4→0) — `vi.mock()` whole-module replacement, a `TestBed`
+  component test running under Vitest, `it.each` table-driven tests, and the
+  `angular.json` `unit-test` builder config.
+- `spring-boot-di-ioc-visualizer.html` (4→0) — hand-wired vs constructor-injected
+  `OrderService`, `@Configuration`/`@Bean` factory methods (`RestClient`, `ObjectMapper`),
+  and the recommended constructor-injection style.
+- `typescript-why-visualizer.html` (4→0) — plain JS vs typed `greet()` signatures, the
+  `User` interface feeding type erasure, and structural typing's `Point`/`CartesianPoint`
+  example.
+- `typescript-modules-visualizer.html` (4→0) — `verbatimModuleSyntax`'s `tsconfig.json`
+  flag, bundler-vs-Node-ESM `moduleResolution` configs, a `baseUrl`/`paths` alias
+  `tsconfig.json`, and ambient `declare module` declarations.
+
+No repeat of batch 10's "await"-phrasing `tmp_codecheck.mjs` false-positive, and no repeat
+of any other `NOT_CODE` C#-exclusion trigger: every added comment on the two
+TypeScript-heavy pages (`typescript-why`, `typescript-modules`) was checked by eye before
+writing, and the 671-block/481-TypeScript baseline was re-confirmed unchanged after every
+single page, not just at batch close.
+
+Same treatment as batches 1–11 throughout: trailing inline comments in each page's own
+comment class (`.cm` on three pages, `.cmt` on the two TypeScript pages), never a new device
+invented. All five passed the full gate suite (`tmp_vcheck`, `tmp_doccheck`, `tmp_assetcheck`
+against `origin/claude/multi-repo-continuation-l6xwuq`, `tmp_codecheck`, `tmp_smoke` — both
+per-page and a full 537-page sweep before pushing — and `tmp_contrast
+--theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 12** (via `tmp_annotationcheck.mjs`, whole site):
+**130 bare blocks across 79 pages** (20 blocks fixed across these 5 pages: 4+4+4+4+4=20,
+matching exactly — cross-checked against `--top=15` after every single page). **79 pages with
+a bare count remain** for a future pass — worst next: `typescript-arrays-tuples` 4/13 ·
+`typescript-classes` 4/13 · `big-o` 3/3 · `bst` 3/3 · `head-first-state` 3/4 ·
+`spring-boot-async-threads-deep` 3/5 · `spring-boot-idm-oauth2-deep` 3/5 ·
+`angular-lazy-loading` 3/6 · `head-first-command` 3/6 · `angular-zoneless-mode` 3/9.
+Re-run `node frontend/tmp_annotationcheck.mjs` for the current top of the list before picking
+up where this pass left off — it will have moved.
+
+Not started this pass either, same reason as batch 11: the remaining page count (79) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide progress
+across this session's batches 7–12: 317 → 130 bare blocks (187 fixed), 114 → 79 pages with a
+bare count remaining.
+
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
 - **StackBlitz WebContainers** (`@webcontainer/api`) — real Node.js in the browser. Needs
