@@ -58,12 +58,12 @@
     <div class="intro-ciam"><span class="tag">CIAM with Rails:</span> Rails apps usually authenticate with Devise (sessions) or, for an API behind Ping/Entra, a <code>before_action</code> that verifies the RS256 JWT against the provider's JWKS and sets <code>current_user</code> — Rails' equivalent of a Spring Security filter. Authorization is a gem like Pundit/CanCanCan (policies ≈ <code>@PreAuthorize</code>): a missing token → 401, an allowed-but-forbidden action → 403. <strong>Strong parameters</strong> stop mass-assignment (a client can't set <code>admin: true</code> by smuggling it in the body). Active Record associations make a consent/role model expressive — <code>current_user.consents.where(granted: true)</code> — and <code>includes</code> avoids N+1 across scopes. The shared-nothing request model means each request re-verifies the token, which suits stateless JWT APIs.</div>
   </div>
 
-  <p class="hf-deck">or, the one Active Record method on this page that skips Active Record entirely</p>
+  <p class="hf-deck" data-shape="questions">or, the one Active Record method on this page that skips Active Record entirely</p>
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">You call something that sounds like the bulk version of <code>save</code>, and every validation and callback you were counting on simply never runs.</p>
 
-<div class="hf-card bad">
+<div class="hf-card">
   <div class="hf-cardtitle">Your before_save email-normalizer never sees the bulk update</div>
   <p>Say <code>User</code> has <code>before_save :downcase_email</code> and <code>validates :email, uniqueness: true</code>. A support script needs to reset 200 legacy accounts to a placeholder address before a migration: <code>User.where(status: "legacy").update_all(email: "reset@example.com")</code>. It reads like the natural bulk cousin of calling <code>.save</code> on each record — same model, same column, just faster.</p>
   <p>Rails' own documentation is blunt about what <code>update_all</code> actually is: it does not instantiate the models involved, and it does not run any callbacks or validations. It compiles your call into <strong>one raw SQL statement</strong> and sends it straight to the database. <code>delete_all</code> and <code>insert_all</code>/<code>upsert_all</code> make the identical trade for deletes and creates. There is no <code>User</code> object anywhere in this path for <code>before_save</code> to be a hook <em>on</em>, and no validation runs to notice that setting the same literal email on 200 rows is about to violate the uniqueness rule those rows would enforce one at a time. All 200 rows get the exact same email, silently.</p>
@@ -76,30 +76,28 @@
   <p class="hf-foot"><code>update_all</code> did exactly what its name says: it updated all of them, in bulk, by skipping every hook that turns <code>save</code> into more than a raw UPDATE.</p>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Reach for update_all only when you deliberately want the object layer skipped</div>
-  <div class="hf-ladder">
-    <b>Default to iterating with save when callbacks and validations matter</b>
-    <i>&darr; <code>User.where(...).find_each(&:save!)</code> is slower, but every before_save/validates/after_commit fires exactly as it would for one record</i>
-    <b>Or run the side effect yourself, once, right after the bulk statement</b>
-    <i>&darr; a single explicit reindex or cache-bust call after update_all keeps the SQL efficiency without silently losing the effect the callback would have provided</i>
-    <b>And remember insert_all/upsert_all make the same trade on creates</b>
-    <i>&darr; they skip validations AND callbacks the same way update_all/delete_all skip them on updates and deletes — "bulk" always means "no object layer" in Active Record</i>
-  </div>
-</div>
+<p class="hf-big">update_all doesn't skip your callbacks to spite you — it skips them because it never builds an object for them to run on.</p>
+
+<dl class="hf-qa">
+  <dt>I called update_all on 200 legacy users. Why didn't before_save lowercase their emails, and why didn't the uniqueness check stop me from giving them all the same address?</dt>
+  <dd>Because update_all never builds a User object for any of the matched rows. It compiles your call into one raw UPDATE statement and sends it straight to the database. before_save is a hook on User#save; update_all doesn't call save, not even once.</dd>
+  <dt>But "update_all" sounds like it's just the bulk version of "update."</dt>
+  <dd>The name is the trap. Plain update loads each record, runs its validations and callbacks, and saves it — one row at a time. update_all skips all three of those steps on purpose; that's the entire reason it's fast.</dd>
+  <dt>So is this a bug in Rails?</dt>
+  <dd>No — it's documented, deliberate behavior. Rails' own docs say update_all/delete_all do not instantiate the models involved and do not trigger Active Record callbacks or validations. The speed comes precisely from skipping the object layer.</dd>
+  <dt>Does the same trade apply to inserts too, not just updates?</dt>
+  <dd>Yes. insert_all and upsert_all make the identical trade on creates — no callbacks, no validations, straight SQL. "Bulk" in Active Record always means "no object layer," across update_all, delete_all, insert_all, and upsert_all alike.</dd>
+  <dt>How do I get the speed AND keep my validations/callbacks?</dt>
+  <dd>Iterate explicitly: <code>User.where(...).find_each(&amp;:save!)</code> is slower, but every before_save/validates/after_commit fires exactly like it would for one record. Or run the side effect yourself, once, right after the bulk statement — a single reindex call instead of 200 individual ones.</dd>
+  <dt>What's the actual tell that a method skips the object layer, before I read the source?</dt>
+  <dd>Any Active Record method documented as compiling straight to one SQL statement across many rows — update_all, delete_all, insert_all, upsert_all — skips it. If the method's own docs don't mention loading records into memory, assume no callbacks run.</dd>
+</dl>
 
 <div class="principle" style="text-align:left">
   <b>The one-sentence rule.</b> Active Record's callbacks and validations are code attached to instances of your model class — any method documented as writing straight to the table, without building those instances, has nothing for that code to run on.
 </div>
 
 <div class="hf-note"><code>update_all</code> is Rails being completely honest about a table, not a model. It just isn't the sentence most people are expecting to hear.</div>
-
-<div class="hf-talk">
-  <div class="hf-bub"><span class="who">You</span><p>I called update_all on 200 legacy users. Why didn't before_save lowercase their emails, and why didn't the uniqueness check stop me from giving them all the same address?</p></div>
-  <div class="hf-bub right"><span class="who">update_all</span><p>I never built a User object for any of them. I compiled your call into one UPDATE statement and sent it to the database directly. before_save is a hook on User#save — I don't call that method, not even once.</p></div>
-  <div class="hf-bub"><span class="who">You</span><p>But "update_all" sounds like it's just the bulk version of "update."</p></div>
-  <div class="hf-bub right"><span class="who">update (no bulk)</span><p>I load each record, run its validations and callbacks, and save it — one at a time. update_all skips all three of those steps on purpose. That's the entire reason it's fast.</p></div>
-</div>
 
 <div class="hf-kick">The mechanism</div>
 <p class="hf-say">Follow the call from your script down to the database, and watch exactly where the object layer disappears.</p>
@@ -133,31 +131,6 @@
   <p class="why" data-for="0">update_all never builds a User object for any of the matched rows, so there is nothing for a callback or validation — both of which are code attached to an instance — to run on. Nothing here behaves like 200 individual saves.</p>
   <p class="why" data-for="1">Callbacks and validations aren't skipped selectively here — update_all skips both together, for the same reason: there's no model instance for either one to attach to. You don't get a partial compromise where one still fires.</p>
   <p class="why" data-for="2">Right. update_all builds a single raw SQL statement and sends it straight to the database. With no model instances involved, all 200 rows end up sharing the identical email — a uniqueness violation the validation would have caught on row two, if it had ever run.</p>
-</div>
-
-<div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">Anything that writes around an object's own lifecycle will skip whatever guarantees live inside that lifecycle — the pattern repeats everywhere objects sit between code and storage.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>A bulk JPQL UPDATE in Spring Data</h4>
-    <p>A <code>@Modifying @Query("UPDATE User u SET u.status = 'ARCHIVED' WHERE ...")</code> repository method makes the identical trade one layer over in JPA: bulk JPQL/HQL update and delete statements run straight against the database and do not invoke <code>@PreUpdate</code>/<code>@PreRemove</code> entity lifecycle callbacks or the persistence context's dirty checking — the exact same "no instance, no hook" gap, in Spring instead of Rails.</p>
-    <div class="hf-scatter"><span>the same trap, one layer over in your own day-job stack</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>A DBA's raw UPDATE against production</h4>
-    <p>When an audit-log entry is written only by application code — say, a service method that logs every balance change — a DBA fixing a stuck row directly in <code>psql</code> bypasses that application layer entirely. The row changes; the audit trail doesn't, because the guarantee never lived in the database, only in code that this particular write never ran through.</p>
-    <div class="hf-scatter"><span>a guarantee that only exists where the write actually happens</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Mutating the DOM outside React</h4>
-    <p>A browser extension (or a stray line of jQuery) that edits an element React renders does change what's on screen — but React's reconciliation never ran, so <code>componentDidUpdate</code>/<code>useEffect</code> never fire for that change. The visible result looks identical to a normal update; the lifecycle hooks that were supposed to react to it simply never knew it happened.</p>
-    <div class="hf-scatter"><span>the frontend's version of writing around the object layer</span></div>
-  </div>
-</div>
-
-<div class="hf-napkin">
-  <b>The whole page on a napkin:</b> a Rails request flows through Rack and its middleware stack to a router and a controller, where Active Record lets the model both hold a row and query for it, guarded by before_action filters and strong parameters. <b>The one new sentence this block adds:</b> update_all, delete_all, and insert_all opt out of that entire model layer on purpose — no callbacks, no validations, just a raw SQL statement — so "bulk" in Active Record always means "you're on your own."
 </div>
 
 
