@@ -59,12 +59,12 @@
     <div class="intro-ciam"><span class="tag">CIAM in production:</span> a query built from unsanitized input is exactly how a CIAM system leaks credentials — a login form is the highest-value SQL-injection target on the whole site, because success returns "you are this user." Parameterized queries and ORMs both close that door by construction; the mistake to watch for in review is a stray <code>`WHERE email = '${email}'`</code> template literal that looks fine in a demo and is a full account-takeover in production. The same discipline applies to Spring's <code>JdbcTemplate</code> — <code>queryForObject("... = '" + email + "'", ...)</code> is the identical bug in Java.</div>
   </div>
 
-<p class="hf-deck">or, a database call that finishes doesn't mean the connection came back</p>
+<p class="hf-deck" data-shape="timelapse">or, a database call that finishes doesn't mean the connection came back</p>
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">Your queries are all parameterized. Injection isn't the bug that takes this app down.</p>
 
-<div class="hf-card bad">
+<div class="hf-card">
   <div class="hf-cardtitle">The return statement that quietly keeps a connection forever</div>
   <p>An endpoint checks out a connection, looks up a row, and — if nothing matched — returns a
   404 straight away. Perfectly reasonable code. It passes every test, because every test either
@@ -81,14 +81,18 @@
   <p class="hf-foot">"The code runs" and "the code always returns the connection it borrowed" are two different claims — this bug is what happens when only the first one gets checked.</p>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Make release() unconditional, not a step in the happy path</div>
+<div class="hf-card">
+  <div class="hf-cardtitle">Walk the same six hours the hf-talk below describes, on the clock</div>
   <div class="hf-ladder">
-    <b>client.release() as the last line of the function</b>
-    <i>↓ any early return, throw, or middleware short-circuit skips right past it</i>
-    <b>client.release() inside a finally block</b>
-    <i>↓ finally runs on every exit from try — return, throw, or falling off the end</i>
-    <b>The connection always goes back, no matter which path the code takes out</b>
+    <b>T+0:00 — deploy. Pool healthy: 10/10 connections FREE</b>
+    <i>↓ nothing in the code has changed; every test still passes</i>
+    <b>T+0:45 — the first request hits the 404 branch; connection #7 leaks, marked CHECKED OUT forever</b>
+    <i>↓ one leak, on its own, is completely invisible — 9 connections still answer everything fine</i>
+    <b>T+1:00 through T+5:30 — nine more requests hit the identical branch, one leak at a time</b>
+    <i>↓ each one is as silent as the first; nothing logs, nothing throws, nothing degrades yet</i>
+    <b>T+5:47 — the tenth leak lands. Zero FREE connections remain in a pool of 10</b>
+    <i>↓ still no error — the pool has simply run out, and nothing watches for that on its own</i>
+    <b>T+5:48 — an unrelated, correctly-written request calls pool.connect() and just hangs, forever</b>
   </div>
 </div>
 
@@ -194,39 +198,11 @@ with nothing watching the clock on it.</div>
   the outside.</p>
 </div>
 
-<div class="hf-kick">Where you've seen this before</div>
-<p class="hf-say">Three different pools, the exact same failure mode: a resource that isn't returned isn't available.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>Spring's HikariCP has a feature for this exact bug</h4>
-    <p>This page's own intro already calls <code>pg.Pool</code> the equivalent of Spring's
-    <code>DataSource</code> pool, HikariCP — and HikariCP ships a setting node-postgres simply
-    doesn't have: <code>leakDetectionThreshold</code>. Set it, and HikariCP logs a full stack
-    trace the moment any connection has been checked out longer than that threshold without being
-    returned — turning this exact bug from a silent multi-hour production mystery into a log line
-    pointing at the offending code, often within seconds of the leak happening.</p>
-    <div class="hf-scatter"><span>HikariCP can tell you it's leaking; pg.Pool cannot</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>"Too many open files" is the OS-level version</h4>
-    <p>Every process has a fixed limit on open file descriptors (often 1024 by default on Linux).
-    An <code>fs.createReadStream</code> that never gets closed on an error path leaks a descriptor
-    the exact same way a forgotten <code>client.release()</code> leaks a connection — one leak is
-    invisible, and the process throws <code>EMFILE</code> only once enough of them have piled up
-    to exhaust the limit. Same shape, different fixed-size pool.</p>
-    <div class="hf-scatter"><span>a fixed pool + one unclosed handle per request = eventual exhaustion</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Your browser does this to itself on purpose</h4>
-    <p>Chrome and Firefox cap plain HTTP/1.1 connections at six per origin. Open a page that fires
-    eight simultaneous requests to the same API and you'll watch two of them sit as
-    <code>(pending)</code> in the Network tab — not failed, not slow, just queued behind the other
-    six exactly the way request 11 queues behind Pool's ten. The difference is those six
-    connections DO eventually free up; that's what makes this a size limit instead of a leak.</p>
-    <div class="hf-scatter"><span>same queueing behavior, no leak — just a small number</span></div>
-  </div>
-</div>
+<div class="hf-note">Spring's HikariCP ships a setting node-postgres simply doesn't have:
+<code>leakDetectionThreshold</code>. Set it, and HikariCP logs a full stack trace the moment any
+connection has been checked out longer than that threshold without being returned — turning this
+exact bug from a silent multi-hour production mystery into a log line pointing at the offending
+code, often within seconds of the leak happening. <b>pg.Pool has no such clock watching it.</b></div>
 
 <div class="hf-kick">Questions from the back row</div>
 <div class="hf-ask">
@@ -258,15 +234,13 @@ with nothing watching the clock on it.</div>
 
 <div class="hf-kick">Grab a napkin</div>
 <p class="hf-say">Predict it before you scroll.</p>
-<div class="hf-napkin">
-  Section 4's <code>transferFunds</code> already does this correctly — <code>client.release()</code>
-  sits in a <code>finally</code> block, after both the <code>try</code> and the <code>catch</code>.
-  A teammate "simplifies" it by moving that <code>release()</code> call out of <code>finally</code>
-  and up into the <code>try</code>, right after <code>COMMIT</code> — reasoning that the
-  <code>catch</code> block already re-throws, so cleanup only matters on success anyway. Does
-  connection exhaustion become possible again — and if so, under which one of the four scenarios
-  on this page does the leak now actually happen?
-</div>
+<p><b>Section 4's <code>transferFunds</code> already does this correctly — <code>client.release()</code>
+sits in a <code>finally</code> block, after both the <code>try</code> and the <code>catch</code>.
+A teammate "simplifies" it by moving that <code>release()</code> call out of <code>finally</code>
+and up into the <code>try</code>, right after <code>COMMIT</code> — reasoning that the
+<code>catch</code> block already re-throws, so cleanup only matters on success anyway. Does
+connection exhaustion become possible again — and if so, under which one of the four scenarios
+on this page does the leak now actually happen?</b></p>
 
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
