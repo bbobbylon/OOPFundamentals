@@ -49,12 +49,12 @@
     <div class="intro-ciam"><span class="tag">CIAM deployment strategy:</span> Run the auth service as a Deployment with <code>maxUnavailable: 0</code> + <code>maxSurge: 1</code> — zero-downtime is critical since any gap means users can't log in. HPA (<code>minReplicas: 2, maxReplicas: 20</code> at 70% CPU) absorbs the 9 AM login spike and scales back by night. Use CronJobs for nightly Entra sync, expired-session cleanup, and token-blacklist pruning. And a <code>readinessProbe</code> is required — K8s only routes traffic after <code>/actuator/health/readiness</code> confirms the app and DB connections are up.</div>
   </div>
 
-<p class="hf-deck">or, why "successfully rolled out" and "users can log in" can be two different claims</p>
+<p class="hf-deck" data-shape="whiteboard">or, why "successfully rolled out" and "users can log in" can be two different claims</p>
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">Your rollout finishes clean — <code>deployment "ciam-auth" successfully rolled out</code> — and for the next fifteen seconds, real login requests get connection refused.</p>
 
-<div class="hf-card bad">
+<div class="hf-card">
   <div class="hf-cardtitle">The rollout that succeeds and fails at the same time</div>
   <p>The manifest defines a <code>livenessProbe</code> hitting <code>/actuator/health/liveness</code> — that feels like the important one, the one that catches a hung process. Nobody added a <code>readinessProbe</code>.</p>
   <p>Kubernetes' own documented default: a container with no readinessProbe is considered Ready the instant it reaches the Running state — no check performed at all. The moment the new pod's process starts, the Service adds its IP to the Endpoints and real traffic starts arriving, even though your Spring Boot app is still loading its context and hasn't opened a database connection yet. The rolling update proceeds exactly on schedule from Kubernetes' point of view — new pods are "Ready," so old ones get terminated right on cue — and <code>kubectl rollout status</code> watches that same signal, reporting success the instant the last new pod was marked Ready, not when it could actually answer a request.</p>
@@ -66,7 +66,26 @@
   <p class="hf-foot">Every command in your runbook did exactly what it claimed. The manifest just never told Kubernetes what "ready" was supposed to mean.</p>
 </div>
 
-<div class="hf-card good">
+<div class="hf-brain">
+  <div class="hf-brain-head">Brain Power</div>
+  <p>Before you look at the diagram below: no readinessProbe is configured, only a livenessProbe. Predict — the instant the new container's process starts, does Kubernetes count that pod as Ready? And if so, does the Service start routing it real traffic before Spring Boot has finished loading its context?</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">Deployment — watches rollout status</span>
+      <div class="ring"><span class="lbl">ReplicaSet — counted "done" once replicas are Ready</span>
+        <div class="ring"><span class="lbl">Pod — container is Running</span>
+          <div class="core">Ready = Success (the default, with no probe)<small>everything above is quietly trusting this one assumption</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p><span class="hf-hand">&larr; nothing above the core ever checks the app — each layer just trusts the ring inside it, and the innermost ring answers "ready" without asking Spring Boot anything at all</span></p>
+  <p class="hf-annot">Every layer here is telling the truth about what it watches — the Deployment really is counting Ready replicas, the ReplicaSet really is tracking Pod conditions. The gap lives at the very center: "Ready," with nothing else configured, means nothing more than "the container process exists."</p>
+</div>
+
+<div class="hf-card">
   <div class="hf-cardtitle">Fix: define a readinessProbe that checks the real thing</div>
   <div class="hf-ladder">
     <b>Add a readinessProbe pointing at <code>/actuator/health/readiness</code> — the Spring Boot group that only returns 200 once the app context and its dependency checks (DB, downstream IdP) are actually up</b>
@@ -83,13 +102,6 @@
 
 <div class="hf-note">Kubernetes doesn't wait to be convinced a pod is ready — it assumes yes until you build something that can say no. Skip the readinessProbe and you've hired a bouncer who <b>waves everyone in the second they appear at the door</b>, before checking whether they're actually on the list.</div>
 
-<div class="hf-talk">
-  <div class="hf-bub"><span class="who">You</span><p>The rollout said "successfully rolled out." Why did we get paged about login failures in that exact same window?</p></div>
-  <div class="hf-bub right"><span class="who">kubelet</span><p>Because nobody told me what "ready" means for your app. No readinessProbe means I mark every new pod Ready the instant its container starts — that's the documented default, not a bug.</p></div>
-  <div class="hf-bub"><span class="who">You</span><p>So the Service was sending it real traffic before Spring Boot even finished starting up?</p></div>
-  <div class="hf-bub right"><span class="who">kubelet</span><p>The second the container process existed. Your app's real startup time and my definition of "ready" had nothing to do with each other.</p></div>
-</div>
-
 <div class="hf-kick">The mechanism</div>
 <p class="hf-say">Here's the exact sequence Kubernetes follows for a Deployment with no readinessProbe.</p>
 
@@ -105,19 +117,6 @@
   <p class="hf-annot">Step 3 is the entire bug, and it's not a corner case — it's Kubernetes' documented, intentional default. The system isn't guessing wrong; it's doing exactly what an absent readinessProbe tells it to do, which is assume the best.</p>
 </div>
 
-<div class="hf-card">
-  <div class="hf-nest">
-    <div class="ring"><span class="lbl">Deployment — watches rollout status</span>
-      <div class="ring"><span class="lbl">ReplicaSet — counted "done" once replicas are Ready</span>
-        <div class="ring"><span class="lbl">Pod — container is Running</span>
-          <div class="core">Ready = Success (the default, with no probe)<small>everything above is quietly trusting this one assumption</small></div>
-        </div>
-      </div>
-    </div>
-  </div>
-  <p class="hf-annot">Every layer here is telling the truth about what it watches — the Deployment really is counting Ready replicas, the ReplicaSet really is tracking Pod conditions. The gap lives at the very center: "Ready," with nothing else configured, means nothing more than "the container process exists."</p>
-</div>
-
 <div class="hf-check" data-answer="1">
   <p class="q">A Deployment's pod template has a <code>livenessProbe</code> hitting <code>/actuator/health/liveness</code> but no <code>readinessProbe</code> at all. During a rolling update, <code>kubectl rollout status</code> reports success in under ten seconds, but real login requests fail for the next fifteen. What's actually going on?</p>
   <button type="button">The livenessProbe is misconfigured and is restarting healthy pods mid-rollout</button>
@@ -128,30 +127,6 @@
   <p class="why" data-for="2"><code>kubectl rollout status</code> genuinely does wait for the Ready condition, not just a bare replica count — that's the whole point of the command. The sneaky part is that the Ready condition it's watching was, in this case, configured to mean nothing more than "the process exists."</p>
 </div>
 
-<div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">A platform assumes success by default until something tells it otherwise — and the assumption quietly outlives the moment it stopped being true.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>Spring Boot's <code>/actuator/health</code> without a custom indicator</h4>
-    <p><code>/actuator/health</code> reports <code>UP</code> based only on the health indicators actually wired in. If you never add one for your downstream identity provider, the endpoint can say <code>UP</code> while that dependency is completely unreachable — "UP" is the default for anything nobody built a check for.</p>
-    <div class="hf-scatter"><span>unchecked and healthy look identical from outside</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>TypeScript trusting a return type instead of the actual runtime path</h4>
-    <p>A function typed <code>Promise&lt;User&gt;</code> that internally does <code>array.find(...)</code> can legitimately resolve <code>undefined</code> at runtime — <code>.find()</code>'s real type is <code>User | undefined</code>. The compiler trusts the annotation everywhere downstream, not what the code can actually produce, and the mismatch surfaces as a crash three functions later.</p>
-    <div class="hf-scatter"><span>the type system assumed; the runtime disagreed</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>An Auto Scaling Group's default health check is EC2-only</h4>
-    <p>By default, an AWS Auto Scaling Group's health check type is <code>EC2</code> — it only confirms the virtual machine is reachable, not that the application on it works. An instance can pass that check while the app itself is completely wedged, and ASG won't replace it until you explicitly switch the health check type to <code>ELB</code>, which actually asks the load balancer.</p>
-    <div class="hf-scatter"><span>"the machine is up" and "the app works" are different questions</span></div>
-  </div>
-</div>
-
-<div class="hf-napkin">
-  <b>The whole page on a napkin:</b> a Deployment manages a ReplicaSet's Pods through rolling updates tuned by maxSurge/maxUnavailable, gated by health probes, and scaled by an HPA. <b>The new sentence this block adds: readiness isn't verified by default — it's assumed true the instant a container starts — so a Deployment with only a livenessProbe can report a fully successful rollout while its brand-new pods are actively failing real traffic.</b>
-</div>
 
 <div class="rt-ctlbar">
   <span class="lbl">scenario:</span>
