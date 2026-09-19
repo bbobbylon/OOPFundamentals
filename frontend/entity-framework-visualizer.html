@@ -56,34 +56,59 @@
     <div class="intro-ciam"><span class="tag">CIAM data layer:</span> A user/consent store on EF Core reads naturally: <code>_db.Users.Include(u =&gt; u.Consents).FirstOrDefaultAsync(u =&gt; u.Subject == sub)</code> pulls a user and their consents in one query keyed by the token <code>sub</code>. The Scoped <code>DbContext</code> means every repository in a request shares one unit of work, so a multi-step consent update commits atomically in <code>SaveChangesAsync()</code>. Watch the N+1 trap when listing users with their roles — project to a DTO or <code>Include</code> the roles, or you fire one query per user.</div>
   </div>
 
-<p class="hf-deck">You made two slow queries run at the same time. EF Core threw an exception instead of saying thank you.</p>
+<p class="hf-deck" data-shape="autopsy">You made two slow queries run at the same time. EF Core threw an exception instead of saying thank you.</p>
 
-<div class="hf-kick">The problem</div>
-<p class="hf-say"><code>Task.WhenAll</code> on one <code>DbContext</code> does not halve your latency — it fails the request outright, and the error message blames threads you never created.</p>
+<div class="hf-kick">The exception</div>
+<p class="hf-say">This is the whole of it, quoted from the page's own scenario above — paste it into a search box and you'll find the mechanism, but not the fixture that hid it from your tests.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">"A second operation was started on this context instance before a previous operation completed."</div>
-  <p>Your dashboard endpoint makes three independent reads: a user count, an order count, and the last ten audit rows. They take 120&nbsp;ms each and they do not depend on each other, so you do the obvious thing and overlap them: <code>await Task.WhenAll(usersTask, ordersTask, auditTask)</code>, with each task a <code>_db.Something.CountAsync()</code>. Three hundred and sixty milliseconds should become a hundred and twenty.</p>
-  <p>Instead the endpoint throws <code>InvalidOperationException</code> on the second query. <code>AddDbContext</code> registers the context <strong>Scoped</strong> — one instance for the whole request — so all three tasks are talking to the same <code>DbContext</code>, which owns one connection and one change tracker and was never built to hold two conversations at once. The message says "usually caused by different threads," which sends everybody hunting for a thread bug. There is no thread bug. EF's concurrency detector fires on <em>overlapping operations</em>, so a single thread that starts a second query before awaiting the first trips it just as reliably.</p>
-  <div class="hf-scatter">
-    <span>the three queries are genuinely independent ✓</span>
-    <span><code>Task.WhenAll</code> is the right tool for independent work ✓</span>
-    <span>they all share one Scoped <code>DbContext</code> ⚠</span>
-  </div>
-  <p class="hf-foot">The unit of work you love for <code>SaveChanges</code> is the same object that refuses to be used twice at once.</p>
+<div class="hf-card">
+  <pre><code>InvalidOperationException: A second operation was started on this context instance before a previous operation completed.</code></pre>
+  <div class="hf-arrow up">"A second operation was started" is the finding, and it says nothing about threads. <span class="hf-mark">operation</span>, not <span class="hf-mark">thread</span> — this fires the moment two calls overlap on one context, whether they're on separate threads or not.</div>
+  <div class="hf-arrow">The rest of the real message goes on to say "usually caused by different threads," which is the trap in this exception: it's the most common cause, not the actual rule, and it sends almost everyone hunting for a threading bug that was never there.</div>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Give each parallel branch its own context, or stop parallelising</div>
+<div class="hf-kick">Working backwards</div>
+<p class="hf-say">Start at the exception and climb the ladder. Each rung is the thing that had to be true for the rung above it to happen.</p>
+
+<div class="hf-card">
   <div class="hf-ladder">
-    <b>First ask whether you need the overlap at all — three sequential <code>await</code>s on one context are correct and boring</b>
-    <i>↓ most "parallel" ORM code saves a few milliseconds and costs a production incident</i>
-    <b>If you do want real concurrency, register <code>AddDbContextFactory&lt;AppDb&gt;()</code> and create a context <em>inside</em> each task</b>
-    <i>↓ <code>await using var db = await factory.CreateDbContextAsync();</code> — a fresh context, its own connection, its own tracker</i>
-    <b>Never let a fire-and-forget continuation touch the request's context — that request's scope may already be disposed</b>
-    <i>↓ same class of bug, later timing, worse error: <code>ObjectDisposedException</code> instead of a clean failure</i>
-    <b>And leave the thread-safety checks on; turning them off removes the exception, not the race</b>
+    <b>THE SYMPTOM — three genuinely independent, cheap read queries, awaited together with <code>Task.WhenAll</code>, throw on the second one, and the message blames threads that were never created</b>
+    <i>↑ which happened because…</i>
+    <b>the concurrency detector set a busy flag when <code>Users.CountAsync()</code> started, and it was still set when <code>Orders.CountAsync()</code> began on the same instance</b>
+    <i>↑ which happened because…</i>
+    <b><code>AddDbContext</code> registers the context <strong>Scoped</strong> — one instance for the whole request — so all three tasks hold three references to the same connection and the same change tracker, not three contexts</b>
+    <i>↑ which was possible because…</i>
+    <b>an async method runs synchronously up to its first real suspension, so the second query starts executing on the very next line, before the first has actually completed — not "later," not "in parallel," just <em>overlapping</em></b>
+    <i>↑ and the reason it shipped this way at all…</i>
+    <b>THE ROOT CAUSE — "independent" and "safe to run concurrently on one object" got treated as the same fact, and nothing in the type system stops you from calling one <code>DbContext</code> twice</b>
   </div>
+  <p class="hf-annot">The bottom two rungs are the ones worth sitting with. Rung four is why this is timing-shaped: with two very fast queries the first sometimes finishes before the second starts, the request succeeds in dev, and the exception waits for the day the database is slow. Rung five is why the fix isn't "add a lock" — a lock would serialize the work and give back exactly the latency <code>Task.WhenAll</code> was supposed to save.</p>
+</div>
+
+<div class="hf-brain">
+  <div class="hf-brain-head">Brain Power</div>
+  <p>Before you scroll: if you replace <code>Task.WhenAll</code> with three sequential <code>await</code>s on the SAME <code>DbContext</code>, does the exception go away? And do you still get back any of the 360ms → 120ms latency win you were originally after?</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-one">
+    <div class="callers"><span><code>Task.WhenAll</code> over two queries</span><span>a forgotten <code>await</code> in a loop</span><span>fire-and-forget <code>_ = AuditAsync(_db)</code></span></div>
+    <div class="funnel">two operations open on one context ↓</div>
+    <div class="instance">"A second operation was started on this context instance"<small>one exception, three code shapes that look nothing alike</small></div>
+  </div>
+  <p class="hf-annot">Read it bottom-up the next time this message lands in your logs: the exception never tells you which line opened the <em>first</em> operation, only where the second one collided with it. The middle shape is the sneakiest — a missing <code>await</code> inside a <code>foreach</code> compiles, returns a <code>Task</code> nobody watches, and usually only overlaps once the loop gets long enough to matter.</p>
+</div>
+
+<div class="hf-card">
+  <pre><code>// ❌ three tasks, one Scoped context — guaranteed to collide
+await Task.WhenAll(_db.Users.CountAsync(), _db.Orders.CountAsync(), _db.Audit.CountAsync());
+
+// ✅ a fresh context per branch, from a factory
+await using var db1 = await factory.CreateDbContextAsync();
+await using var db2 = await factory.CreateDbContextAsync();
+await Task.WhenAll(db1.Users.CountAsync(), db2.Orders.CountAsync());</code></pre>
+  <div class="hf-arrow">Register <code>AddDbContextFactory&lt;AppDb&gt;()</code> alongside (or instead of) <code>AddDbContext</code>, then call <code>CreateDbContextAsync()</code> <em>inside</em> each branch you actually want to overlap — a fresh connection, a fresh tracker, nothing shared to collide on.</div>
+  <div class="hf-arrow up">And first ask whether you need the overlap at all — three sequential <code>await</code>s on one context are correct and boring, and most "parallel" ORM code saves a few milliseconds while costing a production incident.</div>
 </div>
 
 <div class="principle" style="text-align:left">
@@ -99,30 +124,6 @@
   <div class="hf-bub right"><span class="who"><code>IDbContextFactory</code></span><p>Ask me inside each task and everyone gets their own context, their own connection and their own tracker. Then <code>Task.WhenAll</code> does exactly what you expected the first time.</p></div>
 </div>
 
-<div class="hf-kick">The mechanism</div>
-<p class="hf-say">Follow the three tasks from the DI scope to the exception, in the order the runtime actually does it.</p>
-
-<div class="hf-card">
-  <ol class="hf-steps">
-    <li><span>The request opens a DI scope; <code>AddDbContext</code> resolves <strong>one</strong> <code>AppDb</code> for everything in it</span><span class="tag">one instance</span></li>
-    <li class="open"><span>Your handler calls <code>_db.Users.CountAsync()</code> — it starts executing and returns a <code>Task&lt;int&gt;</code> you have not awaited yet</span><span class="tag">in flight</span></li>
-    <li><span>The concurrency detector marks the context busy for the duration of that operation</span><span class="tag">flag set</span></li>
-    <li class="open"><span>The very next line calls <code>_db.Orders.CountAsync()</code> on the same instance, while the first is still open</span><span class="tag">overlap</span></li>
-    <li><span>The detector sees the flag already set and throws <code>InvalidOperationException</code> — before any SQL is sent</span><span class="tag">throw</span></li>
-    <li class="open"><span><code>Task.WhenAll</code> surfaces the faulted task; your dashboard returns 500 and the log points at threads</span><span class="tag">500</span></li>
-  </ol>
-  <p class="hf-annot">Step four is where the damage is done, and notice it happens <em>before</em> any <code>await</code>. An async method runs synchronously until its first real suspension, so calling a second query one line later is not "later" in any sense the context cares about — the first operation has not completed. This is also why the bug is timing-shaped: with two very fast queries the first sometimes finishes before the second starts, the request succeeds in dev, and the exception waits for the day the database is slow. Intermittent is the worst kind of correct.</p>
-</div>
-
-<div class="hf-card">
-  <div class="hf-one">
-    <div class="callers"><span><code>Task.WhenAll</code> over two queries</span><span>a forgotten <code>await</code> in a loop</span><span>fire-and-forget <code>_ = AuditAsync(_db)</code></span></div>
-    <div class="funnel">two operations open on one context ↓</div>
-    <div class="instance">"A second operation was started on this context instance"<small>one exception, three code shapes that look nothing alike</small></div>
-  </div>
-  <p class="hf-annot">Read it bottom-up the next time this message lands in your logs: the exception never tells you which line opened the <em>first</em> operation, only where the second one collided with it. All three shapes above are really the same shape — an operation that is still running when the next one begins — and the middle one is the sneakiest, because a missing <code>await</code> inside a <code>foreach</code> compiles, returns a <code>Task</code> nobody watches, and usually only overlaps once the loop gets long enough.</p>
-</div>
-
 <div class="hf-check" data-answer="1">
   <p class="q">In one request handler, with the standard <code>builder.Services.AddDbContext&lt;AppDb&gt;(...)</code> registration, you write <code>await Task.WhenAll(_db.Users.CountAsync(), _db.Orders.CountAsync());</code>. Both queries are read-only. What happens?</p>
   <button type="button">Both run in parallel — EF takes a second connection from the pool, and read-only queries never touch the change tracker anyway.</button>
@@ -131,31 +132,6 @@
   <p class="why" data-for="0">Connection pooling is real, but it is a level below where this breaks. A <code>DbContext</code> holds <em>its</em> connection and will not acquire a second one to serve itself; the limit is the context, not the pool. And read-only does not help — the detector guards every operation, because materializing results touches shared state inside the context regardless of whether you plan to save anything.</p>
   <p class="why" data-for="1">Correct, and the wording of that message is the trap: it goes on to say "usually caused by different threads," which sends people hunting for a threading bug that does not exist. EF's detector fires on overlapping operations, not on thread identity — one thread that starts a second query before the first completes trips it just the same. Fix it with <code>AddDbContextFactory</code> and a fresh context inside each task, or simply await the two queries in sequence.</p>
   <p class="why" data-for="2">This describes a real phenomenon — two separate queries do run in two implicit transactions and can absolutely observe different data — but it is not what happens here, because the second query never reaches the database. Worth keeping in your head for the version that <em>does</em> run: two sequential counts are two point-in-time reads, and if you need them consistent with each other you need one explicit transaction, not one context.</p>
-</div>
-
-<div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">Every persistence session you have ever used is single-conversation; the ones that look concurrent are handing out copies.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>Hibernate's <code>Session</code> is not thread-safe either</h4>
-    <p>On the Spring side the rule is identical: a JPA <code>EntityManager</code> and the Hibernate <code>Session</code> behind it are single-threaded objects, and the transaction is bound to the thread by <code>TransactionSynchronizationManager</code>. Kick off <code>CompletableFuture</code>s inside a <code>@Transactional</code> method and the child threads do not merely share the session unsafely — they cannot see the transaction at all. The .NET answer is a context factory; the Java answer is a new <code>EntityManager</code> per thread, which is the same answer wearing different syntax.</p>
-    <div class="hf-scatter"><span>a session belongs to one thread's work</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>The ADO.NET layer underneath says the same thing, louder</h4>
-    <p>Drop below EF to raw <code>SqlConnection</code> and try to run a second command while a <code>SqlDataReader</code> is still open, and SQL Server tells you there is already an open data reader associated with this command — unless you explicitly enable <code>MultipleActiveResultSets</code>, which is off by default. That is the physical reason the bridge has one lane: one connection, one active result stream. EF's exception is the polite version of a constraint that exists all the way down at the wire protocol.</p>
-    <div class="hf-scatter"><span>one connection, one active reader</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>node-postgres: <code>Client</code> versus <code>Pool</code></h4>
-    <p>A single <code>pg.Client</code> can run exactly one query at a time; hand the same client to two overlapping handlers and the queries queue or misbehave, which is precisely why the library ships a <code>Pool</code> and the docs push you to it. Different language, different ORM, same architecture: the object that represents <em>a</em> connection is not the object you parallelise. When you want concurrency, you ask something for another one.</p>
-    <div class="hf-scatter"><span>parallelism comes from more clients, not more calls</span></div>
-  </div>
-</div>
-
-<div class="hf-napkin">
-  <b>The whole page on a napkin:</b> EF Core is Spring Data JPA in C# — a <code>DbContext</code> is your session and unit of work, LINQ over <code>IQueryable</code> becomes one parameterized SQL statement, the change tracker diffs snapshots so a property assignment plus <code>SaveChangesAsync()</code> writes the minimal UPDATE in a transaction, and lazy navigation inside a loop is the same N+1 trap Hibernate has, fixed with <code>Include()</code> or a projection. <b>And the one thing this block adds: that single context is a single-lane bridge — overlapping operations on it throw "a second operation was started," even on one thread, so concurrency means a context per branch via <code>AddDbContextFactory</code>, never more tasks on one context.</b>
 </div>
 
   <div style="margin:0 0 28px">
@@ -356,5 +332,6 @@ DevHubCodeWalk.mount('#cw-ef',{
 <script src="devhub-notebook.js"></script>
 <script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-syntax.js"></script>
 </body>
 </html>
