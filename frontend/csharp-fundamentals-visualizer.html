@@ -60,12 +60,12 @@
     <div class="intro-ciam"><span class="tag">CIAM .NET service:</span> A Java/Spring developer dropped into a .NET CIAM service will recognize everything: DTOs become <code>record</code>s (immutable, value-equal — ideal for token claims), claim filtering is LINQ over <code>ClaimsPrincipal.Claims</code>, and authorization checks read naturally as pattern-matching switch expressions over a role enum. The mental shift is small; the productivity transfer is large.</div>
   </div>
 
-  <p class="hf-deck">or, the record equality this page called "true (by VALUE)" — until one of the fields is a List&lt;T&gt;</p>
+  <p class="hf-deck" data-shape="questions">or, the record equality this page called "true (by VALUE)" — until one of the fields is a List&lt;T&gt;</p>
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">Two records holding the exact same claims fail a <code>==</code> check, and nothing about the <code>record</code> keyword warned you it could happen.</p>
 
-<div class="hf-card bad">
+<div class="hf-card">
   <div class="hf-cardtitle">Your cache keyed on a record never hits — even for "identical" tokens</div>
   <p>You model a decoded JWT as <code>record TokenClaims(string Sub, List&lt;string&gt; Roles);</code> — a natural extension of the <code>Point</code> record above. You decode the same token twice — once at login, once on a silent refresh — and both times you get <code>Sub = "u-42"</code>, <code>Roles = ["admin","billing"]</code>. You cache the first <code>TokenClaims</code> and look it up again with the second, expecting the "value equality" this page just promised to say they match. It doesn't. Every refresh is treated as a brand-new, uncached entry.</p>
   <p>The compiler-generated <code>Equals</code> compares each field with <code>EqualityComparer&lt;T&gt;.Default</code>. For <code>Sub</code> (a <code>string</code>), that means comparing characters — correct. For <code>Roles</code> (a <code>List&lt;string&gt;</code>), <code>List&lt;T&gt;</code> never overrides <code>Equals</code>, so the default comparer falls all the way back to <code>ReferenceEquals</code>. Two lists built from two separate <code>new List&lt;string&gt; { "admin", "billing" }</code> calls are two different objects — same contents, different identity — so the whole record compares unequal.</p>
@@ -77,30 +77,28 @@
   <p class="hf-foot">A record gives you value equality per FIELD, not deep equality of the whole object — and a mutable collection field never opts in on its own.</p>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Take equality on collection fields into your own hands</div>
-  <div class="hf-ladder">
-    <b>Know which fields are reference types before you trust ==</b>
-    <i>↓ int, bool, string and other records compare by content automatically — List&lt;T&gt;, arrays, Dictionary, and most plain classes silently fall back to reference equality</i>
-    <b>Write your own Equals(TokenClaims other) for the fields that need it</b>
-    <i>↓ the compiler only synthesizes Equals when you don't supply one — hand it <code>Roles.SequenceEqual(other.Roles)</code> and your version wins over the generated one</i>
-    <b>Or normalize the field before it ever needs comparing</b>
-    <i>↓ sort Roles and join it into one string before storing it on the record, and the "tricky" field becomes a plain string that already compares correctly</i>
-  </div>
-</div>
+<p class="hf-big">A record's == isn't lying to you about "value equality" — it's just per field, and List&lt;T&gt; never opted in.</p>
+
+<dl class="hf-qa">
+  <dt>I made TokenClaims a record specifically to get value equality for my cache key. Why doesn't claimsA == claimsB return true when both hold the same Sub and the same Roles?</dt>
+  <dd>Because List&lt;string&gt; never overrides Equals. The generated Equals compares each field with EqualityComparer&lt;T&gt;.Default — for Sub (a string) that means comparing characters, but Roles has no content-equality override to fall back on, so it compares object identity instead.</dd>
+  <dt>But isn't "value equality per field" supposed to be the whole point of a record?</dt>
+  <dd>It is — for fields whose type actually implements it. int, string, bool, and nested records all override Equals with content comparison. List&lt;T&gt;, arrays, and Dictionary never did, record or no record.</dd>
+  <dt>So is this a bug in the record keyword?</dt>
+  <dd>No — the compiler is doing exactly what it's documented to do: generate Equals per field using EqualityComparer&lt;T&gt;.Default. The record isn't wrong. The expectation that "record" means "deep equality of the whole object" is.</dd>
+  <dt>Does this only bite List&lt;T&gt;, or should I worry about other field types too?</dt>
+  <dd>Any field whose type never overrode Equals carries the same risk — arrays and Dictionary&lt;TKey,TValue&gt; share the identical gap. It isn't one type's quirk, it's every built-in mutable collection.</dd>
+  <dt>How do I actually fix TokenClaims so my cache starts hitting?</dt>
+  <dd>Either write your own Equals(TokenClaims other) that calls Roles.SequenceEqual(other.Roles) — your version wins over the generated one — or normalize the field before it's ever compared: sort and join Roles into one string, and the tricky field becomes a plain string that already compares correctly.</dd>
+  <dt>What's the tell that saves me from hitting this again, before I've even written the cache key?</dt>
+  <dd>For every reference-type field in a record, ask: does this type override Equals? int/string/other records do. Anything that's fundamentally a mutable container — List, array, Dictionary, most plain classes — almost never does.</dd>
+</dl>
 
 <div class="principle" style="text-align:left">
   <b>The one-sentence rule.</b> A record's <code>==</code> is value equality per field, generated with <code>EqualityComparer&lt;T&gt;.Default</code> — for <code>int</code>, <code>string</code>, and nested records that means comparing contents, but for any field whose type never overrode <code>Equals</code> (List&lt;T&gt;, arrays, Dictionary, most ordinary classes) it silently degrades into "is this the literal same object."
 </div>
 
 <div class="hf-note">Two students who copied the exact same answers onto two different answer sheets aren't holding <b>the same sheet</b> — a teacher checking "is this literally the paper I handed out" will mark them different every time, no matter how identical the answers are. That's what a record's default comparer does to your <code>List&lt;T&gt;</code> field.</div>
-
-<div class="hf-talk">
-  <div class="hf-bub"><span class="who">You</span><p>I made TokenClaims a record specifically to get value equality for my cache key. Why is it never hitting?</p></div>
-  <div class="hf-bub right"><span class="who">TokenClaims.Equals</span><p>I compare every field with EqualityComparer&lt;T&gt;.Default. Your Sub is a string — I compared the characters, and they matched.</p></div>
-  <div class="hf-bub"><span class="who">You</span><p>Then why does Roles fail? It's the same two strings, in the same order, both times.</p></div>
-  <div class="hf-bub right"><span class="who">TokenClaims.Equals</span><p>List&lt;string&gt; never gave me a content check to call, so my default for it is ReferenceEquals. Same words, different List objects — as far as I'm concerned, not equal.</p></div>
-</div>
 
 <div class="hf-kick">The mechanism</div>
 <p class="hf-say">Follow one <code>==</code> call as it splits into two completely different comparisons, field by field.</p>
@@ -138,31 +136,6 @@
   <p class="why" data-for="0">Right. The record's Equals is generated per field using EqualityComparer&lt;T&gt;.Default. That gives you content comparison for string and numeric fields, but List&lt;T&gt; has no Equals override, so its default comparison is ReferenceEquals — same contents, different objects, not equal.</p>
   <p class="why" data-for="1">That's the assumption "value equality" naturally encourages, but the generated Equals is per-field, not a deep/recursive walk. A List&lt;T&gt; field never gets upgraded to content comparison just because it's sitting inside a record.</p>
   <p class="why" data-for="2">Nothing throws — List&lt;T&gt; is a perfectly legal record field type. The comparison runs fine and simply returns false, silently, which is exactly what makes this so easy to ship without noticing.</p>
-</div>
-
-<div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">"Does this container compare by contents or by identity?" gets answered differently by nearly every language and type you'll touch.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>Java's own record — same question, opposite default</h4>
-    <p>A Java <code>record TokenClaims(String sub, List&lt;String&gt; roles)</code> does NOT have this bug. Java's generated <code>equals()</code> calls <code>Objects.equals()</code> per component, and <code>java.util.List</code>'s interface contract requires <code>equals()</code> to compare elements in order — <code>ArrayList</code> honors that. The identical-looking feature in the language you already know gives the opposite answer, purely because .NET's <code>List&lt;T&gt;</code> was never required to implement structural equality the way Java's <code>List</code> was.</p>
-    <div class="hf-scatter"><span>same question, opposite answer, same-looking syntax</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>JavaScript/TypeScript array === — the same trap, on the frontend</h4>
-    <p><code>["admin","billing"] === ["admin","billing"]</code> is <code>false</code> in JS and TS for the identical reason: <code>===</code> on arrays and objects always compares references, never contents. An Angular service comparing two role arrays fetched on two different requests hits this exact wall — and if you've ever reached for <code>JSON.stringify(a) === JSON.stringify(b)</code> to work around it, you were patching the same gap this record hits in C#.</p>
-    <div class="hf-scatter"><span>the frontend's version of the identical gap</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>It's not just List&lt;T&gt; — arrays and Dictionary share the gap</h4>
-    <p>Swapping <code>List&lt;string&gt; Roles</code> for <code>string[] Roles</code> or <code>Dictionary&lt;string,string&gt; Claims</code> fixes nothing — neither .NET array types nor <code>Dictionary&lt;TKey,TValue&gt;</code> override <code>Equals</code> either. Any record field whose type is a built-in mutable collection carries this exact risk, not just the one used in this example.</p>
-    <div class="hf-scatter"><span>the same gap, reopened by every sibling collection type</span></div>
-  </div>
-</div>
-
-<div class="hf-napkin">
-  <b>The whole page on a napkin:</b> C# gives a Java developer records for concise, immutable, value-equal DTOs, LINQ for deferred queries that can compile straight to SQL, and switch expressions for exhaustive pattern matching. <b>The one new sentence this block adds:</b> "value equality" on a record is generated per field with EqualityComparer&lt;T&gt;.Default, and any field whose type never overrode Equals — List&lt;T&gt;, arrays, Dictionary — silently compares object identity instead, no matter how identical its contents look.
 </div>
 
 <div style="margin:0 0 28px">
