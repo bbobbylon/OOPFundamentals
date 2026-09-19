@@ -57,12 +57,12 @@
     <div class="intro-ciam"><span class="tag">CIAM in production:</span> you rarely verify an HMAC secret you own. Instead the IdP (Microsoft Entra, Ping) signs tokens with <strong>RS256</strong> (asymmetric) and publishes its <em>public</em> keys at a <strong>JWKS</strong> endpoint. Your API fetches and caches those keys, then verifies the signature plus <code>iss</code> (issuer), <code>aud</code> (audience) and <code>exp</code> — never holding a shared secret. That is exactly what Spring's <code>NimbusJwtDecoder.withJwkSetUri(...)</code> does. In a <strong>BFF</strong> (backend-for-frontend) the browser holds only an <code>httpOnly</code> session cookie and the BFF keeps the tokens server-side, relaying them to downstream APIs — so the access token never touches JavaScript (no XSS token theft). See <code>spring-boot-security-filter-chain-deep</code> and <code>spring-boot-bff-token-relay-deep</code> for the same flow on the Java side.</div>
   </div>
 
-<p class="hf-deck">or, your public key can be turned into the attacker's secret password</p>
+<p class="hf-deck" data-shape="questions">or, your public key can be turned into the attacker's secret password</p>
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">Your IdP's signing key is PUBLIC by design. That's supposed to be fine.</p>
 
-<div class="hf-card bad">
+<div class="hf-card">
   <div class="hf-cardtitle">The one missing argument that turns a public key into a backdoor</div>
   <p>Your API verifies Entra/Ping tokens with <code>jwt.verify(token, publicKey)</code> — no third
   argument. It works in every test you've written: real tokens, signed RS256 by the IdP, verify
@@ -79,16 +79,22 @@
   <p class="hf-foot">The bug isn't the public key. It's letting the token's OWN header decide how the server should check it.</p>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Never let the token choose its own verification algorithm</div>
-  <div class="hf-ladder">
-    <b>jwt.verify(token, publicKey)</b>
-    <i>↓ the verifier blindly follows whatever alg the token's header claims</i>
-    <b>Better: jwt.verify(token, publicKey, { algorithms: ['RS256'] })</b>
-    <i>↓ the SERVER decides the algorithm; a token claiming HS256 is rejected before the key is touched</i>
-    <b>A public key can never be smuggled in as someone else's HMAC secret</b>
-  </div>
-</div>
+<p class="hf-big">A key being public was never the problem. Letting the TOKEN pick how it gets checked was.</p>
+
+<dl class="hf-qa">
+  <dt>I call jwt.verify(token, publicKey). My key is PUBLIC by design — how can a forged token possibly get through?</dt>
+  <dd>Because "public" was never the issue. jwt.verify with no algorithms option lets the token's own header decide how to check it — a header claiming <code>alg: HS256</code> makes the library treat your public key string as an HMAC secret instead of an RSA key.</dd>
+  <dt>But HMAC needs a SECRET. My public key isn't secret — why does that even work?</dt>
+  <dd>HMAC doesn't know or care what a key "is." It takes an arbitrary byte string. A PEM-formatted RSA public key is, at the byte level, just a string — and that string works perfectly well as an HMAC key. Nothing checks "this looks like an RSA key" against "the header says HMAC."</dd>
+  <dt>So is jwt.verify buggy?</dt>
+  <dd>No — it's doing exactly what its API promises: verify the token using the algorithm the header names, with the key you gave it. Nothing in that default is a bug. It's an unset guardrail, not broken code.</dd>
+  <dt>Doesn't the server at least cross-check that an RSA key isn't being used where HS256 is claimed?</dt>
+  <dd>Not unless you ask it to. Without an explicit algorithms allowlist, jwt.verify just follows the header's instructions — there's no built-in sanity check standing between the two.</dd>
+  <dt>What's the actual fix, in one line?</dt>
+  <dd><code>jwt.verify(token, publicKey, { algorithms: ['RS256'] })</code>. Now the SERVER decides the algorithm before the key is ever touched — a header claiming HS256 is rejected outright, and a public key can never be smuggled in as someone else's HMAC secret.</dd>
+  <dt>What's the tell that saves me from this whole class of bug, not just this one library?</dt>
+  <dd>Any time untrusted input includes a field describing how IT should be processed — a JWT's alg header, a serialized object's type descriptor — treat that self-description as a suggestion, never an instruction. The receiver decides how to process something; the sender's claim about itself doesn't get a vote.</dd>
+</dl>
 
 <div class="principle" style="text-align:left">
   <b>A verifier that lets the token say how it should be checked isn't verifying anything.</b>
@@ -97,39 +103,6 @@
   as an HMAC secret instead," a value that was never meant to be secret becomes exactly that. The
   fix isn't a stronger key. It's refusing to let the token's own header cast a vote in its own
   verification.
-</div>
-
-<div class="hf-note">Think of the RSA public key as a <b>notary's stamp</b> everyone is handed a
-photo of, on purpose — you're meant to be able to check a document against it. Algorithm confusion
-is a forger using that same photo as the <i>ink</i> for a completely different kind of signature —
-one your front desk happens to accept too, because nobody ever told it to accept only the notary's
-actual stamp. The photo was never stolen. Nobody told the front desk to reject the other kind of
-signature.</div>
-
-<div class="hf-talk">
-  <div class="hf-bub">
-    <span class="who">You</span>
-    <p>I verify every token against our IdP's public key. How did someone forge an admin token without ever touching a private key?</p>
-  </div>
-  <div class="hf-bub right">
-    <span class="who">jwt.verify (unpinned)</span>
-    <p>You handed me a key and a token, and I did what the token's header told me: it said
-    <code>alg: HS256</code>, so I treated your key argument as an HMAC secret and computed a
-    matching signature. Nobody told me it was supposed to be an RSA public key used only for
-    RS256. I just followed instructions — the token's instructions.</p>
-  </div>
-  <div class="hf-bub">
-    <span class="who">The attacker</span>
-    <p>And your public key was never a secret. It's published at a JWKS URL for anyone to fetch —
-    that's the whole point of asymmetric signing. I downloaded it, used it as an HMAC key instead
-    of an RSA key, and your verifier never questioned the switch.</p>
-  </div>
-  <div class="hf-bub right">
-    <span class="who">jwt.verify (algorithms: ['RS256'] pinned)</span>
-    <p>This time you told me what to expect before I ever looked at the token. Its header says
-    HS256; that's not on my allowlist, so I reject it before your key is used for anything. The
-    token's own claims don't get a vote.</p>
-  </div>
 </div>
 
 <div class="hf-kick">The mechanism</div>
@@ -189,43 +162,6 @@ signature.</div>
   RSA key" against "the header says HMAC"; the library just does what the header asks.</p>
 </div>
 
-<div class="hf-kick">Where you've seen this before</div>
-<p class="hf-say">Three systems, one root cause: letting the untrusted side pick how it gets checked.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>TLS downgrade attacks: the same move, one layer down</h4>
-    <p>POODLE, FREAK, and Logjam are all the identical idea at the transport layer: a TLS
-    handshake lets both sides negotiate the cipher, and an attacker who can sit in the middle
-    forces that negotiation down to a weaker algorithm the server still accepts for compatibility
-    — then breaks the weak algorithm instead of the strong one. JWT algorithm confusion is the
-    application-layer version: the "negotiation" is just an unauthenticated header field, and
-    "still accepts for compatibility" is an unpinned <code>algorithms</code> list.</p>
-    <div class="hf-scatter"><span>downgrade to a weaker algorithm, exploit that instead</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Insecure deserialization: trusting the payload to describe itself</h4>
-    <p>Java and Python's classic insecure-deserialization bugs (the 2015 <code>ysoserial</code>
-    gadget chains, among others) share the same root cause: the incoming data includes a type
-    descriptor, and the deserializer instantiates whatever the payload claims to be. Algorithm
-    confusion is the same shape in miniature — the token includes an algorithm descriptor, and a
-    naive verifier processes it as whatever the token claims. Both are fixed the same way: an
-    explicit allowlist the RECEIVER controls, never a self-description the SENDER controls.</p>
-    <div class="hf-scatter"><span>let the receiver decide the type, never the payload</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Your Spring resource server has the safer default</h4>
-    <p>Spring Security's <code>NimbusJwtDecoder.withJwkSetUri(...)</code> — the exact tool this
-    page's own CIAM note points to — sidesteps this entire bug class structurally: it resolves the
-    verification key from the token's <code>kid</code> against the JWKS endpoint and expects an
-    RS256/ES256-family algorithm by configuration, so a forged HS256 token is rejected as an
-    algorithm mismatch before any key material is even compared. Node's <code>jsonwebtoken</code>
-    gives you the same safety, but only if you ask for it with an explicit <code>algorithms</code>
-    array — Spring's happy path defaults you into the safe behavior; Node's makes you opt in.</p>
-    <div class="hf-scatter"><span>Spring defaults you in; jsonwebtoken makes you opt in</span></div>
-  </div>
-</div>
-
 <div class="hf-kick">Questions from the back row</div>
 <div class="hf-ask">
   <p class="q">Is this just a theoretical attack, or has it happened for real?</p>
@@ -257,12 +193,10 @@ signature.</div>
 
 <div class="hf-kick">Grab a napkin</div>
 <p class="hf-say">Predict it before you scroll.</p>
-<div class="hf-napkin">
-  Your server pins <code>algorithms: ['RS256', 'HS256']</code> — both, because a second, older
-  integration still issues HS256 tokens. A forged token with header <code>alg: HS256</code>,
-  HMAC-signed using the public RS256 key as the secret, arrives. Does it verify — and would your
-  answer change if the list were pinned to just <code>['RS256']</code> instead?
-</div>
+<p><b>Your server pins <code>algorithms: ['RS256', 'HS256']</code> — both, because a second, older
+integration still issues HS256 tokens. A forged token with header <code>alg: HS256</code>,
+HMAC-signed using the public RS256 key as the secret, arrives. Does it verify — and would your
+answer change if the list were pinned to just <code>['RS256']</code> instead?</b></p>
 
   <div style="margin:0 0 28px">
     <div class="rt-ctlbar">
