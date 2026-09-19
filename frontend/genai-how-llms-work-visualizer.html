@@ -68,48 +68,33 @@
     <div class="intro-ciam"><span class="tag">Where this shows up in CIAM work:</span> every LLM-assisted tool you use day to day — Copilot, Claude Code, an internal chatbot answering "how do I configure a Ping policy?" — runs exactly this loop. The context window is why a huge codebase can't all be "in view" at once (hence retrieval — see the RAG page). Non-determinism from sampling is why the same prompt against an LLM API can return slightly different code two runs in a row — pin <code>temperature: 0</code> in automation scripts that call an LLM API for reproducibility. And hallucination is why an LLM confidently inventing a Ping Identity API endpoint that doesn't exist is a *feature of how the model works*, not a rare bug — always verify generated code/config against real docs before shipping it.</div>
   </div>
 
-  <p class="hf-deck">or, the setting that promises "always the same answer" and doesn't quite deliver</p>
+  <p class="hf-deck" data-shape="questions">or, the setting that promises "always the same answer" and doesn't quite deliver</p>
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">You just pinned <code>temperature: 0</code> because the docs — and this very page — told you that makes generation deterministic. Run the exact same request twice anyway, and sometimes the text comes back different.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">Two identical requests, one flipped word, and no code change between them</div>
-  <p>You write an automation script that calls an LLM API to classify support tickets, set <code>temperature: 0</code> exactly like the CIAM callout above recommends, and run it twice against the same ticket text an hour apart. Run #1 returns <code>"category: billing"</code>. Run #2 — same prompt, same model, same parameters, byte-for-byte identical request body — returns <code>"category: account"</code>.</p>
-  <p>Temperature 0 does mean "always pick the highest-probability token, never sample" — that part of the page above is true. What it does <em>not</em> mean is "run the exact same floating-point arithmetic every time." Provider infrastructure batches many different users' requests together on the same GPU for throughput, and floating-point addition is not strictly associative — <code>(a+b)+c</code> and <code>a+(b+c)</code> can round to slightly different values. Which other requests happen to be sitting in your batch changes the order those sums happen in, which can nudge the top logit by a hair, which is all it takes to flip the argmax to a different token — and one flipped token early in the output can cascade into a completely different sentence.</p>
-  <div class="hf-scatter">
-    <span>same prompt text ✓</span>
-    <span>same model version ✓</span>
-    <span>same temperature: 0 ✓</span>
-    <span>different output anyway ⚠</span>
-  </div>
-  <p class="hf-foot">"Deterministic" described the sampling rule, not the arithmetic underneath it — and the arithmetic is the part you don't control.</p>
-</div>
+<p class="hf-big">Temperature 0 makes the SAMPLING deterministic. It says nothing about the ARITHMETIC underneath it.</p>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Design for "mostly stable," not "guaranteed identical"</div>
-  <div class="hf-ladder">
-    <b>Keep <code>temperature: 0</code> anyway</b>
-    <i>&darr; it's still the right setting — it removes an entire second source of randomness (sampling) so you're only fighting the floating-point one, which is far rarer</i>
-    <b>Never diff two LLM outputs byte-for-byte in a test or gate</b>
-    <i>&darr; assert on structure (does it parse as valid JSON, is the category one of the five allowed values), not on exact string equality</i>
-    <b>For anything that must be reproducible, cache the first response and reuse it</b>
-    <i>&darr; if the downstream step (a workflow, a support macro) truly needs the same answer every time, store the answer once instead of re-asking the model and hoping</i>
-  </div>
-</div>
+<dl class="hf-qa">
+  <dt>I set temperature to 0. Why didn't I get the same answer twice — same prompt, same model, same parameters, byte-for-byte identical request?</dt>
+  <dd>The sampling step did its job — it picked the single most likely token every time, no randomness there at all. The difference came from earlier, in the arithmetic that produced the scores it was choosing between.</dd>
+  <dt>How can the same request produce different scores on two calls?</dt>
+  <dd>Provider infrastructure batches many different users' requests together on the same GPU for throughput. <span class="hf-mark">Floating-point addition is not strictly associative</span> — <code>(a+b)+c</code> and <code>a+(b+c)</code> can round to slightly different values — and which OTHER requests happen to be sitting in your batch changes the order those sums happen in.</dd>
+  <dt>So temperature 0 doesn't mean what the docs say it means?</dt>
+  <dd>It means exactly what it says: "always pick the highest-probability token, never sample." What it does NOT mean is "run the exact same floating-point arithmetic every time." Those are two different guarantees, and only the first one is documented as deterministic.</dd>
+  <dt>How small a difference are we talking about — would I even notice it in the raw numbers?</dt>
+  <dd>Often far past what you'd notice by eye — the resulting logits can differ by a hundredth of a point. But argmax doesn't care how close the race was; it just picks whoever's ahead, so that hair's-width shift is enough to flip the winning token — and one flipped token early on can cascade into a completely different sentence.</dd>
+  <dt>Is this an LLM-specific quirk, or does it show up anywhere else?</dt>
+  <dd>Anywhere a sum gets parallelized: floating-point reductions in Spark or multi-threaded BLAS, hash-map iteration order across JVM runs depending on incidental insertion state, even distributed clock skew stamping slightly different token timestamps on "simultaneous" auth requests. "Should be identical" and "is byte-for-byte identical" come apart the moment concurrency enters the picture.</dd>
+  <dt>So what should I actually do instead of expecting byte-identical output?</dt>
+  <dd>Keep <code>temperature: 0</code> anyway — it removes an entire source of randomness, so you're only fighting the rare floating-point one. Never diff two LLM outputs byte-for-byte in a test or gate; assert on structure instead — does it parse as valid JSON, is the category one of the five allowed values. And for anything that truly must be reproducible, cache the first response and reuse it rather than re-asking the model and hoping.</dd>
+</dl>
 
 <div class="principle" style="text-align:left">
   <b>The one-sentence rule.</b> Temperature 0 controls how the model chooses among the logits it computed, not whether the GPU computes those logits the same way twice — and only the first of those two things is documented as deterministic.
 </div>
 
 <div class="hf-note">Think of temperature 0 as a <b>rule about picking a winner</b>, not a <b>promise about the vote count</b> — argmax always picks the single highest score, but if two servers count the votes in a different order and the count comes out one-hundredth of a point different, argmax will happily hand the win to a different candidate.</div>
-
-<div class="hf-talk">
-  <div class="hf-bub"><span class="who">You</span><p>I set temperature to 0. Why didn't I get the same answer twice?</p></div>
-  <div class="hf-bub right"><span class="who">The sampling step, personified</span><p>I did my job — I picked the single most likely token every time, no randomness on my end at all.</p></div>
-  <div class="hf-bub"><span class="who">You</span><p>Then where did the difference come from?</p></div>
-  <div class="hf-bub right"><span class="who">The GPU matrix multiply, personified</span><p>From me. I ran your request batched next to a stranger's, added up the same numbers in a slightly different order because of it, and handed the sampling step a probability distribution that was one-hundredth of a point off from last time. That was enough.</p></div>
-</div>
 
 <div class="hf-kick">The mechanism</div>
 <p class="hf-say">Follow the same request through two separate calls and watch where the two runs quietly part ways.</p>
@@ -147,31 +132,6 @@
   <p class="why" data-for="0">Temperature can't go lower than 0 — 0 already means "always take the argmax, no sampling." The variation isn't coming from leftover randomness in the sampling step at all.</p>
   <p class="why" data-for="1">Right — temperature 0 removes sampling randomness, which is most of the variation you'll see, but it can't remove floating-point rounding differences from GPU batching. Design your checks around structure and cache anything that must be identical, rather than trusting two calls to match.</p>
   <p class="why" data-for="2">This is documented, expected infrastructure behavior, not a defect — providers describe determinism at temperature 0 (and even with a seed parameter) as best-effort, not guaranteed.</p>
-</div>
-
-<div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">"Should be identical" and "is byte-for-byte identical" come apart in plenty of systems that have nothing to do with LLMs.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>Distributed clock skew across auth servers</h4>
-    <p>Two Ping/Entra nodes issuing tokens milliseconds apart can stamp slightly different <code>iat</code>/<code>exp</code> values even for requests that look simultaneous to the client, because each node's clock and processing order differ by fractions of a second. "Same moment" to a caller isn't "same value" internally.</p>
-    <div class="hf-scatter"><span>concurrent isn't the same as identical</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Hash map iteration order across JVM runs</h4>
-    <p>Two runs of the same Java program can iterate a <code>HashMap</code> in a different order if hash bucket layout depends on insertion order or object identity — nothing "random" happened, but two runs that should feel deterministic quietly disagree on order.</p>
-    <div class="hf-scatter"><span>deterministic logic can still depend on incidental state</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Floating-point sums in a parallel reduction (Spark, NumPy multi-threaded BLAS)</h4>
-    <p>Summing the same array of floats on one thread versus splitting it across four threads can produce a different final value, because addition order changed — the classic non-associativity bug that shows up anywhere a sum is parallelized, LLM inference included.</p>
-    <div class="hf-scatter"><span>a+b+c isn't always a+(b+c) in floating point</span></div>
-  </div>
-</div>
-
-<div class="hf-napkin">
-  <b>The whole page on a napkin:</b> an LLM generates text one token at a time by tokenizing input, running an autoregressive forward pass bounded by a hard context window, and sampling from a probability distribution over the vocabulary — which is also why hallucination is the same mechanism as a correct answer, just applied where "plausible" and "true" have split apart. <b>The one new sentence this block adds:</b> temperature 0 guarantees the sampling rule is deterministic, but not that two separate API calls compute identical logits to sample from — GPU batching can make "the same request" return two different answers anyway.
 </div>
 
 <!-- ── EXTREME-VIZ HERO ── -->

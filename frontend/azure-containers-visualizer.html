@@ -59,33 +59,29 @@
     <div class="intro-ciam"><span class="tag">CIAM in production:</span> the registry pull is an identity problem: give the Container App (or AKS kubelet) a <strong>managed identity</strong> with the <code>AcrPull</code> role instead of admin username/password — the image pull is then authorized by Entra, auditable, and secret-free. Same story for the app reaching Key Vault or Service Bus at runtime. In your ADO pipelines, <code>az acr build</code> + workload identity federation means the whole build-push-deploy chain runs without a single stored credential.</div>
   </div>
 
-  <p class="hf-deck">or, the request that wakes the app pays for waking it</p>
+  <p class="hf-deck" data-shape="receipt">or, the request that wakes the app pays for waking it</p>
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">You just watched a queue-driven worker scale from 0 to 8 replicas without a single producer noticing. Set min-replicas to 0 on your public API the same way, and the first user after a quiet period feels every millisecond of that boot.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">shop-api set to min-replicas 0, the first request of the day times out</div>
-  <p><code>shop-api</code> is a Spring Boot app on Container Apps with <code>--ingress external --min-replicas 0 --max-replicas 10</code>. Traffic is bursty during the day and near-zero overnight, so scaling to zero looks like free money — no requests, no compute, no bill.</p>
-  <p>At 6:14am the first request of the day arrives. There are zero replicas running. Unlike the queue scenario above — where KEDA polls in the background and messages just wait in the queue while replicas spin up — an HTTP request has nowhere to wait. The platform has to pull the image (if it isn't already cached on a node), start the container, and boot the JVM and Spring context before that exact request gets a response. If the client's timeout is shorter than that boot time, the very request that triggered the scale-up is the one that fails.</p>
-  <div class="hf-scatter">
-    <span>scale rule correct ✓</span>
-    <span>image builds and runs fine ✓</span>
-    <span>the first caller's own patience ⚠</span>
-  </div>
-  <p class="hf-foot">Scale-to-zero didn't fail. It did exactly what it promises — it just promised nothing about how long the first caller waits.</p>
+<div class="hf-receipt">
+  <div class="hf-receipt-head">shop-api's 6:14am cold start — a representative Spring Boot boot budget, not a measurement of this exact app</div>
+  <div class="row"><span>Image pull (not cached on this node)</span><span>~500ms</span></div>
+  <div class="row"><span>Container start</span><span>~1,200ms</span></div>
+  <div class="row"><span>JVM start</span><span>~1,800ms</span></div>
+  <div class="row"><span>Spring context boot — component scan, connection pool init</span><span>~2,500ms</span></div>
+  <div class="row total"><span>Total, before /actuator/health answers</span><span>~6,000ms</span></div>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Match min-replicas to whether a human is waiting</div>
-  <div class="hf-ladder">
-    <b>Keep min-replicas 0 for anything nobody is synchronously waiting on</b>
-    <i>↓ queue/event workers, cron-style jobs — the event source buffers for you</i>
-    <b>Set min-replicas to at least 1 for anything behind synchronous HTTP ingress</b>
-    <i>↓ one warm replica always answers instantly; scale rules still add more under load</i>
-    <b>If you must scale an HTTP app to zero, budget for it explicitly</b>
-    <i>↓ size client timeouts and retry policies for a cold boot, not just steady-state latency</i>
-  </div>
+<div class="hf-arrow up">A warm replica answers the same endpoint in single-digit milliseconds. <span class="hf-mark">The first request of the day pays roughly 6,000&times; that</span> — and it pays it as its OWN latency, not as a metric nobody's watching.</div>
+
+<div class="hf-vs">
+  <div class="bad"><h5>Behind a queue: 6 seconds, invisible</h5><p>KEDA polls queue depth in the background and spins up a replica while the message sits, patiently, in Service Bus. Nobody's clock is running against that 6 seconds — the message doesn't have a timeout the way an HTTP client does.</p></div>
+  <div class="good"><h5>Behind HTTP ingress: 6 seconds, felt by one real caller</h5><p>An HTTP request has nowhere to wait. It IS the thing waiting — for the image pull, the container, the JVM, and the Spring context, in sequence, before it gets a response. If the client's timeout is shorter than 6 seconds, the request that triggered the scale-up is the one that fails.</p></div>
+</div>
+
+<div class="hf-card">
+  <p><b>Match min-replicas to whether a human is waiting.</b> Keep <code>min-replicas 0</code> for anything nobody is synchronously waiting on — queue/event workers, cron-style jobs, where the event source buffers for you. Set <code>min-replicas</code> to at least 1 for anything behind synchronous HTTP ingress; one warm replica always answers instantly, and scale rules still add more under load. If you must scale an HTTP app to zero anyway, budget for it explicitly — size client timeouts and retry policies for a cold boot, not just steady-state latency.</p>
 </div>
 
 <div class="principle" style="text-align:left">
@@ -93,13 +89,6 @@
 </div>
 
 <div class="hf-note">A queue doesn't mind waiting. A browser tab does. <b>The exact same min-replicas 0 setting is free lunch behind a queue and a support ticket behind an ingress route</b> — the difference isn't the Container App, it's what's on the other end of the wait.</div>
-
-<div class="hf-talk">
-  <div class="hf-bub"><span class="who">You</span><p>The queue worker scaled from zero with zero producer impact — surely my HTTP API does the same thing?</p></div>
-  <div class="hf-bub right"><span class="who">KEDA</span><p>I don't know the difference between your two apps. I watch a metric, I add replicas when it crosses the rule — same logic either way.</p></div>
-  <div class="hf-bub"><span class="who">You</span><p>So why did my API's first caller time out, but the queue's first message didn't?</p></div>
-  <div class="hf-bub right"><span class="who">The message queue</span><p>Because I held that message and waited, patiently, for a replica to show up. Your HTTP caller doesn't have a queue behind it — the request itself has to sit there until something can answer.</p></div>
-</div>
 
 <div class="hf-kick">The mechanism</div>
 <p class="hf-say">Here's the same 0→N scale event, and the one thing that's different when a human is on the other end.</p>
@@ -137,27 +126,6 @@
   <p class="why" data-for="0">Right — an HTTP request has no buffer to wait in; it IS the thing waiting on the cold start. A queued message sits safely in the queue while KEDA notices the depth and spins up a replica, so the producer and the message are both unaffected by the boot time.</p>
   <p class="why" data-for="1">There's no scheduled pre-warm here — both apps are genuinely at zero replicas until something triggers a scale-up; nothing warms them proactively in this setup.</p>
   <p class="why" data-for="2">KEDA polls the event source directly — an azure-servicebus scaler reads queue depth independent of whether any replica is currently running, which is exactly what lets it wake a zero-replica app in the first place.</p>
-</div>
-
-<div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">Whoever triggers the wake-up eats the wake-up cost — this shape shows up anywhere something scales from idle.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>AWS Lambda cold starts on the invocation that needed a new execution environment</h4>
-    <p>The request or event that causes a new environment to spin up is the one that pays the init-time latency — provisioned concurrency exists specifically to keep at least one environment warm, the same fix as min-replicas ≥ 1 here.</p>
-    <div class="hf-scatter"><span>the trigger and the victim are the same request</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Spring Boot with lazy bean initialization turned on</h4>
-    <p>With <code>spring.main.lazy-initialization=true</code>, beans construct on first use rather than at startup, so the first real request pays initialization cost that every request after it never sees.</p>
-    <div class="hf-scatter"><span>lazy anything defers the cost onto whoever asks first</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>A JVM method running interpreted before the JIT compiles it</h4>
-    <p>The first calls through a hot code path run at interpreter speed while the JIT gathers profiling data; only after enough invocations does it compile to fast native code — early callers subsidize the warm-up that later callers benefit from for free.</p>
-    <div class="hf-scatter"><span>the first callers pay for the optimization nobody else notices</span></div>
-  </div>
 </div>
 
 <div class="hf-napkin">

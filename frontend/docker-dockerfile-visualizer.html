@@ -100,33 +100,34 @@
     <div class="intro-ciam"><span class="tag">CIAM Dockerfile patterns:</span> Multi-stage for your Spring CIAM service: Stage 1 (<code>AS build</code>, jdk-alpine) copies <code>pom.xml</code> → <code>mvn dependency:go-offline</code> → copies <code>src/</code> → <code>mvn package</code>; Stage 2 (jre-alpine) adds a non-root user and copies <em>only</em> the jar (<code>COPY --from=build …*.jar app.jar</code>). JVM flags: <code>-XX:MaxRAMPercentage=75</code> (container-aware heap) and <code>-XX:+ExitOnOutOfMemoryError</code> (crash-restart beats a hung OOM). Target &lt;250MB; never include source, test classes, <code>.env</code> files, or private keys.</div>
   </div>
 
-  <p class="hf-deck">or, the "safer" place to put a secret that's actually more exposed</p>
+  <p class="hf-deck" data-shape="exhibit">or, the "safer" place to put a secret that's actually more exposed</p>
 
-<div class="hf-kick">The problem</div>
-<p class="hf-say">You moved a secret out of ENV specifically so it wouldn't leak into the image — and it leaked anyway, into a place you weren't checking.</p>
+<div class="hf-kick">Exhibit A</div>
+<p class="hf-say">A teammate runs this against your "clean" image, months after you shipped it. Read it before you read anything else.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle"><code>docker inspect</code> is clean. <code>docker history</code> is not.</div>
-  <p>Your build needs an Azure Artifacts token to pull a private internal library during <code>mvn package</code>. You know better than to hardcode it in <code>ENV</code> — that would sit in the shipped container's environment forever. So you use <code>ARG AZURE_ARTIFACTS_TOKEN</code> instead, passed at build time with <code>docker build --build-arg AZURE_ARTIFACTS_TOKEN=abc123...</code>, and reference it in a <code>RUN</code> line.</p>
-  <p>You check <code>docker inspect</code> on the finished image. No token anywhere in <code>Config.Env</code>. You ship it. Months later, a teammate runs <code>docker history --no-trunc myimage:1.0</code> out of curiosity and reads your token in plain text, straight off a layer that was supposedly "build-time only."</p>
-  <div class="hf-scatter">
-    <span>not in ENV ✓</span>
-    <span>not in the running container ✓</span>
-    <span>not in the build history ⚠</span>
-  </div>
-  <p class="hf-foot">ARG hides a value from the container you ship. It does not hide it from the record of how that image was built.</p>
+<pre class="hf-annot"><code>$ docker history --no-trunc myimage:1.0
+
+IMAGE          CREATED         CREATED BY                                                                     SIZE
+a91f3c2d8b44   3 minutes ago   RUN |1 AZURE_ARTIFACTS_TOKEN=<span class="hf-mark">abc123def456ghi789jkl</span> mvn package -Dtoken=$AZURE_ARTIFACTS_TOKEN   187MB
+&lt;missing&gt;      3 minutes ago   ARG AZURE_ARTIFACTS_TOKEN                                                       0B
+&lt;missing&gt;      4 minutes ago   COPY pom.xml pom.xml # buildkit                                                 4.2kB
+&lt;missing&gt;      5 minutes ago   FROM eclipse-temurin:21-jdk-jammy                                               0B</code></pre>
+
+<div class="hf-arrow up">You checked <code>docker inspect</code> first. <code>Config.Env</code> came back clean — no <code>AZURE_ARTIFACTS_TOKEN</code> anywhere. <span class="hf-mark r">This RUN row is the actual leak</span>, and nobody thought to check it, because nobody thinks of build history as "the image's data" the way an environment variable is.</div>
+
+<div class="hf-arrow"><code>|1</code> means "one build-time variable fed this layer." That prefix, and the resolved value sitting right after it, are BuildKit writing your token into this layer's own metadata — permanently — the moment the RUN instruction that referenced it finished running.</div>
+
+<div class="hf-arrow rose">The <code>ARG AZURE_ARTIFACTS_TOKEN</code> row two lines down is <code>0B</code> and looks completely inert — that's the declaration, not the leak. The leak is the row above it: the RUN that actually USED the ARG's value.</div>
+
+<p class="hf-annot">Nothing here required an attacker or a misconfiguration. <code>docker history</code> is doing exactly its documented job — showing every command that built this image, in full — because that is what "history" means. Moving the token from <code>ENV</code> to <code>ARG</code> genuinely stopped it from reaching the running container. It never stopped it from reaching this.</p>
+
+<div class="hf-brain">
+  <div class="hf-brain-head">Brain Power</div>
+  <p>Before you scroll: if you fixed this by switching to <code>RUN --mount=type=secret,id=az_token mvn package -Dtoken=$(cat /run/secrets/az_token)</code> instead of <code>ARG</code>, would that secret show up anywhere in <code>docker history --no-trunc</code> the way this one does?</p>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Use the tool actually built to keep a build-time secret secret</div>
-  <div class="hf-ladder">
-    <b>Stop passing real secrets through ARG entirely</b>
-    <i>↓ if a RUN instruction ever touches the ARG's value, that resolved value gets stapled onto the layer's build metadata for cache-keying — this is true no matter how careful the RUN line looks</i>
-    <b>Mount the secret instead of substituting it</b>
-    <i>↓ <code>RUN --mount=type=secret,id=az_token mvn package -Dtoken=$(cat /run/secrets/az_token)</code>, built with <code>docker build --secret id=az_token,src=./token.txt .</code> — BuildKit mounts this only for the instant the instruction runs and writes it into no layer at all</i>
-    <b>Treat every image ever built the old way as already compromised</b>
-    <i>↓ rotate the credential and check <code>docker history --no-trunc</code> on anything built before the fix — the exposure already happened for every one of those images, and rebuilding today doesn't retroactively clean the old tags</i>
-  </div>
+<div class="hf-card">
+  <p><b>No — and that's the actual fix, not a smaller version of the same mistake.</b> <code>RUN --mount=type=secret</code> (built with <code>docker build --secret id=az_token,src=./token.txt .</code>) mounts the value into the filesystem only for the instant that one instruction runs, and writes it into no layer's metadata at all — nothing for <code>docker history</code> to ever have. Stop passing real secrets through <code>ARG</code> entirely; if a RUN instruction ever touches an ARG's value, that resolved value is stapled onto the layer's build metadata no matter how careful the RUN line looks. And treat every image already built the old way as already compromised: rotate the credential and check <code>docker history --no-trunc</code> on anything shipped before the fix — rebuilding today doesn't retroactively clean the old tags.</p>
 </div>
 
 <div class="principle" style="text-align:left">
@@ -134,13 +135,6 @@
 </div>
 
 <div class="hf-note">ARG is a Post-it note the builder shows to everyone who ever asks how this image got made. It <b>disappears from the running container, but the note stays pinned to the build history forever.</b></div>
-
-<div class="hf-talk">
-  <div class="hf-bub"><span class="who">You</span><p>I moved my token from ENV to ARG so it wouldn't leak into the container. Why did it show up in docker history?</p></div>
-  <div class="hf-bub right"><span class="who">ARG</span><p>I never join the running container — that part's true. But any RUN that uses me gets my resolved value stapled onto its own history entry, and I don't disappear from THAT.</p></div>
-  <div class="hf-bub"><span class="who">docker history</span><p>I show exactly how this image was assembled, one layer at a time — including any value that was ever substituted into a RUN command.</p></div>
-  <div class="hf-bub right"><span class="who">RUN --mount=type=secret</span><p>I'm the one built to actually keep a secret. I exist in the filesystem only for the instant this instruction runs, and I get written into no layer at all.</p></div>
-</div>
 
 <div class="hf-kick">The mechanism</div>
 <p class="hf-say">Follow one ARG-based token from "build-time only" to "readable by anyone who pulls the image."</p>
@@ -180,26 +174,7 @@
   <p class="why" data-for="2">There's no such base-image-dependent behavior — build history is generated by BuildKit itself, not by anything inside the base image, so this holds identically whether the final stage is Alpine, Debian, or anything else.</p>
 </div>
 
-<div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">"Meant to be temporary, actually permanent" is one of the most common ways a secret escapes.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>Stack traces dumping env vars into centralized logging</h4>
-    <p>An unhandled exception handler that logs <code>System.getenv()</code> "just for this one debug session" ships every environment variable — secrets included — into Splunk or Datadog, where it's retained for months and searchable by anyone with log access. The intent was transient; the storage wasn't.</p>
-    <div class="hf-scatter"><span>a debug-time convenience becomes a permanent record</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Angular build-time env vars baked into the bundle</h4>
-    <p>An API key substituted into an Angular build via <code>process.env</code> at build time doesn't stay "build-time only" — it gets compiled directly into the shipped <code>main.js</code>, readable by any browser user who views source. "Build-time" sounds temporary; the output artifact is what actually ships.</p>
-    <div class="hf-scatter"><span>the frontend version of the exact same mistake</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>CI pipeline logs printing a secret</h4>
-    <p>An <code>echo $TOKEN</code> dropped into a pipeline step "just to debug this once" prints the secret into the pipeline's console output — retained by the CI system for as long as its log retention policy allows, visible to anyone with read access to that pipeline.</p>
-    <div class="hf-scatter"><span>the value was never IN the deployed artifact, only in the record of building it</span></div>
-  </div>
-</div>
+<p class="hf-big">docker inspect shows the container. docker history shows how it was MADE.</p>
 
 <div class="hf-napkin">
   <b>The whole page on a napkin:</b> This page walks every instruction in a production Spring Boot Dockerfile — multi-stage builds that discard the JDK, COPY over ADD's surprising magic, ENTRYPOINT plus CMD for a fixed-but-configurable command, and ordering layers so caching actually works. <b>The one new sentence this block adds:</b> ARG keeps a value out of the shipped container and out of <code>docker inspect</code>, but any RUN instruction that touches it stamps the resolved value permanently into the image's build history instead — a different leak than ENV's, not a smaller one.
@@ -609,5 +584,6 @@ function showDetail(id) {
 <script src="devhub-notebook.js"></script>
 <script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
+<script src="devhub-syntax.js"></script>
 </body>
 </html>

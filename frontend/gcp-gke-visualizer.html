@@ -58,7 +58,7 @@
     <div class="intro-ciam"><span class="tag">CIAM in production:</span> Workload Identity is the whole ballgame here — a pod that needs to read a secret from Secret Manager or write an audit event to BigQuery authenticates as <strong>itself</strong>, via a token the metadata server issues and rotates automatically, never as a static key sitting in a Kubernetes Secret that someone could <code>kubectl get secret -o yaml</code> and exfiltrate. Combined with Artifact Registry's IAM-gated pulls (node service accounts hold <code>artifactregistry.reader</code>, nothing more), the entire path from "image built" to "pod calling a GCP API" never touches a long-lived credential.</div>
   </div>
 
-  <p class="hf-deck">or, the upgrade you never clicked can still take your API down</p>
+  <p class="hf-deck" data-shape="timelapse">or, the upgrade you never clicked can still take your API down</p>
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">Your Deployment survives node failures, auto-heals, and scales fine — then a routine node-pool upgrade takes all three replicas down at once, and nothing in your manifests was wrong.</p>
@@ -127,6 +127,24 @@
   <p class="hf-annot">Read this loop as what happens to ONE node, not your whole cluster — but if all your replicas sit on that one node, "this node's drain" and "your Deployment's entire uptime" are, for a few seconds, the same event.</p>
 </div>
 
+<div class="hf-kick">The same drain, timestamped</div>
+<p class="hf-say">Every rung below is a clock reading from one upgrade window. shop-api is healthy at the first mark and at the last — the gap in between is the whole gotcha.</p>
+
+<div class="hf-card">
+  <div class="hf-ladder">
+    <b>T+0:00 — GKE marks web-standard-pool for a node upgrade (auto-upgrade schedule, or a manual gcloud command)</b>
+    <i>↓ 2 seconds later</i>
+    <b>T+0:02 — the target node is cordoned: SchedulingDisabled, no new pods can land there</b>
+    <i>↓ 1 second later, the drain begins</i>
+    <b>T+0:03 — Eviction API called for pod 1 of 3; no matching PodDisruptionBudget, approved instantly</b>
+    <i>↓ pods 2 and 3 evicted the same way, back to back</i>
+    <b>T+0:04 — all three shop-api replicas are gone. Zero ready pods, zero PDB to have slowed any of it down</b>
+    <i>↓ the ReplicaSet controller schedules replacements elsewhere, but a fresh pod still has to boot</i>
+    <b>T+0:45 — the first replacement pod passes its readiness probe and starts receiving traffic again</b>
+  </div>
+  <p class="hf-annot">Rung four to rung five is the whole outage: about 41 seconds where a Deployment that "survives node failures" had nowhere to fail over to, because every replica was evicted in the same one-second window instead of one at a time. A PodDisruptionBudget doesn't speed up the upgrade — it forces the drain to wait for T+0:45's replacement before it's allowed to start T+0:04's eviction on the next pod, so there's never a moment with zero ready replicas.</p>
+</div>
+
 <div class="hf-check" data-answer="0">
   <p class="q">shop-api runs 3 replicas on GKE Standard, no PodDisruptionBudget defined. GKE begins a scheduled node-pool upgrade and all 3 pods happen to be on the node being drained. What happens?</p>
   <button type="button">The Eviction API approves evicting all 3 pods with nothing to slow it down, since no PDB exists to enforce a minimum available count</button>
@@ -137,30 +155,7 @@
   <p class="why" data-for="2">Liveness probes are unrelated to eviction — a perfectly healthy pod gets evicted just as readily as a failing one; eviction is about scheduling for maintenance, not pod health.</p>
 </div>
 
-<div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">"No guardrail, so the platform did exactly what it was told" — you've met that shape in the rest of the stack too.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>Spring Boot's graceful shutdown with no drain timeout configured</h4>
-    <p>In-flight requests during a rolling pod restart get cut off unless <code>server.shutdown=graceful</code> and a matching <code>spring.lifecycle.timeout-per-shutdown-phase</code> are both set — the same "nothing told the platform to wait" shape as a missing PDB.</p>
-    <div class="hf-scatter"><span>no guardrail set = no guardrail enforced</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>An Angular HTTP interceptor chain with no explicit ordering enforced</h4>
-    <p>Interceptors run in the order they're provided, and nothing stops a security interceptor from landing after a logging one if you assumed an order you never actually configured — same silent gap between "I assumed a rule" and "a rule exists."</p>
-    <div class="hf-scatter"><span>assumed order ≠ enforced order</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>A Kafka consumer group rebalance without a cooperative-sticky assignor</h4>
-    <p>With the default eager assignor, one consumer joining or leaving the group revokes ALL partitions from ALL members before reassigning — a full stop-the-world event, because nothing was configured to make it gradual instead.</p>
-    <div class="hf-scatter"><span>one membership change, every partition disrupted</span></div>
-  </div>
-</div>
-
-<div class="hf-napkin">
-  <b>The whole page on a napkin:</b> GKE fully manages your control plane in both modes, and the real decision is who owns node capacity (Autopilot vs Standard) plus how images and identity reach a pod safely via Artifact Registry and Workload Identity. <b>The one new sentence this block adds:</b> none of that protects a Deployment's uptime during a routine node upgrade — that guarantee only exists if you write a PodDisruptionBudget yourself.
-</div>
+<p class="hf-big">A PDB doesn't stop the upgrade. It stops the upgrade from ever leaving you at zero.</p>
 
 <div style="margin:0 0 28px">
     <div class="rt-ctlbar">

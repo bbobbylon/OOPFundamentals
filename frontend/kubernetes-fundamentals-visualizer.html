@@ -49,46 +49,33 @@
     <div class="intro-ciam"><span class="tag">In a CIAM deployment:</span> Your Spring CIAM app runs in pods across nodes. <code>kubectl apply -f ciam-deployment.yaml</code> lets the scheduler place pods on nodes with capacity; a crashed pod (OOMKilled, startup failure) is replaced immediately by the ReplicaSet controller, and a failed node's pods reschedule to healthy ones — no manual intervention. Namespaces separate <code>ciam-dev</code>/<code>staging</code>/<code>prod</code> with their own RBAC and quotas, and your Ping server runs as a StatefulSet (stable identity for clustering).</div>
   </div>
 
-<p class="hf-deck">or, the redeploy that redeployed nothing at all</p>
+<p class="hf-deck" data-shape="questions">or, the redeploy that redeployed nothing at all</p>
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">You rebuilt the image, pushed it back to the same <code>:latest</code> tag, ran the exact <code>kubectl apply -f</code> you always run — and the running pod is still serving yesterday's bug.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">The fix that never left the registry</div>
-  <p>The manifest says <code>image: myregistry/ciam-auth:latest</code>. You fix a bug, <code>docker build</code>, <code>docker push myregistry/ciam-auth:latest</code>, then run <code>kubectl apply -f ciam-auth-pod.yaml</code> — the same command that's "deployed" every time before.</p>
-  <p><code>kubectl apply</code> is declarative against the <b>text of the manifest</b>, not the contents of your registry. It diffs the file you just handed it against the <code>kubectl.kubernetes.io/last-applied-configuration</code> annotation already recorded on the live object. The file says <code>image: myregistry/ciam-auth:latest</code> — exactly what it said the last hundred times you ran this. There is no textual difference. Kubernetes issues zero API changes, the kubelet is never told to do anything, and the container running right now is still whatever it pulled the last time something actually forced a pull.</p>
-  <div class="hf-scatter">
-    <span>the new image really is in the registry ✓</span>
-    <span>kubectl apply exited 0, no errors ✓</span>
-    <span>the running container is still yesterday's code ⚠</span>
-  </div>
-  <p class="hf-foot">kubectl didn't lie to you — from where it's standing, you asked for the exact same thing you already had.</p>
-</div>
+<p class="hf-big">kubectl apply doesn't diff your registry. It diffs your TEXT.</p>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Fix: give the manifest something to actually diff on</div>
-  <div class="hf-ladder">
-    <b>Tag images by content, not a floating label — a git SHA or build number (<code>ciam-auth:a91f3c2</code>), so every real change produces a new string in the manifest</b>
-    <i>↓ kubectl apply diffs text; a new tag is a real text change, so this time it actually issues a patch</i>
-    <b>If you must keep <code>:latest</code>, force the issue yourself — <code>kubectl rollout restart deployment/ciam-auth</code>, or delete the pod, so the kubelet re-pulls</b>
-    <i>↓ this bypasses the manifest diff entirely and asks the kubelet to fetch again directly — and it only helps if imagePullPolicy is Always</i>
-    <b>And set <code>imagePullPolicy</code> explicitly instead of relying on the tag-based default — <code>Always</code> for a tag that moves, <code>IfNotPresent</code> only for one that genuinely never does</b>
-  </div>
-</div>
+<dl class="hf-qa">
+  <dt>I pushed a new image to the same <code>:latest</code> tag and ran <code>kubectl apply</code>. Why is the old bug still live?</dt>
+  <dd>Because your file says the same thing it said yesterday. <code>kubectl apply</code> is declarative against the <b>text of the manifest</b>, not the contents of your registry — it diffs what you just handed it against the <code>kubectl.kubernetes.io/last-applied-configuration</code> annotation already recorded on the live object. <span class="hf-mark">It has never once looked inside your registry.</span></dd>
+  <dt>So <code>:latest</code> doesn't mean "always the newest one" to kubectl?</dt>
+  <dd>Not to it. It's four ASCII characters in a string field. <code>image: myregistry/ciam-auth:latest</code> is exactly what the file said the last hundred times you ran this — no textual difference, no patch, no API change, no instruction to the kubelet. kubectl didn't lie to you: from where it's standing, you asked for the exact same thing you already had.</dd>
+  <dt>Doesn't kubectl at least check the image's digest behind that tag, even if it ignores the string itself?</dt>
+  <dd>No — <code>kubectl apply</code> never queries the registry at all, digest or otherwise, during this comparison. The only two things on the table are the text it already recorded and the text you're handing it now.</dd>
+  <dt>If I'd changed something trivial in the YAML — even just a comment — would that have redeployed?</dt>
+  <dd>Yes, and that's the trap hiding inside the confusion: ANY textual difference produces a real patch. kubectl isn't being picky about images specifically; it's genuinely blind to everything except the file's own text, for better and for worse.</dd>
+  <dt>So how do teams actually avoid shipping this bug?</dt>
+  <dd>They stop tagging by a floating label at all — a git SHA or build number (<code>ciam-auth:a91f3c2</code>) means every real change is also a real text change, so the diff that was always running finally has something to catch. If you must keep <code>:latest</code>, force the issue directly: <code>kubectl rollout restart deployment/ciam-auth</code> bypasses the manifest diff and tells the kubelet to re-pull — but only works if <code>imagePullPolicy</code> is <code>Always</code>.</dd>
+  <dt>Is this a Kubernetes quirk, or does every "declarative" tool work this way?</dt>
+  <dd>Every one of them. <code>terraform plan</code> diffs your <code>.tf</code> files against its own state file, not against what's actually running in AWS — hand-edit a security group in the console and <code>terraform plan</code> can report a clean plan anyway. "Declarative" always means "compares to what I was told," never "compares to reality."</dd>
+</dl>
 
 <div class="principle" style="text-align:left">
   <b>The one-sentence rule.</b> <code>kubectl apply</code> reconciles the cluster's recorded desired state against the <em>text</em> of the file you hand it — it has no way to know what's sitting in your container registry, and it never checks. Pairing a mutable tag like <code>:latest</code> with a habit of "re-push the image, then apply the same unchanged file" guarantees the one command you're running never actually changes anything, because from Kubernetes' point of view, nothing did.
 </div>
 
 <div class="hf-note">kubectl apply reads your manifest like a <b>grocery list, not a fridge inspection</b>. If the list says "milk" both times, it doesn't matter that you swapped in a different carton at the store — nobody's going back to buy anything.</div>
-
-<div class="hf-talk">
-  <div class="hf-bub"><span class="who">You</span><p>I pushed a new image to the same :latest tag and ran kubectl apply. Why is the old bug still live?</p></div>
-  <div class="hf-bub right"><span class="who">kubectl</span><p>Because your file says the same thing it said yesterday. I compare what you hand me to what I last recorded — I've never once looked inside your registry.</p></div>
-  <div class="hf-bub"><span class="who">You</span><p>So :latest doesn't mean "always the newest one" to you?</p></div>
-  <div class="hf-bub right"><span class="who">kubectl</span><p>Not to me. It's four ASCII characters in a string field. If that string doesn't change, neither does anything I control.</p></div>
-</div>
 
 <div class="hf-kick">The mechanism</div>
 <p class="hf-say">Here's exactly what kubectl apply checks before it does anything at all.</p>
@@ -126,31 +113,6 @@
   <p class="why" data-for="0">Nothing here points to an auth failure — kubectl apply genuinely exits 0 because it found no difference to apply, not because something silently broke.</p>
   <p class="why" data-for="1">Not quite — the real default is <code>Always</code> for <code>:latest</code> (or no tag at all) and <code>IfNotPresent</code> for any other explicit tag; it's never <code>Never</code> by default. But even with <code>Always</code> in play, this particular no-op isn't about pulling at all — it's that the manifest never gave kubectl anything new to act on.</p>
   <p class="why" data-for="2">Right — the file is byte-for-byte identical to what was last applied, so there's no patch to send and nothing for the kubelet to do.</p>
-</div>
-
-<div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">A reconciliation system that trusts the declared text in front of it, and has no way to see the reality that text is supposed to describe.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>Terraform plan showing "no changes" over real drift</h4>
-    <p><code>terraform plan</code> diffs your <code>.tf</code> files against its own state file — not against whatever is actually running in AWS. Someone edits a security group by hand in the console, or a referenced "latest" AMI gets rebuilt upstream, and Terraform can report a clean plan anyway, because nothing in the text it tracks actually changed.</p>
-    <div class="hf-scatter"><span>the state file, not the cloud, is the thing being compared</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>CloudFront still serving the old file from the same key</h4>
-    <p>You overwrite an object in S3 at the exact same key, but CloudFront keeps serving the cached response until its TTL expires or you run an explicit invalidation. The CDN's decision was never "is the origin content different" — it's "do I already have something cached for this key."</p>
-    <div class="hf-scatter"><span>same URL, new bytes, stale answer until told otherwise</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Angular OnPush missing a mutated array</h4>
-    <p>A component with <code>ChangeDetectionStrategy.OnPush</code> only re-renders when an <code>@Input</code>'s reference changes. Call <code>this.items.push(x)</code> instead of assigning a new array, and the reference is identical to before — Angular's change detector compares references, not contents, so the new item never appears on screen.</p>
-    <div class="hf-scatter"><span>the comparison was shallow on purpose, and the data changed somewhere it doesn't look</span></div>
-  </div>
-</div>
-
-<div class="hf-napkin">
-  <b>The whole page on a napkin:</b> Kubernetes is a reconciliation loop — pods, nodes, the control plane, kubectl, namespaces, and lifecycle phases, all built around "declare the desired state and K8s makes it real." <b>The new sentence this block adds: "desired state" means the literal text you handed it last, not whatever now exists in your registry — so kubectl apply is a genuine no-op whenever that text hasn't changed, no matter what you just pushed.</b>
 </div>
 
 <div class="rt-ctlbar">
@@ -216,16 +178,16 @@
 <span class="kw">metadata</span>:
   <span class="kw">name</span>: demo
   <span class="kw">labels</span>:
-    <span class="kw">app</span>: demo
+    <span class="kw">app</span>: demo   <span class="cm"># how a Service/Deployment finds this pod later</span>
 <span class="kw">spec</span>:
   <span class="kw">containers</span>:
   - <span class="kw">name</span>: app
-    <span class="kw">image</span>: <span class="str">myregistry/demo:1.0</span>
+    <span class="kw">image</span>: <span class="str">myregistry/demo:1.0</span>   <span class="cm"># the image this pod actually runs</span>
     <span class="kw">ports</span>:
-    - <span class="kw">containerPort</span>: 8080
+    - <span class="kw">containerPort</span>: 8080   <span class="cm"># documents what the app listens on — doesn't expose it by itself</span>
     <span class="kw">resources</span>:
-      <span class="kw">requests</span>: { <span class="kw">cpu</span>: <span class="str">"100m"</span>, <span class="kw">memory</span>: <span class="str">"256Mi"</span> }
-      <span class="kw">limits</span>:  { <span class="kw">cpu</span>: <span class="str">"500m"</span>, <span class="kw">memory</span>: <span class="str">"512Mi"</span> }</code></pre>
+      <span class="kw">requests</span>: { <span class="kw">cpu</span>: <span class="str">"100m"</span>, <span class="kw">memory</span>: <span class="str">"256Mi"</span> }   <span class="cm"># the guaranteed minimum — this is what the SCHEDULER uses to pick a node</span>
+      <span class="kw">limits</span>:  { <span class="kw">cpu</span>: <span class="str">"500m"</span>, <span class="kw">memory</span>: <span class="str">"512Mi"</span> }   <span class="cm"># the hard ceiling — over on memory = OOMKilled, over on CPU = just throttled</span></code></pre>
 <p class="note">100m CPU = 0.1 core. Always set both requests and limits — requests drive scheduling; limits prevent a bad pod from starving others.</p>
 </div>
 </section>

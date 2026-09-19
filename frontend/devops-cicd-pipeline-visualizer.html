@@ -57,13 +57,20 @@
     <div class="intro-ciam"><span class="tag">In this very repo:</span> the backend ships with <code>.github/workflows/deploy-backend-aws.yml</code> and <code>deploy-backend-azure.yml</code> — deliberately <code>workflow_dispatch</code>-only so they never fail-spam before cloud secrets exist. They build the multi-stage Docker image and push to AWS App Runner / Azure Container Apps. For a CIAM service the pipeline is also where you keep secrets <em>out</em> of code: client secrets and signing keys live in encrypted Actions/ADO secrets injected at deploy time, never committed — the same discipline as the <code>.env</code>-driven config in the Spring backend.</div>
   </div>
 
-  <p class="hf-deck">or, the environment variable you set in one job that quietly doesn't exist in the next</p>
+  <p class="hf-deck" data-shape="assembly">or, the environment variable you set in one job that quietly doesn't exist in the next</p>
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">Two jobs in the same workflow file read like two functions in the same program. They aren't — they're two different machines, and nothing you set on one exists on the other unless you say so on purpose.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">Your deploy job shipped an empty version string to production</div>
+<div class="hf-chain">
+  <span class="n">build job: echo "VERSION=1.4.1" &gt;&gt; $GITHUB_ENV</span><span class="a">→</span>
+  <span class="n">build job's runner VM is torn down — env, disk, process tree, all gone</span><span class="a">→</span>
+  <span class="n"><span class="hf-mark">deploy job starts once needs: build is satisfied</span></span><span class="a">→</span>
+  <span class="n">${{ env.VERSION }} resolves to an empty string on this brand-new runner</span><span class="a">→</span>
+  <span class="n">./deploy.sh runs with no argument, ships whatever was already checked out</span>
+</div>
+
+<div class="hf-card">
   <p>Your build job computes a version from <code>git describe --tags</code> and saves it with
   <code>echo "VERSION=1.4.1" >> $GITHUB_ENV</code>. A later step in that same job echoes
   <code>$VERSION</code> to confirm it worked — and it does, printing <code>1.4.1</code> right there in
@@ -77,25 +84,11 @@
   fail — the shell just expands <code>./deploy.sh</code> with no argument, and if <code>deploy.sh</code>
   quietly falls back to whatever's already checked out (or a "latest" tag) when its argument is blank,
   the workflow finishes green while shipping the wrong build.</p>
-  <div class="hf-scatter">
-    <span>workflow YAML syntax ✓</span>
-    <span><code>needs: build</code> correctly orders the two jobs ✓</span>
-    <span>the same-job echo really does confirm $VERSION works ✓</span>
-    <span>assuming that confirmation carries into a DIFFERENT job ⚠</span>
-  </div>
-  <p class="hf-foot"><code>needs: build</code> tells GitHub Actions <em>when</em> to run the deploy job. It says nothing at all about <em>what that job can see.</em></p>
+  <p><b>needs: build</b> is the stage in this chain that looks like it means "and inherits whatever build had" — it doesn't. It tells GitHub Actions <em>when</em> to run the deploy job. It says nothing at all about <em>what that job can see</em>.</p>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Hand values across jobs with outputs, never environment variables</div>
-  <div class="hf-ladder">
-    <b>Give the value-producing step an <code>id:</code></b>
-    <i>↓ e.g. <code>id: ver</code> — this is what lets anything reference <code>steps.ver.outputs.value</code> afterward</i>
-    <b>Declare <code>outputs:</code> on the job itself</b>
-    <i>↓ <code>outputs: { version: ${{ steps.ver.outputs.value }} }</code> — this is what actually makes the value visible OUTSIDE that job, to anything that lists <code>needs: build</code></i>
-    <b>Read it downstream as <code>needs.build.outputs.version</code></b>
-    <i>↓ this crosses the job boundary the way a plain env var or <code>$GITHUB_ENV</code> never does — GitHub Actions itself records the output as part of the workflow run, not the runner</i>
-  </div>
+<div class="hf-card">
+  <p><b>Hand values across jobs with outputs, never environment variables.</b> Give the value-producing step an <code>id:</code> — e.g. <code>id: ver</code> — so anything can reference <code>steps.ver.outputs.value</code> afterward. Declare <code>outputs:</code> on the job itself: <code>outputs: { version: ${{ steps.ver.outputs.value }} }</code> is what actually makes the value visible OUTSIDE that job, to anything that lists <code>needs: build</code>. Read it downstream as <code>needs.build.outputs.version</code> — this crosses the job boundary the way a plain env var or <code>$GITHUB_ENV</code> never does, because GitHub Actions itself records the output as part of the workflow run, not the runner.</p>
 </div>
 
 <div class="principle" style="text-align:left">
@@ -109,13 +102,6 @@
 <div class="hf-note"><code>needs: build</code> is a start signal, not a memory share. It's like phoning
 a coworker in a different building and telling them "go" — <b>they still can't see anything sitting
 on your desk just because you told them when to start.</b></div>
-
-<div class="hf-talk">
-  <div class="hf-bub"><span class="who">You</span><p>I set VERSION with $GITHUB_ENV in the build job, and I can see it if I echo it right after. Why is it empty in deploy?</p></div>
-  <div class="hf-bub right"><span class="who">$GITHUB_ENV</span><p>I only promised to carry that value through the REST of the job you wrote me in. I never left that runner, and I can't — it gets destroyed the moment your job ends.</p></div>
-  <div class="hf-bub"><span class="who">You</span><p>But deploy has "needs: build" right there in the YAML. Doesn't that mean it inherits whatever build had?</p></div>
-  <div class="hf-bub right"><span class="who">needs: build</span><p>I only tell the scheduler "wait for build to finish and succeed before starting deploy." I hand over precisely nothing build had lying around — that's a job <code>output</code>'s job, not mine.</p></div>
-</div>
 
 <div class="hf-kick">The mechanism</div>
 <p class="hf-say">Watch the exact same value, <code>1.4.1</code>, take two different paths out of the build job — one that dies at the runner's edge, one that survives it.</p>

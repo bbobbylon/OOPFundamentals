@@ -105,7 +105,7 @@
   </div>
 
   
-<p class="hf-deck">or, the one property line that decides whether your API can start before Ping does</p>
+<p class="hf-deck" data-shape="timelapse">or, the one property line that decides whether your API can start before Ping does</p>
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">The API was down for seven minutes after PingFederate came back healthy. Ping was not the reason.</p>
@@ -252,43 +252,41 @@ about your car at 3am.</div>
   cure is to remove the startup call rather than to make it forgiving.</p>
 </div>
 
-<div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">Every service eventually does something at boot it cannot survive failing.</p>
+<div class="hf-kick">The same failure, timestamped</div>
+<p class="hf-say">Kubernetes' real default backoff schedule for a crashing container: 10s, then double it each time, capped at 300s. Every rung below is a clock reading.</p>
 
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>Flyway migrating on startup against a database still electing a primary</h4>
-    <p>Same shape exactly: a boot-time call to a dependency that is also restarting, no degraded
-    mode, and a crash loop that outlives the failover. The general rule is worth stating plainly —
-    <b>if it can fail, it should not be the reason the process cannot exist.</b></p>
-    <div class="hf-scatter"><span>boot-time calls are boot-time risks</span></div>
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Pod boots</span>
+      <span class="go"><em>context reaches the JWT decoder bean</em> <span class="arrow">→</span> calls /.well-known/openid-configuration</span></div>
+    <div class="stt"><span class="nm">Discovery call</span>
+      <span class="go"><em>PingFederate unreachable</em> <span class="arrow">→</span> bean creation fails, the JVM exits, pod marked Error</span></div>
+    <div class="stt"><span class="nm">Backoff</span>
+      <span class="go"><em>Kubernetes doubles the wait</em> <span class="arrow">→</span> 10s → 20s → 40s → 80s → … capped at 300s, then back to Pod boots</span></div>
   </div>
-  <div class="hf-card hf-taped">
-    <h4>Readiness and liveness probes being different things for this reason</h4>
-    <p>Readiness says "do not send me traffic yet"; liveness says "kill me". A dependency that is
-    temporarily unavailable is a readiness concern, and a service that treats it as a liveness
-    concern removes its own ability to wait. Starting up and reporting unready is almost always the
-    better failure.</p>
-    <div class="hf-scatter"><span>not ready ≠ not alive</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>The thundering herd, and why correlated restarts are their own category</h4>
-    <p>Failures that would be harmless independently become an outage when they happen together — a
-    cache flush, a token expiry wave, a deploy that restarts every pod at once. It is why the
-    interesting question about any dependency is not "how often does it fail?" but "what else is
-    failing at the same moment?"</p>
-    <div class="hf-scatter"><span>test the restart, not just the request</span></div>
-  </div>
+  <p class="hf-annot">This is a cycle, not a one-time failure, because it re-runs every time the pod restarts — and the wait between attempts keeps growing even after the reason for failing has gone away.</p>
 </div>
 
-<div class="hf-napkin">
-  <b>The whole page on a napkin:</b> Angular gets a token from PingFederate, sends it to Spring as a
-  Bearer, and Spring validates it against Ping's JWKS — with the classic breakages being an issuer
-  mismatch, a CORS preflight blocked before the CORS filter, a redirect URI that does not match
-  character for character, and roles arriving in a custom claim your converter has to be told about.
-  The operational sentence to add: <b><code>issuer-uri</code> alone makes discovery a startup call,
-  so set <code>jwk-set-uri</code> too</b> — same validation, no boot-time dependency on the IdP.
+<div class="hf-card">
+  <div class="hf-ladder">
+    <b>T+0:00 — maintenance window restarts PingFederate and all twelve API pods at the same moment</b>
+    <i>↓ 3 seconds later, the context reaches the decoder bean</i>
+    <b>T+0:03 — first attempt: discovery call to Ping, which isn't listening yet. Bean creation fails, the JVM exits</b>
+    <i>↓ 10-second backoff</i>
+    <b>T+0:13 — second attempt, same call, same failure — Ping is still booting</b>
+    <i>↓ 20-second backoff</i>
+    <b>T+0:33 — third attempt, still fails</b>
+    <i>↓ 40-second backoff</i>
+    <b>T+1:13 — fourth attempt, still fails</b>
+    <i>↓ meanwhile, on a completely different clock</i>
+    <b>T+1:30 — PingFederate reports healthy. Nothing in the cluster is running that could notice — every pod is asleep inside its own backoff timer</b>
+    <i>↓ 80-second backoff</i>
+    <b>T+2:33 — fifth attempt finally lands, 63 seconds after Ping had already recovered</b>
+  </div>
+  <p class="hf-annot">Rung five is the one to stare at. Ping's own outage lasted 90 seconds — everything after T+1:30 is downtime the retry POLICY manufactured, not downtime the IdP caused. A single pod loses about a minute here; twelve pods on independent timers, mid-backoff at different points, is how a 90-second blip becomes the "seven minutes" this page's own incident opened with.</p>
 </div>
+
+<p class="hf-big">A backoff timer doesn't know the outage ended. It only knows when it's scheduled to check again.</p>
 
 <!-- ── HERO: animated Angular→Ping→Spring round-trip · happy path + the 3 classic failures · live per-hop inspector ── -->
   <div class="panel" style="border:1px solid var(--accent)">

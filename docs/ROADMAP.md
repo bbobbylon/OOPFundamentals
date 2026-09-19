@@ -902,7 +902,1199 @@ score-ranked list.
 
 A worked sample of the treatment is on `angular-standalone-migration-visualizer.html` (commit
 `b823165`): inline comments carrying the per-line meaning, plus an `.hf-arrow up` note tying
-the block to the idea underneath it. Awaiting Bobby's go-ahead on the volume.
+the block to the idea underneath it.
+
+**🚧 IN PROGRESS (2026-09-16) — Bobby gave the go-ahead on the full volume, sweep started.**
+The by-hand count above is now a real gate, `frontend/tmp_annotationcheck.mjs` — run
+`node frontend/tmp_annotationcheck.mjs` for the ranked worklist or `--page=foo.html` for one
+page's block-by-block detail. It is a static-source scan (not the rendered-DOM check this item
+originally called for — its own `WHAT IT CANNOT SEE` explains the gap and the one real
+false-positive class it fixes: a `<style>` block's own CSS comment mentioning the text
+`<pre>`, which had inflated `angular-custom-directives-visualizer.html`'s raw count before
+`<style>` blocks were stripped from the scan). Its numbers **do not match the ~353/~72 figures
+above 1:1** — it scans all 484 site pages rather than only the "97 at-bar" set the original
+by-hand pass scoped to, and a page's exact bare-count can shift by a block or two depending on
+which comment-span class it uses — but before any pages were touched this session it named the
+SAME six worst pages (plus `angular-forms-visualizer.html`, which slots in at #3 by this gate's
+count and was not in the original six), each within 1-2 blocks of the original figure, which is
+the cross-check that matters.
+
+**11 pages finished, 0 bare blocks remaining on each** (verified with
+`tmp_annotationcheck.mjs --page=`, plus a full read of every touched block by hand — the
+gate counts markup, not meaning):
+
+- `angular-standalone-migration-visualizer.html` — the worked-sample page above, finished (18→0)
+- `angular-material-cdk-visualizer.html` (16→0)
+- `angular-forms-visualizer.html` (16→0)
+- `angular-content-projection-visualizer.html` (15→0)
+- `config-environment-runtime-visualizer.html` (14→0)
+- `config-pom-xml-visualizer.html` (14→0, using the page's own `.xc`/`.xb`/`.xt`/`.xv` XML
+  token classes rather than `.cm` — matched the page's existing highlighting convention rather
+  than inventing a new one)
+- `angular-custom-directives-visualizer.html` (13→0, incl. the interactive playground's
+  duplicate quick-reference snippets, which render into a separate DOM node from the main
+  teaching blocks and so needed their own annotation)
+- `angular-form-array-visualizer.html` (12→0)
+- `angular-services-visualizer.html` (12→0)
+- `typescript-type-guards-visualizer.html` (12→0, using the page's `.cmt` class)
+- `typescript-decorators-visualizer.html` (10→0, using `.cmt`)
+
+Every finished page follows the worked sample's exact treatment: trailing `<span class="cm">`
+(or the page's own comment-span class) inline comments on the lines that carry meaning, plus
+one or more `.hf-arrow` notes synthesizing the block for the idea underneath it — never a new
+device. `devhub-syntax.js` was already included on all 11 (checked, not assumed).
+
+**Batch 2 (2026-09-16), same session, five more pages, 0 bare remaining on each** — the
+coordinator's explicit standing rule going forward: never sacrifice per-page annotation quality
+to hit a page count, and stop whenever quality can no longer be maintained rather than aiming
+for a fixed batch size. Verified with `tmp_annotationcheck.mjs --page=` plus a full by-hand read
+of every touched block, same as batch 1:
+
+- `angular-routing-advanced-visualizer.html` (13→0) — also flagged a genuine pre-existing bug in
+  the page's own sample code via an `.hf-arrow` note rather than silently fixing or glossing over
+  it: the class-based `AuthGuard.canActivate()` reads `this.auth.isLoggedIn` (no call parens)
+  against a signal-based `AuthService.isLoggedIn` accessor, so the check is always truthy.
+- `config-app-config-providers-visualizer.html` (12→0)
+- `angular-template-forms-visualizer.html` (11→0)
+- `angular-directives-visualizer.html` (10→0)
+- `angular-http-visualizer.html` (10→0) — also fixed a pre-existing malformed-HTML comment
+  (`<ty>HttpClient<ty>` instead of `<span class="ty">HttpClient</span>`) found while annotating
+  the exact line it sat on.
+
+Same treatment as batch 1 throughout: trailing `<span class="cm">` (this set's own comment
+class in every case) inline comments on the lines that carry meaning, plus `.hf-arrow` notes
+synthesizing each block for the idea underneath it — no new device invented. All five passed the
+full gate suite (`tmp_vcheck`, `tmp_doccheck`, `tmp_assetcheck` against
+`origin/claude/multi-repo-continuation-l6xwuq`, `tmp_codecheck`, `tmp_smoke` — both per-page and
+a full 537-page sweep before pushing — and `tmp_contrast --theme=cream`/`--theme=dark`).
+
+**A real gate bug was found and fixed this batch, too**: `tmp_annotationcheck.mjs`'s
+`stripStyleBlocks` replaced an entire `<style>` block with a single line of spaces, collapsing
+its internal newlines and throwing off every `--page=` line number reported for content after
+it in the file (sitewide bare/substantial totals were unaffected — only the reported line
+numbers were wrong). Fixed to blank every character except newlines, so line numbers after a
+`<style>` block now match the real file. See the fix's own doc comment in
+`frontend/tmp_annotationcheck.mjs` for detail.
+
+**Sitewide count after batch 2** (via `tmp_annotationcheck.mjs`, whole site):
+**489 bare blocks across 134 pages** (down from the batch-1 baseline of 545/139 — 56 blocks
+fixed across these 5 pages, matching their individual before-counts of 13+12+11+10+10=56
+exactly).
+
+**Batch 3 (2026-09-16), same session — the user approved auto-continuing the sweep batch by
+batch without a go-ahead each time; per-page quality self-limiting stays the permanent rule.**
+Five more pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=`
+plus a full by-hand read of every touched block:
+
+- `angular-rxjs-visualizer.html` (11→0)
+- `angular-control-flow-visualizer.html` (10→0)
+- `angular-functional-guards-visualizer.html` (10→0)
+- `config-tsconfig-advanced-visualizer.html` (10→0) — this page's existing `.bad`/`.good` inline
+  annotation spans (e.g. `// Error: not initialized`) look like comments but don't satisfy the
+  gate: its comment-density check only counts the page's own `.cm`/`.cmt`/`.xc` classes plus a
+  marker regex that requires NO space right after `//`/`<!--` — `// Error: not initialized` (space
+  after `//`) doesn't match either path. Added real `.cm`-classed trailing comments alongside the
+  existing `.bad`/`.good` spans rather than reformatting them, since those spans are a distinct,
+  deliberate correct/incorrect device on this page, not this project's comment convention.
+- `angular-testing-visualizer.html` (9→0) — every single substantial block on the page was bare
+  (9/9); the largest blocks ran 37–50 lines of Jasmine/TestBed/Playwright code, so density-25%
+  comments were added at the API-call level (what each TestBed/fixture/httpMock/spy call actually
+  does and why) rather than truly every line, matching the density used elsewhere on the site
+  (28–58% per block) rather than over-commenting boilerplate braces.
+
+Same treatment as batches 1–2 throughout: trailing inline comments in each page's own comment
+class plus `.hf-arrow` notes synthesizing a block for the idea underneath it — no new device
+invented. All five passed the full gate suite (`tmp_vcheck`, `tmp_doccheck`, `tmp_assetcheck`
+against `origin/claude/multi-repo-continuation-l6xwuq`, `tmp_codecheck`, `tmp_smoke` — both
+per-page and a full 537-page sweep before pushing — and `tmp_contrast --theme=cream`/`--theme=dark`).
+Noted but out of scope (pre-existing, confirmed via `git stash` to predate this batch, unrelated
+to the annotation edits): `angular-rxjs-visualizer.html` has a low-contrast marble bead
+(`.marble-track div.bead.err`, ~1.2:1 cream / ~1.62:1 dark) — flagged here for a future contrast
+pass rather than fixed in an annotation-only batch.
+
+**Sitewide count after batch 3** (via `tmp_annotationcheck.mjs`, whole site):
+**439 bare blocks across 129 pages** (50 blocks fixed across these 5 pages: 11+10+10+10+9=50,
+matching exactly).
+
+**Batch 4 (2026-09-16), same session, auto-continued per the standing approval** — five more
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `angular-change-detection-visualizer.html` (9→0)
+- `angular-cli-project-visualizer.html` (9→0, incl. a 60-line annotated `angular.json` skeleton)
+- `angular-routing-visualizer.html` (9→0)
+- `angular-custom-form-controls-visualizer.html` (9→0) — five full `ControlValueAccessor`
+  examples (star rating, phone input, chip list, sync/async validators, the `NgControl`
+  self-injection pattern). Large page (354 lines across the 9 bare blocks); comments were added
+  at the site's typical 25–45% density rather than every single line, matching the depth used
+  on other big-block pages this sweep (angular-testing, angular-http).
+- `config-app-config-visualizer.html` (9→0)
+
+Same treatment as batches 1–3 throughout: trailing inline comments in each page's own `.cm`
+comment class plus `.hf-arrow` notes synthesizing a block for the idea underneath — no new
+device invented. All five passed the full gate suite (`tmp_vcheck`, `tmp_doccheck`,
+`tmp_assetcheck` against `origin/claude/multi-repo-continuation-l6xwuq`, `tmp_codecheck`,
+`tmp_smoke` — both per-page and a full 537-page sweep before pushing — and
+`tmp_contrast --theme=cream`/`--theme=dark`). Two pre-existing text-clipping notices
+(`angular-routing-visualizer.html`'s `li +6px`, `angular-custom-form-controls-visualizer.html`'s
+`div.intro-head +107px`) were confirmed via `git stash` to predate this batch — not introduced
+by these edits, left as-is (out of scope for an annotation-only pass).
+
+**Sitewide count after batch 4** (via `tmp_annotationcheck.mjs`, whole site):
+**394 bare blocks across 124 pages** (45 blocks fixed across these 5 pages: 9+9+9+9+9=45,
+matching exactly).
+
+**Batch 5 (2026-09-16), same session, auto-continued per the standing approval** — five more
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `typescript-fundamentals-visualizer.html` (9→0) — type guards, assertion functions,
+  discriminated unions, exhaustiveness checking, generics, declaration files.
+- `angular-animations-visualizer.html` (8→0) — fade/state/transition, enter/leave, stagger,
+  keyframes, route transitions, animation events. One block's added comments sat inside a JS
+  template-literal string as raw HTML comments outside any `class="cm"` span, so the gate's
+  density check couldn't see them (same class of gap batch 4 hit on config-tsconfig-advanced's
+  `.bad`/`.good` spans) — fixed by wrapping them in `<span class="cm">` to match the page's own
+  convention.
+- `solid-visualizer.html` (8→0) — all five SOLID principle before/after pairs.
+- `angular-v21-visualizer.html` (8→0) — `resource()`/`rxResource()`, `linkedSignal()`,
+  incremental hydration, signal-based forms, `effect()` cleanup callbacks, `allowSignalWrites`
+  stabilization.
+- `angular-viewchild-visualizer.html` (8→0) — `@ViewChildren`/`QueryList`, `@ContentChild`/
+  `@ContentChildren`, the four signal-based query functions (Angular 17+), and four real-world
+  patterns (focus-on-open, calling a child method, measuring DOM, reading a projected form).
+
+Same treatment as batches 1–4 throughout: trailing inline comments in each page's own comment
+class plus `.hf-arrow` notes where useful, never a new device invented. All five passed the full
+gate suite (`tmp_vcheck`, `tmp_doccheck`, `tmp_assetcheck` against
+`origin/claude/multi-repo-continuation-l6xwuq`, `tmp_codecheck`, `tmp_smoke` — both per-page and
+a full 537-page sweep before pushing — and `tmp_contrast --theme=cream`/`--theme=dark`). One
+comment in `typescript-fundamentals-visualizer.html` initially tripped `tmp_codecheck.mjs`'s
+XMARK counter-example heuristic (the same `"Error —"` pattern batch 2's angular-http page hit)
+and was reworded before committing.
+
+**Sitewide count after batch 5** (via `tmp_annotationcheck.mjs`, whole site):
+**353 bare blocks across 119 pages** (41 blocks fixed across these 5 pages: 9+8+8+8+8=41,
+matching exactly).
+
+**Batch 6 (2026-09-16), same session, auto-continued per the standing approval** — five more
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `typescript-mapped-types-visualizer.html` (8→0) — syntax/keyof/T[K], readonly/? modifiers,
+  stripping with `-`, key remapping with `as`, key filtering via `never`, and five practical
+  mapped types (NonNullableFields, PickByType, Setters, form-error fields, reducer action map).
+- `angular-interceptors-advanced-visualizer.html` (7→0, every substantial block on the page was
+  bare) — class-based vs functional comparison, `HttpContextToken`, the token-refresh-with-
+  `shareReplay` pattern, a cache interceptor, exponential-backoff retry, request deduplication.
+- `angular-dynamic-components-visualizer.html` (7→0) — the full `createComponent()` workflow,
+  `NgComponentOutlet`, scoped environment injectors, content projection via
+  `projectableNodes`, and three real-world patterns (modal/dialog service, toast service, tabs).
+- `angular-rxjs-custom-operators-visualizer.html` (7→0) — the universal pipeable-operator
+  template, composing with `pipe()`, and the `debug`/`tapOnce`/`retryWithDelay`/
+  `distinctUntilKeysChanged`/`throttleMap` custom operators.
+- `angular-view-encapsulation-visualizer.html` (7→0) — Emulated/`None`/`ShadowDom` compared,
+  `:host`/`:host()`/`:host-context()`, `::ng-deep`, the `host` property, and
+  `@HostBinding`/`@HostListener`.
+
+Same treatment as batches 1–5 throughout: trailing inline comments in each page's own comment
+class, never a new device invented. All five passed the full gate suite (`tmp_vcheck`,
+`tmp_doccheck`, `tmp_assetcheck` against `origin/claude/multi-repo-continuation-l6xwuq`,
+`tmp_codecheck`, `tmp_smoke` — both per-page and a full 537-page sweep before pushing — and
+`tmp_contrast --theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 6** (via `tmp_annotationcheck.mjs`, whole site):
+**317 bare blocks across 114 pages** (36 blocks fixed across these 5 pages: 8+7+7+7+7=36,
+matching exactly). **114 pages with a bare count remain** for a future pass — worst next:
+`typescript-template-literal-types` 7/14 · `config-angular-json` 7/16 · `typescript-generics`
+7/16 · `angular-lifecycle` 7/17 · `angular-workspace-libraries` 7/18 · `design-patterns` 6/7 ·
+`angular-ngrx` 6/8 · `angular-ngrx-signal-store` 6/9 · `angular-pagination-deep` 6/10 ·
+`angular-performance` 6/10. Re-run `node frontend/tmp_annotationcheck.mjs` for the current top
+of the list before picking up where this pass left off — it will have moved.
+
+Not started this pass, and why: the remaining page count (114) at this treatment's real
+per-block cost (each line needs an actually-true explanation, not a template) is substantially
+more authoring than one session covers; each batch (1–6) prioritized worst-first by bare count
+and stopped once per-page quality could no longer be maintained at the same depth, per the
+standing rule above — not at a fixed page count. **This remains a standing auto-continuing
+sweep** (per the user's 2026-09-16 approval): further batches proceed on the same worst-first,
+same-rules, same-gates basis without a per-batch go-ahead, reporting back only at a natural
+checkpoint or when a decision needs the user.
+
+**Batch 7 (2026-09-16), same session, auto-continued per the standing approval** — eight
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `typescript-template-literal-types-visualizer.html` (7→0) — mapped-type key remapping
+  (`Getters`, prefixed Redux/NgRx action types), the `RouteParams` recursive-`infer` worked
+  example, `SnakeToCamel`, `Split`, `Join`, and a type-safe SQL-fragment `SelectStmt` sketch.
+- `config-angular-json-visualizer.html` (7→0, largest single block on the page was 81 lines) —
+  the full `angular.json` anatomy (build/serve/extract-i18n/test/lint targets), a
+  `proxy.conf.json`, `environment.ts`/`environment.prod.ts`, `fileReplacements`, using
+  environments in code, and the `scripts` array.
+- `typescript-generics-visualizer.html` (7→0) — multi-param generic functions (`pair`/`zip`),
+  a default type parameter (`ApiResponse<T = unknown>`), a default referencing an earlier
+  param (`Result<T, E = Error>`), a generic `Repository` interface + `Dict`/`Pair` aliases,
+  a fully-typed `EventBus`, `groupBy`, and `once()`.
+- `angular-lifecycle-visualizer.html` (7→0) — constructor-vs-`ngOnInit` DI timing, the
+  `@ViewChild` wrong/right timing pair, the memory-leak fix trio (manual unsubscribe,
+  `takeUntil`, `takeUntilDestroyed`/`DestroyRef`), `afterNextRender()`, and the
+  `ExpressionChangedAfterItHasBeenCheckedError` `setTimeout`/`detectChanges` fix.
+- `angular-workspace-libraries-visualizer.html` (7→0) — `tsconfig.json` path aliases, using a
+  workspace library like an npm package, and the tree-explorer's `angular.json`/
+  `package.json`/project-tree/`ng-package.json`/`my-lib.module.ts` panels.
+- `design-patterns-visualizer.html` (6→0) — Singleton (classic + enum), Factory, Builder
+  (fluent chain + skeleton), Observer, and Strategy (classes + lambda-as-strategy).
+- `angular-ngrx-visualizer.html` (6→0) — the full classic-NgRx todo feature (actions, reducer,
+  selectors, effects, store wiring, component dispatch) plus its `@ngrx/signals` SignalStore
+  rewrite.
+- `angular-ngrx-signal-store-visualizer.html` (6→0) — the traditional-NgRx-vs-SignalStore
+  counter comparison, `withState`/`withComputed`/`withMethods` core-API examples, and the
+  69-line `withEntities()` CRUD `TodoStore` worked example.
+
+Two bugs caught before shipping this batch (both by the gates, not by luck):
+`angular-workspace-libraries-visualizer.html` had two added comments use literal backticks
+(`` `ng run ...` ``, `` `npm start` ``) inside a JS template-literal string (the tree-explorer's
+`content:` values) — `tmp_vcheck.mjs` caught the resulting broken inline-`<script>` parse
+immediately, fixed by switching those two comments to double-quoted mentions instead of
+backticks. `design-patterns-visualizer.html` had an edit drop the closing `</pre>` tag off the
+Builder fluent-chain block, silently merging it into the next block's line count —
+`tmp_annotationcheck.mjs`'s substantial-block count dropping from 7 to 6 was the tell; fixed by
+restoring the tag and re-verifying.
+
+Same treatment as batches 1–6 throughout: trailing inline comments in each page's own comment
+class, never a new device invented. All eight passed the full gate suite (`tmp_vcheck`,
+`tmp_doccheck`, `tmp_assetcheck` against `origin/claude/multi-repo-continuation-l6xwuq`,
+`tmp_codecheck`, `tmp_smoke` — both per-page and a full 537-page sweep before pushing — and
+`tmp_contrast --theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 7** (via `tmp_annotationcheck.mjs`, whole site):
+**264 bare blocks across 106 pages** (53 blocks fixed across these 8 pages: 7+7+7+7+7+6+6+6=53,
+matching exactly — cross-checked against `--top=15` after every single page, not just at the
+end). **106 pages with a bare count remain** for a future pass — worst next:
+`angular-pagination-deep` 6/10 · `angular-performance` 6/10 · `angular-di-advanced` 6/11 ·
+`angular-communication` 6/12 · `typescript-functions` 6/12 · `angular-events-deep` 6/13 ·
+`typescript-narrowing` 6/15 · `typescript-async-patterns` 6/16 · `angular-state-patterns` 5/8 ·
+`angular-pipes` 5/10. Re-run `node frontend/tmp_annotationcheck.mjs` for the current top of the
+list before picking up where this pass left off — it will have moved.
+
+Not started this pass either, same reason as batch 6: the remaining page count (106) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead.
+
+**Batch 8 (2026-09-16), same session, auto-continued per the standing approval** — five
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `angular-pagination-deep-visualizer.html` (6→0) — client-side vs server-side pagination
+  components, the `pageNumbers()` ellipsis-gap algorithm, the pager template, the RxJS
+  `page$`/`size$` declarative paging pattern, and the `IntersectionObserver` infinite-scroll
+  component.
+- `angular-performance-visualizer.html` (6→0) — `angular.json` bundle budgets, standalone
+  lazy-loading routes (`loadComponent`/`loadChildren`), `PreloadAllModules` wiring,
+  `NgOptimizedImage`, the `trackBy` `$index`-vs-`id` comparison, the pure-pipe-vs-method-call-
+  vs-computed-signal trio, and the Web Worker round trip.
+- `angular-di-advanced-visualizer.html` (6→0) — the DI lookup pseudo-code walk, the full
+  `InjectionToken` worked example (basic/factory/complex-type tokens), `useFactory` with
+  `deps`, `@Self`/`@SkipSelf`/`@Host` decorators, built-in `PLATFORM_ID`/`DOCUMENT` tokens,
+  and old-style constructor injection.
+- `angular-communication-visualizer.html` (6→0) — the full parent/child
+  `@Input()`/`@Output()` worked example (both components), the `[(x)]`/`xChange` two-way
+  custom-output pattern, the shared-service sibling "chat" pattern, content projection
+  (`<ng-content select=...>`), and `TemplateRef`/`*ngTemplateOutlet` with a generic
+  `ListComponent<T>`.
+- `typescript-functions-visualizer.html` (6→0) — `withLog<A, R>()` generic rest-arg
+  forwarding, a hybrid call-signature `Counter` type, construct-signature `Ctor<T>`, a typed
+  `this` parameter, polymorphic `this` return type on a class, and predicate/assertion return
+  functions (`isString`/`assertString`).
+
+One bug caught before shipping this batch: an edit to `angular-communication-visualizer.html`'s
+`TemplateRef`/`ngTemplateOutlet` block needed to split a single JS template-literal `.str` span
+into three separate spans (to interleave `.cm` comments between lines of the template string) —
+verified the open/close tag count stayed balanced by hand and via a clean `tmp_vcheck.mjs`
+before moving on, since an unbalanced split there would silently mis-color the rest of the block
+without throwing anything.
+
+Same treatment as batches 1–7 throughout: trailing inline comments in each page's own comment
+class, never a new device invented. All five passed the full gate suite (`tmp_vcheck`,
+`tmp_doccheck`, `tmp_assetcheck` against `origin/claude/multi-repo-continuation-l6xwuq`,
+`tmp_codecheck`, `tmp_smoke` — both per-page and a full 537-page sweep before pushing — and
+`tmp_contrast --theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 8** (via `tmp_annotationcheck.mjs`, whole site):
+**234 bare blocks across 101 pages** (30 blocks fixed across these 5 pages: 6+6+6+6+6=30,
+matching exactly — cross-checked against `--top=15` after every single page). **101 pages with
+a bare count remain** for a future pass — worst next: `angular-events-deep` 6/13 ·
+`typescript-narrowing` 6/15 · `typescript-async-patterns` 6/16 · `angular-state-patterns` 5/8 ·
+`angular-pipes` 5/10 · `angular-pwa` 5/10 · `typescript-utility-types` 5/12 ·
+`typescript-type-patterns` 5/13 · `angular-components` 5/14 · `angular-signals-deep` 5/14.
+Re-run `node frontend/tmp_annotationcheck.mjs` for the current top of the list before picking
+up where this pass left off — it will have moved.
+
+Not started this pass either, same reason as batch 7: the remaining page count (101) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead.
+
+**Batch 9 (2026-09-16), same session, auto-continued per the standing approval** — five
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `angular-events-deep-visualizer.html` (6→0) — the EditorComponent binding-target class,
+  passing extra args alongside `$event`, the three `@HostListener` examples (global keydown,
+  `window:scroll`, host click), a click-outside directive, the classic
+  `@Output()`/`EventEmitter` child→parent rating component, and the RxJS debounced-search
+  pattern.
+- `typescript-narrowing-visualizer.html` (6→0) — the `in` operator (Fish|Bird), a
+  discriminated-union `Shape`/`area()`, a named user-defined type guard (`isUser`), an
+  assertion function (`assertString`), a plain-truthiness assertion
+  (`assert`/`head<T>()`), and `never`-based exhaustiveness checking (`assertNever`).
+- `typescript-async-patterns-visualizer.html` (6→0) — `Promise.race` `withTimeout()`, the
+  no-throw `Result<T,E>` `safeGet()` pattern, `retry()` with exponential backoff, an
+  `AsyncGenerator`-backed `fromEvent()` plus a `ReadableStream` reader loop, typed errors in
+  `catch` (`unknown` → `instanceof` → custom `ApiError` guard), and `mapWithLimit()` bounded
+  concurrency.
+- `angular-state-patterns-visualizer.html` (5→0) — the same todo-app state modeled five ways:
+  RxJS `BehaviorSubject` service, plain signal-based store, classic NgRx (actions/reducer/
+  selectors/effects), `ComponentStore`, and `@ngrx/signals` SignalStore — each a large,
+  complete worked example (42–51 lines).
+- `angular-pipes-visualizer.html` (5→0) — manual subscribe/unsubscribe vs the async pipe, the
+  `as user` single-subscription trick (`*ngIf` and the new `@if` control flow), the
+  `keyvalue` pipe over a plain object and over a `Map` with a custom comparator, and a
+  standalone pipe using `inject()` for DI.
+
+Same treatment as batches 1–8 throughout: trailing inline comments in each page's own comment
+class, never a new device invented. All five passed the full gate suite (`tmp_vcheck`,
+`tmp_doccheck`, `tmp_assetcheck` against `origin/claude/multi-repo-continuation-l6xwuq`,
+`tmp_codecheck`, `tmp_smoke` — both per-page and a full 537-page sweep before pushing — and
+`tmp_contrast --theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 9** (via `tmp_annotationcheck.mjs`, whole site):
+**206 bare blocks across 96 pages** (28 blocks fixed across these 5 pages: 6+6+6+5+5=28,
+matching exactly — cross-checked against `--top=15` after every single page). **96 pages with
+a bare count remain** for a future pass — worst next: `angular-pwa` 5/10 ·
+`typescript-utility-types` 5/12 · `typescript-type-patterns` 5/13 · `angular-components` 5/14 ·
+`angular-signals-deep` 5/14 · `config-tsconfig` 5/14 · `config-angular-json-advanced` 5/19 ·
+`config-package-json-advanced` 5/19 · `angular-route-guards-deep` 4/4 ·
+`spring-boot-api-design-deep` 4/4. Re-run `node frontend/tmp_annotationcheck.mjs` for the
+current top of the list before picking up where this pass left off — it will have moved.
+
+Not started this pass either, same reason as batch 8: the remaining page count (96) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide progress
+across this session's batches 7–9: 317 → 206 bare blocks (111 fixed), 114 → 96 pages with a
+bare count remaining.
+
+**Batch 10 (2026-09-16), same session, auto-continued per the standing approval** — five
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `angular-pwa-visualizer.html` (5→0) — `provideServiceWorker()` registration wiring,
+  `manifest.webmanifest`, `AppUpdateService`'s `versionUpdates`/`SwUpdate` detect-and-prompt
+  flow, a manual `checkForUpdate()` call, and `PushService`'s subscribe/listen `SwPush`
+  pattern.
+- `typescript-utility-types-visualizer.html` (5→0) — `Required<T>`, `Parameters<F>` + a
+  generic `withLog()` wrapper, `ConstructorParameters<C>`/`InstanceType<C>` + a generic
+  factory function, `ReturnType`+`Awaited` chained to derive a resolved async return shape,
+  and a hand-rolled `PickByValue<T, V>`.
+- `typescript-type-patterns-visualizer.html` (5→0) — branded types (`UserId`/`PostId` + the
+  generic `Brand<T,B>` helper), the phantom-type `QueryBuilder` type-state builder, the core
+  `Result<T,E>` discriminated union, railway-oriented Result chaining (`andThen`/`mapOk`/
+  `ResultChain`), and a strongly-typed generic `TypedEmitter<Events>`.
+- `angular-components-visualizer.html` (5→0) — `counter.component.css` (scoped `:host`
+  styles), `app.component.ts` connecting a child via selector, `stepper.component.ts`'s
+  `model()` two-way binding, the NgModule-vs-standalone comparison pair, and `main.ts`'s
+  `bootstrapApplication()` entry point.
+- `angular-signals-deep-visualizer.html` (5→0) — `effect()` tracked-vs-untracked signal
+  reads, the advanced object-form `linkedSignal()`, `rxResource()` for RxJS-based loaders,
+  `afterNextRender()`/`afterRender()`, and a hand-rolled `CartStore` SignalStore-equivalent
+  service.
+
+Two out-of-scope pre-existing `tmp_smoke.mjs` text-clip notices (on `typescript-utility-types`
+and `angular-components`) were confirmed via `git stash` to predate these edits, not caused by
+them. One bug caught before shipping batch 10: an added comment on
+`angular-signals-deep-visualizer.html`'s `rxResource` block read "no async/await needed
+here", which trips `tmp_codecheck.mjs`'s C#-exclusion heuristic
+(`/\bawait\s+\w+/`, meant to rule out C# snippets) and silently dropped the whole block from
+TypeScript classification (671→670 blocks, 481→480 TS sitewide) with **no error reported** —
+caught only by re-running `tmp_codecheck.mjs` and diffing against a `git stash`ed baseline,
+fixed by rewording to "no async keyword" so "await" is never followed by whitespace + a word.
+**Lesson for future batches: a teaching comment that happens to use the word "await" in
+prose can silently defeat this gate's language detection — reread `tmp_codecheck.mjs`'s
+`NOT_CODE` list before writing a comment that mentions async/await, Console.Write, `var x =
+new`, or any of its other C#-exclusion phrases near a TS block.**
+
+Same treatment as batches 1–9 throughout: trailing inline comments in each page's own comment
+class, never a new device invented. All five passed the full gate suite (`tmp_vcheck`,
+`tmp_doccheck`, `tmp_assetcheck` against `origin/claude/multi-repo-continuation-l6xwuq`,
+`tmp_codecheck`, `tmp_smoke` — both per-page and a full 537-page sweep before pushing — and
+`tmp_contrast --theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 10** (via `tmp_annotationcheck.mjs`, whole site):
+**181 bare blocks across 91 pages** (25 blocks fixed across these 5 pages: 5+5+5+5+5=25,
+matching exactly — cross-checked against `--top=15` after every single page). **91 pages with
+a bare count remain** for a future pass — worst next: `config-tsconfig` 5/14 ·
+`config-angular-json-advanced` 5/19 · `config-package-json-advanced` 5/19 ·
+`angular-route-guards-deep` 4/4 · `spring-boot-api-design-deep` 4/4 ·
+`spring-boot-http-exchange-deep` 4/4 · `angular-ssr-hydration` 4/6 ·
+`angular-forms-data-deep` 4/8 · `angular-vitest` 4/8 · `spring-boot-di-ioc` 4/8. Re-run
+`node frontend/tmp_annotationcheck.mjs` for the current top of the list before picking up
+where this pass left off — it will have moved.
+
+Not started this pass either, same reason as batch 9: the remaining page count (91) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide progress
+across this session's batches 7–10: 317 → 181 bare blocks (136 fixed), 114 → 91 pages with a
+bare count remaining.
+
+**Batch 11 (2026-09-16), same session, auto-continued per the standing approval** — seven
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `config-tsconfig-visualizer.html` (5→0) — the strict-flag shorthand, `paths`/`baseUrl`
+  aliasing, a root solution-style `tsconfig.json`, an app `tsconfig.json` referencing a
+  library project, and an Angular shared-base `tsconfig.json`.
+- `config-angular-json-advanced-visualizer.html` (5→0) — the `build`/`configurations`
+  architect-target structure, a `fileReplacements` entry, `environment.ts`,
+  `environment.prod.ts`, and a multi-configuration staging setup.
+- `config-package-json-advanced-visualizer.html` (5→0) — `$npm_package_version` in a script,
+  conditional `exports`, sub-path `exports`, `overrides` for a transitive dependency, and
+  `package-lock.json`'s v3 anatomy.
+- `angular-route-guards-deep-visualizer.html` (4→0) — the `authGuard`/`roleGuard` functional
+  `CanActivateFn`s, the `canActivate`/`canMatch` routes array, the `HasRoleDirective`
+  structural directive, and the `@if` vs `*appHasRole` template-usage comparison.
+- `spring-boot-api-design-deep-visualizer.html` (4→0) — the paginated `@GetMapping` endpoint,
+  the `Page<T>` JSON response envelope, the RFC 7807 `ApiExceptionHandler`, and the
+  `ProblemDetail` JSON response body.
+- `spring-boot-http-exchange-deep-visualizer.html` (4→0) — imperative `RestClient`-by-hand vs
+  the declarative `@HttpExchange` interface, the `@Bean` proxy-wiring method, the
+  on-behalf-of identity block, and the client-credentials identity block.
+- `angular-ssr-hydration-visualizer.html` (4→0) — `app.config.ts`'s hydration providers, the
+  `server.ts` Express entry point, the manual `TransferState` API, and the per-route
+  prerendering config (`app.routes.server.ts`).
+
+No repeat of batch 10's "await"-phrasing `tmp_codecheck.mjs` false-positive: every added
+comment was checked by eye against the `NOT_CODE` C#-exclusion phrases before writing, and
+`tmp_codecheck.mjs`'s 671-block/481-TypeScript baseline was re-confirmed unchanged after
+every single page in this batch, not just at batch close.
+
+Same treatment as batches 1–10 throughout: trailing inline comments in each page's own
+comment class (`.cm` on all seven pages), never a new device invented. All seven passed the
+full gate suite (`tmp_vcheck`, `tmp_doccheck`, `tmp_assetcheck` against
+`origin/claude/multi-repo-continuation-l6xwuq`, `tmp_codecheck`, `tmp_smoke` — both per-page
+and a full 537-page sweep before pushing — and `tmp_contrast --theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 11** (via `tmp_annotationcheck.mjs`, whole site):
+**150 bare blocks across 84 pages** (31 blocks fixed across these 7 pages: 5+5+5+4+4+4+4=31,
+matching exactly — cross-checked against `--top=15` after every single page). **84 pages with
+a bare count remain** for a future pass — worst next: `angular-forms-data-deep` 4/8 ·
+`angular-vitest` 4/8 · `spring-boot-di-ioc` 4/8 · `typescript-why` 4/9 ·
+`typescript-modules` 4/10 · `typescript-arrays-tuples` 4/13 · `typescript-classes` 4/13 ·
+`big-o` 3/3 · `bst` 3/3 · `head-first-state` 3/4. Re-run `node frontend/tmp_annotationcheck.mjs`
+for the current top of the list before picking up where this pass left off — it will have
+moved.
+
+Not started this pass either, same reason as batch 10: the remaining page count (84) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide progress
+across this session's batches 7–11: 317 → 150 bare blocks (167 fixed), 114 → 84 pages with a
+bare count remaining.
+
+**Batch 12 (2026-09-16), same session, auto-continued per the standing approval** — five
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `angular-forms-data-deep-visualizer.html` (4→0) — reactive-forms validation + submit
+  (`nonNullable.group`, the `showError` helper, `onSubmit`), the `FormData` file-upload
+  builder, `HttpClient` upload-progress tracking (`reportProgress`/`observe: 'events'`), and
+  file-input validation + `FileReader` preview.
+- `angular-vitest-visualizer.html` (4→0) — `vi.mock()` whole-module replacement, a `TestBed`
+  component test running under Vitest, `it.each` table-driven tests, and the
+  `angular.json` `unit-test` builder config.
+- `spring-boot-di-ioc-visualizer.html` (4→0) — hand-wired vs constructor-injected
+  `OrderService`, `@Configuration`/`@Bean` factory methods (`RestClient`, `ObjectMapper`),
+  and the recommended constructor-injection style.
+- `typescript-why-visualizer.html` (4→0) — plain JS vs typed `greet()` signatures, the
+  `User` interface feeding type erasure, and structural typing's `Point`/`CartesianPoint`
+  example.
+- `typescript-modules-visualizer.html` (4→0) — `verbatimModuleSyntax`'s `tsconfig.json`
+  flag, bundler-vs-Node-ESM `moduleResolution` configs, a `baseUrl`/`paths` alias
+  `tsconfig.json`, and ambient `declare module` declarations.
+
+No repeat of batch 10's "await"-phrasing `tmp_codecheck.mjs` false-positive, and no repeat
+of any other `NOT_CODE` C#-exclusion trigger: every added comment on the two
+TypeScript-heavy pages (`typescript-why`, `typescript-modules`) was checked by eye before
+writing, and the 671-block/481-TypeScript baseline was re-confirmed unchanged after every
+single page, not just at batch close.
+
+Same treatment as batches 1–11 throughout: trailing inline comments in each page's own
+comment class (`.cm` on three pages, `.cmt` on the two TypeScript pages), never a new device
+invented. All five passed the full gate suite (`tmp_vcheck`, `tmp_doccheck`, `tmp_assetcheck`
+against `origin/claude/multi-repo-continuation-l6xwuq`, `tmp_codecheck`, `tmp_smoke` — both
+per-page and a full 537-page sweep before pushing — and `tmp_contrast
+--theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 12** (via `tmp_annotationcheck.mjs`, whole site):
+**130 bare blocks across 79 pages** (20 blocks fixed across these 5 pages: 4+4+4+4+4=20,
+matching exactly — cross-checked against `--top=15` after every single page). **79 pages with
+a bare count remain** for a future pass — worst next: `typescript-arrays-tuples` 4/13 ·
+`typescript-classes` 4/13 · `big-o` 3/3 · `bst` 3/3 · `head-first-state` 3/4 ·
+`spring-boot-async-threads-deep` 3/5 · `spring-boot-idm-oauth2-deep` 3/5 ·
+`angular-lazy-loading` 3/6 · `head-first-command` 3/6 · `angular-zoneless-mode` 3/9.
+Re-run `node frontend/tmp_annotationcheck.mjs` for the current top of the list before picking
+up where this pass left off — it will have moved.
+
+Not started this pass either, same reason as batch 11: the remaining page count (79) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide progress
+across this session's batches 7–12: 317 → 130 bare blocks (187 fixed), 114 → 79 pages with a
+bare count remaining.
+
+**Batch 13 (2026-09-16), same session, auto-continued per the standing approval** — five
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `typescript-arrays-tuples-visualizer.html` (4→0) — labeled tuples, rest-tuple types
+  (`[string, ...number[]]`), the `defer<A,R>` argument-forwarding generic, and
+  `readonly`-array API design.
+- `typescript-classes-visualizer.html` (4→0) — a typed `Animal` class, the abstract
+  `Shape`/`Circle`/`Square` hierarchy, `implements` vs `extends`
+  (`Serializable`/`Cloneable<T>`/`Entity`/`User`), and the generic `Repository<T>` class.
+- `big-o-visualizer.html` (3→0) — binary search's halving, merge sort's split/merge, and
+  the nested-loop O(n²) duplicate check.
+- `bst-visualizer.html` (3→0) — in-order, pre-order, and post-order traversal, using the
+  page's own already-styled-but-never-used `.cm` class.
+- `head-first-state-visualizer.html` (3→0) — the if/else gumball machine's raw `int`
+  state, the `State` interface + `GumballMachine` context, and the `NoQuarterState`
+  concrete state.
+
+**A real gate bug found and fixed mid-batch**: `tmp_annotationcheck.mjs`'s `COMMENT_CLASSES`
+list (`cm`, `cmt`, `xc`) didn't include `com` — the pre-existing comment span class on
+`big-o-visualizer.html`/`concurrency-visualizer.html`/`inheritance-visualizer.html` (all
+three link `devhub-syntax.js` and syntax-color Java `//` comments with it already). The
+gate's marker-text fallback for an unrecognized class only matches `//` when it's
+**immediately** followed by a non-space character (`/\s(\/\/…)\S/`); a normal `// note`
+with a space after the slashes never satisfies it, so `big-o-visualizer.html`'s newly-added
+trailing comments kept scoring 0% density no matter how many were added. Fixed by adding
+`'com'` to `COMMENT_CLASSES`, exactly the maintenance path the gate's own
+"WHAT IT CANNOT SEE" banner documents for this situation — confirmed as a strict
+improvement (zero regressions: `concurrency-visualizer.html`/`inheritance-visualizer.html`
+both already had 0 substantial blocks, so the fix only ever helps, never hides a real bare
+block elsewhere).
+
+No repeat of batch 10's "await"-phrasing `tmp_codecheck.mjs` false-positive: the two
+TypeScript-heavy pages in this batch were checked by eye before writing, and the
+671-block/481-TypeScript baseline was re-confirmed unchanged after every single page.
+
+Same treatment as batches 1–12 throughout: trailing inline comments in each page's own
+comment class (`.cmt` on the two TypeScript pages, `.com` on `big-o`, `.cm` on `bst` and
+`head-first-state`), never a new device invented — `bst-visualizer.html`'s `.cm` was
+already defined in its local `<style>` block but had never actually been used in its code,
+which is the same "reuse what's declared, don't invent" rule applied to a class that
+existed in CSS but not yet in markup. All five passed the full gate suite (`tmp_vcheck`,
+`tmp_doccheck`, `tmp_assetcheck` against `origin/claude/multi-repo-continuation-l6xwuq`,
+`tmp_codecheck`, `tmp_smoke` — both per-page and a full 537-page sweep before pushing — and
+`tmp_contrast --theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 13** (via `tmp_annotationcheck.mjs`, whole site):
+**113 bare blocks across 74 pages** (17 blocks fixed across these 5 pages: 4+4+3+3+3=17,
+matching exactly — cross-checked against `--top=15` after every single page). **74 pages with
+a bare count remain** for a future pass — worst next:
+`spring-boot-async-threads-deep` 3/5 · `spring-boot-idm-oauth2-deep` 3/5 ·
+`angular-lazy-loading` 3/6 · `head-first-command` 3/6 · `angular-zoneless-mode` 3/9 ·
+`angular-rxjs-multicasting` 3/10 · `typescript-maps-sets` 3/10 · `config-index-html` 3/16 ·
+`searching` 2/2 · `spring-boot-dtos-mapping-deep` 2/2. Re-run
+`node frontend/tmp_annotationcheck.mjs` for the current top of the list before picking up
+where this pass left off — it will have moved.
+
+Not started this pass either, same reason as batch 12: the remaining page count (74) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide progress
+across this session's batches 7–13: 317 → 113 bare blocks (204 fixed), 114 → 74 pages with a
+bare count remaining.
+
+**Batch 14 (2026-09-16), same session, auto-continued per the standing approval** — five
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `spring-boot-async-threads-deep-visualizer.html` (3→0) — `@EnableAsync` +
+  `ReportService`'s fire-and-forget/`CompletableFuture` methods, the self-invocation
+  gotcha's bypassed-proxy call, and the tuned `ThreadPoolTaskExecutor` bean.
+- `spring-boot-idm-oauth2-deep-visualizer.html` (3→0) — the `issuer-uri`
+  `application.yml`, the resource-server `SecurityFilterChain`, and the
+  `JwtAuthenticationConverter` role-mapping bean.
+- `angular-lazy-loading-visualizer.html` (3→0) — `loadChildren` feature routes,
+  `loadComponent` standalone routes, and the custom `SelectivePreloadStrategy`.
+- `head-first-command-visualizer.html` (3→0) — the naive if/else remote,
+  `LightOnCommand`'s receiver-wrapping constructor, and `MacroCommand`'s recursive
+  Command-of-Commands.
+- `angular-zoneless-mode-visualizer.html` (3→0) — `angular.json`'s emptied `polyfills`
+  array, the `OnPush` `CounterComponent`, and the required signal-input line in
+  `UserCardComponent`.
+
+No repeat of the "await"-phrasing `tmp_codecheck.mjs` false-positive and no repeat of the
+`.com`-class gate gap found in batch 13: every added comment was checked by eye, and the
+671-block/481-TypeScript baseline plus the (now four-class) `COMMENT_CLASSES` list were
+re-confirmed correct after every single page.
+
+Same treatment as batches 1–13 throughout: trailing inline comments in each page's own
+comment class (`.cm` on all five pages), never a new device invented. All five passed the
+full gate suite (`tmp_vcheck`, `tmp_doccheck`, `tmp_assetcheck` against
+`origin/claude/multi-repo-continuation-l6xwuq`, `tmp_codecheck`, `tmp_smoke` — both per-page
+and a full 537-page sweep before pushing — and `tmp_contrast --theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 14** (via `tmp_annotationcheck.mjs`, whole site):
+**98 bare blocks across 69 pages** (15 blocks fixed across these 5 pages: 3+3+3+3+3=15,
+matching exactly — cross-checked against `--top=15` after every single page). **69 pages
+with a bare count remain** for a future pass — worst next:
+`angular-rxjs-multicasting` 3/10 · `typescript-maps-sets` 3/10 · `config-index-html` 3/16 ·
+`searching` 2/2 · `spring-boot-dtos-mapping-deep` 2/2 ·
+`spring-boot-method-security-deep` 2/2 · `spring-boot-multi-idm-claims-deep` 2/2 ·
+`genai-tool-calling-agents` 2/3 · `head-first-strategy` 2/3 ·
+`angular-error-handling-deep` 2/4. Re-run `node frontend/tmp_annotationcheck.mjs` for the
+current top of the list before picking up where this pass left off — it will have moved.
+
+Not started this pass either, same reason as batch 13: the remaining page count (69) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide progress
+across this session's batches 7–14: 317 → 98 bare blocks (219 fixed), 114 → 69 pages with a
+bare count remaining — under 100 bare blocks and past 60% of pages cleared.
+
+**Batch 15 (2026-09-16), same session, auto-continued per the standing approval** — five
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `angular-rxjs-multicasting-visualizer.html` (3→0) — `multicast(Subject) + refCount()`,
+  the HTTP-caching `UserService` (`shareReplay`/`startWith`/`switchMap`), and the
+  `AppComponent` consuming its shared/cached `user$`.
+- `typescript-maps-sets-visualizer.html` (3→0) — the `memoize<K,V>` Map-as-cache function,
+  the frequency counter, and the pre-`#` `WeakMap` private-instance-data pattern.
+- `config-index-html-visualizer.html` (3→0) — the `APP_BASE_HREF` provider, Angular's
+  `Title`/`Meta` services, and the self-hosted-fonts `preload` example.
+- `searching-visualizer.html` (2→0) — linear search and binary search, reusing the
+  sitewide `.cm` convention available via the page's already-linked `devhub.css` (no
+  local comment class had ever been defined on this page).
+- `spring-boot-dtos-mapping-deep-visualizer.html` (2→0) — the `CreateUserRequest`
+  allow-list record and the `UserResponse` mapping record.
+
+**A second real gate bug found and fixed**, same shape as batch 13's `.com` fix:
+`tmp_annotationcheck.mjs`'s `COMMENT_CLASSES` list didn't include `hc`,
+`config-index-html-visualizer.html`'s own local `<style>`-block comment span
+(`.hc{color:#546e7a;font-style:italic;} /* comment */`, used for its HTML/markup code
+blocks alongside `.cm` for its JS/shell ones). Same root cause as `.com`: the marker-text
+fallback needs `<!--`/`//` immediately followed by a non-space character, which a normal
+`<!-- note -->` trailing comment never satisfies. Fixed by adding `'hc'` to
+`COMMENT_CLASSES`; confirmed a strict improvement with zero regressions (it's used on only
+this one page sitewide, so no other page's count could shift).
+
+No repeat of the "await"-phrasing `tmp_codecheck.mjs` false-positive: the TypeScript-heavy
+page in this batch was checked by eye, and the 671-block/481-TypeScript baseline plus the
+(now five-class) `COMMENT_CLASSES` list were re-confirmed correct after every single page.
+
+Same treatment as batches 1–14 throughout: trailing inline comments in each page's own
+comment class (`.cm` on four of the five pages), never a new device invented —
+`searching-visualizer.html`'s case is the same "reuse what's already available, don't
+invent" principle as batch 13's `bst-visualizer.html`, just via the shared `devhub.css`
+rule instead of a page-local one. All five passed the full gate suite (`tmp_vcheck`,
+`tmp_doccheck`, `tmp_assetcheck` against `origin/claude/multi-repo-continuation-l6xwuq`,
+`tmp_codecheck`, `tmp_smoke` — both per-page and a full 537-page sweep before pushing —
+and `tmp_contrast --theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 15** (via `tmp_annotationcheck.mjs`, whole site):
+**85 bare blocks across 64 pages** (13 blocks fixed across these 5 pages: 3+3+3+2+2=13,
+matching exactly — cross-checked against `--top=15` after every single page). **64 pages
+with a bare count remain** for a future pass — worst next:
+`spring-boot-method-security-deep` 2/2 · `spring-boot-multi-idm-claims-deep` 2/2 ·
+`genai-tool-calling-agents` 2/3 · `head-first-strategy` 2/3 ·
+`angular-error-handling-deep` 2/4 · `head-first-observer` 2/4 ·
+`kubernetes-spring-boot` 2/4 · `typescript-narrowing-cfa-deep` 2/4 ·
+`genai-llm-api-integration` 2/5 · `head-first-adapter-facade` 2/5. Re-run
+`node frontend/tmp_annotationcheck.mjs` for the current top of the list before picking up
+where this pass left off — it will have moved.
+
+Not started this pass either, same reason as batch 14: the remaining page count (64) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide progress
+across this session's batches 7–15: 317 → 85 bare blocks (232 fixed), 114 → 64 pages with a
+bare count remaining — 73% of the original bare blocks fixed, 44% of the original pages
+cleared entirely.
+
+**Batch 16 (2026-09-16), same session, auto-continued per the standing approval** — five
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `spring-boot-method-security-deep-visualizer.html` (2→0) — the `@PreAuthorize`
+  scope/ownership checks on `UserService` and the `@AuthenticationPrincipal Jwt` endpoint.
+- `spring-boot-multi-idm-claims-deep-visualizer.html` (2→0) — the multi-issuer
+  `JwtIssuerAuthenticationManagerResolver` and the `EntraAuthoritiesConverter`
+  claim-melting converter.
+- `genai-tool-calling-agents-visualizer.html` (2→0) — the tool definition + first
+  tool-call response, and the agent plan/act/observe loop. This page has no manual
+  syntax-highlighting spans at all (plain `<pre><code>`, colorized at runtime by
+  `devhub-syntax.js`), so the annotations are standalone `#` comment lines matching the
+  page's own existing style rather than trailing `.cm`-classed spans.
+- `head-first-strategy-visualizer.html` (2→0) — Act 1's abstract `Duck` class and the
+  `FlyBehavior`/`FlyWithWings` behavior family.
+- `angular-error-handling-deep-visualizer.html` (2→0) — the `ProblemDetail`/`ApiError`
+  typed models and the centralized `errorInterceptor`.
+
+No repeat of any prior gate gap: every added comment on `genai-tool-calling-agents` (a
+plain-Python page with no comment span at all) was verified by eye against the marker-text
+fallback's actual matching rules before writing, since a multi-word trailing `# comment`
+fails that fallback the same way a multi-word `// comment` or `<!-- comment -->` does —
+standalone comment lines were used instead, which the fallback already handles correctly.
+The 671-block/481-TypeScript `tmp_codecheck.mjs` baseline was re-confirmed unchanged after
+every single page (Python isn't compiled by that gate at all, so this page couldn't have
+moved it either way).
+
+Same treatment as batches 1–15 throughout: trailing inline comments in each page's own
+comment class (`.cm` on four of the five pages) or, where no class exists at all,
+standalone lines matching the page's own established plain-text convention — never a new
+device invented. All five passed the full gate suite (`tmp_vcheck`, `tmp_doccheck`,
+`tmp_assetcheck` against `origin/claude/multi-repo-continuation-l6xwuq`, `tmp_codecheck`,
+`tmp_smoke` — both per-page and a full 537-page sweep before pushing — and `tmp_contrast
+--theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 16** (via `tmp_annotationcheck.mjs`, whole site):
+**75 bare blocks across 59 pages** (10 blocks fixed across these 5 pages: 2+2+2+2+2=10,
+matching exactly — cross-checked against `--top=15` after every single page). **59 pages
+with a bare count remain** for a future pass — worst next: `head-first-observer` 2/4 ·
+`kubernetes-spring-boot` 2/4 · `typescript-narrowing-cfa-deep` 2/4 ·
+`genai-llm-api-integration` 2/5 · `head-first-adapter-facade` 2/5 ·
+`head-first-factory` 2/5 · `head-first-iterator-composite` 2/5 ·
+`python-fastapi-deep` 2/5 · `typescript-discriminated-unions` 2/5 ·
+`angular-signal-store-patterns-deep` 2/6. Re-run `node frontend/tmp_annotationcheck.mjs`
+for the current top of the list before picking up where this pass left off — it will have
+moved.
+
+Not started this pass either, same reason as batch 15: the remaining page count (59) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide progress
+across this session's batches 7–16: 317 → 75 bare blocks (242 fixed), 114 → 59 pages with a
+bare count remaining — 76% of the original bare blocks fixed, 48% of the original pages
+cleared entirely. Remaining pages are now overwhelmingly 2-bare (most of the 3- and 4-bare
+pages are cleared), so the per-page fix cost has been dropping batch over batch.
+
+**Batch 17 (2026-09-16), same session, auto-continued per the standing approval** — five
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `head-first-observer-visualizer.html` (2→0) — the `Subject`/`Observer` interfaces and
+  `WeatherData`'s subscriber-list implementation.
+- `kubernetes-spring-boot-visualizer.html` (2→0) — the multi-stage Dockerfile and the
+  Actuator health-probe `application.yml` + K8s deployment spec.
+- `typescript-narrowing-cfa-deep-visualizer.html` (2→0) — the `const`-aliased guard that
+  narrows and the `let`-aliased guard that doesn't.
+- `genai-llm-api-integration-visualizer.html` (2→0) — the chat-completions request shape
+  and the raw SSE wire format. This page wraps whole comment lines in
+  `<code class="cm">…</code>` rather than a trailing `<span>`, so the fix added standalone
+  comment lines matching that exact convention instead of inventing a trailing-span style
+  the page had never used.
+- `head-first-adapter-facade-visualizer.html` (2→0) — `HomeTheaterFacade`'s single
+  orchestrating method and Angular's `CurrencyPipe`-as-Adapter `transform`.
+
+No new gate gaps found this batch — every page used a comment class already inside
+`COMMENT_CLASSES` (`.cm`), except `genai-llm-api-integration-visualizer.html`, whose
+`<code class="cm">` wrapping is recognized by the same class-name match regardless of tag
+name, so no script change was needed there either. The 671-block/481-TypeScript
+`tmp_codecheck.mjs` baseline was re-confirmed unchanged after every single page.
+
+Same treatment as batches 1–16 throughout: trailing inline comments (or, on the one page
+with no trailing convention, standalone lines matching its own style) in each page's own
+comment class, never a new device invented. All five passed the full gate suite
+(`tmp_vcheck`, `tmp_doccheck`, `tmp_assetcheck` against
+`origin/claude/multi-repo-continuation-l6xwuq`, `tmp_codecheck`, `tmp_smoke` — both
+per-page and a full 537-page sweep before pushing — and `tmp_contrast
+--theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 17** (via `tmp_annotationcheck.mjs`, whole site):
+**65 bare blocks across 54 pages** (10 blocks fixed across these 5 pages: 2+2+2+2+2=10,
+matching exactly — cross-checked against `--top=15` after every single page). **54 pages
+with a bare count remain** for a future pass — worst next: `head-first-factory` 2/5 ·
+`head-first-iterator-composite` 2/5 · `python-fastapi-deep` 2/5 ·
+`typescript-discriminated-unions` 2/5 · `angular-signal-store-patterns-deep` 2/6 ·
+`head-first-template-method` 2/6 · `typescript-classes-internals-deep` 2/9 ·
+`angular-binding` 2/12 · `config-package-json` 2/12 · `typescript-declarations` 2/12.
+Re-run `node frontend/tmp_annotationcheck.mjs` for the current top of the list before
+picking up where this pass left off — it will have moved. Notably, the ranked list now
+also contains several 1-bare pages (e.g. `angular-debugging-rxjs-deep`,
+`angular-e2e-playwright`, `angular-rxjs-operators-lab`, `angular-token-lifecycle-deep`),
+meaning the worklist has moved past every 3+ and most 2-bare pages.
+
+Not started this pass either, same reason as batch 16: the remaining page count (54) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide progress
+across this session's batches 7–17: 317 → 65 bare blocks (252 fixed), 114 → 54 pages with a
+bare count remaining — 79% of the original bare blocks fixed, 53% of the original pages
+cleared entirely, crossing the halfway mark on pages cleared.
+
+**Batch 18 (2026-09-16), same session, auto-continued per the standing approval** — five
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `head-first-factory-visualizer.html` (2→0) — the `NYPizzaStore`/`ChicagoPizzaStore`
+  Factory Method overrides and the `PizzaIngredientFactory` Abstract Factory.
+- `head-first-iterator-composite-visualizer.html` (2→0) — the common `Iterator`
+  interface and the one `printMenu` loop that works for every menu.
+- `python-fastapi-deep-visualizer.html` (2→0) — the Spring Boot `UserController` vs
+  FastAPI `create_user` side-by-side comparison, matching the page's own inline
+  `<code class="cm">`-tag comment convention (not a trailing `<span>`, which this page
+  had never used).
+- `typescript-discriminated-unions-visualizer.html` (2→0) — the exhaustive switch with a
+  `never` fallthrough, and the Redux/NgRx action reducer + WebSocket message union.
+- `angular-signal-store-patterns-deep-visualizer.html` (2→0) — the `rxMethod` debounced
+  search and the `withEntities` normalized collection.
+
+No new gate gaps found this batch — every page used a comment class already inside
+`COMMENT_CLASSES` (`.cm`), including the `<code class="cm">` pattern on
+`python-fastapi-deep-visualizer.html`, which the class-name match already recognizes
+regardless of tag. The 671-block/481-TypeScript `tmp_codecheck.mjs` baseline was
+re-confirmed unchanged after every single page, including the Java/Python comparison page.
+
+Same treatment as batches 1–17 throughout: trailing inline comments (or, on pages with a
+tag-wrapped convention, matching that tag) in each page's own comment class, never a new
+device invented. All five passed the full gate suite (`tmp_vcheck`, `tmp_doccheck`,
+`tmp_assetcheck` against `origin/claude/multi-repo-continuation-l6xwuq`, `tmp_codecheck`,
+`tmp_smoke` — both per-page and a full 537-page sweep before pushing — and `tmp_contrast
+--theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 18** (via `tmp_annotationcheck.mjs`, whole site):
+**55 bare blocks across 49 pages** (10 blocks fixed across these 5 pages: 2+2+2+2+2=10,
+matching exactly — cross-checked against `--top=15` after every single page). **49 pages
+with a bare count remain** for a future pass — worst next: `head-first-template-method`
+2/6 · `typescript-classes-internals-deep` 2/9 · `angular-binding` 2/12 ·
+`config-package-json` 2/12 · `typescript-declarations` 2/12 · `angular-signals` 2/14, plus
+a long tail of 1-bare pages (`angular-debugging-rxjs-deep`, `angular-e2e-playwright`,
+`angular-rxjs-operators-lab`, `angular-token-lifecycle-deep`, `angular-zoneless-deep`,
+`datasci-visualization`, `maven-plugins`, `nosql-redis`, `spring-boot-grpc`, and more).
+Re-run `node frontend/tmp_annotationcheck.mjs` for the current top of the list before
+picking up where this pass left off — it will have moved. The worklist has now moved past
+every 2-bare page with 6 or fewer substantial blocks; what remains is a mix of a handful of
+higher-substantial-count 2-bare pages and a large tail of 1-bare pages, so a future pass's
+per-page yield will be lower (1 fix per page on most remaining pages) even though the
+remaining page count (49) is still sizable.
+
+Not started this pass either, same reason as batch 17: the remaining page count (49) at this
+treatment's real per-block cost is substantially more authoring than one session covers.
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide progress
+across this session's batches 7–18: 317 → 55 bare blocks (262 fixed), 114 → 49 pages with a
+bare count remaining — 83% of the original bare blocks fixed, 57% of the original pages
+cleared entirely.
+
+**Batch 19 (2026-09-16), same session, auto-continued per the standing approval** — five
+pages, 0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block:
+
+- `head-first-template-method-visualizer.html` (2→0) — Coffee's and Tea's near-identical
+  `prepareRecipe()` methods (Act 1's "two recipes, 80% identical" setup).
+- `typescript-classes-internals-deep-visualizer.html` (2→0) — the parameter-property
+  constructor shorthand and the polymorphic `this`-return `Builder`/`FormBuilder` example.
+- `angular-binding-visualizer.html` (2→0) — the double-subscription async-pipe trap
+  without `as`, and the decorator-style `HostBinding`/`HostListener` `CardComponent`.
+- `config-package-json-visualizer.html` (2→0) — the pre/post npm-script lifecycle hooks
+  and the `package-lock.json` v3 `"packages"` flat-map anatomy.
+- `typescript-declarations-visualizer.html` (2→0) — the `vendor.d.ts` ambient module
+  declarations and the `globals.d.ts` global-scope/`process.env` extensions.
+
+No new gate gaps found this batch — every page used a comment class already inside
+`COMMENT_CLASSES` (`.cm` on four pages, `.cmt` on `typescript-declarations`). The
+671-block/481-TypeScript `tmp_codecheck.mjs` baseline was re-confirmed unchanged after
+every single page, including the two TypeScript-heavy pages in this batch.
+
+Same treatment as batches 1–18 throughout: trailing inline comments in each page's own
+comment class, never a new device invented. All five passed the full gate suite
+(`tmp_vcheck`, `tmp_doccheck`, `tmp_assetcheck` against
+`origin/claude/multi-repo-continuation-l6xwuq`, `tmp_codecheck`, `tmp_smoke` — both
+per-page and a full 537-page sweep before pushing — and `tmp_contrast
+--theme=cream`/`--theme=dark`).
+
+**Sitewide count after batch 19** (via `tmp_annotationcheck.mjs`, whole site):
+**45 bare blocks across 44 pages** (10 blocks fixed across these 5 pages: 2+2+2+2+2=10,
+matching exactly — cross-checked against `--top=20` after every single page). **44 pages
+with a bare count remain** for a future pass — worst next: `angular-signals` 2/14, then an
+almost entirely 1-bare tail (`angular-debugging-rxjs-deep`, `angular-e2e-playwright`,
+`angular-rxjs-operators-lab`, `angular-token-lifecycle-deep`, `angular-zoneless-deep`,
+`datasci-visualization`, `maven-plugins`, `nosql-redis`, `spring-boot-grpc`,
+`spring-boot-rate-limiting-deep`, `streams`, and dozens more at 1/1 through 1/2). Re-run
+`node frontend/tmp_annotationcheck.mjs` for the current top of the list before picking up
+where this pass left off — it will have moved. **The worklist has now moved past every
+2-bare page except `angular-signals`** — essentially all remaining pages need exactly one
+fix each, so a future pass's per-page yield is now consistently 1 (occasionally 2), a real
+shift from earlier batches' 2-5-per-page average.
+
+Not started this pass either, same reason as batch 18: the remaining page count (44) at this
+treatment's real per-block cost is substantially more authoring than one session covers,
+though each remaining page is now individually cheap (1 fix, not several).
+**This remains a standing auto-continuing sweep**: further batches proceed on the same
+worst-first, same-rules, same-gates basis without a per-batch go-ahead. Sitewide progress
+across this session's batches 7–19: 317 → 45 bare blocks (272 fixed), 114 → 44 pages with a
+bare count remaining — 86% of the original bare blocks fixed, 61% of the original pages
+cleared entirely.
+
+**Batch 20 (2026-09-16) — one page, `angular-signals-visualizer.html` (2→0)**, the last
+page in the worklist needing more than one fix: annotated the `signal()`/`computed()`
+`Counter` component (why `count` is the source of truth and `double` only recomputes when
+read) and the `@for`/`@empty` control-flow block (`@empty` renders only on a genuinely empty
+array). Verified with `tmp_annotationcheck.mjs --page=` (0/14 bare), and the full gate suite
+run directly rather than by an agent this time — `tmp_vcheck` (537/521), `tmp_doccheck`
+(340/0 undocumented), `tmp_codecheck` (671 blocks, 0 errors, 671/481 baseline unchanged),
+`tmp_contrast --theme=cream`/`--theme=dark` on this page (both clean), and a full
+`tmp_smoke.mjs` sweep (537/537 clean — only the expected sandbox-network and pre-existing
+text-clip notices, unrelated to this page). **Sitewide after batch 20: 43 bare blocks across
+43 pages** — every remaining page needs exactly one fix. Same worklist as batch 19's tail
+(`angular-debugging-rxjs-deep`, `angular-e2e-playwright`, `angular-rxjs-operators-lab`,
+`angular-token-lifecycle-deep`, `angular-zoneless-deep`, `datasci-visualization`,
+`maven-plugins`, `nosql-redis`, `spring-boot-grpc`, `spring-boot-rate-limiting-deep`,
+`streams`, and dozens more at 1/1–1/2) — re-run `tmp_annotationcheck.mjs` before picking up,
+the exact order shifts as pages are fixed. **Still a standing auto-continuing sweep**; 43
+pages remain, each now cheap.
+
+**Batch 21 (2026-09-16), new session (the retired agent's harness anomaly was unrelated to
+work quality — every prior batch stayed gate-verified and pushed), continuing the same
+standing auto-continue approval** — eleven pages (every remaining 1/1 page in one pass),
+0 bare remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full
+by-hand read of every touched block, **one commit per page** per the standing instruction:
+
+- `angular-debugging-rxjs-deep-visualizer.html` (1→0) — the numbered-`tap()` debugging
+  chain. No comment class existed on the page at all; added trailing `.cm` spans
+  (devhub.css's default, matching `devhub-syntax.js`'s own output class) explaining each
+  probe's position relative to `debounceTime`/`switchMap`.
+- `angular-e2e-playwright-visualizer.html` (1→0) — the `LoginPage` Page Object Model
+  example. Already used `.cm` on its leading line; extended it across the constructor,
+  both locators, and the `loginAs()` body.
+- `angular-rxjs-operators-lab-visualizer.html` (1→0) — the typeahead-search hero pipeline.
+  No comment class existed; added `.cm` spans per operator.
+- `angular-token-lifecycle-deep-visualizer.html` (1→0, 19%→75% density) — the
+  `authInterceptor` functional interceptor. Already used `.cm` on 3 of 16 lines; extended
+  to the signature, injection, clone/ternary, and the 401-vs-other-error branch.
+- `angular-zoneless-deep-visualizer.html` (1→0, 17%→67%) — the `provideZonelessChangeDetection()`
+  bootstrap snippet. Extended the page's existing `.cm` use from 1 line to 4.
+- `datasci-visualization-visualizer.html` (1→0) — the Figure/Axes two-panel Matplotlib
+  example. Matched the page's own `<code class="cm">` tag convention (not a `<span>`) on
+  every remaining line, naming which Axes (`ax1`/`ax2`) each call targets.
+- `maven-plugins-visualizer.html` (1→0, 0%→31%) — the `maven-compiler-plugin`
+  `<configuration>` XML block. This page's own comment convention is `.xml-cm` (used
+  elsewhere on the page), which is **not** one of `tmp_annotationcheck.mjs`'s recognized
+  `COMMENT_CLASSES` (`cm`/`cmt`/`xc`/`com`/`hc`) — added standalone `<!-- -->` lines in
+  that class, confirmed via the gate's own marker-text fallback (a line that *starts* with
+  `&lt;!--` after tag-stripping is counted regardless of class name) rather than adding a
+  new class to the gate or inventing a different convention for one block.
+- `nosql-redis-visualizer.html` (1→0, 22%→56%) — the cache-aside `RedisTemplate` example.
+  Extended the page's existing `.cm` use to the key-build, `get()`, and `set()` lines.
+- `spring-boot-grpc-visualizer.html` (1→0, 20%→60%) — the `.proto` service contract.
+  Extended `.cm` to the `service`/`rpc`/field-tag lines.
+- `spring-boot-rate-limiting-deep-visualizer.html` (1→0, 0%→86%) — the bucket4j
+  token-bucket example. No comment class existed; added `.cm` spans on 6 of 7 lines
+  (capacity vs. refill rate, what `tryConsume`'s boolean means, why 429 + `Retry-After`).
+- `streams-visualizer.html` (1→0, 18%→76%) — the imperative-vs-stream before/after.
+  Extended the page's existing `.cm` use across both versions, naming each stream step
+  (`filter`/`filter`/`mapToInt`/`sum`) against the imperative loop's buried, hand-mutated
+  equivalent.
+
+Same treatment as every prior batch: trailing (or, on `maven-plugins`, standalone) comments
+in each page's own established convention, never inventing a new device. Every page passed
+the full per-page gate suite (`tmp_annotationcheck.mjs --page=`, `tmp_vcheck`, `tmp_doccheck`,
+`tmp_codecheck` — 671/481 baseline unchanged after every single page — `tmp_contrast
+--theme=cream`/`--theme=dark`), plus a full 537-page `tmp_smoke.mjs` sweep and
+`tmp_assetcheck.mjs origin/claude/multi-repo-continuation-l6xwuq` (both clean) before
+pushing. One real gate-interaction detail found and worked around, not a bug in the gate
+itself: `maven-plugins-visualizer.html`'s pre-existing `.xml-cm` class is invisible to
+`COMMENT_CLASSES`'s exact-string match (`class="cm"` is not a substring of
+`class="xml-cm"`), so the fix leaned on the documented marker-text fallback instead of
+touching the gate or breaking the page's own convention.
+
+**Sitewide count after batch 21** (via `tmp_annotationcheck.mjs`, whole site):
+**32 bare blocks across 32 pages** (11 blocks fixed, all pages fully cleared: 43→32). Next
+up: `abstraction` 1/2 · `angular-auth-state-signals-deep` 1/2 ·
+`angular-control-flow-internals-deep` 1/2 · `angular-signals-rxjs-interop-deep` 1/2 ·
+`graph` 1/2 · `shell-gcloud-cli` 1/2 · `spring-boot-cors-deep` 1/2 ·
+`spring-boot-jpa-fetching-deep` 1/2 · `typescript-top-bottom-types-deep` 1/2 ·
+`exceptions` 1/3, and more at 1/3–1/14. Re-run `node frontend/tmp_annotationcheck.mjs` for
+the current top before picking up — it will have moved. **Still a standing
+auto-continuing sweep**, every remaining page needs exactly one fix.
+
+**Batch 22 (2026-09-16), same session, continuing the standing auto-continue approval** —
+nine pages (every remaining 1/2 page), 0 bare remaining on each, re-verified with
+`tmp_annotationcheck.mjs --page=` plus a full by-hand read of every touched block, one
+commit per page:
+
+- `abstraction-visualizer.html` (1→0) — the template-method `DataExporter` example.
+- `angular-auth-state-signals-deep-visualizer.html` (1→0, 0%→58%) — the `AuthStore`
+  signal-store: why `_user` is the sole write path and `login()`/`logout()` are its only
+  two call sites.
+- `angular-control-flow-internals-deep-visualizer.html` (1→0, 0%→57%) — `@for`'s
+  contextual variables and `@empty`.
+- `angular-signals-rxjs-interop-deep-visualizer.html` (1→0, 11%→78%) — the
+  `toObservable()`/`pipe()`/`toSignal()` round-trip.
+- `graph-visualizer.html` (1→0, 7%→79%) — the Dijkstra pseudocode block, walked line by
+  line (priority-queue pop, relaxation check, why `prev[]` matters).
+- `shell-gcloud-cli-visualizer.html` (1→0) — a real `gcloud config list` terminal
+  transcript inside the page's `hf-walk` scenario device. Inline comments would have
+  corrupted a copy-pasteable output block, so this used an `.hf-arrow` note instead (the
+  other CLAUDE.md-sanctioned device) explaining the output and the actual gotcha
+  (`gcloud config set project` vs. `configurations activate`).
+- `spring-boot-cors-deep-visualizer.html` (1→0, 10%→80%) — the global
+  `WebMvcConfigurer` CORS bean.
+- `spring-boot-jpa-fetching-deep-visualizer.html` (1→0, 0%→86%) — the `@Query` DTO
+  projection JPQL text block.
+- `typescript-top-bottom-types-deep-visualizer.html` (1→0, 22%→44%) — the exhaustiveness
+  switch, narrowing on the discriminated union's `kind` tag.
+
+Same treatment throughout: trailing comments in each page's own established class, or an
+`.hf-arrow` note where the block is a literal transcript rather than authored code. All
+nine passed `tmp_vcheck`/`tmp_doccheck`/`tmp_codecheck` (671/481 baseline unchanged after
+every page) and `tmp_contrast --theme=cream`/`--theme=dark` per page.
+
+**Sitewide count after batch 22** (via `tmp_annotationcheck.mjs`, whole site):
+**23 bare blocks across 23 pages** (9 fixed, every remaining 1/2 page cleared: 32→23).
+Next up: `exceptions` 1/3 · `genai-embeddings-vector-db` 1/3 · `genai-rag` 1/3 · `git` 1/3
+· `kubernetes-deployments` 1/3 · `kubernetes-fundamentals` 1/3 · `python-async` 1/3 ·
+`spring-boot-caching-internals-deep` 1/3 · `spring-boot-security-filter-chain-deep` 1/3,
+then a 1/4–1/14 tail.
+
+**Batch 23 (2026-09-16), same session, continuing the standing auto-continue approval** —
+nine pages (every remaining 1/3 page), 0 bare remaining on each, re-verified with
+`tmp_annotationcheck.mjs --page=` plus a full by-hand read of every touched block, one
+commit per page:
+
+- `exceptions-visualizer.html` (1→0, 20%→47%) — the `InsufficientFundsException`
+  custom-exception example.
+- `genai-embeddings-vector-db-visualizer.html` (1→0, 14%→71%) — the brute-force
+  cosine-similarity search (the formula, then running it against every stored vector).
+- `genai-rag-visualizer.html` (1→0, 22%→39%) — the minimal RAG pipeline function; the
+  `tenant_id` filter line got the most attention (skip it and retrieval can leak another
+  tenant's private documents into the generated answer).
+- `git-visualizer.html` (1→0, 13%→50%) — the merge-conflict-markers example. Its existing
+  `// ← your version`-style annotations ride on `.hlbad` spans and don't satisfy the
+  gate's marker-fallback (a space right after `//` intentionally fails that check, to
+  avoid false-positiving on ordinary prose) — added real `.cm` comments alongside instead.
+- `kubernetes-deployments-visualizer.html` (1→0, 8%→36%) — the Deployment manifest:
+  `replicas`, `selector.matchLabels`, `strategy.type`, and — the important contrast — what
+  actually happens when a liveness probe fails (kill+restart) vs. a readiness probe
+  (pulled from load balancing, not restarted).
+- `kubernetes-fundamentals-visualizer.html` (1→0, 6%→38%) — the minimal Pod manifest:
+  `labels`, `image`, `containerPort`, and `requests` (drives scheduling) vs. `limits`
+  (OOMKilled on memory, throttled on CPU).
+- `python-async-visualizer.html` (1→0, 14%→36%) — the `asyncio.gather()` concurrency
+  example: calling an `async def` doesn't run its body, and `asyncio.run()` is the one
+  sync-to-async entry point.
+- `spring-boot-caching-internals-deep-visualizer.html` (1→0, 17%→50%) — the
+  self-invocation `@Cacheable` trap: `@Cacheable` only fires through the Spring proxy,
+  never via a bare `this.method()` call.
+- `spring-boot-security-filter-chain-deep-visualizer.html` (1→0, 0%→50%) — the
+  `SecurityFilterChain` bean: request-matcher rules are evaluated top-down, and
+  `oauth2ResourceServer`'s JWT config is the `AuthenticationProvider` from the diagram in
+  the adjacent card.
+
+Same treatment throughout: trailing comments in each page's own established class, never
+a new device invented. All nine passed the full per-page gate suite plus a full 537-page
+`tmp_smoke.mjs` sweep and `tmp_assetcheck.mjs origin/claude/multi-repo-continuation-l6xwuq`
+(both clean) before pushing.
+
+**Sitewide count after batch 23** (via `tmp_annotationcheck.mjs`, whole site):
+**14 bare blocks across 14 pages** (9 fixed, every remaining 1/3 page cleared: 23→14).
+Next up: `angular-change-detection-deep` 1/4 · `encapsulation` 1/4 ·
+`kubernetes-config-secrets` 1/4 · `kubernetes-rbac` 1/4 · `nosql-document-wide-column` 1/4
+· `spring-boot-auto-configuration-deep` 1/4 · `sql-advanced-queries` 1/4 ·
+`sql-fundamentals` 1/4 · `sql` 1/4 · `typescript-structural-typing-deep` 1/4, then
+`python-oop` 1/5 · `angular-build-esbuild` 1/6 · `typescript-functions-overloads-deep` 1/8
+· `typescript-conditional-types` 1/14. Re-run `node frontend/tmp_annotationcheck.mjs`
+before picking up — it will have moved. **Still a standing auto-continuing sweep**; 14
+pages remain, each needing exactly one fix.
+
+**Batch 24 (2026-09-16), same session, continuing the standing auto-continue approval** —
+ten pages (every remaining 1/4 page), 0 bare remaining on each, re-verified with
+`tmp_annotationcheck.mjs --page=` plus a full by-hand read of every touched block, one
+commit per page:
+
+- `angular-change-detection-deep-visualizer.html` (1→0, 13%→50%) — the `markForCheck()`
+  WebSocket-feed example: why the callback needs it (Zone.js never patched it, and the
+  mutation is in place).
+- `encapsulation-visualizer.html` (1→0, 19%→38%) — the `GoodAccount` validating-methods
+  example, naming the rule each guard clause enforces.
+- `kubernetes-config-secrets-visualizer.html` (1→0, 13%→33%) — the ConfigMap manifest: a
+  simple key vs. the `|` block scalar embedding a whole file, plus the `---` separator.
+- `kubernetes-rbac-visualizer.html` (1→0, 5%→33%) — the Role + RoleBinding manifest: the
+  core API group, the verbs allow-list, and that a Role alone grants nothing.
+- `nosql-document-wide-column-visualizer.html` (1→0, 13%→38%) — the embedded-document
+  example, naming `lineItems` as the data that used to be its own collection.
+- `spring-boot-auto-configuration-deep-visualizer.html` (1→0, 0%→43%) —
+  `DataSourceAutoConfiguration`: `@ConditionalOnClass`/`@ConditionalOnMissingBean`.
+- `sql-advanced-queries-visualizer.html` (1→0, 6%→31%) — the multi-CTE query, why the
+  join is LEFT.
+- `sql-fundamentals-visualizer.html` (1→0, 0%→100%) — the basic SELECT/WHERE/ORDER
+  BY/LIMIT, every clause commented for the execution order that actually matters.
+- `sql-visualizer.html` (1→0, 14%→59%) — the JDBC transaction example, walked through
+  try-with-resources, both placeholder bindings, `getGeneratedKeys()`, and commit/rollback.
+- `typescript-structural-typing-deep-visualizer.html` (1→0, 14%→43%) — the branded-type
+  `UserId`/`OrderId` example.
+
+Same treatment throughout: trailing comments in each page's own established class. All
+ten passed `tmp_vcheck`/`tmp_doccheck`/`tmp_codecheck` (671/481 baseline unchanged after
+every page) and `tmp_contrast --theme=cream`/`--theme=dark` per page.
+
+**Sitewide count after batch 24** (via `tmp_annotationcheck.mjs`, whole site):
+**4 bare blocks across 4 pages** (10 fixed, every remaining 1/4 page cleared: 14→4). Next
+up: `python-oop` 1/5 · `angular-build-esbuild` 1/6 ·
+`typescript-functions-overloads-deep` 1/8 · `typescript-conditional-types` 1/14.
+
+**Batch 25 (2026-09-16), same session — the last four pages in the sweep**, 0 bare
+remaining on each, re-verified with `tmp_annotationcheck.mjs --page=` plus a full by-hand
+read of every touched block, one commit per page:
+
+- `python-oop-visualizer.html` (1→0, 10%→50%) — the Singleton-via-`__new__` example:
+  why `__new__` runs before `__init__` and decides whether a new object gets made at all.
+- `angular-build-esbuild-visualizer.html` (1→0, 24%→30%) — the `angular.json` production
+  configuration block was one comment line short of the 25% floor; added the two missing
+  comments on the `budgets` array (`initial` vs. `anyComponentStyle`).
+- `typescript-functions-overloads-deep-visualizer.html` (1→0, 20%→40%) — the `format()`
+  overload-vs-implementation-signature example: why the implementation uses `unknown` and
+  that the `instanceof` narrowing happens at runtime, not from the overloads.
+- `typescript-conditional-types-visualizer.html` (1→0, 11%→67%) — the last bare block
+  sitewide: `Promisify<F>`'s `extends`/`infer` tuple and match branch, explaining what `A`
+  and `R` each infer to.
+
+Same treatment throughout: trailing comments in each page's own established class (`.cm`
+on three pages, `.cmt` on `typescript-conditional-types`), never a new device invented.
+All four passed the full per-page gate suite, plus a final full 537-page `tmp_smoke.mjs`
+sweep and `tmp_assetcheck.mjs origin/claude/multi-repo-continuation-l6xwuq` (both clean)
+before pushing.
+
+**✅ SWEEP COMPLETE (2026-09-16).** `node frontend/tmp_annotationcheck.mjs` now reports
+**0 bare blocks across 0 pages**, down from the 2026-09-16-morning baseline of 43
+bare/43 pages (batches 21–25, this session) and the original ~353/~72-page by-hand count
+that opened this item on 2026-09-04. Final whole-site gate pass, run directly (not by an
+agent): `tmp_vcheck` (537/521 registered), `tmp_doccheck` (340 symbols, 0 undocumented),
+`tmp_codecheck` (671 blocks — 481 TypeScript, 190 Java — 0 errors, baseline unchanged
+across all 25 batches), `tmp_assetcheck.mjs origin/claude/multi-repo-continuation-l6xwuq`
+(no teaching assets lost), and a full `tmp_smoke.mjs` sweep (537/537 clean — only the
+expected sandbox-network failures and the same pre-existing text-clip notices flagged and
+left out-of-scope in earlier batches). Every one of the 25 batches' touched blocks was
+also read by hand against the "genuinely true, specific" bar — the gate counts markup,
+not meaning, so that hand-read is the actual quality control, not the automated 0.
+
+**What's still open, for a future pass, not part of this item's scope:** the gate's own
+`WHAT IT CANNOT SEE` section — it is a static-source proxy, not the rendered-DOM check the
+original 2026-09-04 note called for, and it cannot tell a genuinely explanatory comment
+from a restated one. A handful of pre-existing, out-of-scope issues were flagged and left
+alone during this sweep rather than fixed in an annotation-only pass: a low-contrast
+marble bead on `angular-rxjs-visualizer.html` (batch 3), two pre-existing text-clip
+notices on `angular-routing-visualizer.html`/`angular-custom-form-controls-visualizer.html`
+(batch 4), and a genuine `AuthGuard.canActivate()` bug on
+`angular-routing-advanced-visualizer.html` flagged via `.hf-arrow` rather than silently
+fixed (batch 2, same session). None of these are annotation gaps; they're separate,
+smaller findings a future sweep can pick up.
 
 ### 3. StackBlitz-grade embedded IDE (Bobby's package question — answered)
 Bobby asked if a package/dependency exists to make live coding feel like StackBlitz. Research:
@@ -2394,19 +3586,203 @@ Three things the build taught that the spec had not:
   was declared instead of rewritten, and `java-datetime` took the slot.
 
 **Still open:**
-- **459 pages `unshaped`.** Each needs a shape assigned and its block re-staged — or a
+- **453 pages `unshaped`.** Each needs a shape assigned and its block re-staged — or a
   deliberate `data-shape="tour"` when it genuinely earns one (Bobby: *"If some pages are
   perfect with the current view … we can leave it"*). Leaving it undeclared is NOT the same
   as declaring `tour`; the manifest is the audit trail.
-- **The manifest review (step 2, next).** `tmp_variety.mjs --manifest=` per track, with a
-  reason column, for Bobby to spot-check BEFORE the re-staging — the point is that a wrong
-  call shows up in a 459-line file rather than in 459 rewritten pages.
-- **Step 3** — the bulk re-stage, track by track, against the reviewed manifest.
+- **The manifest review (step 2).** `tmp_variety.mjs --manifest=` per track, with a
+  reason column, for Bobby to spot-check BEFORE the next big re-staging push — the point is
+  that a wrong call shows up in a short file rather than in hundreds of rewritten pages.
+- **Step 3** — the bulk re-stage, track by track, against the reviewed manifest. A first,
+  small (6-page) slice of this shipped 2026-09-16 — see below — as a calibration batch to
+  measure real per-page cost before committing to pacing for the remaining ~447.
 
 **What the gate cannot see** (stated because the last mechanism failed by being trusted past
 its limits): whether a shape SUITS its page. A `receipt` on a lesson with no cost in it passes
 every check and is still wrong. It stops a relapse into one shape; it cannot tell you the
 eleven are well matched. That is what reading the manifest is for.
+
+**2026-09-16 — `tmp_variety.mjs` had to be REBUILT; the prior "Landed 2026-09-13" entry above
+overstated what survived.** The 2026-09-13 session ("8 agents running simultaneously") that
+wrote `docs/HEADFIRST-SHAPES.md` and `docs/HEADFIRST-BLOCK-RECIPE.md` also built
+`tmp_variety.mjs` and `tmp_hfsplice.mjs` and used them to ship the 9 non-pilot exemplar pages
+(`abstraction`, `debugging-jwt`, `debugging-stack-traces`, `ds-hash-tables`,
+`entra-oauth-oidc`, `java-datetime`, `nosql-document-wide-column`, `nosql-redis`,
+`polymorphism` — wait, **not** `polymorphism`: it has an `hf-deck` with no `data-shape` at
+all, so it is `unshaped`, not the ninth exemplar it looked like at a glance. A loose
+`grep -o 'data-shape="[a-z]*"'` on that page instead matches an UNRELATED
+`<div class="shape-card" data-shape="circle">` used by its own Shape-classes demo — a real
+trap for any future tool that greps for `data-shape=` sitewide instead of anchoring the match
+to `<p class="hf-deck" ...>` specifically). Neither `tmp_variety.mjs` nor `tmp_hfsplice.mjs`
+was ever committed, and that session ended before they were — so both were gone for the next
+session to find, silently, the exact failure mode `CLAUDE.md` now calls out by name (the
+`upgradeToMonaco()` warning, same shape of mistake). `tmp_variety.mjs` has been rebuilt from
+scratch against `docs/HEADFIRST-SHAPES.md`'s own contract, verified line-for-line against the
+real markup on the (correctly counted) 16 already-shaped pilot/exemplar pages before being
+trusted, and is now committed with a `.gitignore` allowlist line so this cannot happen again
+to this specific file. `tmp_hfsplice.mjs` was **not** rebuilt this pass — see below.
+
+**What the rebuilt `tmp_variety.mjs` actually does**, precisely, because the original's exact
+behavior is unrecoverable and future sessions should trust THIS description over the
+2026-09-13 entry above: it locates each page's `<p class="hf-deck" data-shape="…">` tag,
+takes the shape's `data-shape` value (or reports `unshaped` if absent, `no-block` if the page
+has no `hf-deck` at all), and scans forward from there to the page's next `<h2` (capped at
+40,000 characters) as a heuristic block boundary — there is no reliable closing marker, since
+five of the eleven shapes forbid `hf-napkin`, the device every block used to end on. Inside
+that window it checks the declared shape's device inventory against hardcoded
+must-have/must-not rules transcribed from `docs/HEADFIRST-SHAPES.md` (thresholds like
+`argument`'s ">=8 hf-bub" or `questions`'s ">=5 dt/dd" came from measuring the real pilot
+pages, not just the prose). It reports per-track shape distribution against the 18%/25% caps,
+denominated against that track's SHAPED pages only (per CLAUDE.md's own wording) — which
+means, honestly, that at this early stage (1-3 shaped pages in most tracks) the cap is
+close to mathematically unsatisfiable in isolation: one page in a previously-unshaped track is
+always 100% of that track's shaped total, no matter which of the eleven shapes it takes. This
+is expected, not a bug in the gate — see the calibration-batch report below. It does **not**
+run in `.github/workflows/deploy.yml`; it is an authoring aid, same tier as `tmp_hfaudit.mjs`,
+not a merge gate. Full `WHAT IT CANNOT SEE` banner is in the file itself per `tmp_doccheck.mjs`
+convention.
+
+**Calibration batch — 6 pages re-staged, 6 different shapes, 6 different tracks, 2026-09-16.**
+Chosen from the 453 `unshaped` pages (every one of which already carries a FULL old-recipe
+block — confirmed by inventory-diffing five candidate pages before touching any of them, all
+five carried the identical old-recipe device set: `hf-card`×7, `hf-scatter`×4, `hf-bub`×4,
+`hf-taped`×3, `hf-say`×3, `hf-kick`×3, `hf-check`×2, `hf-cardtitle`×2, `hf-annot`×2,
+`hf-terms`/`hf-talk`/`hf-steps`/`hf-note`/`hf-napkin`/`hf-ladder`/`hf-foot`×1). This makes
+"retrofitting" a RE-STAGE, not fresh authoring: the gotcha is already written and already
+fact-checked from the earlier sweep — the job is recognizing the KIND of gotcha already on
+the page and reshaping its device set to match, per `docs/HEADFIRST-SHAPES.md`'s own method
+("read the block that is already on the page… find that sentence in the trigger column").
+Two early candidates were rejected for a real reason worth recording: `python-functions` was
+initially planned around its "mutable default argument" trap, but the page's EXISTING block
+already teaches that trap exhaustively (the intro card, the animated scenario, a callout, AND
+a loop-closure variant) — re-staging it would have meant inventing a second angle rather than
+recognizing the one already there, which the method explicitly forbids.
+
+| page | track | shape chosen | why (the KIND of gotcha, not the topic) |
+|---|---|---|---|
+| `python-generators` | python | `autopsy` | surfaces as a real, empirically-verified error message (`RuntimeError: generator raised StopIteration`, PEP 479) the learner would paste into a search box |
+| `go-interfaces` | go | `whiteboard` | structural — a compile-time check and a runtime check answering two different questions about `==` on `interface{}` |
+| `csharp-async` | csharp | `argument` | two individually-correct parties (`SynchronizationContext` and `.Result`) meeting on one thread |
+| `kubernetes-fundamentals` | kubernetes | `questions` | pure misconception — "I thought `:latest` meant always fetch the newest one" |
+| `node-express` | nodejs | `assembly` | a middleware pipeline where the registration-time `fn.length` stage silently misfiles a correctly-shaped handler |
+| `docker-dockerfile` | tools | `exhibit` | visible in one real artifact the learner will actually run themselves (`docker history --no-trunc`) |
+
+Every fact re-verified, not assumed: the Python traceback was reproduced and captured from a
+real `python3` run in this session (not written from memory) before being used verbatim in the
+`autopsy` re-stage; the Go/`.Result`/`kubectl apply`/Express-arity/Docker-build-history claims
+were all already correct in the pages' pre-existing, previously-shipped content and were kept
+verbatim or lightly restructured, not rewritten from scratch. `tmp_hfsplice.mjs` was not
+rebuilt — each page was small enough (one existing block, being reshaped in place, not a fresh
+insertion into a page with none) that plain `Edit`-tool replacements on the exact existing text
+were safer than reconstructing an unverified splice tool; every file was confirmed LF-only
+(`grep -c $'\r'` = 0) before editing and every diff was confirmed to touch only the block region
+(`git diff --stat` + the hunk header line numbers) afterward. One real regression was caught
+and fixed mid-batch: the first `csharp-async` `hf-big` draft clipped at 390px (a long unbroken
+identifier inside large type) — `tmp_smoke.mjs` on that one page caught it, and it was
+reworded and reverified clean. One real, unrelated vcheck warning was caught and fixed on
+`docker-dockerfile`: adding the page's first-ever `<pre>` tripped CLAUDE.md rule 8 (a page
+showing code must load `devhub-syntax.js`) — the rest of that page's code had always used
+hand-styled spans instead of `<pre>`, so the page had simply never needed the script before.
+
+**Sitewide shape count after this batch: 22 shaped / 453 unshaped / 62 no-block, 0 declaration
+lies.** Full distribution (`node frontend/tmp_variety.mjs`): `questions` 3, `whiteboard` 3,
+`argument` 3, `receipt` 2, `exhibit` 2, `assembly` 2, `autopsy` 2, `tour` 2, `timelapse` 1,
+`twodoors` 1, `mnemonic` 1 — all eleven still alive, closest to even yet. Every track touched
+this batch went from 0 shaped pages to 1 (100% skew, unavoidable at this count per the cap-math
+note above); `tmp_variety.mjs --track=<x>` was run before each page to confirm the CHOICE was
+still the track's least-habitual shape, not to chase a currently-unreachable green state.
+
+**Next-worst worklist for a future batch** (not committed to specific shapes yet — pick per
+the method, not this list): the two biggest tracks are the furthest from shaped by volume and
+worth prioritizing for raw count — `angular` (74 pages, 1 shaped) and `spring-boot`/`spring`
+(53 pages, 3 shaped) — followed by `java` (43, 2) and `ts` (31, 1). Candidate pages spotted
+but NOT yet read closely enough to commit a shape (re-verify each against its own existing
+block before assigning, per method step 1): `python-context-managers` (`__exit__` return-True
+swallowing — likely `exhibit` or `mnemonic`, needs its own read), `python-errors` (already a
+`finally`-wins-over-an-in-flight-exception gotcha — possibly already earns `tour`, needs the
+earning check), `python-decorators` ("crashes on an integer that appears nowhere in your
+code" — sounds `exhibit`-shaped), any Angular `OnPush`/change-detection-adjacent page other
+than the one already-shaped `angular-change-detection-visualizer`, and any Spring page beyond
+the three already shaped.
+
+**Honest per-page cost estimate for the remaining ~447, at this quality bar:** this batch's 6
+pages, including building and verifying `tmp_variety.mjs` itself from nothing, took a full
+session. With the tool now built and reusable, a single page (read existing block → pick shape
+→ re-stage → the 8-gate verification loop → commit) is the bulk of the recurring cost — the
+tool-build cost will not repeat. Do not read that as "therefore fast at scale": every page
+above needed real, individual fact-checking (one traceback was verified by actually running
+Python) and a genuine gotcha-to-shape judgment call, not a mechanical transform, and the
+2026-09-13 session's own note that "re-staging costs teaching" held again here — several
+pages shrank as banned devices took real paragraphs with them. Treat per-page cost as roughly
+comparable to authoring a new block from the recipe, not cheaper, despite the head start of an
+existing gotcha.
+
+**2026-09-16 — scale-up batch: 26 more pages (22 → 48 shaped sitewide), after Bobby chose a
+smaller target over the full ~251-page rollout.** Given the honest cost estimate above, the
+target was cut down to "roughly 2 shaped pages per track" rather than half the site. Same
+method as the calibration batch throughout: read the page's existing (pre-shapes-system) HF
+block first, pick a shape by the KIND of gotcha it already tells — never by topic — re-stage
+its devices to that shape's must-have/must-not list, verify any factual claim empirically
+where the sandbox allows it rather than trusting memory, then run the full gate loop
+(`tmp_variety.mjs --track=`, `tmp_vcheck.mjs`, `tmp_doccheck.mjs`, `tmp_hfaudit.mjs`,
+`tmp_smoke.mjs`, `tmp_contrast.mjs --theme=cream/dark`) and commit individually before moving
+on. 26 pages landed, one per commit:
+
+`python-generators` (autopsy), `go-interfaces` (whiteboard), `csharp-async` (argument),
+`kubernetes-fundamentals` (questions), `node-express` (assembly), `docker-dockerfile`
+(exhibit) — these 6 were the original calibration batch, already logged above —
+`interview-linked-lists` (autopsy), `interview-system-design` (timelapse), `config-pom-xml`
+(questions), `config-package-json-advanced` (whiteboard), `datasci-numpy-pandas` (exhibit),
+`datasci-model-evaluation` (questions), `genai-how-llms-work` (questions),
+`genai-embeddings-vector-db` (receipt), `ping-oauth` (whiteboard), `ping-integration`
+(timelapse), `shell-bash` (exhibit), `shell-powershell` (argument), `azure-cosmos` (exhibit),
+`azure-containers` (receipt), `devops-cicd-pipeline` (assembly), `devops-deployment-strategies`
+(argument), `gcp-gke` (timelapse), `gcp-storage` (twodoors), `angular-signals` (questions),
+`typescript-async-patterns` (receipt), `react-useeffect-deep` (questions),
+`python-context-managers` (timelapse), `go-sync` (exhibit), `aws-s3` (mnemonic),
+`maven-dependencies` (whiteboard), `rbac-deep` (timelapse) — 26 new pages beyond the
+calibration 6.
+
+**Two real, pre-existing factual errors were found and fixed while fact-checking, not just
+authoring around them:**
+- `python-context-managers-visualizer.html` claimed reusing an exhausted `@contextmanager`
+  object raises `RuntimeError: generator didn't yield`. Verified live across python3.10
+  through 3.13: it actually raises `AttributeError: '_GeneratorContextManager' object has no
+  attribute 'args'`, because CPython's real `contextlib.py` (`inspect.getsource`) shows
+  `__enter__`'s first line is `del self.args, self.kwds, self.func`, which fails on reuse
+  before the generator itself is ever touched — confirmed `RuntimeError: generator didn't
+  yield` is real, but for a different bug entirely (a generator that never reaches `yield`).
+  Every instance of the wrong claim (the bad card, the quiz, the closing line) was corrected.
+- `go-sync-visualizer.html`'s planned content assumed a recursive-RLock RWMutex deadlock would
+  print Go's `fatal error: all goroutines are asleep - deadlock!`. Built and ran three Go 1.24.7
+  repros (the last channel-synchronized + `kill -QUIT` for a real goroutine dump) and found the
+  runtime prints **nothing** — `main()`'s own live timer keeps the process "alive" from the
+  runtime's global deadlock-detector, so the two blocked goroutines hang forever silently. Used
+  the real captured goroutine dump as the exhibit artifact instead of the assumed crash message.
+
+`tmp_variety.mjs` also caught one of my own authoring mistakes as designed: on
+`python-context-managers`, it reported `LIES … missing required devices: hf-cycle + hf-ladder`
+after I'd added the ladder but forgotten the cycle — fixed by adding the missing `hf-cycle`
+before re-running, which then passed clean.
+
+**Sitewide shape count after this batch: 48 shaped / 427 unshaped / 62 no-block, 0 declaration
+lies** (`node frontend/tmp_variety.mjs`). Full distribution: `questions` 8, `exhibit` 6,
+`whiteboard` 6, `timelapse` 6, `argument` 5, `receipt` 5, `assembly` 3, `autopsy` 3, `tour` 2,
+`mnemonic` 2, `twodoors` 2 — all eleven alive, no dead shape. Every track this batch touched
+now carries 1-3 shaped pages, still well inside the "early rollout, cap math is unavoidable at
+this count" regime the calibration batch's note already covers — `tmp_variety.mjs --track=`
+was run before every page to make sure the CHOICE was the track's least-used shape, not to
+chase a currently-unreachable green cap state. Tracks still at 0 shaped pages:
+`ai-dev`, `playground`, `git`, `php`, `mulesoft`, `stacks`, `ruby`, `rust`, `springboot` (note:
+distinct body-class spelling from `spring`, which has 3 — a naming quirk for a future session
+to either reconcile or just remember), `web-fundamentals`. Tracks still at exactly 1: `csharp`,
+`kubernetes`, `nodejs`.
+
+**Per this task's own standing instruction, this batch stops here** (~40-50 total shaped pages
+sitewide was the requested landing zone; 48 lands inside it) rather than continuing toward the
+full remaining ~427-page sweep — that remains future work, not started, per the honest cost
+estimate above (roughly a page per read-verify-restage-gate-commit cycle, not a batch
+operation).
 
 ---
 
