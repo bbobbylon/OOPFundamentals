@@ -3784,6 +3784,105 @@ full remaining ~427-page sweep — that remains future work, not started, per th
 estimate above (roughly a page per read-verify-restage-gate-commit cycle, not a batch
 operation).
 
+**2026-09-18 — every track that was at 0 shaped pages is now at 2 (48 → 67 shaped sitewide),
+19 pages landed, one commit each.** This session's brief was looser than a fixed page count
+("continue", "find something to improve"), so the target was the previous batch's own
+worklist: every one of the ten tracks it named as stuck at 0 (`git`, `springboot`, `ai-dev`,
+`stacks`, `rust`, `ruby`, `playground`, `php`, `mulesoft`, `web-fundamentals`). Same method
+throughout: read the page's existing pre-shapes block, name the KIND of gotcha in one sentence
+against `docs/HEADFIRST-SHAPES.md`'s trigger column, re-stage to that shape's must-have/
+must-not list, verify any checkable factual claim for real rather than trusting the page's own
+prior prose, then the full gate loop (`tmp_variety.mjs --track=`, `tmp_vcheck.mjs`,
+`tmp_doccheck.mjs`, `tmp_hfaudit.mjs`, `tmp_smoke.mjs`, `tmp_contrast.mjs --theme=cream/dark`,
+`tmp_codecheck.mjs` on any page that gained a `<pre>`) before committing. `springboot` has only
+one real lesson page (`spring-boot-lombok`; its other two files are an exam and a flashcard
+deck with no `hf-deck` block at all, confirmed by inventory before picking it), so that track
+tops out at 1 shaped page — not a partial result, the track's real ceiling.
+
+`git-visualizer` (questions), `git-advanced` (assembly), `spring-boot-lombok` (argument),
+`claude-code` (whiteboard), `ai-assistants-overview` (timelapse), `production-deployment`
+(whiteboard), `web-stacks` (exhibit), `rust-fundamentals` (autopsy), `rust-web` (receipt),
+`ruby-fundamentals` (assembly), `rails` (questions), `api-playground` (exhibit),
+`jwt-playground` (assembly), `laravel` (mnemonic), `php-fundamentals` (timelapse),
+`mulesoft-api-led` (assembly), `mulesoft-fundamentals` (argument), `web-js-async` (mnemonic),
+`web-dom-events` (whiteboard) — 19 pages, all eleven shapes still alive, 0 declaration lies at
+every checkpoint.
+
+**One real, pre-existing factual error was found and fixed, verified live rather than
+authored around:** `ai-assistants-overview-visualizer.html` claimed that running
+`openai.ChatCompletion.create(...)` against a current `openai` install raises a bare
+`AttributeError: module 'openai' has no attribute 'ChatCompletion'`. Installed real `openai`
+3.15.0 and ran the exact snippet: `openai.ChatCompletion` actually resolves to a deliberate
+`APIRemovedInV1Proxy` stub the library keeps around for this exact migration, and calling
+`.create()` on it raises a custom `APIRemovedInV1` error with its own `openai migrate`
+instructions — a better teaching point than the assumed one, since it shows the library
+anticipated this exact gotcha. Corrected everywhere the wrong claim appeared (the scenario
+card, the timestamped ladder, the knowledge check). Two more claims were verified and
+confirmed accurate rather than rewritten: Ruby's `include` ordering (`Order.ancestors` and
+`order.notify`'s resolved value, reproduced live on Ruby 3.3.6) and the JWT `alg`-confusion
+key-reuse attack (reproduced with a real RSA keypair and a real HMAC-SHA256 over the public
+key's PEM bytes, using Node's `crypto` module) — both matched the pages' existing prose
+exactly, so neither needed a correction, only a citation of how it was checked.
+
+**Two real, sitewide CSS gaps were found and fixed, not routed around:**
+- `.hf-brain p`, `.hf-qa dd` and `.hf-note` were missing from `devhub-hf.css`'s
+  `overflow-wrap:anywhere` safety net that `.hf-napkin` and friends already had (see the
+  2026-09-13 entry's own note on this exact class of gap). Converting `spring-boot-lombok`'s
+  closing predict-first paragraph from the banned `hf-napkin` to `hf-brain` (required by
+  `argument`'s must-not list) clipped at 390px where the identical content under `hf-napkin`
+  had been clean — caught by `tmp_smoke.mjs` on that one page, confirmed pre-existing-vs-new
+  via `git stash`. Fixed by adding all three selectors to the shared list; affects all 31
+  pages using `hf-brain` sitewide, not just the one that surfaced it.
+- `.hf-arrow` had the identical gap — surfaced on `web-stacks-visualizer.html`'s first-ever
+  `<pre>`/`hf-arrow` pairing (the page's `exhibit` re-stage), where a long `hf-mark` span
+  inside an `hf-arrow` clipped the same way. Added to the same selector list; affects 53
+  pages using `hf-arrow`. Both fixes re-verified with a full 537-page `tmp_smoke.mjs` sweep
+  afterward — clean, no regression anywhere else on the site.
+
+**A real markup bug the gate itself caught:** `web-dom-events-visualizer.html`'s nest diagram
+was authored as `<div class="hf-card hf-nest">` (merged onto one element) rather than the
+site's normal `<div class="hf-card"><div class="hf-nest">` nesting. `tmp_variety.mjs`'s
+diagram-kit check is an exact-match regex against `class="hf-nest"`, so it never saw the
+diagram and reported the shape as failing its must-have list even though the diagram rendered
+correctly — the same class of gap the tool's own `WHAT IT CANNOT SEE` banner already warns
+about (device presence vs. layout). Split into the standard two-`div` nesting, which fixed
+both the gate and matched every other whiteboard page's convention.
+
+**Sitewide shape count after this batch: 67 shaped / 408 unshaped / 62 no-block, 0 declaration
+lies** (`node frontend/tmp_variety.mjs`). Full distribution: `questions` 10, `whiteboard` 9,
+`exhibit` 8, `timelapse` 8, `assembly` 7, `argument` 7, `receipt` 6, `mnemonic` 4,
+`autopsy` 4, `tour` 2, `twodoors` 2 — all eleven alive, no dead shape, closest to even yet.
+Tracks now at their real ceiling or at 2: `springboot` (1/1, ceiling), `git`, `ai-dev`,
+`stacks`, `rust`, `ruby`, `playground`, `php`, `mulesoft`, `web-fundamentals` (2 each). Tracks
+still at exactly 1 (next session's natural pick, per the same "prioritize thin tracks"
+instruction): `csharp`, `kubernetes`, `nodejs`. Every other track sits at 2-3, still well
+inside the "early rollout, cap math is mathematically unavoidable" regime the calibration
+batch's own note covers — `tmp_variety.mjs --track=` was run before every page in this batch,
+same as the last one. Full verification before pushing: `tmp_vcheck.mjs` (537 pages, clean),
+`tmp_doccheck.mjs` (341 symbols, 0 undocumented), `tmp_codecheck.mjs` (671 blocks, 0 real
+errors), a full 537-page `tmp_smoke.mjs` sweep (clean — the 78-page/121-element clipping list
+is the same pre-existing, unrelated set as before this batch), full-site
+`tmp_contrast.mjs --theme=cream` and `--theme=dark` sweeps (**re-run and corrected after an
+earlier draft of this entry had cream/dark backwards**: cream comes back fully clean, 537
+pages, 0 failures. Dark shows 3 distinct selectors under 2.2:1 across 17 pages —
+`.subject code` (8 pages incl. `go-structs-methods-visualizer.html`,
+`interview-system-design-visualizer.html`), `.instance code` (5 pages incl.
+`debugging-auth-401-403-visualizer.html`), `.core code` (4 pages incl.
+`datasci-numpy-pandas-visualizer.html`, `java-networking-visualizer.html`) — worst case
+1.57:1, all the same `rgb(240, 145, 109)` code-text color. None of these 17 pages are among
+the 19 this batch touched, and the batch's only CSS change (the `overflow-wrap` selector
+list above) never mentions `.subject`/`.instance`/`.core`, confirmed via `git diff d420391
+HEAD -- frontend/devhub-hf.css frontend/devhub.css`; not a regression from this batch, not
+fixed by it either — a real pre-existing dark-theme gap, left for a future contrast pass
+same as the two cream ones the 2026-09-16 entry flagged), and
+`tmp_assetcheck.mjs origin/claude/multi-repo-continuation-l6xwuq` (no teaching assets lost).
+
+Remaining work is unchanged in shape from the prior entry: **427 pages still `unshaped`**, at
+the same honest per-page cost (read-verify-restage-gate-commit, not a batch operation). The
+next natural targets are the three 1-shaped tracks named above, plus the two biggest
+by-volume tracks the 2026-09-16 entry already flagged (`angular` at 74 pages/2 shaped,
+`spring` — note the distinct body-class spelling from `springboot` — at 53/3).
+
 ---
 
 ### 18. Go GRANULAR on the eight core tracks before scaffolding anything new (Bobby, 2026-09-13)
