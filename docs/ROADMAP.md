@@ -3883,6 +3883,105 @@ next natural targets are the three 1-shaped tracks named above, plus the two big
 by-volume tracks the 2026-09-16 entry already flagged (`angular` at 74 pages/2 shaped,
 `spring` — note the distinct body-class spelling from `springboot` — at 53/3).
 
+**2026-09-20 — `track-web-fundamentals` fully cleared, `track-ts` partially (67 → 92 shaped
+sitewide), 13 pages, one commit.** This session's brief named a specific 13-page worklist up
+front (not derived fresh from `--unshaped` — see the correction below about why a fresh check
+mattered anyway): 8 pages in `track-ts` (`typescript-template-literal-types`,
+`typescript-top-bottom-types-deep`, `typescript-type-guards`, `typescript-type-level-lab`,
+`typescript-type-patterns`, `typescript-utility-types`, `typescript-variance`, `typescript-why`)
+plus all 5 remaining `unshaped` pages in `track-web-fundamentals` (`web-browser-rendering`,
+`web-css-fundamentals`, `web-css-layout`, `web-html-fundamentals`, `web-js-fundamentals`) — the
+latter is now a complete sweep of that track, but `track-ts` had 29 unshaped pages sitewide
+before this batch, so this cleared the 8 the brief named, not the whole track (21 still
+`unshaped` in `track-ts`). Same method as
+every batch above: read the page's existing pre-shapes block, name the KIND of gotcha in one
+sentence against `docs/HEADFIRST-SHAPES.md`'s trigger column — never the topic, never the track —
+re-stage to that shape's must-have/must-not list, verify every checkable factual claim for real
+(TypeScript 5.6.3 was already vendored in `frontend/node_modules` for `tmp_codecheck.mjs`, so
+every TS compiler-behavior claim in this batch — narrowing evaporating across a closure boundary
+on a mutable property, `Omit`'s `keyof any` constraint vs `Pick`'s `keyof T`, excess-property
+checking firing on a fresh literal but not through an unannotated local, method-vs-property
+bivariance under `strictFunctionTypes`, array covariance through a wide alias — was compiled for
+real against `--strict`, not assumed from memory or trusted from the page's own prior prose).
+
+| page | shape | the gotcha that chose it |
+|---|---|---|
+| `typescript-template-literal-types` | `tour` | already earned it — verdict pair + ladder + 3 real parallels were all already on the page; declared, not rewritten (the `debugging-jwt` precedent) |
+| `typescript-top-bottom-types-deep` | `autopsy` | TS2352's own error text names the workaround it enables — a real error a learner pastes into a search box |
+| `typescript-type-guards` | `timelapse` | a guard's narrowing is proof about T0, not a subscription — verified live that a property narrowed by `if (this.user)` re-widens (TS2531) the moment it crosses into a `setTimeout`, while a `const` copy stays narrowed but goes stale |
+| `typescript-type-level-lab` | `mnemonic` | "if you can't see it, name it" — type-level code has no debugger, so naming intermediate steps IS the debugger; genuinely sticky, not a manufactured catchphrase |
+| `typescript-type-patterns` | `exhibit` | the artifact is `getUser(orderId)` itself — nine lines, compiles clean under `--strict`, hands back a real stranger's PII |
+| `typescript-utility-types` | `argument` | `Omit` and `Pick` each behave exactly per their own one-line definitions (verified: `Omit<User,'typo'>` compiles to 0 removed fields, `Pick<User,'typo'>` is TS2344) — the gap is the assumption they're symmetric |
+| `typescript-variance` | `whiteboard` | direction of travel — reading a widened array is safe, writing through it is where the hole is — the textbook diagram case |
+| `typescript-why` | `assembly` | excess-property checking is a checkpoint tied to ONE station (a fresh literal next to its target type), not to the object; an unannotated `const opts = {...}` is the station that silently waves the typo through — corrected a real pre-existing bug in the page's OWN example while re-staging it (see below) |
+| `web-browser-rendering` | `receipt` | layout thrashing has a real, countable cost — 40 forced synchronous reflows where 1 would do |
+| `web-css-fundamentals` | `questions` | the misconception that specificity totals up across columns ("3 classes should beat 1 id") instead of being compared column-by-column, left to right |
+| `web-css-layout` | `tour` | already earned it — verdict pair + ladder + 3 parallels already on the page; declared, not rewritten |
+| `web-html-fundamentals` | `exhibit` | the artifact is the markup itself — `<div class="btn" onclick>` vs `<button>`, both real, one missing four behaviors a screen reader and keyboard both need |
+| `web-js-fundamentals` | `argument` | closures (lexical, fixed at definition) and `this` (dynamic, fixed at call) are both behaving correctly — the `obj.method` passed bare to `setTimeout` bug lives in the gap between the two |
+
+**A real, pre-existing factual bug was found and fixed while fact-checking, not authored
+around:** `typescript-why-visualizer.html`'s example claimed `login(opts)` — an object with a
+typo'd REQUIRED field (`passward` instead of `password`) assigned to an unannotated local first —
+"compiles clean" once excess-property checking is bypassed by the indirection. Compiled for real:
+it does NOT compile clean — TS2345, "Property 'password' is missing," because the object is
+missing a REQUIRED field, which structural typing always checks regardless of excess-property
+rules. The example never actually isolated the excess-property behavior it was trying to teach.
+Fixed by rewriting the scenario with an interface that has an OPTIONAL extra field
+(`rememberMe?`) and a typo'd EXTRA property (`rembemberMe`) instead of a typo'd required one —
+verified this version does exactly what the original claimed: TS2561 on the direct literal, zero
+errors through the unannotated local, TS2561 again once the local gets an explicit
+`: LoginOptions` annotation.
+
+Two structural notes for whoever re-stages a page next: (1) **`tmp_hfsplice.mjs` still does not
+exist in this repository** — confirmed via `git log --all --diff-filter=A -- '*tmp_hfsplice*'`,
+zero commits, ever. It is referenced by `CLAUDE.md` and `docs/HEADFIRST-BLOCK-RECIPE.md` as the
+required splice tool, but every re-stage batch since the 2026-09-16 calibration batch (this one
+included) has used plain line-range replacement instead: confirm the target file is LF-only
+(`grep -c $'\r'`, must be 0) before editing, replace the exact `hf-deck`-through-`hf-napkin` (or
+last `hf-*` device) line range, then confirm `git diff --stat` and the hunk headers touch only
+that range. (2) **All 5 `web-fundamentals` pages open with `<p class="hf-deck">` directly
+followed by a `<p class="sub">` tagline** (the 8 `ts` pages don't — their `hf-deck` is followed
+straight by the block's first `hf-kick`) — a different convention from pages where `hf-deck`
+comes after the `.intro` card entirely. Replacing only from `hf-deck` through the block's end
+(not capturing the `sub` line in the replacement) and re-emitting it unchanged, right after the
+new `data-shape`-bearing deck line, keeps that tagline from being silently dropped — it was
+caught once, on `web-browser-rendering-visualizer.html`, via `git diff` showing the `sub`
+paragraph missing entirely, and fixed before it reached the other four web-fundamentals pages.
+
+**Sitewide shape count after this batch: 92 shaped / 383 unshaped / 62 no-block, 0 declaration
+lies** (`node frontend/tmp_variety.mjs`). Both touched tracks are now fully clean of skew
+warnings: `track-ts` went from 2 shaped (both already over-represented once diluted) to **10
+shaped, 8 different shapes, every one at exactly 1/10 = 10%** (well under every cap; `receipt`
+and `questions` — the two pre-existing shapes — were deliberately avoided for all 8 new pages to
+keep it that way); `track-web-fundamentals` went from 2 shaped to **7 shaped, 7 different shapes,
+every one at 1/7 ≈ 14%** (`whiteboard` and `mnemonic` — the two pre-existing shapes — were
+likewise avoided). All eleven shapes remain alive sitewide, no dead shape. Full verification
+before pushing: `tmp_vcheck.mjs` (537 pages, clean), `tmp_doccheck.mjs` (341 symbols, 0
+undocumented), `tmp_assetcheck.mjs origin/claude/multi-repo-continuation-l6xwuq` (no teaching
+assets lost), `tmp_codecheck.mjs` (674 blocks across 537 files, 0 real errors), a full 537-page
+`tmp_smoke.mjs` sweep (clean — the 78-page/121-element clipping list and the 133-page
+network-only-failure list are the same pre-existing, unrelated sets as before this batch, each
+individually confirmed via `git stash` on the pages this batch actually touched), `tmp_cwlines.mjs`
+(455 mounts, 0 out-of-range, 0 miscounted as 1-based), and `tmp_contrast.mjs --theme=cream` /
+`--theme=dark` run against all 13 touched pages (clean in both themes). One real, page-specific
+regression was caught and fixed mid-batch: `web-browser-rendering-visualizer.html`'s first
+`hf-receipt-head` draft was a long unbroken code line (`for (let i = 0; i < 40; ...) {...}`) that
+clipped 22px at 320px — `tmp_smoke.mjs` on that one page caught it; reworded to a shorter phrase
+with natural break points and reverified clean.
+
+Remaining work is otherwise unchanged in shape: **383 pages still `unshaped`**, at the same
+honest per-page cost this section has documented since the calibration batch. **Correction to
+this section's own prior "remaining" note:** the three tracks it named as stuck at exactly 1
+shaped page (`csharp`, `kubernetes`, `nodejs`) are not — a re-check this session
+(`tmp_variety.mjs --track=`) found `csharp` at 5, `kubernetes` at 7, `nodejs` at 3, all with
+their own `ok`/`SKEW` mix already. Those pages were evidently re-staged in session(s) between the
+2026-09-18 entry above and this one, but no batch entry for that work was ever added here — this
+section is the shared source of truth for the sweep and had gone stale. Do not trust this
+section's own "remaining tracks" list without re-running `tmp_variety.mjs` first; the two
+biggest by-volume tracks (`angular` at 74 pages, `spring` at 53) are still worth checking fresh
+for the same reason before picking a next target.
+
 ---
 
 ### 18. Go GRANULAR on the eight core tracks before scaffolding anything new (Bobby, 2026-09-13)
