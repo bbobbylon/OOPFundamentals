@@ -106,112 +106,29 @@
     <div class="intro-ciam"><span class="tag">CIAM / user management:</span> <code>findByExternalId(sub)</code> looks up a user by their OIDC subject claim; <code>save(user)</code> persists a newly provisioned user after first login; <code>findByRoleIn(roles)</code> backs admin user listings.</div>
   </div>
 
-<p class="hf-deck">or, JPA doesn't track your entity — it tracks a transaction, and your entity just rides along</p>
+<p class="hf-deck" data-shape="questions">or, JPA doesn't track your entity — it tracks a transaction, and your entity just rides along</p>
 
-<div class="hf-kick">The problem</div>
+<p class="hf-big">A detached entity is a perfectly normal Java object that nobody's watching anymore.</p>
 <p class="hf-say">You set the role. You never called save(). The database still disagrees with you.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">Nothing threw, the debugger shows the new role, and the write still never happened</div>
-  <p><code>promoteToAdmin(id)</code> has no <code>@Transactional</code> of its own. It calls
-  <code>userRepository.findById(id).get()</code>, then <code>u.setRole("ADMIN")</code>, then
-  returns — no <code>save()</code> anywhere, because the page's own "save() &amp; dirty checking"
-  demo told you an already-loaded entity doesn't need one. You breakpoint the setter: <code>u</code>
-  really does say <code>"ADMIN"</code>. A separate query five seconds later shows the old role.
-  Nothing logged, nothing threw, and the object in your hand is telling the truth — it just isn't
-  connected to anything anymore.</p>
-  <div class="hf-scatter">
-    <span>debugger shows role = "ADMIN" ✓</span>
-    <span>no exception thrown ✓</span>
-    <span>findById() already committed and closed ⚠</span>
-    <span>u is a detached POJO by the time setRole() runs ⚠</span>
-  </div>
-  <p class="hf-foot">The bug isn't in setRole(). It's in believing a Java object and a database row
-  stay the same thing after the transaction that connected them ends.</p>
-</div>
+<dl class="hf-qa">
+  <dt>I called <code>setRole("ADMIN")</code> right after <code>findById()</code>. No <code>save()</code> anywhere. Why doesn't the database show ADMIN?</dt>
+  <dd>Because <code>findById()</code> opened its own tiny transaction, read the row, and committed and closed it — all before it even returned <code>u</code> to you. JPA only tracks an entity for the life of the transaction that loaded it; by the time <code>setRole()</code> runs, that transaction is already gone, so <code>u</code> is just a plain, detached Java object.</dd>
+  <dt>The debugger shows <code>u.getRole() == "ADMIN"</code> right after I call the setter. Doesn't that prove it's still tracked?</dt>
+  <dd>It proves the field changed in memory — that's just Java doing what Java always does. A correct field value doesn't tell you whether anything is still comparing it to a database snapshot. The persistence context that would have done that comparison closed before you ever got <code>u</code> back.</dd>
+  <dt><code>userRepository.findById(id)</code> is a Spring Data method — I never wrote an implementation for it. Shouldn't it at least share ONE session with the rest of my method?</dt>
+  <dd>Every generated repository method — <code>findById</code>, <code>findAll</code>, even a derived one like <code>findByRole</code> — is wrapped in its own <code>@Transactional(readOnly = true)</code> by <code>SimpleJpaRepository</code>, whether you asked for it or not. If you're not already inside a bigger transaction, it opens a tiny one just for that call and commits it immediately. "One method, one tiny transaction" is the default — not "my whole service method, one shared session."</dd>
+  <dt>Everyone says JPA does automatic dirty checking. Why does it look like it's just off here?</dt>
+  <dd>It isn't off — it's scoped. Dirty checking runs when the persistence context flushes at the end of an open transaction, comparing each managed entity's current field values against the snapshot it took when the entity was loaded. No open transaction means no persistence context to do that comparison in — there's nothing "off," there's just nothing left running.</dd>
+  <dt>If I just put <code>@Transactional</code> on <code>promoteToAdmin()</code> itself, does the whole problem disappear?</dt>
+  <dd>Yes — and it's the real fix, not a workaround. Your method's <code>@Transactional</code> defaults to propagation <code>REQUIRED</code>: no transaction running yet, so it starts one; <code>findById()</code> then joins that transaction instead of opening and closing its own. <code>u</code> stays managed for the entire method body, and the UPDATE flushes automatically when the method returns — still no explicit <code>save()</code> call needed.</dd>
+  <dt>If I call <code>save(u)</code> on the detached <code>u</code> instead, does that fix it without touching <code>@Transactional</code>?</dt>
+  <dd>Only if you use what it hands back. <code>save()</code> on an entity that already has an id runs an <code>EntityManager.merge()</code> under the hood — it copies your object's field values onto a freshly loaded, newly managed instance in a new persistence context, and returns <i>that</i> instance. <span class="hf-mark"><code>repository.save(u)</code> and then continuing to use the original <code>u</code> is a classic near-miss</span> — the merge worked, you're just still holding the wrong object.</dd>
+</dl>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Keep the read and the write inside ONE transaction — not two</div>
-  <div class="hf-ladder">
-    <b>Put @Transactional on promoteToAdmin itself</b>
-    <i>↓ findById() now joins your already-open transaction instead of opening and closing its own</i>
-    <b>u stays managed for the whole method body</b>
-    <i>↓ setRole() becomes a mutation inside a live persistence context, not after one</i>
-    <b>The UPDATE flushes automatically when the method returns — still no save() needed</b>
-  </div>
-</div>
-
-<div class="principle" style="text-align:left">
-  <b>An entity is only as "live" as the transaction that loaded it.</b> That one sentence is why
-  <code>findById()</code> + <code>setRole()</code> with no <code>@Transactional</code> silently
-  does nothing, why <code>@Transactional(readOnly = true)</code> sits on every generated repository
-  method whether you asked for it or not, and why calling <code>save()</code> explicitly on a
-  detached object works while mutating it in place does not — <code>save()</code> hands you back a
-  fresh, managed copy; the object you already had never rejoins anything.
-</div>
-
-<div class="hf-note">Think of a managed entity as <b>a hotel room while you're still checked in</b>.
-Housekeeping (the persistence context) notices every rearranged lamp and updates the ledger for you
-automatically — but only while your key card (the transaction) is still active. Check out, and you
-can keep holding that key and rearranging furniture in your head all you like; nobody is writing
-any of it down anymore. Where it breaks down: checking into a fresh room with the same room number
-(a new <code>findById()</code> for the same id) doesn't restore your old rearrangements — it hands
-you brand-new furniture, pulled straight from the database.</div>
-
-<div class="hf-talk">
-  <div class="hf-bub">
-    <span class="who">You</span>
-    <p>I called setRole() right after findById() — no save() anywhere. Why is the database still
-    showing the old role?</p>
-  </div>
-  <div class="hf-bub right">
-    <span class="who">The Persistence Context</span>
-    <p>Because I was never there when you called it. I only exist for the life of a transaction, and
-    in your case <code>findById()</code> opened its own, tiny one and closed it before that method
-    even returned <code>u</code> to you.</p>
-  </div>
-  <div class="hf-bub">
-    <span class="who">SimpleJpaRepository</span>
-    <p>That part's on me. Every method I generate — <code>findById</code>, <code>findAll</code>, even
-    a derived one like <code>findByRole</code> — is <code>@Transactional</code> by default. If you're
-    not already inside a bigger transaction, I open a tiny one just for that call and commit it
-    immediately. You got back a plain Java object, not a live wire to the database.</p>
-  </div>
-  <div class="hf-bub right">
-    <span class="who">Hibernate</span>
-    <p>And once that wire's cut, I call your object <b>detached</b>. I won't throw an error if you
-    keep mutating it — I just won't be watching anymore. Want it tracked again? Call
-    <code>merge()</code> and use the object it hands back, or better: do the read and the write
-    inside one <code>@Transactional</code> method so I never let go in between.</p>
-  </div>
-</div>
-
-<div class="hf-kick">The mechanism</div>
-<p class="hf-say">Every repository method opens a door. Most close it before you're back in your own code.</p>
-
-<div class="hf-card">
-  <ol class="hf-steps">
-    <li><span>You call <code>userRepo.findByRole("ADMIN")</code> — an interface method with
-    <b>no implementation you ever wrote</b></span><span class="tag">not magic, generated</span></li>
-    <li class="open"><span>At startup, Spring Data parsed that method name into a query —
-    <code>findByRole</code> → <code>WHERE role = :role</code> — and checked it against
-    <code>User</code>'s fields. Misspell it and the app <b>refuses to start</b></span><span class="tag">fails at boot, not at call time</span></li>
-    <li><span><code>SimpleJpaRepository</code> wraps the generated method in
-    <code>@Transactional(readOnly = true)</code></span><span class="tag">the part nobody notices</span></li>
-    <li class="open"><span>Hibernate opens a persistence context, runs the SQL, and maps each row to
-    a <code>User</code> — each one is now <b>managed</b></span><span class="tag">managed = tracked</span></li>
-    <li><span>If no wider transaction was already running, that transaction — and the persistence
-    context with it — commits and closes the instant the method returns</span><span class="tag">this is the trap</span></li>
-    <li class="open"><span>The <code>User</code> you're holding is still perfectly usable Java —
-    it's just <b>detached</b>. Mutating it is legal; persisting it is not, until something reopens a
-    session</span><span class="tag">dirty checking needs a live session</span></li>
-  </ol>
-  <p class="hf-annot">Step 3 is the lesson, and everything else follows from it. You never asked for a
-  transaction, but <code>SimpleJpaRepository</code> put one around your call anyway — one scoped to
-  exactly that method. That single default explains why a non-transactional service "loses" writes,
-  why wrapping your own method in <code>@Transactional</code> fixes it (yours becomes the one that's
-  already running, so the repository joins it instead of opening a new one), and why the fetch
-  strategies on the next page all live or die by the same boundary.</p>
+<div class="hf-brain">
+  <div class="hf-brain-head">Brain Power</div>
+  <p>Before you scroll: <code>promoteToAdmin(id)</code> has no <code>@Transactional</code> of its own. It calls <code>userRepository.findById(id).get()</code>, then <code>u.setRole("ADMIN")</code>, then returns — no exception anywhere. Is the object <code>u</code> holds after that call a lie, or is it telling the truth about something that just stopped being connected to the database?</p>
 </div>
 
 <div class="hf-card">
@@ -224,9 +141,11 @@ you brand-new furniture, pulled straight from the database.</div>
     </div>
   </div>
   <p class="hf-annot">The setter fires outside both rings — the inner one already closed before
-  <code>findById()</code> even returned. Move <code>@Transactional</code> onto
-  <code>promoteToAdmin</code> itself and the inner ring grows to cover the setter too — that's the
-  entire fix, and it's a one-line, one-annotation change.</p>
+  <code>findById()</code> even returned. <code>u</code> is telling the truth: its <code>role</code>
+  field really does say <code>"ADMIN"</code>. It's just a truth nobody with write access to the
+  database is listening to anymore. Move <code>@Transactional</code> onto <code>promoteToAdmin</code>
+  itself and the inner ring grows to cover the setter too — that's the entire fix, and it's a
+  one-line, one-annotation change.</p>
 </div>
 
 <div class="hf-check" data-answer="1">
@@ -249,77 +168,13 @@ you brand-new furniture, pulled straight from the database.</div>
   stale in-memory role never gets a second chance to write itself.</p>
 </div>
 
-<div class="hf-kick">Where you've seen this before</div>
-<p class="hf-say">Three systems, one boundary: tracked only while a resource stays open.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>EF Core's DbContext — the .NET twin of this exact bug</h4>
-    <p>Entity Framework Core tracks entities per <code>DbContext</code> instance, and in ASP.NET
-    that context is usually request-scoped. Load an entity, let the request end (the context
-    disposes), and a background job holding a reference to that entity is holding a detached POCO —
-    calling <code>SaveChanges()</code> on a <i>different</i> context does nothing for it unless you
-    explicitly <code>Attach()</code> and mark it modified. Same idea, same silence, different
-    runtime.</p>
-    <div class="hf-scatter"><span>DbContext scope ≈ persistence context scope</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Raw JDBC's ResultSet — the version that at least yells at you</h4>
-    <p>Keep a <code>ResultSet</code> reference after its <code>Connection</code> closes and call
-    <code>rs.getString()</code> and you get a loud <code>SQLException: ResultSet is closed</code>.
-    JPA sits one layer above JDBC and hides that connection entirely — which is exactly why its
-    version of "the resource already closed" fails <i>silently</i> instead. The convenience that
-    makes JPA pleasant to use is the same convenience that hides this bug.</p>
-    <div class="hf-scatter"><span>JDBC fails loud; JPA fails quiet</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Your CIAM login-timestamp bug</h4>
-    <p>A user-provisioning service calls <code>findByExternalId(sub)</code> — the exact lookup this
-    page's intro uses for OIDC login — then sets <code>lastLoginAt = now()</code> on the result with
-    no <code>@Transactional</code> wrapping the call. The login succeeds, the token issues, and the
-    timestamp never lands in the database. Nobody notices for weeks, because nothing about a
-    successful login looked wrong from the client's side.</p>
-    <div class="hf-scatter"><span>findByExternalId() ≈ findById() — same trap</span></div>
-  </div>
-</div>
-
-<div class="hf-kick">Questions from the back row</div>
-<div class="hf-ask">
-  <p class="q">Why doesn't Spring just keep one big transaction open for my whole service method automatically?</p>
-  <p class="a">It does — you just have to ask. Put <code>@Transactional</code> on your own service
-  method and its propagation defaults to <code>REQUIRED</code>: if a transaction is already running,
-  join it; if not, start one. When your method is the one that's already running,
-  <code>findById()</code>'s own <code>@Transactional</code> joins yours instead of opening a second
-  one — Spring doesn't nest real transactions here, it just notices one is already open and reuses
-  it. That's the actual fix, not a workaround: put the boundary where the read and the write both
-  need to live.</p>
-</div>
-<div class="hf-ask">
-  <p class="q">If I call save() on the detached u, does that fix it?</p>
-  <p class="a">Yes, but only if you use what it hands back. <code>save()</code> on an entity that
-  already has an id runs an <code>EntityManager.merge()</code> under the hood: it copies your
-  object's field values onto a <i>freshly loaded, newly managed</i> instance in a new persistence
-  context and returns <i>that</i> instance. <code>repository.save(u)</code> and then continuing to
-  use the original <code>u</code> is a classic near-miss — the merge worked, you're just still
-  holding the wrong object.</p>
-</div>
-<div class="hf-ask">
-  <p class="q">Does @Transactional(readOnly = true) actually stop me from writing?</p>
-  <p class="a">No — it's a hint, not a lock. It tells Hibernate to skip the dirty-checking flush at
-  commit (a real performance win on read paths) and some JDBC drivers use it to set the connection
-  read-only at the database level, but neither is guaranteed across every driver. Don't rely on it
-  as a safety rail against accidental writes; rely on it for speed on methods that genuinely never
-  write.</p>
-</div>
-
-<div class="hf-kick">Grab a napkin</div>
-<p class="hf-say">Predict it before you scroll.</p>
-<div class="hf-napkin">
-  A <code>@Transactional</code> service method <code>A()</code> loads a <code>User</code>, mutates
-  it, and then calls <i>another</i> <code>@Transactional</code> method, <code>B()</code>, defined in
-  the <b>same class</b> — called as a plain <code>this.B()</code>, not through an injected bean.
-  Does <code>B()</code>'s own <code>@Transactional</code> do anything at all?
-</div>
+<div class="hf-note">Think of a managed entity as <b>a hotel room while you're still checked in</b>.
+Housekeeping (the persistence context) notices every rearranged lamp and updates the ledger for you
+automatically — but only while your key card (the transaction) is still active. Check out, and you
+can keep holding that key and rearranging furniture in your head all you like; nobody is writing
+any of it down anymore. Checking into a fresh room with the same room number (a new
+<code>findById()</code> for the same id) doesn't restore your old rearrangements — it hands you
+brand-new furniture, pulled straight from the database.</div>
 
   <!-- ── HERO: animated repository-call walk · call chip + live "method → SQL → entity" inspector ── -->
   <div class="card" style="border:1px solid #a78bfa;margin-bottom:18px">

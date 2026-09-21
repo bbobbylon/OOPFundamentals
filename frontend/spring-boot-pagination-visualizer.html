@@ -153,126 +153,86 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> Your internal DB uses Spring offset paging (<code>Page&lt;UserDto&gt;</code>). The Entra ID Graph API is cursor-based — <code>GET /v1.0/users?$top=20</code> returns an <code>@odata.nextLink</code>; Angular stores it in a <code>signal&lt;string|null&gt;</code> and "Previous" means caching prior pages client-side. Ping Directory returns an <code>x-first-result-cookie</code>. Know which model the API you're calling uses.</div>
   </div>
 
-<p class="hf-deck">or, adding one JOIN FETCH can make Spring page through your entire table just to hand you 20 rows</p>
+<p class="hf-deck" data-shape="receipt">or, adding one JOIN FETCH can make Spring page through your entire table just to hand you 20 rows</p>
 
-<div class="hf-kick">The problem</div>
-<p class="hf-say">totalElements said 4,700. The actual SQL says something scarier.</p>
+<p class="hf-say">totalElements said 4,700. The actual SQL says something scarier. Worked example, real query shape, from the fetch-strategies page's own Order/LineItem model.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">Page 0, size 20 comes back perfect — and the database just read all 4,700 rows to build it</div>
-  <p>You've got a paginated endpoint, and someone reasonably asks for the order's line items on the
-  same call, so you add <code>JOIN FETCH o.lineItems</code> to the <code>@Query</code> behind
-  <code>Page&lt;Order&gt; findByStatus(status, Pageable p)</code>. You test it: page 0, size 20
-  comes back with exactly 20 orders, and <code>totalElements</code> correctly says 4,700. Ships
-  clean. Weeks later the logs show <code>HHH000104: firstResult/maxResults specified with
-  collection fetch; applying in memory!</code> buried at DEBUG level, and nobody connects it to
-  this endpoint — the response has never once looked wrong.</p>
-  <div class="hf-scatter">
-    <span>totalElements: 4700 — correct ✓</span>
-    <span>content.size(): 20 — correct ✓</span>
-    <span>HHH000104 logged, easy to miss ⚠</span>
-    <span>every matching row loaded into memory before trimming to 20 ⚠</span>
-  </div>
-  <p class="hf-foot">The response looks exactly like pagination working. The query behind it looks
-  nothing like "page 0 of 20."</p>
+<div class="hf-receipt">
+  <div class="hf-receipt-head">GET /orders?page=0&amp;size=20 — what the response shows vs. what the database did</div>
+  <div class="row"><span>Rows requested (page size)</span><span>20</span></div>
+  <div class="row"><span>Rows returned in the response</span><span>20</span></div>
+  <div class="row"><span>totalElements reported</span><span>4,700</span></div>
+  <div class="row"><span>Orders actually loaded into memory, fully joined with their line items, to build that page</span><span>4,700</span></div>
+  <div class="row total"><span>Rows thrown away after loading, never returned</span><span>4,680</span></div>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Page the IDs first — fetch the join second</div>
-  <div class="hf-ladder">
-    <b>Query 1: page just the Order ids, no fetch join at all</b>
-    <i>↓ a plain Pageable query has nothing to multiply, so SQL LIMIT/OFFSET applies honestly — 20 ids, really 20</i>
-    <b>Query 2: JOIN FETCH lineItems WHERE id IN (those 20 ids)</b>
-    <i>↓ a small, second query with no pagination math to get wrong</i>
-    <b>Or skip the join entirely and let @BatchSize load lineItems in batches after</b>
-  </div>
-</div>
+<div class="hf-arrow up">Every number in that receipt is individually correct — 20 came back, 4,700 is the real
+total. <span class="hf-mark">The line that isn't on the response anywhere</span> is the 4,700 fully-joined
+orders it took to produce those 20. Nothing in the JSON says so; only the query log does, at DEBUG,
+easy to miss.</div>
 
-<div class="principle" style="text-align:left">
-  <b>Pagination and a fetch-joined collection can't both be honest at the SQL level — Hibernate
-  picks correctness over speed.</b> A <code>LIMIT</code> can only cut cleanly between whole rows,
-  and a fetch-joined collection turns one <code>Order</code> into several rows — one per line item.
-  A SQL-level cutoff could slice a parent's children in half, so Hibernate refuses to risk it: it
-  loads every matching row, pages in memory, and logs a warning most teams never read until the
-  table is too big to fit in memory anymore. It's the same root conflict as
-  <code>MultipleBagFetchException</code> on the fetch-strategies page — Hibernate just has a safe
-  answer for one bag and no safe answer for two.
-</div>
-
-<div class="hf-note">Think of SQL's LIMIT/OFFSET as <b>a bouncer counting people at a door, one at a
-time</b>. JOIN FETCH turns each order into a small group — the order and its line items, arriving
-together. Ask the bouncer for "the first 20 people" when guests arrive in clumps of 1, 3, or 5, and
-he can't stop mid-group without splitting someone from half their own party — so instead he waves
-the <i>entire</i> line inside, counts everyone himself once they're all in the room, and only then
-walks 20 of them back out to you. The line outside looked short. The room is now completely full.</div>
-
-<div class="hf-talk">
-  <div class="hf-bub">
-    <span class="who">You</span>
-    <p>I put a Pageable on a JOIN FETCH query. totalElements is right, content has exactly 20 orders.
-    What's actually wrong here?</p>
-  </div>
-  <div class="hf-bub right">
-    <span class="who">Hibernate</span>
-    <p>Not the response — the SELECT behind it. I can't apply LIMIT and OFFSET to a query that
-    fetch-joins a collection, because your join multiplies rows per line item, and a SQL-level
-    cutoff could split an order's line items across the page boundary. So I drop LIMIT/OFFSET from
-    the real SQL entirely, pull back every row matching your WHERE clause, and do the paging myself
-    in the JVM afterward.</p>
-  </div>
-  <div class="hf-bub">
-    <span class="who">Your heap</span>
-    <p>Which is where I come in. "Page 0 of 4,700 orders" sounded like 20 rows arriving. It was
-    actually every matching order and every one of their line items, all at once, just to throw
-    away everything past position 20. I'm fine at 4,700 rows. I will not be fine at 4.7 million.</p>
-  </div>
+<div class="hf-vs">
+  <div class="bad"><h5>4,700 orders loaded</h5><p>One <code>@Query</code> with both a
+  <code>Pageable</code> parameter and <code>JOIN FETCH o.lineItems</code>. Hibernate can't apply
+  <code>LIMIT</code> to a fetch-joined collection, so it drops LIMIT/OFFSET entirely, pulls back
+  every matching row, and pages in memory. It works — at 4,700 rows. It does not work at 4.7
+  million.</p></div>
+  <div class="good"><h5>20 orders loaded</h5><p>Page just the <code>Order</code> ids first, with no
+  fetch join at all — a plain <code>Pageable</code> query has nothing to multiply, so
+  <code>LIMIT</code>/<code>OFFSET</code> applies honestly. A second, small query then fetch-joins
+  <code>lineItems</code> for only those 20 ids.</p></div>
 </div>
 
 <div class="hf-kick">The mechanism</div>
 <p class="hf-say">One JOIN turns "give me 20" into "give me literally everything, and I'll count to 20 myself."</p>
 
-<div class="hf-card">
-  <ol class="hf-steps">
-    <li><span>Your repository method carries both a <code>Pageable</code> parameter and
-    <code>JOIN FETCH o.lineItems</code> in the same <code>@Query</code></span><span class="tag">looks like ordinary pagination</span></li>
-    <li class="open"><span>Hibernate builds the SQL as a real <code>JOIN</code> across orders and
-    line items — one order with 3 line items becomes <b>3 SQL rows</b></span><span class="tag">rows ≠ orders once you fetch-join</span></li>
-    <li><span>A SQL <code>LIMIT 20</code> would cut those rows at row 20 — possibly mid-order,
-    handing back 2 of a 3-line order's line items</span><span class="tag">an incomplete, corrupted collection</span></li>
-    <li class="open"><span>To avoid that, Hibernate silently drops <code>LIMIT</code>/<code>OFFSET</code>
-    from the SQL and logs <code>HHH000104: firstResult/maxResults specified with collection fetch;
-    applying in memory!</code></span><span class="tag">the warning almost nobody reads</span></li>
-    <li class="open"><span>It loads <b>every</b> row matching your <code>WHERE</code> clause — all
-    4,700 orders' worth, fully joined — into a Java <code>List</code>, then slices index 0–19 off
-    that list in memory</span><span class="tag">this is the actual query cost</span></li>
-    <li><span>The separate <code>COUNT</code> query Spring Data runs for
-    <code>totalElements</code> is a normal, cheap SQL count — so the response metadata looks
-    completely healthy</span><span class="tag">the part that hides the bug</span></li>
-  </ol>
-  <p class="hf-annot">Step 3 is the lesson — every other step is Hibernate protecting you from it. A
-  SQL <code>LIMIT</code> operates on rows, and the instant <code>JOIN FETCH</code> turns one order
-  into three rows, "row 20" and "order 20" stop being the same cutoff. Hibernate's only safe moves
-  from there are load-everything-then-slice (what it does here, silently) or refuse to run the
-  query at all (what it does for two fetch-joined Lists). Same root conflict, two different
-  responses to it.</p>
+<div class="hf-chain">
+<span class="n">Pageable(page=0, size=20) + JOIN FETCH o.lineItems, one @Query</span><span class="a">&rarr;</span>
+<span class="n">Hibernate builds the SQL as a real JOIN</span><span class="a">&rarr;</span>
+<span class="n">sees a fetch-joined collection alongside LIMIT/OFFSET</span><span class="a">&rarr;</span>
+<span class="n">drops LIMIT/OFFSET, logs HHH000104</span><span class="a">&rarr;</span>
+<span class="n">loads all 4,700 orders, slices 20 in the JVM</span>
+</div>
+
+<pre><code>// the query that looks like ordinary pagination
+@Query("SELECT o FROM Order o JOIN FETCH o.lineItems WHERE o.status = :status")
+Page&lt;Order&gt; findByStatus(String status, Pageable pageable);
+
+// what actually shows up in the log, at DEBUG, easy to miss
+HHH000104: firstResult/maxResults specified with collection fetch; applying in memory!</code></pre>
+
+<div class="hf-arrow">Line 2 — the fetch join is what breaks LIMIT/OFFSET. Nothing else about this method
+looks unusual; it reads exactly like every other paginated repository method on this page.</div>
+<div class="hf-arrow up">The log line is the only artifact on the whole request that says anything
+happened differently. It's DEBUG-level by default, and <span class="hf-mark">nothing in the HTTP
+response tells you it fired</span> — totalElements and content.size() both look completely normal.</div>
+<div class="hf-arrow rose">Swap the method for two smaller queries — page just the ids, then
+<code>JOIN FETCH o.lineItems WHERE o.id IN (:ids)</code> — and the log line disappears along with
+the 4,680 wasted row-loads, with the response staying byte-for-byte identical.</div>
+
+<div class="hf-brain">
+  <div class="hf-brain-head">Brain Power</div>
+  <p>Before you scroll: a plain <code>Page&lt;Order&gt; findAll(Pageable p)</code> — no
+  <code>JOIN FETCH</code>, no <code>@EntityGraph</code>, nothing but the derived method — is called
+  for page 3, size 20 against the same 4,700-row table. Does Hibernate load all 4,700 rows to build
+  that page too, the same way it does once a fetch join is involved?</p>
 </div>
 
 <div class="hf-card">
-  <div class="hf-cast">
-    <div class="subject">GET /orders?page=0&amp;size=20<small>Pageable(page=0, size=20)</small></div>
-    <div class="fan">JOIN FETCH o.lineItems ↓ LIMIT/OFFSET silently dropped</div>
-    <div class="obs">
-      <span>Order #1</span>
-      <span>Order #2</span>
-      <span>Order #3</span>
-      <span>…4,694 more, all fully loaded</span>
-      <span class="new">the 20 actually handed back to you</span>
+  <div class="hf-slot">
+    <div class="ctx">the question being asked<small>"how many rows does the database actually touch to build page 0, size 20?"</small></div>
+    <div class="arrow">it depends entirely on &rarr;</div>
+    <div class="opts">
+      <span>plain Pageable, no fetch join</span>
+      <span class="on">Pageable + a fetch-joined collection</span>
+      <span>a separate COUNT query for totalElements</span>
     </div>
   </div>
-  <p class="hf-annot">Every one of those 4,700 orders — and every line item on every one of them —
-  really did load into memory. The "page" you asked for is the last thing that happens, not the
-  first: once a fetch-joined collection is in the query, Hibernate can't shrink the SQL to match
-  your request, so it does the shrinking after the expensive part is already finished.</p>
+  <p class="hf-annot">A plain <code>Pageable</code> query — no collection fetch join anywhere —
+  applies <code>LIMIT</code>/<code>OFFSET</code> at the database exactly the way you'd expect: it
+  touches 20 rows, not 4,700. The COUNT query behind <code>totalElements</code> is separate either
+  way and stays cheap in both cases. The one thing that flips the whole cost model is whether a
+  <code>JOIN FETCH</code> on a collection is riding along with the page request.</p>
 </div>
 
 <div class="hf-check" data-answer="0">
@@ -301,74 +261,7 @@ walks 20 of them back out to you. The line outside looked short. The room is now
   back a corrupted collection.</p>
 </div>
 
-<div class="hf-kick">Where you've seen this before</div>
-<p class="hf-say">Three systems, one rule: joining first and paging second gets expensive exactly when size matters most.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>Elasticsearch's deep-pagination wall</h4>
-    <p>Ask Elasticsearch for <code>from: 10000, size: 20</code> and it has to sort and hold 10,020
-    results on every shard before trimming — which is exactly why it caps <code>from+size</code> and
-    pushes you toward <code>search_after</code> instead. Different engine, same shape of problem:
-    "skip N, take M" gets radically more expensive the deeper you page, and the fix is always the
-    same instinct — stop asking to skip, ask for a stable position instead.</p>
-    <div class="hf-scatter"><span>from/size deep paging ≈ in-memory pagination</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>MongoDB's $lookup before $skip</h4>
-    <p>An aggregation pipeline that runs <code>$lookup</code> (Mongo's join) before
-    <code>$skip</code>/<code>$limit</code> pays this exact tax — the join expands documents first,
-    so skip/limit counts the expanded set, not the original one. The documented fix is identical to
-    this page's fix: page the base collection's <code>_id</code>s first, THEN <code>$lookup</code>
-    only for that page.</p>
-    <div class="hf-scatter"><span>page ids first, join second — same fix, different database</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Your CIAM admin user list</h4>
-    <p><code>GET /admin/users?page=2&amp;size=50</code> joining <code>roles</code> for a nicer
-    single-query listing throws the identical <code>HHH000104</code> warning. At 50 users per
-    tenant it's invisible. At a 200,000-employee enterprise tenant, every single page of that admin
-    table quietly reads the entire user population first.</p>
-    <div class="hf-scatter"><span>roles JOIN FETCH + Pageable ≈ lineItems JOIN FETCH + Pageable</span></div>
-  </div>
-</div>
-
-<div class="hf-kick">Questions from the back row</div>
-<div class="hf-ask">
-  <p class="q">Does Slice&lt;T&gt; avoid this the way it avoids the COUNT query?</p>
-  <p class="a">No. <code>Slice</code> still asks for <code>Pageable</code>-driven
-  <code>LIMIT</code>/<code>OFFSET</code> under the hood — it just skips the separate COUNT query.
-  Fetch-join a collection on a <code>Slice</code> query and you hit the identical
-  <code>HHH000104</code> in-memory pagination, because the conflict is between LIMIT/OFFSET and a
-  collection join, not between COUNT and anything. Slice makes pagination cheaper; it doesn't make
-  it safe to combine with a fetch join.</p>
-</div>
-<div class="hf-ask">
-  <p class="q">Why doesn't Spring Data just detect this and throw, like it does for two bags?</p>
-  <p class="a">Because a single fetch-joined collection plus pagination has a well-defined, if
-  expensive, correct answer — load everything, then page in memory. There's no ambiguity about
-  which rows belong together, only a cost problem. Hibernate only refuses to run a query when it
-  genuinely cannot produce a correct result at all, which is the two-bag case; here it CAN produce
-  a correct result, so it does — just not the cheap one you were expecting.</p>
-</div>
-<div class="hf-ask">
-  <p class="q">How would I even catch this before it causes an outage?</p>
-  <p class="a">Treat any <code>Page&lt;T&gt;</code> endpoint that also fetch-joins a collection as a
-  standing review item, regardless of today's table size — it gets worse only as the table grows,
-  quietly, with zero code changes. Concretely: stop letting <code>HHH000104</code> sit at DEBUG
-  (alert on it), or turn on Hibernate statistics and watch for a query whose row count is nowhere
-  near its stated page size. The same instinct this site already teaches for spotting N+1 — watch
-  the query log, don't trust the response shape — applies here word for word.</p>
-</div>
-
-<div class="hf-kick">Grab a napkin</div>
-<p class="hf-say">Predict it before you scroll.</p>
-<div class="hf-napkin">
-  A plain <code>Page&lt;Order&gt; findAll(Pageable p)</code> — no <code>JOIN FETCH</code>, no
-  <code>@EntityGraph</code>, nothing but the derived method — is called for page 3, size 20 against
-  a 50,000-row table. Does Hibernate load all 50,000 rows to build that page, the same way it does
-  once a fetch join is involved?
-</div>
+<p class="hf-big">The response says 20. The database bill says 4,700.</p>
 
   <!-- ── HERO: animated Pageable pipeline · live per-step inspector ── -->
   <div class="panel" style="border:1px solid var(--accent)">
@@ -984,6 +877,7 @@ renderNodes(cur);
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-syntax.js"></script>
 <script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>

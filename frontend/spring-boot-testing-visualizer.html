@@ -119,25 +119,56 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> Unit-test every service branch; slice-test every controller for "right role → 200" and "wrong role → 403"; <code>@DataJpaTest</code> + Testcontainers for user-search specifications against 50 seed rows; one <code>@SpringBootTest</code> end-to-end for the critical flow — create user → assign role → fetch → assert role. Focus on the hard logic and the security boundary, not coverage for its own sake.</div>
   </div>
 
-  <p class="hf-deck">or, why a test that passes alone fails in the full suite — and nobody touched a database</p>
+  <p class="hf-deck" data-shape="timelapse">or, why a test that passes alone fails in the full suite — and nobody touched a database</p>
 
-<div class="hf-kick">The problem</div>
-<p class="hf-say"><code>mvn test -Dtest=InventoryServiceIT</code> is green. <code>mvn test</code> — the whole suite — fails on that exact same class. Nothing about the test changed.</p>
+<div class="hf-kick">One JVM, one test run, one class that never changed</div>
+<p class="hf-say">Watch the clock, not the test. <code>InventoryServiceIT</code>'s source file is byte-identical whether it passes or fails.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">InventoryServiceIT fails only when OrderServiceIT runs first</div>
-  <p><code>OrderServiceIT</code> and <code>InventoryServiceIT</code> are both plain <code>@SpringBootTest</code> classes, no profile, no <code>@TestPropertySource</code>, no context customizers — nothing that would make their configuration different from each other. Both wire in <code>DiscountCache</code>, a small <code>@Service</code> that holds a <code>HashMap&lt;String,BigDecimal&gt;</code> in memory as a stand-in for a real cache. <code>OrderServiceIT</code>'s test inserts a discount code into it and never cleans up. <code>InventoryServiceIT</code> asserts the cache is empty at the start of its test — and when it runs second, it isn't.</p>
-  <p>Spring's TestContext framework doesn't build a fresh <code>ApplicationContext</code> per test class. It computes a cache key from each class's effective configuration — declared config classes, active profiles, property sources, context customizers — and if two classes hash to the <b>same key</b>, it hands the second class the literal same context object it already built for the first, straight out of a static, JVM-wide <code>ContextCache</code>. Same context means same singleton beans. <code>DiscountCache</code> isn't recreated for <code>InventoryServiceIT</code> — it's the exact same instance <code>OrderServiceIT</code> already mutated.</p>
-  <div class="hf-scatter">
-    <span>each test class looks self-contained ✓</span>
-    <span>neither test touches the real database ✓</span>
-    <span>the thing that is not ⚠ a fresh DiscountCache per class</span>
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">A new configuration signature shows up</span>
+      <span class="go"><em>a @SpringBootTest class with no matching entry in the cache</em> <span class="arrow">&rarr;</span> <code>ContextCache</code> miss — Spring builds a fresh <code>ApplicationContext</code>, singleton beans included</span></div>
+    <div class="stt"><span class="nm">That class's own test method runs</span>
+      <span class="go"><em>it touches a mutable singleton bean</em> <span class="arrow">&rarr;</span> the singleton changes state; nothing resets it when the method returns</span></div>
+    <div class="stt"><span class="nm">A later class with the identical signature runs</span>
+      <span class="go"><em>same declared config, same profiles, same property sources</em> <span class="arrow">&rarr;</span> <code>ContextCache</code> hit — Spring hands back the SAME context object, mutation and all</span></div>
   </div>
-  <p class="hf-foot">JUnit doesn't guarantee test class execution order by default — so this failure comes and goes depending on classpath ordering, parallelism settings, or which IDE run configuration you clicked.</p>
+  <p class="hf-annot">This is a cycle, not a one-time event, because it replays for every distinct configuration signature across a whole test run — and the middle state is whichever class the JVM happened to run first. Nothing here is a bug in <code>@SpringBootTest</code>. The trap is that state one only happens ONCE per signature, and every later class inherits whatever state two left behind.</p>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Stop assuming isolation you were never given</div>
+<div class="hf-kick">The same suite, timestamped</div>
+<p class="hf-say">Every rung is a moment inside one <code>mvn test</code> run. The two test classes never changed.</p>
+
+<div class="hf-card">
+  <div class="hf-ladder">
+    <b>10:02:14 &mdash; mvn test starts. JUnit discovers OrderServiceIT and InventoryServiceIT, both bare @SpringBootTest classes, no profile, no @TestPropertySource</b>
+    <i>&darr; 5 seconds into class discovery, before either test method has run</i>
+    <b>10:02:19 &mdash; OrderServiceIT is the first of the two to execute. Its configuration signature has no match in ContextCache, so Spring builds a fresh ApplicationContext &mdash; DiscountCache starts empty</b>
+    <i>&darr; inside that same class's test method, half a second later</i>
+    <b>10:02:19.4 &mdash; the test calls discountCache.put("SAVE10", ...) and returns. Nothing resets the map &mdash; there was never a reason to, from that test's own point of view</b>
+    <i>&darr; 4 seconds later, a completely different test class</i>
+    <b>10:02:23 &mdash; InventoryServiceIT runs. Its signature is identical to OrderServiceIT's &mdash; ContextCache hits, and Spring hands back that SAME ApplicationContext, SAME DiscountCache instance, mutation and all</b>
+    <i>&darr; the very next assertion, same second</i>
+    <b>10:02:23.1 &mdash; InventoryServiceIT asserts the cache starts empty. It isn't. The suite goes red on a class nobody touched</b>
+    <i>&darr; the next morning, in a different terminal</i>
+    <b>09:14:02 &mdash; mvn test -Dtest=InventoryServiceIT, run alone. No OrderServiceIT anywhere in this JVM to share a context with &mdash; ContextCache misses, a brand-new DiscountCache is built, and the test passes clean</b>
+  </div>
+  <p class="hf-annot">Rung four is the one to stare at. It is not "sometimes fails" &mdash; it is <span class="hf-mark">deterministically red whenever OrderServiceIT ran first in this JVM</span> and deterministically green otherwise. That is why "it passed on my machine" and "it failed in CI" can both be true reports about the exact same commit: the two runs just picked a different execution order.</p>
+</div>
+
+<div class="hf-arrow up">Read rungs two and six together. Same class, same assertion, same source file &mdash; and the only variable is <b>whether another class with a matching configuration happened to run first in this JVM</b>.</div>
+
+<p class="hf-big">The context is cached. The mess a test leaves in it is cached right along with it.</p>
+
+<div class="hf-brain">
+  <div class="hf-brain-head">Brain Power</div>
+  <p>A third class, PricingServiceIT, adds one <code>@TestPropertySource</code> that OrderServiceIT and InventoryServiceIT don't have. Before you scroll: does PricingServiceIT see OrderServiceIT's mutated DiscountCache too &mdash; and what single fact about ContextCache decides the answer?</p>
+</div>
+
+<div class="hf-kick">The way out</div>
+<p class="hf-say">Stop assuming an isolation you were never given.</p>
+
+<div class="hf-card">
   <div class="hf-ladder">
     <b>Reset mutable singleton state yourself, in @BeforeEach or @AfterEach</b>
     <i>↓ discountCache.clear() costs nothing and removes the dependency on load order entirely</i>
@@ -152,42 +183,7 @@
   <b>The one-sentence rule.</b> Spring reuses a cached <code>ApplicationContext</code> — singleton beans and all — across every test class whose effective configuration matches, purely as a startup-time optimization; it never promises you a clean bean graph between test classes, only between test <i>runs</i> of a context it decided to rebuild. A mutable singleton is exactly as shared across your test classes as it would be across two controllers in production — the test slice you're looking at doesn't change that fact, it just hides it until the wrong two classes run in the wrong order.
 </div>
 
-<div class="hf-note">"<b>Your test classes are roommates, not strangers.</b>" If their configuration matches, they don't get separate apartments — they get the same one, mess included.</div>
-
-<div class="hf-talk">
-  <div class="hf-bub"><span class="who">You</span><p>I ran InventoryServiceIT by itself and it passed. How can the exact same test fail in the suite?</p></div>
-  <div class="hf-bub right"><span class="who">TestContext framework, personified</span><p>Run alone, there's no OrderServiceIT ahead of you to share a context with, so you get a brand new DiscountCache. Run in the suite, OrderServiceIT went first, matched your configuration key, and I handed you its already-mutated context instead of building you a new one.</p></div>
-  <div class="hf-bub"><span class="who">You</span><p>So the bug isn't in either test.</p></div>
-  <div class="hf-bub right"><span class="who">TestContext framework, personified</span><p>Correct — it's in assuming I owe you an empty DiscountCache. I never promised that. I promised to avoid rebuilding a context I've already built for an identical configuration, and I keep that promise very literally.</p></div>
-</div>
-
-<div class="hf-kick">The mechanism</div>
-<p class="hf-say">Trace exactly what "same configuration" triggers, from the first test class to the second.</p>
-
-<div class="hf-card">
-  <ol class="hf-steps">
-    <li><span>OrderServiceIT runs first: @SpringBootTest, no profile, no property overrides</span><span class="tag">class A</span></li>
-    <li class="open"><span>TestContext framework builds a MergedContextConfiguration key from A's settings</span><span class="tag">the key</span></li>
-    <li><span>No matching entry in ContextCache → builds a fresh ApplicationContext, caches it under that key</span><span class="tag">cache miss</span></li>
-    <li class="open"><span>A's test method calls discountCache.put("SAVE10", ...) and finishes — nothing resets it</span><span class="tag">mutation, no cleanup</span></li>
-    <li><span>InventoryServiceIT runs next: identical settings → identical key</span><span class="tag">class B</span></li>
-    <li class="open"><span>ContextCache has a match → hands back the SAME context instance, SAME DiscountCache bean</span><span class="tag">cache hit</span></li>
-  </ol>
-  <p class="hf-annot">Step 6 is the one that surprises people: a "cache hit" here doesn't mean "an equivalent context" — it means the identical <code>ApplicationContext</code> object, with every singleton bean it already constructed, mutations included. Spring's context cache defaults to holding up to 32 contexts (evicting the least-recently-used past that), which is generous enough that two unrelated <code>@SpringBootTest</code> classes with plain, matching configuration will almost always land in the same slot.</p>
-</div>
-
-<div class="hf-card">
-  <div class="hf-cast">
-    <div class="subject">ApplicationContext for signature "no profile, no overrides"<small>built once by OrderServiceIT, then cached</small></div>
-    <div class="fan">handed to every test class whose configuration matches it ↓</div>
-    <div class="obs">
-      <span>OrderServiceIT — built it, mutated DiscountCache</span>
-      <span class="new">InventoryServiceIT — same signature → same context, same mutated DiscountCache</span>
-      <span>PricingServiceIT — adds @TestPropertySource → different signature, own fresh context</span>
-    </div>
-  </div>
-  <p class="hf-annot">PricingServiceIT is the control case: one extra <code>@TestPropertySource</code> changes its configuration signature, so it gets its own context and never sees the leak. InventoryServiceIT is the surprising one — it did nothing different from Pricing except NOT customize its configuration, and that similarity to OrderServiceIT is exactly what makes it share state with it.</p>
-</div>
+<div class="hf-note">"<b>Your test classes are roommates, not strangers.</b>" If their configuration matches, they don't get separate apartments — they get the same one, mess included, and whoever moves in second inherits whatever the first one left on the counter.</div>
 
 <div class="hf-check" data-answer="2">
   <p class="q"><code>OrderServiceIT</code> and <code>InventoryServiceIT</code> are both bare <code>@SpringBootTest</code> classes with no profiles or property overrides, and both inject the same singleton <code>DiscountCache</code> bean. <code>OrderServiceIT</code>'s test mutates it and doesn't clean up. What do you need to add to make <code>InventoryServiceIT</code> reliably see a clean cache, regardless of run order?</p>
@@ -197,31 +193,6 @@
   <p class="why" data-for="0">Spring does the opposite when it can: if two classes' effective configuration matches, it deliberately reuses the cached context — and its singleton beans — instead of rebuilding one. That reuse is the whole mechanism behind this bug.</p>
   <p class="why" data-for="1">@Transactional test rollback only undoes changes made through that test's database transaction. DiscountCache is a plain in-memory HashMap on a singleton bean — it was never inside any transaction, so nothing about it gets rolled back.</p>
   <p class="why" data-for="2">Right — either reset the shared state yourself once you're done with it, or force Spring to evict and rebuild the context with @DirtiesContext. Both accept that the context (and its singletons) are shared by default; the fix works with that fact instead of assuming it isn't true.</p>
-</div>
-
-<div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">"A cache handed you back the same mutable object instead of a fresh one" is a shape that shows up far outside test classes.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>HTTP session attributes on a shared app server</h4>
-    <p>Store a mutable object in the session and forget to defensively copy it, and the next request handler on the same session gets the same live object, mutations and all — the same "cache returns identity, not a copy" surprise, just at request scope instead of test-class scope.</p>
-    <div class="hf-scatter"><span>same object back, not an equivalent one</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Browser-level connection pooling</h4>
-    <p>A keep-alive HTTP connection reused for a second request carries over TCP-level state (like a half-read buffer) from the first — reuse for performance, with correctness resting entirely on you not assuming a clean slate.</p>
-    <div class="hf-scatter"><span>reuse is the optimization, not the bug</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Static fields in any singleton, framework or not</h4>
-    <p>A plain Java <code>static</code> field shared across an app server's threads has this exact problem in production, minus the test-only framing — one caller's mutation is every other caller's starting state.</p>
-    <div class="hf-scatter"><span>the test just exposed what was already true</span></div>
-  </div>
-</div>
-
-<div class="hf-napkin">
-  <b>The whole page on a napkin:</b> the testing pyramid, slice annotations, and TestContainers all exist to make a test's environment predictable and fast. <b>The one new sentence this block adds:</b> "fast" is partly achieved by reusing a cached <code>ApplicationContext</code> — including its mutable singleton beans — across every test class whose configuration matches, so an un-reset singleton leaks state between classes in a way that depends on run order, not on anything either test got wrong on its own.
 </div>
 
 <!-- ── HERO: animated test lifecycle · live per-step inspector ── -->

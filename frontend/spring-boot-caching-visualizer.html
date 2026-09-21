@@ -115,40 +115,35 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> <code>@Cacheable(value="user-roles", key="#userId")</code> on Redis across all pods; an admin role change fires <code>@CacheEvict(value="user-roles", key="#userId")</code> so every pod refetches. <code>@Cacheable(value="jwks", key="'global'")</code> with a 10-min TTL auto-picks-up Ping key rotation. Never cache the token-validation result — that would keep a deprovisioned user "authorized".</div>
   </div>
 
-<p class="hf-deck">or, @Cacheable doesn't clone your object for you — every caller gets the exact same instance</p>
+<p class="hf-deck" data-shape="argument">or, @Cacheable doesn't clone your object for you — every caller gets the exact same instance</p>
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">Two unrelated requests. One of them saw the other's price change, and the database never moved.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">Nothing in the request path was shared — except the one thing that mattered</div>
-  <p><code>@Cacheable(value="products", key="#id")</code> returns a <code>Product</code> straight
-  from the cache. Somewhere downstream, a price-preview helper runs
-  <code>product.setPrice(BigDecimal.ZERO)</code> on the result to build a temporary display value —
-  no save call, no update method, it looks like a harmless local variable holding whatever the
-  cache handed back. Except that "local variable" <i>is</i> the cached object, not a copy of it. The
-  very next unrelated request for the same product ID gets that same zeroed-out price, the database
-  still says the real number, and nobody ever wrote to it.</p>
-  <div class="hf-scatter">
-    <span>the database was never touched ✓</span>
-    <span>the @Cacheable method looks completely correct ✓</span>
-    <span>cache.get() returns the SAME object reference every time ⚠</span>
-    <span>one caller's mutation is now every caller's cached value ⚠</span>
-  </div>
-  <p class="hf-foot">The wrong assumption: that reading from a cache behaves like reading from a
-  database — a fresh copy every time. It's a shared, mutable, in-memory object with nobody's name on
-  it.</p>
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">You</span><p>I just set a field on the object the cache gave me. I never called a save method — how did that change anything?</p></div>
+  <div class="hf-bub right"><span class="who">@Cacheable</span><p>I never promised you a copy. My whole job is skipping repeated work, and the cheapest way to do that is handing back the exact object I stored last time — no cloning, no serialization round-trip, unless the cache provider forces one on me.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Fine — but the cache store must at least keep its own private copy somewhere, so my mutation can't reach it?</p></div>
+  <div class="hf-bub right"><span class="who">The cache store</span><p>Wrong instinct. I'm not a database. I don't have rows, columns, or isolation levels — I'm a Map. Whatever object reference you handed me, that's the object every get() returns, to every caller, until something evicts it.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>So the price-preview helper that ran setPrice(ZERO) thought it had its own local variable to throw away when it was done.</p></div>
+  <div class="hf-bub right"><span class="who">Your "local" variable</span><p>I was never local. I was just a second name for the object the cache already had a name for. Setting a field through me sets it for every name pointing at the same object — including the one the cache store is still holding, because there is no separate "the cache's own copy" to protect.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Then somebody here has to be wrong. Whose bug is this?</p></div>
+  <div class="hf-bub right"><span class="who">@Cacheable</span><p>Nobody's, if you go check what I actually promise. I never say "returns a defensive copy" — caching an object and returning a copy of it are two different jobs, and I only ever signed up for the first one.</p></div>
+  <div class="hf-bub"><span class="who">You</span><p>Then what was supposed to stop this?</p></div>
+  <div class="hf-bub right"><span class="who">The cache store</span><p>Whatever hands you back something nobody else can mutate — an immutable record, a DTO built fresh for you, or a defensive copy on the way out. That responsibility was always yours, not mine. I only ever agreed to remember what you gave me.</p></div>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Return something nobody can mutate out from under everyone else</div>
-  <div class="hf-ladder">
-    <b>Quick fix: defensively copy before handing it to code that might mutate it</b>
-    <i>↓ the cache's own copy stays clean no matter what the caller does with theirs</i>
-    <b>Better: return immutable types in the first place — a Java record, or <code>List.copyOf(...)</code></b>
-    <i>↓ now there's no mutating method to accidentally call — the compiler backs you up</i>
-    <b>Best: never cache entities at all — cache DTOs, which nobody has a reason to treat as shared state</b>
-  </div>
+<div class="hf-card">
+  <p><b>Neither party is the bug.</b> <code>@Cacheable</code> is doing exactly what its contract
+  promises — skip the rebuild, hand back what's already stored. The cache store is doing exactly
+  what a plain <code>Map</code> does — hold a reference, return that same reference. The
+  price-preview helper is doing exactly what ordinary Java code does — mutate the object sitting in
+  its hand. Each of the three is individually correct. The bug lives in the gap between them: nobody
+  in that chain was ever responsible for making a copy, so nobody made one.</p>
+  <p><b>The fix lives on the return path, not on any one party.</b> Return an immutable type — a Java
+  <code>record</code>, or <code>List.copyOf(...)</code> for collections — and there's no mutating
+  method left to accidentally call. Or cache DTOs instead of live entities, so nobody has a reason to
+  treat the cached object as something they're allowed to own.</p>
 </div>
 
 <div class="principle" style="text-align:left">
@@ -165,30 +160,6 @@ for it gets handed the <i>same physical book</i>, not a photocopy. Scribble a no
 "just to keep track of something" and the next visitor reads your note too — the book never knew
 you thought it was your own copy. A cache without defensive copies is a reference desk, not a
 lending library.</div>
-
-<div class="hf-talk">
-  <div class="hf-bub">
-    <span class="who">You</span>
-    <p>I just set a field on the object the cache gave me. I never called a save method — how did that change anything?</p>
-  </div>
-  <div class="hf-bub right">
-    <span class="who">@Cacheable</span>
-    <p>I never promised you a copy. My whole job is skipping repeated work, and the cheapest way to
-    do that is handing back the exact object I stored last time — no cloning, no serialization
-    round-trip, unless the cache provider forces one on me.</p>
-  </div>
-  <div class="hf-bub">
-    <span class="who">The cache store</span>
-    <p>And I'm not a database. I don't have rows, columns, or isolation levels — I'm a Map.
-    Whatever object reference you handed me, that's the object every <code>get()</code> returns, to
-    every caller, until something evicts it.</p>
-  </div>
-  <div class="hf-bub right">
-    <span class="who">Your "local" variable</span>
-    <p>I was never local. I was just a second name for the object the cache already had a name
-    for.</p>
-  </div>
-</div>
 
 <div class="hf-kick">The mechanism</div>
 <p class="hf-say">One put(). Every get() after it returns the identical object — not a copy, the object.</p>
@@ -242,74 +213,7 @@ lending library.</div>
   <p class="why" data-for="2">A tempting exception name — it's real, and Java-flavored, which is exactly why it's a good guess. But it's thrown by an iterator that detects a collection changed mid-loop; nothing here is iterating anything. Setting a field on a shared object just works, silently — which is worse than an exception would be.</p>
 </div>
 
-<div class="hf-kick">Where you've seen this before</div>
-<p class="hf-say">Three systems, one shared-object footgun.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>A naive JavaScript <code>memoize()</code></h4>
-    <p>A hand-rolled memoizer has the identical property: it hands back the SAME cached array or
-    object on every call for a given key, and a caller that mutates the return value corrupts every
-    future call's result too — unless the memoizer clones before returning, which most homemade
-    ones don't.</p>
-    <div class="hf-scatter"><span>memoize() ≈ @Cacheable</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Python's mutable default argument</h4>
-    <p><code>def f(x, cache=[])</code> is a famous footgun for the exact same underlying reason: one
-    shared mutable object, handed to every caller who didn't pass their own, that nobody expected to
-    be shared across calls.</p>
-    <div class="hf-scatter"><span>one object, every caller</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>CIAM: a shared role list mutated inside a permission check</h4>
-    <p><code>@Cacheable(value="user-roles", key="#userId")</code> returns a <code>List&lt;Role&gt;</code>
-    that a permission helper passes into <code>roles.addAll(inheritedRoles)</code> to build what it
-    thinks is a temporary "effective roles" list. Every later request for that user now sees the
-    inherited roles as directly assigned — not staleness, silent corruption of an authorization
-    decision, until the entry evicts.</p>
-    <div class="hf-scatter"><span>this is worse than a stale read</span></div>
-  </div>
-</div>
-
-<div class="hf-kick">Questions from the back row</div>
-<div class="hf-ask">
-  <p class="q">Does @CachePut have the same mutable-reference risk?</p>
-  <p class="a">Yes — and it's an easy place to introduce the bug on the write side.
-  <code>@CachePut</code> stores whatever the method returns, so if that method builds its response
-  by mutating and returning a shared or reused object (a static builder, a cached template), the
-  same "everyone shares one reference" problem shows up on the write path instead of the read path.
-  The annotation doesn't check whether the object is safe to hand out — it just stores what you
-  gave it.</p>
-</div>
-<div class="hf-ask">
-  <p class="q">If I switch to Redis, does this whole problem go away?</p>
-  <p class="a">Mostly, as a side effect rather than a fix. Redis stores a serialized copy (JSON,
-  typically, via <code>GenericJackson2JsonRedisSerializer</code>), so every <code>get()</code>
-  deserializes a brand-new Java object, and mutating it can't reach anyone else's copy. But don't
-  reach for Redis as the fix for THIS specific bug — you still want immutable DTOs, because the
-  in-memory backends (the default, and Caffeine) are common enough in local dev and tests that the
-  bug resurfaces the moment someone runs without Redis configured.</p>
-</div>
-<div class="hf-ask">
-  <p class="q">The gotcha table also lists "caching null results" — is that the same category of bug?</p>
-  <p class="a">Different mechanism, same root cause: trusting the cache to behave like a database.
-  <code>@Cacheable</code> caches <code>null</code> by default, so a method that returns null because
-  the data doesn't exist <i>yet</i> keeps returning null forever, even after the data shows up,
-  because nothing ever re-checks. <code>unless="#result == null"</code> — or
-  <code>cache-null-values: false</code> for Redis — stops it from being stored in the first place,
-  but it's a separate fix from anything about mutation or defensive copies.</p>
-</div>
-
-<div class="hf-kick">Grab a napkin</div>
-<p class="hf-say">Predict it before you scroll.</p>
-<div class="hf-napkin">
-  <code>@Cacheable(value="products")</code> with no <code>key</code> attribute uses Spring's
-  default key generator, which combines all method arguments. <code>findDiscounted(Long id,
-  boolean vipOnly)</code> gets called as <code>findDiscounted(42, true)</code> and then
-  <code>findDiscounted(42, false)</code>. Same product ID both times — do these two calls share one
-  cache entry, or land in two separate ones?
-</div>
+<p class="hf-big">One reference, every caller, no copy — ever.</p>
 
   <!-- ── HERO: animated @Cacheable lifecycle · live per-step inspector ── -->
   <div class="panel" style="border:1px solid var(--accent)">

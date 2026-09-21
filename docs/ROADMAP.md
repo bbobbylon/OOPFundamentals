@@ -3982,6 +3982,108 @@ section's own "remaining tracks" list without re-running `tmp_variety.mjs` first
 biggest by-volume tracks (`angular` at 74 pages, `spring` at 53) are still worth checking fresh
 for the same reason before picking a next target.
 
+**2026-09-21 — a prior session under-reported the true remaining scope by piping `--unshaped`
+through `tail`.** Before this batch started, the corrected, un-truncated
+`node frontend/tmp_variety.mjs --unshaped` (read in full, no `tail`/`head`) was re-run to get the
+real numbers: **537 total pages, 92 shaped, 383 `hf-deck`-with-no-`data-shape` (unshaped), 62 with
+no `hf-deck` block at all.** Recorded here explicitly so a future session doesn't repeat the same
+truncated-count mistake: this is a large, standing, far-from-finished workstream, not the
+"13 pages left" a `tail -15` made it look like.
+
+**10 pages re-staged, `track-spring` only, one commit.** `track-spring` (53 total pages) was
+picked over continuing `track-ts` (~18 left) because it had the largest shaped/total gap visible
+in the corrected list — only 3 of 53 pages shaped (`spring-boot-bean-lifecycle` = `questions`,
+`spring-boot-microservices` = `twodoors`, `spring-boot-security-filter-chain-deep` = `assembly`)
+against a track this big. Same method as every prior batch: read each page's existing
+pre-shapes-system block in full first, name the KIND of gotcha in one sentence against
+`docs/HEADFIRST-SHAPES.md`'s trigger column — never the topic — re-stage to that shape's
+must-have/must-not device list, verify every checkable factual claim for real rather than trusting
+the page's own prior prose or assuming the ORM behavior from memory, then the full gate loop
+before committing. The 8 shapes `track-spring` didn't yet have were deliberately targeted to
+maximize sitewide shape variety in one pass (`tour`, `receipt`, `whiteboard`, `argument`,
+`exhibit`, `timelapse`, `mnemonic`, `autopsy`); `questions` and `assembly` were each reused once
+more where the page's own gotcha was a genuinely better fit than forcing a new shape onto it.
+
+| page | shape | the gotcha that chose it |
+|---|---|---|
+| `spring-boot-security` | `tour` | already earned it — verdict pair + ladder + 3 real parallels (firewall ACLs, CSS specificity, a CIAM gateway) were already on the page; declared, not rewritten (the `debugging-jwt` precedent). Also genuinely fits `assembly` (first-match-wins filter chain), but `tour` was 0/3 in the track and `assembly` was already 1/3, so the rarer shape won per the shapes doc's own tie-break rule |
+| `spring-boot-caching` | `argument` | three individually-correct parties meeting in a gap: `@Cacheable` never promised a copy, the cache store is "just a Map," and the caller's "local" variable was never local — none of them is wrong, and a mutation from one leaks into every other caller |
+| `spring-boot-transactions` | `whiteboard` | structural containment — isolation only takes effect at the instant a NEW physical transaction opens, and `REQUIRED` makes a nested call join the outer one instead; the page's own `hf-nest` rings-within-rings diagram already drew exactly that containment |
+| `spring-boot-data-jpa` | `questions` | pure misconception, escalating: "I called setRole(), no save() — why didn't it persist?" through "if I just add @Transactional does it disappear?" — a detached entity is a perfectly normal Java object nobody's watching, not a bug |
+| `spring-boot-rest-api` | `assembly` | a pipeline where one stage (the JWT filter, throwing before `DispatcherServlet` even exists for the request) reads like it's headed toward `@ControllerAdvice` and isn't — the liar station, before any handler is ever chosen |
+| `spring-boot-testing` | `timelapse` | Spring's `ContextCache` reuses an `ApplicationContext` — mutable singletons included — across every test class whose configuration matches; true at T0 (fresh context), false at T1 (mutated, reused) depending purely on JVM execution order, re-cast with real elapsed-second timestamps across one `mvn test` run |
+| `spring-boot-validation` | `mnemonic` | the payload is a rule to memorize — `@Valid`/`MethodArgumentNotValidException` vs `@Validated`/`ConstraintViolationException` are unrelated types with no shared supertype, and a handler matches type, not "feels like the same failure"; catchphrase already on the page ("a catch clause, not a mood") |
+| `spring-boot-cors-deep` | `exhibit` | the artifact is literally the trigger's own paradigm example — "a response header block" sitting in DevTools, visible, while `res.headers.get()` returns `null` for the identical header; two raw HTTP response exhibits, before and after `.exposedHeaders(...)` |
+| `spring-boot-jpa-fetching-deep` | `autopsy` | a real, copy-exact, googleable exception — `MultipleBagFetchException: cannot simultaneously fetch multiple bags: [Order.lineItems, Order.discounts]` — worked backwards from symptom to the day-one modeling choice (two `List`-typed collections) that made it possible |
+| `spring-boot-pagination` | `receipt` | a real, countable, exaggerated cost — 20 rows requested, 4,700 fully-joined orders actually loaded to produce them — because `JOIN FETCH` plus `Pageable` forces Hibernate to drop `LIMIT`/`OFFSET` and page in memory |
+
+**Every fact re-verified this session, not assumed from the pages' own prior prose** (which itself
+predates the shapes system and was written before any of these devices existed): `WebSearch`
+confirmed the exact `org.hibernate.loader.MultipleBagFetchException` message format including its
+bracketed field list, that Spring Data JPA wraps it in `InvalidDataAccessApiUsageException` ←
+`IllegalArgumentException` (Spring's standard exception-translation chain) — used verbatim in the
+autopsy page's exhibit — the `HHH000104` warning text, the exact 7-name CORS-safelisted response
+header list and that `Access-Control-Expose-Headers: *` is treated as a literal name (not a
+wildcard) once a request carries credentials, Spring's `ContextCache` default max size of 32, and
+the `@Valid`/`MethodArgumentNotValidException` vs `@Validated`/`ConstraintViolationException`
+distinction. **One claim drafted for the `assembly` re-stage was checked and found WRONG before
+shipping, not after:** the first draft of `spring-boot-rest-api`'s `hf-brain` reveal asserted that
+a controller method's `@PreAuthorize`-thrown `AccessDeniedException` is caught by Spring
+Security's own `ExceptionTranslationFilter` before `@ControllerAdvice` ever sees it — backwards.
+`WebSearch` confirmed method-security's `AccessDeniedException` is thrown from inside the handler
+invocation, squarely inside `DispatcherServlet`'s territory, so `@ExceptionHandler` gets first
+crack at it; `ExceptionTranslationFilter`'s `AccessDeniedHandler` is only the fallback if nothing
+in `@ControllerAdvice` claims it. Fixed before the block was spliced in, matching this session's
+own standing instruction to fact-check rather than trust a plausible-sounding first draft.
+
+**Two real, page-specific `tmp_smoke.mjs` regressions were caught and fixed mid-batch, both
+confirmed via `git stash` against the pre-edit page rather than assumed:** (1)
+`spring-boot-validation-visualizer.html`'s first `hf-big` draft — "Your @ExceptionHandler is a
+catch clause, not a mood." — clipped 119px at 320px. The `mnemonic` shape's CSS bump
+(`.hf-deck[data-shape="mnemonic"] ~ .hf-big`, `font-size:clamp(30px,5.4vw,44px)`) is correct and
+intentional, but at that size `@ExceptionHandler` is a single unbroken ~18-character token wider
+than the available column at phone width, and `overflow-wrap` is `normal` there by design (same
+class of defect `docs/HEADFIRST-SHAPES.md` already documents on `csharp-async`'s first `hf-big`
+draft) — reworded to "It's a catch clause. Not a mood.", which carries no single long token, and
+reverified clean. (2) `spring-boot-jpa-fetching-deep-visualizer.html`'s re-staged `hf-check`
+question dropped an inline `style="display:block"` that was present on the original, pre-existing
+`<p class="q">` — without it the paragraph's default display (shrink-to-fit around its `<code>`
+children) clipped 187px at 320px. Restored the inline style and reverified clean. Both fixes
+confirmed against the exact pre-edit baseline for each page (not just "smoke passes now") so
+neither masked an unrelated, already-present issue.
+
+**Sitewide shape count after this batch: 102 shaped / 373 unshaped / 62 no-block, 0 declaration
+lies** (`node frontend/tmp_variety.mjs`). `track-spring` went from 3 shaped (3 different shapes,
+each 1/3 = 33% skew, unavoidable at that count) to **13 shaped, all eleven shapes represented,
+every one at 8% or 15% — 0 SKEW warnings** (`questions` 2/13, `assembly` 2/13, the other nine at
+1/13 each; cap is 18%, 25% for `tour`). All eleven shapes remain alive sitewide, no dead shape,
+`declaration/device MISMATCH: 0`. Full verification before pushing, all re-run AFTER the two
+mid-batch fixes above (not just before): `tmp_vcheck.mjs` (537 pages, clean), `tmp_doccheck.mjs`
+(341 symbols, 0 undocumented), `tmp_assetcheck.mjs origin/claude/multi-repo-continuation-l6xwuq`
+(no teaching assets lost), `tmp_variety.mjs --track=spring` (0 skew, 0 mismatches, shown above),
+`tmp_variety.mjs` full-site (373/62 counts confirmed; the overall run still reports FAIL from
+other tracks' pre-existing 1-2-shaped-page skew, unrelated to and unworsened by this batch —
+`track-spring` itself is the only track this batch touched and it is fully clean), `tmp_smoke.mjs`
+on all 10 touched pages (clean; the 4-page/9-element clipping list matches each page's own
+pre-edit baseline exactly, individually confirmed via `git stash`), `tmp_cwlines.mjs` (455 mounts,
+0 out-of-range, 0 miscounted as 1-based — this batch didn't touch any CodeWalk `lines:` array),
+`tmp_codecheck.mjs` (675 blocks across 537 files, 0 real errors), and `tmp_contrast.mjs
+--theme=cream` / `--theme=dark` against all 10 touched pages (clean in both themes).
+`tmp_hfaudit.mjs --json=… --top=0`: all 10 pages score 87.8–96.5, comfortably above the 75 floor
+(`spring-boot-caching` lowest at 87.8, `spring-boot-security`/`spring-boot-transactions`/
+`spring-boot-rest-api` highest at 96.5 — the three richest in devices, unsurprisingly, since
+`security` is a declared `tour` and kept its full original device set).
+
+**Remaining scope, stated in full so the next session doesn't need to re-derive it:** **373 pages
+`hf-deck`-with-no-`data-shape` (unshaped) + 62 pages with no `hf-deck` block at all = 435 pages
+still not through this pass**, at the same honest per-page cost this section has documented since
+the calibration batch (read-verify-restage-gate-commit, not a batch operation — a page is roughly
+comparable in cost to authoring a fresh Head First block, not cheaper, despite the head start of
+an already-written gotcha). `track-spring` still has 40 unshaped pages left (53 total, 13 done) —
+a natural next target for continuing the same track — alongside `track-angular` (74 pages, still
+only 2 shaped per the last confirmed count, unrechecked this session) as the other large-by-volume
+track worth a fresh `tmp_variety.mjs --track=angular` before picking it up.
+
 ---
 
 ### 18. Go GRANULAR on the eight core tracks before scaffolding anything new (Bobby, 2026-09-13)

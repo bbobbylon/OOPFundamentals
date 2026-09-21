@@ -132,50 +132,36 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> <code>@Transactional</code> on <code>createUser(...)</code> inserts the user, the default role assignment, and an audit log entry as one unit — if the role insert violates a constraint, the user insert rolls back too (no orphans). <code>@Transactional(readOnly=true)</code> on <code>searchUsers(criteria, pageable)</code>. Rule: transactions live on the service layer.</div>
   </div>
 
-  <p class="hf-deck">or, the isolation level you declared that never once touched the database</p>
+<p class="hf-deck" data-shape="whiteboard">or, the isolation level you declared that never once touched the database</p>
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">Two customers "reserve" the last unit of the same SKU at the same instant. You put <code>isolation = SERIALIZABLE</code> right on the method that's supposed to stop that. It didn't.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">reserveStock()'s SERIALIZABLE never reaches the database</div>
-  <p><code>OrderService.placeOrder()</code> is <code>@Transactional</code> — default propagation (<code>REQUIRED</code>), default isolation (whatever your database's default is; <code>READ_COMMITTED</code> on Postgres and MySQL). Partway through, it calls a completely different bean, <code>InventoryService.reserveStock()</code>, which is annotated <code>@Transactional(propagation = Propagation.REQUIRED, isolation = Isolation.SERIALIZABLE)</code> — a real call through a real proxy, no self-invocation involved.</p>
-  <p>Spring's transaction interceptor for <code>reserveStock()</code> checks the current thread for an active transaction, finds one (placeOrder's), and — because the propagation is <code>REQUIRED</code> — joins it instead of starting a new one. Isolation level is a property of a <b>physical transaction at the moment it opens</b>, not something re-negotiated every time another <code>@Transactional</code> method is entered. Since <code>reserveStock()</code> never opens its own transaction, its <code>SERIALIZABLE</code> request is evaluated and quietly dropped. And because <code>AbstractPlatformTransactionManager.validateExistingTransaction</code> defaults to <code>false</code>, Spring doesn't warn you, log anything, or throw — it just proceeds on <code>placeOrder()</code>'s original isolation level.</p>
-  <div class="hf-scatter">
-    <span>reserveStock() compiles clean ✓</span>
-    <span>@Transactional(isolation=SERIALIZABLE) is spelled correctly ✓</span>
-    <span>the thing that is not ⚠ SERIALIZABLE ever reaching the connection</span>
+<div class="hf-brain">
+  <div class="hf-brain-head">Brain Power</div>
+  <p>Before you scroll: <code>placeOrder()</code> is <code>@Transactional</code> with the default
+  isolation (whatever the database defaults to). Partway through, it calls
+  <code>reserveStock()</code> in a different bean — a real proxied call — annotated
+  <code>@Transactional(propagation = Propagation.REQUIRED, isolation = Isolation.SERIALIZABLE)</code>.
+  Does that second annotation open its own connection at <code>SERIALIZABLE</code>, or does
+  something about <code>REQUIRED</code> get in the way first?</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-nest">
+    <div class="ring"><span class="lbl">placeOrder() opens the physical transaction — isolation: READ_COMMITTED</span>
+      <div class="ring"><span class="lbl">reserveStock() joins it (propagation=REQUIRED, isolation=SERIALIZABLE requested)</span>
+        <div class="core">Isolation actually used for the entire call: READ_COMMITTED<small>SERIALIZABLE never opened a transaction of its own, so it never applied</small></div>
+      </div>
+    </div>
   </div>
-  <p class="hf-foot">Under load, two placeOrder() calls both read "3 in stock," both decide there's enough, and both commit — the exact race SERIALIZABLE exists to prevent, running at READ_COMMITTED the whole time.</p>
+  <p class="hf-annot">Read it from the outside in: whichever method opens the physical transaction is
+  the only one whose isolation setting ever reaches the database. Everything nested inside it under
+  REQUIRED is sharing that same connection, at that same isolation, no matter what its own annotation
+  requests. <span class="hf-hand">And because <code>AbstractPlatformTransactionManager.validateExistingTransaction</code>
+  defaults to <code>false</code>, Spring doesn't warn you, log anything, or throw when the two
+  annotations disagree — it just proceeds on the outer method's isolation and says nothing at all.</span></p>
 </div>
-
-<div class="hf-card good">
-  <div class="hf-cardtitle">Make the mismatch loud, or stop nesting it</div>
-  <div class="hf-ladder">
-    <b>Turn on validateExistingTransaction on your transaction manager</b>
-    <i>↓ now a real isolation mismatch throws IllegalTransactionStateException the moment reserveStock() joins the wrong transaction — in a test, not in a postmortem</i>
-    <b>Or give reserveStock() its own transaction with REQUIRES_NEW</b>
-    <i>↓ REQUIRES_NEW suspends placeOrder()'s transaction and opens a fresh physical one, so SERIALIZABLE finally applies to a connection that actually opens at that isolation</i>
-    <b>Or just declare the isolation on the outer boundary</b>
-    <i>↓ placeOrder() is the method that actually opens the connection every nested call runs on, so that's the only annotation that was ever going to matter</i>
-  </div>
-</div>
-
-<div class="principle" style="text-align:left">
-  <b>The one-sentence rule.</b> A <code>@Transactional</code> method's isolation level only takes effect at the instant a NEW physical transaction opens, and under the default <code>REQUIRED</code> propagation, a method called from inside an already-open transaction joins it instead of opening one — so its own isolation annotation is evaluated and discarded, not applied or rejected. Spring can be made to catch this — <code>setValidateExistingTransaction(true)</code> turns a real mismatch into an <code>IllegalTransactionStateException</code> — but that check defaults to off, on the assumption that nested calls usually agree about isolation, which is exactly the assumption this bug breaks.
-</div>
-
-<div class="hf-note">"<b>Isolation is a door, not a dial.</b>" You only get to set it while walking through the door that opens the transaction. Once you're already inside, turning the dial on your own annotation does nothing to the room you're standing in.</div>
-
-<div class="hf-talk">
-  <div class="hf-bub"><span class="who">You</span><p>I put isolation=SERIALIZABLE right on reserveStock(). Why can two requests still oversell the last unit?</p></div>
-  <div class="hf-bub right"><span class="who">AbstractPlatformTransactionManager, personified</span><p>By the time your call reached me, placeOrder() had already opened a transaction. REQUIRED told me to join it, not replace it — and a running transaction's isolation doesn't change mid-flight for one of its participants.</p></div>
-  <div class="hf-bub"><span class="who">You</span><p>Shouldn't something have at least warned me the two didn't match?</p></div>
-  <div class="hf-bub right"><span class="who">AbstractPlatformTransactionManager, personified</span><p>Only if you ask me to check — validateExistingTransaction defaults to false, so I joined quietly and said nothing at all.</p></div>
-</div>
-
-<div class="hf-kick">The mechanism</div>
-<p class="hf-say">Follow one call from the outer method's proxy to the actual connection.</p>
 
 <div class="hf-card">
   <ol class="hf-steps">
@@ -189,15 +175,21 @@
   <p class="hf-annot">Step 5 is the whole bug: REQUIRED means "run inside a transaction, starting one only if none exists yet." It does not mean "run at the isolation level I asked for." Those two guarantees only coincide when the method happens to be the one that actually opens the transaction — and here, it isn't.</p>
 </div>
 
+<div class="hf-note">"<b>Isolation is a door, not a dial.</b>" You only get to set it while walking through the door that opens the transaction. Once you're already inside, turning the dial on your own annotation does nothing to the room you're standing in.</div>
+
+<div class="principle" style="text-align:left">
+  <b>The one-sentence rule.</b> A <code>@Transactional</code> method's isolation level only takes effect at the instant a NEW physical transaction opens, and under the default <code>REQUIRED</code> propagation, a method called from inside an already-open transaction joins it instead of opening one — so its own isolation annotation is evaluated and discarded, not applied or rejected. Spring can be made to catch this — <code>setValidateExistingTransaction(true)</code> turns a real mismatch into an <code>IllegalTransactionStateException</code> — but that check defaults to off, on the assumption that nested calls usually agree about isolation, which is exactly the assumption this bug breaks.
+</div>
+
 <div class="hf-card">
-  <div class="hf-nest">
-    <div class="ring"><span class="lbl">placeOrder() opens the physical transaction — isolation: READ_COMMITTED</span>
-      <div class="ring"><span class="lbl">reserveStock() joins it (propagation=REQUIRED, isolation=SERIALIZABLE requested)</span>
-        <div class="core">Isolation actually used for the entire call: READ_COMMITTED<small>SERIALIZABLE never opened a transaction of its own, so it never applied</small></div>
-      </div>
-    </div>
+  <div class="hf-ladder">
+    <b>Turn on validateExistingTransaction on your transaction manager</b>
+    <i>↓ now a real isolation mismatch throws IllegalTransactionStateException the moment reserveStock() joins the wrong transaction — in a test, not in a postmortem</i>
+    <b>Or give reserveStock() its own transaction with REQUIRES_NEW</b>
+    <i>↓ REQUIRES_NEW suspends placeOrder()'s transaction and opens a fresh physical one, so SERIALIZABLE finally applies to a connection that actually opens at that isolation</i>
+    <b>Or just declare the isolation on the outer boundary</b>
+    <i>↓ placeOrder() is the method that actually opens the connection every nested call runs on, so that's the only annotation that was ever going to matter</i>
   </div>
-  <p class="hf-annot">Read it from the outside in: whichever method opens the physical transaction is the only one whose isolation setting ever reaches the database. Everything nested inside it under REQUIRED is sharing that same connection, at that same isolation, no matter what its own annotation requests.</p>
 </div>
 
 <div class="hf-check" data-answer="2">
@@ -210,30 +202,7 @@
   <p class="why" data-for="2">Right — REQUIRED means "join the current transaction if one exists," and a transaction's isolation is fixed at the moment the physical transaction opens. reserveStock() never opens one of its own, so its SERIALIZABLE request never reaches the connection.</p>
 </div>
 
-<div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">"The setting you declared only applies if you're the one opening the resource" is a pattern well outside transaction management.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>readOnly=true has the identical life cycle</h4>
-    <p><code>@Transactional(readOnly = true)</code> on a nested method that joins an already-open, non-read-only transaction doesn't retroactively make that transaction read-only either — the flag is only consulted at the moment a transaction is opened, exactly like isolation.</p>
-    <div class="hf-scatter"><span>same rule, different attribute</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Connection pools and a raw setTransactionIsolation() call</h4>
-    <p>Call <code>Connection.setTransactionIsolation(...)</code> directly on a pooled JDBC connection and most pools do not reset it before handing that same physical connection to the next borrower — a setting that outlives the scope you thought it was confined to, the mirror image of this bug.</p>
-    <div class="hf-scatter"><span>a setting leaking past its scope, either direction</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Reentrant locks</h4>
-    <p>A thread that already holds a <code>synchronized</code> monitor and re-enters another <code>synchronized</code> block on the same object doesn't get a "new," differently configured lock — it just continues under the one it already holds. Nested requests get absorbed into the context that's already open, not renegotiated.</p>
-    <div class="hf-scatter"><span>already inside, so nothing to renegotiate</span></div>
-  </div>
-</div>
-
-<div class="hf-napkin">
-  <b>The whole page on a napkin:</b> propagation decides whether a method joins or starts a transaction, isolation decides what anomalies the database allows inside it, and self-invocation quietly skips the proxy that makes any of this possible in the first place. <b>The one new sentence this block adds:</b> propagation and isolation interact — under REQUIRED, a nested method's OWN isolation annotation is evaluated and discarded whenever it joins a transaction that's already open, and Spring stays silent about it unless you turn on <code>validateExistingTransaction</code> yourself.
-</div>
+<p class="hf-big">Isolation is set at the door. Everyone who walks in after it's open just lives in the room.</p>
 
 <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">
