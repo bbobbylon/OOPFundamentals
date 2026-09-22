@@ -4171,6 +4171,111 @@ for continuing the same track, given its remaining volume — alongside `track-j
 shaped) and `track-react` (27 pages, 2 shaped) as the next largest-by-volume tracks still barely
 started, per the per-track counts in this entry's own `tmp_variety.mjs` run.
 
+**2026-09-22 — `track-java` picked up (44 total pages, only 2 shaped: `tour` = `abstraction`
+declared-not-rewritten, `timelapse` = `java-datetime`), per this entry's own next-worklist note
+above. Re-verified the corrected count from the previous entry first
+(`node frontend/tmp_variety.mjs --unshaped`, read in full — not piped through `tail`/`head`): 537
+total pages, 112 shaped, 363 unshaped, 62 no-block, confirming the 425-remaining figure was still
+accurate before starting. 9 pages re-staged, all nine shapes `track-java` didn't yet have, one
+commit.**
+
+Every one of these 9 pages already carried a pre-shapes-system Head First block, so the method was
+the same as every prior batch: read the existing block in full, name the KIND of gotcha it already
+teaches against `docs/HEADFIRST-SHAPES.md`'s trigger column, and re-stage — strip the shape's own
+banned devices, add its must-haves, keep the page's real, already-fact-checked content wherever the
+new silhouette allowed it. No page in this batch already earned a shape outright the way
+`spring-boot-security`/`angular-performance` did, so all nine were genuine re-stages, not
+declarations. Two pages swapped shape assignment mid-planning for a real reason worth recording:
+`generics` was the first candidate for `autopsy` (a real, googleable javac error), but
+`java-comparable-comparator`'s pre-existing block turned out to be the stronger exemplar — an
+actual JDK runtime exception, already structured with a working-backwards narrative — so it took
+the slot and `generics` was left unshaped for a future batch rather than forcing a second, weaker
+autopsy into this one.
+
+| page | shape | the gotcha that chose it |
+|---|---|---|
+| `encapsulation` | `whiteboard` | structural — a plain `getItems()` returning the live field reference punches straight through Java's four access-modifier "rings" without ever violating the compiler's own access check; the page's existing `hf-nest` containment diagram already drew the rings, it just needed the predict-before-reveal `Brain Power` beat and the arrow-annotated "the core walked outside the wall wearing the getter as a coat" reading |
+| `inheritance` | `twodoors` | a genuine two-sided choice the page's own content already argued (`extends Animal` vs. holding one) without ever writing the deciding condition down; recast as `.door` panels (never `.bad`/`.good` — neither side is the mistake) with the Liskov Substitution question as the `principle`, and the JDK's own `Stack extends Vector` kept as the illustrative case where Door 1 was picked and the substitutability turned out not to hold |
+| `concurrency` | `argument` | the strongest fit in the batch — the page's pre-existing 3-line `hf-talk` (Thread A / Thread B / the CPU cache) was already the exact shape the argument trigger describes ("two parties each behave correctly and the bug lives in the gap"), just short of the 8-bubble minimum; expanded to two `hf-talk` blocks (10 bubbles total, a `Brain Power` predict beat between them) ending on "You" naming that the bug was never in either thread's three steps, it's that `counter++` was never one step |
+| `solid` | `mnemonic` | SOLID *is* a mnemonic — the acronym already existed on the page as five section headers with no `hf-big`/`principle`/`hf-note` tying them together; added a five-clause `hf-big` ("S stops the 'and.' O stops the edit. L stops the lie…"), a one-sentence `principle` naming the single question all five letters ask, and two `hf-note` sticky notes (the "say the class out loud" SRP tell, the Square-extends-Rectangle LSP trap) — the lightest edit of the batch, since almost nothing on the page violated `mnemonic`'s own ban list to begin with |
+| `java-comparable-comparator` | `autopsy` | a real, copy-exact JDK exception the page's own pre-existing content had already built a working-backwards narrative around — just with the wrong error string (see fact-check note below) and no literal `<pre>` exhibit; opened cold on a corrected stack trace, added a 6-rung bottom-up `hf-ladder` (SYMPTOM → ROOT CAUSE) and a `Brain Power` predict beat, kept the page's own `hf-cycle` A-B-C transitivity diagram as the autopsy finding |
+| `java-io-nio` | `receipt` | a real, countable memory-allocation cost the page's own block already narrated in prose ("600,000 leftover path strings") but never itemised; built an `hf-receipt` (created/deleted/leaked/removed-early/**total still in memory**) plus an `hf-vs` contrasting `deleteOnExit()` against deleting deterministically — the numbers on the receipt are a worked example scaled from the page's own pre-existing narrative, not a newly invented figure |
+| `streams` | `questions` | pure misconception, escalating exactly the way the shape wants: "peek() printed nothing, is it broken?" through "doesn't laziness just mean I hid a for loop?" — condensed the page's pre-existing verdict-pair/ladder/talk framing plus two of its "back row" Q&As into a single 7-pair `dl.hf-qa`; needed a follow-up pass after the first `tmp_hfaudit.mjs` run (see below) |
+| `collections` | `exhibit` | the artifact IS the bug — a five-line JShell transcript (`board`, `view = Arrays.asList(board)`, sort `view`, print both) where nothing is edited for effect and the exact same six memory slots print in two different orders under two different variable names; three `hf-arrow` annotations plus one `hf-mark` on the "arrived in one order, left in another, from the SAME six memory slots" line, `hf-terms`' three cross-language parallels condensed into one closing `hf-big` line since `hf-terms` is banned for this shape |
+| `exceptions` | `assembly` | a pipeline where one stage lies — `try { chargeCard(); } → throws → no catch matches → finally { return false; }` reads like ordinary cleanup and is actually the whole decision, discarding an exception already in flight (JLS §14.20.2); built the page's first `hf-chain`, marked the `finally` station "◀ THE LIAR" in the existing `hf-steps` list, and — since `assembly`'s ban list is only `hf-talk`/`hf-qa`/`hf-receipt` — kept the page's `hf-terms`, three `hf-ask` entries, and `hf-napkin` completely untouched |
+
+**A real factual error was caught and fixed, not propagated, on the page already carrying it
+before this session.** `java-comparable-comparator`'s pre-existing block (written in an earlier
+session, before the shapes system existed) quoted the JDK's TimSort contract-violation exception as
+`IllegalArgumentException: Comparator.compare() violates its general contract!` in two places. Since
+re-staging this page to `autopsy` specifically requires the error string be "the real one, copy-exact"
+per `docs/HEADFIRST-SHAPES.md`'s own bar, both instances were checked with `WebSearch` before shipping
+rather than trusted from the page's own prior prose — the real JDK message is
+`Comparison method violates its general contract!`, with no `Comparator.compare()` prefix. Fixed both
+occurrences (the exhibit's `<pre>` stack trace and the `hf-check` question text) and verified the
+unrelated `MIN_MERGE = 32` / binary-insertion-sort-below-32-elements claim independently, since it was
+the other load-bearing fact the whole ladder depends on — confirmed correct via the OpenJDK `TimSort.java`
+source and multiple independent sources, left unchanged. Also caught mid-draft, before shipping: the
+existing `java-io-nio` "peek()… add `.count()` and the prints appear" line elsewhere on `streams` — not
+wrong for the specific filtered pipeline it describes, but `Stream.count()` has a documented JDK
+optimisation (confirmed via `WebSearch` against `Stream.count()`'s own Javadoc) that can skip pipeline
+execution — and therefore `peek()`'s side effects — entirely when the source size is knowable without
+traversal. Reworded both the new `hf-qa` pair and the pre-existing paragraph to demonstrate with
+`.toList()` instead, which has no such shortcut and makes the same point without the caveat.
+
+**One real, page-specific `tmp_hfaudit.mjs` regression was caught and fixed mid-batch, the way the
+gate is supposed to be used** — as a check on the batch's own edits, not just a pre-existing-issue
+scanner. `streams-visualizer.html` scored 59.5 immediately after its first re-stage, well under the
+75 floor and far below every other page in the batch — traced to the re-stage removing `hf-napkin`
+(forbidden for `questions`) without replacing the `recall`/`hooks`-dimension credit it was carrying,
+which `tmp_hfaudit.mjs`'s own dimension formulas make mechanical to diagnose. Fixed by adding a
+genuinely-motivated `hf-brain` predict beat (not a bare device add-on — it previews the exact
+findFirst-short-circuit fact "The mechanism" section right below it answers) and one `hf-note`,
+recovering `recall` and `hooks` to 100 each; a follow-up `hf-slot` diagram (visualizing which of 6
+users actually get touched before `findFirst()` stops) pushed `visual` from 33 to 67 and the whole
+page from 73.5 to a final 79.2. The same pattern repeated once more, caught proactively rather than
+reactively this time: `solid-visualizer.html` scored 74.5 — technically its pre-edit baseline
+(74.2, confirmed via `git stash`), not a regression this batch caused, but still under the stated
+75 floor — so before moving on, one more legitimately-motivated `hf-slot` diagram (visualizing the
+Square/Rectangle LSP trap the page's own `hf-note` already describes in prose) was added, landing
+it at a final 80.5. Both additions were content the page's existing prose already justified, not
+markup added purely to move a number — consistent with this session's standing instruction never to
+force a device that doesn't fit just to hit a target.
+
+**Sitewide shape count after this batch: 121 shaped / 354 unshaped / 62 no-block, 0 declaration
+lies** (`node frontend/tmp_variety.mjs`). `track-java` went from 2 shaped (both already skewed at
+1/2 = 50%, unavoidable at that count) to **11 shaped, all eleven shapes represented, every one at
+9% — 0 SKEW warnings** (cap 18%, 25% for `tour`; every shape landed at exactly 1/11 = 9%, the
+flattest distribution any single-batch track has hit yet). All eleven shapes remain alive sitewide,
+no dead shape, `declaration/device MISMATCH: 0`. Full verification before pushing, re-run AFTER
+every mid-batch fix above (not just before): `tmp_vcheck.mjs` (537 pages, clean — two transient
+warnings for new `<pre>` blocks on `collections`/`java-comparable-comparator` missing
+`devhub-syntax.js`, fixed by adding the script tag, then re-run clean), `tmp_doccheck.mjs` (341
+symbols, 0 undocumented — no shared engine touched this batch), `tmp_assetcheck.mjs origin/master`
+(no teaching assets lost), `tmp_variety.mjs --track=java` (0 skew, 0 mismatches, shown above),
+`tmp_variety.mjs` full-site (354/62 counts confirmed; the overall run still reports FAIL from other
+tracks' pre-existing 1–5-shaped-page skew, unrelated to and unworsened by this batch —
+`track-java` itself is the only track this batch touched and it is fully clean), `tmp_smoke.mjs` on
+all 9 touched pages (clean — no uncaught errors, no overflow; the 4 pre-existing per-page clip
+notices on `exceptions`/`collections`/`streams` matched each page's own pre-edit baseline exactly,
+individually confirmed via `git stash`, both before and after the mid-batch `streams`/`solid`
+follow-up edits), `tmp_cwlines.mjs` (455 mounts, 0 out-of-range, 0 miscounted as 1-based — this
+batch didn't touch any CodeWalk `lines:` array), `tmp_codecheck.mjs` (676 blocks across 537 files,
+0 real errors), and `tmp_contrast.mjs --theme=cream` / `--theme=dark` against all 9 touched pages
+(clean in both themes, re-run after the `streams`/`solid` follow-up edits too).
+`tmp_coachcheck.mjs` was not run against this batch's pages — none of the 9 carry a Code-With-Me
+`coach:` entry. `tmp_hfaudit.mjs --json=… --top=0`: all 9 pages score **79.2–96**, comfortably
+above the 75 floor after the two mid-batch fixes above (`streams` lowest at 79.2,
+`java-comparable-comparator` highest at 96 — unsurprising, since its `<pre>` exhibit plus
+`hf-cycle` diagram plus `hf-steps` mechanism card give it the richest device set in the batch).
+
+**Remaining scope: 354 pages `hf-deck`-with-no-`data-shape` + 62 pages with no `hf-deck` block at
+all = 416 pages still not through this pass.** `track-java` still has 33 unshaped pages left (44
+total, 11 done) — `generics` among them, left unshaped this round per the autopsy note above —
+alongside `track-angular` (74 pages, 12 shaped, 63 unshaped) and `track-react` (27 pages, 2 shaped)
+as the next largest-by-volume tracks, per the per-track counts in this entry's own `tmp_variety.mjs`
+run.
+
 ---
 
 ### 18. Go GRANULAR on the eight core tracks before scaffolding anything new (Bobby, 2026-09-13)
