@@ -108,152 +108,127 @@
     </div>
   </div>
 
-<p class="hf-deck">or, status: 0 tells you the response got lost — never whether the request did</p>
+<p class="hf-deck" data-shape="autopsy">or, the toast said "can't reach the server" — the server was never even asked</p>
 
-<div class="hf-kick">The problem</div>
-<p class="hf-say">The create-user request timed out. So you retried it. Now there are two users.</p>
+<div class="hf-kick">The body</div>
+<p class="hf-say">This is the whole of it. Paste it in a search box and you get "it's CORS"; you don't get why it's only THIS request.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">status: 0 looked like "never landed." For this request, it had already landed</div>
-  <p>Your global interceptor catches errors and retries anything that looks like a network hiccup:
-  <code>err.status === 0</code>. A user clicks "Create User" on a slow connection. The POST reaches
-  Spring, Spring creates the user, commits the transaction, and starts writing the response — and
-  right then the connection drops. A flaky wifi handoff, a proxy timeout, doesn't matter which.
-  Angular never receives that response, so it reports the exact same <code>status: 0</code> it
-  would report for a request that never left the browser at all. Your interceptor can't tell those
-  two cases apart from the client side — they look identical. It retries. Spring receives a second,
-  perfectly honest <code>POST /users</code> and creates a second user.</p>
-  <div class="hf-scatter">
-    <span>status === 0 detected correctly ✓</span>
-    <span>retry logic ran exactly as designed ✓</span>
-    <span>the FIRST request actually succeeded server-side ⚠</span>
-    <span>POST isn't idempotent — retrying it isn't "safe" ⚠</span>
-  </div>
-  <p class="hf-foot">status: 0 tells you the response never arrived. It tells you nothing about
-  whether the request did.</p>
+<div class="hf-card">
+  <pre><code>Access to fetch at 'https://api.bobco.dev/v1/orders' from origin
+'https://app.bobco.dev' has been blocked by CORS policy: Response
+to preflight request doesn't pass access control check: No
+'Access-Control-Allow-Origin' header is present on the requested
+resource.</code></pre>
+
+  <div class="hf-arrow">Read "preflight," not "CORS policy" — <span class="hf-mark">the browser sent
+  an OPTIONS request before the real one</span>, and it's the OPTIONS response that failed the
+  check. The PUT your code actually wrote never left the browser at all.</div>
+  <div class="hf-arrow up">This is the exact same interceptor from this page's own §4 catching it —
+  <code>err.status === 0</code>, <code>error instanceof ProgressEvent</code>, indistinguishable at
+  that layer from Wi-Fi dropping mid-request. The interceptor's honest "can't reach the server"
+  toast is <i>wrong</i> here: the server was reachable. It was never asked.</div>
+  <div class="hf-arrow rose">And it's inconsistent on purpose — a plain cross-origin
+  <code>GET /v1/orders/42</code> with no custom headers works fine from the exact same page. Only
+  requests that trigger a preflight hit this wall, which is the whole reason it survived code
+  review and a working demo.</div>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Only auto-retry what's provably safe to run twice</div>
+<div class="hf-brain">
+  <div class="hf-brain-head">Brain Power</div>
+  <p>The GET to the same API, from the same page, has never failed. Before you scroll: what does a
+  GET have that this PUT doesn't — and why does that one difference decide whether the browser
+  preflights the request at all?</p>
+</div>
+
+<div class="hf-kick">Working backwards</div>
+<p class="hf-say">Start at the console line and climb. Each rung is the thing that had to be true for the rung above it to happen.</p>
+
+<div class="hf-card">
   <div class="hf-ladder">
-    <b>Retry GET freely — reading the same thing twice changes nothing</b>
-    <i>↓ idempotent by nature; a lost response just means "ask again"</i>
-    <b>Never blind-retry a POST on status 0 — surface it, or send a client-generated idempotency key the server can dedupe on</b>
-    <i>↓ a retried POST either does nothing extra (server recognizes the key) or the user decides, not the interceptor</i>
-    <b>PUT/DELETE sit in between — safe IF your API genuinely implements them as idempotent, so verify, don't assume</b>
+    <b>THE SYMPTOM — a PUT to <code>/v1/orders/42</code> throws <code>status: 0</code> in the token-refresh flow. GET calls to the same API never fail this way</b>
+    <i>↑ which happened because…</i>
+    <b>the browser sent an OPTIONS preflight first, and the server's response to THAT request had no <code>Access-Control-Allow-Origin</code> header</b>
+    <i>↑ which happened because…</i>
+    <b>a PUT with <code>Content-Type: application/json</code> and an <code>Authorization</code> header is not a "simple" cross-origin request — the spec requires a preflight for it; a bare GET with no custom headers is simple and skips one entirely</b>
+    <i>↑ which was possible because…</i>
+    <b>Spring's CORS config lists <code>Access-Control-Allow-Methods: GET, POST</code> — PUT and DELETE were never added to the allowlist</b>
+    <i>↑ which nobody noticed because…</i>
+    <b>every manual test and every GET-heavy demo happened to use only the two allowed verbs</b>
+    <i>↑ and the reason it shipped this way at all…</i>
+    <b>THE ROOT CAUSE — the CORS config was copied from an earlier read-only endpoint and never updated when write routes were added behind it</b>
   </div>
+  <p class="hf-annot">Rung two is the one to stare at. <code>status === 0</code> from
+  <code>catchError</code> cannot tell "the network is down" from "the server refused this specific
+  verb" apart — both produce the exact same client-side observation. The generic "can't reach the
+  server" toast this page's own §6 code shows is <i>honestly written</i> and <i>actively hides</i>
+  the fixable cause: the server was up the entire time.</p>
+</div>
+
+<p class="hf-big">The request wasn't lost. It was never sent.</p>
+
+<div class="hf-kick">The autopsy finding</div>
+<p class="hf-say">Two allowlists, one line apart, and only one of them ever gets exercised by hand.</p>
+
+<div class="hf-card">
+  <pre><code>// what shipped — copied from the read-only endpoint this replaced
+@Bean
+CorsConfigurationSource corsConfig() {
+    var cfg = new CorsConfiguration();
+    cfg.setAllowedOrigins(List.of("https://app.bobco.dev"));
+    cfg.setAllowedMethods(List.of("GET", "POST"));   // PUT, DELETE: never added
+    cfg.setAllowedHeaders(List.of("Authorization", "Content-Type"));
+    return req -&gt; cfg;
+}
+
+// the fix — one line, and it's the one nobody had a manual test for
+cfg.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE"));</code></pre>
+  <div class="hf-arrow">The failing line isn't the PUT interceptor, the retry logic, or anything in
+  Angular at all — it's a Spring bean nobody touched when the write routes were added, three files
+  away from the stack trace you'd normally go looking in.</div>
+  <div class="hf-arrow up">Note what a code review of the Angular side would never catch: the
+  request that fails is syntactically perfect. <span class="hf-mark">The defect is an absence on a
+  server-side allowlist</span>, and absences don't show up in a frontend diff.</div>
 </div>
 
 <div class="principle" style="text-align:left">
-  <b>A network error only tells you the response got lost — never whether the request did.</b> That
-  single fact is why blanket retry-on-any-error is dangerous for anything that changes data.
-  HTTP methods split into ones safe to repeat (GET, and PUT/DELETE if built correctly) and ones that
-  aren't automatically safe (POST, unless the server itself guards against duplicates).
-  <code>status === 0</code> makes this worse, because it's the one error that looks identical
-  whether the request succeeded server-side or never left the browser.
+  <b>A network error only tells you the response got lost — never whether the request was even
+  sent, and never why.</b> <code>status === 0</code> is the browser's way of saying "I have nothing
+  to show you," and it means that identically whether the cause is a dead Wi-Fi radio or a
+  perfectly healthy server that refused a preflight for one specific HTTP verb. When it's
+  inconsistent by <i>method</i> rather than by <i>connection</i> — some calls always work, others
+  always fail, from the same page, same network — stop suspecting the network and go read the
+  server's <code>Access-Control-Allow-Methods</code> header before anything else.
 </div>
 
-<div class="hf-note">Think of status: 0 like a phone call that drops mid-sentence — right after you
-asked your bank to transfer money, right before they said "done." You genuinely don't know if the
-transfer happened. Calling back and asking again is fine if you're checking your balance (a GET).
-<b>It is not fine if "asking again" means "making the transfer again"</b> (a POST) — you need to ask
-"did that already go through?" first, not just repeat yourself.</div>
-
-<div class="hf-talk">
-  <div class="hf-bub">
-    <span class="who">You</span>
-    <p>status is 0. That obviously means it failed, right? Just retry it.</p>
-  </div>
-  <div class="hf-bub right">
-    <span class="who">The interceptor</span>
-    <p>I only know the response never arrived. That's it. I have no way to see whether Spring
-    finished processing before the connection dropped — "created the user and lost the response"
-    and "never received the request" produce the exact same status: 0 from here.</p>
-  </div>
-  <div class="hf-bub">
-    <span class="who">Spring</span>
-    <p>And from my side, I did my job. I committed the transaction. Whatever happened to the
-    response after that is a networking problem that isn't mine to solve — I have no idea anyone's
-    about to send me the same POST again.</p>
-  </div>
-  <div class="hf-bub right">
-    <span class="who">The interceptor</span>
-    <p>So I genuinely can't tell these apart on my own. Give me an idempotency key and I can hand it
-    to Spring, and Spring can say "already did that one" instead of creating a second user. Without
-    one, the honest move is to surface the failure, not guess.</p>
-  </div>
+<div class="hf-check" data-answer="1">
+  <p class="q">From <code>https://app.bobco.dev</code>, a <code>DELETE /v1/orders/42</code> fails
+  with the same "blocked by CORS policy… preflight request…" console error. A teammate says "the
+  GET works fine, so CORS must be configured correctly — this has to be something else." Is
+  <code>DELETE</code> failing while <code>GET</code> succeeds evidence CORS is fine?</p>
+  <button type="button">Yes — if CORS were broken, every cross-origin call would fail the same way, GET included</button>
+  <button type="button">No — a plain GET with no custom headers never triggers a preflight at all, so it can succeed even while the server's allowed-methods list is missing DELETE entirely</button>
+  <button type="button">No — GET requests are exempt from CORS enforcement entirely, so its success or failure never says anything about the CORS config</button>
+  <p class="why" data-for="0">CORS isn't pass/fail per origin — it's evaluated per request, and a
+  "simple" request (GET, no custom headers) skips the preflight check this DELETE is failing.
+  A working GET only proves the origin itself is allowed; it says nothing about which methods are.</p>
+  <p class="why" data-for="1">Right. GET with no custom headers is a CORS "simple request" — no
+  preflight, so there's no <code>Access-Control-Allow-Methods</code> check to fail. DELETE always
+  preflights, and that OPTIONS response is exactly where an incomplete allowlist shows up. The two
+  requests are testing two different code paths on the server.</p>
+  <p class="why" data-for="2">GET requests are absolutely still subject to CORS — a cross-origin GET
+  can and does get blocked if the origin itself isn't allowed. It's specifically exempt from the
+  <i>preflight</i> step when it carries no custom headers, which is a narrower claim than "exempt
+  from CORS."</p>
 </div>
 
-<div class="hf-kick">The mechanism</div>
-<p class="hf-say">One dropped connection, two completely different truths hiding behind the same status code.</p>
-
-<div class="hf-card">
-  <ol class="hf-steps">
-    <li><span>Angular sends POST /api/users. The request leaves the browser and travels toward Spring</span><span class="tag">this part always happens the same way</span></li>
-    <li class="open"><span>Somewhere in the middle — before Spring receives it, OR after Spring finishes and starts sending the response back — the connection can drop</span><span class="tag">two different failure points, same eventual symptom</span></li>
-    <li><span>Spring may have already run the full handler: validated, inserted the row, committed. That work doesn't undo itself just because the response never made it back</span><span class="tag">the server doesn't know the client is unhappy</span></li>
-    <li class="open"><span>Angular's HttpClient sees no response at all — not a 4xx, not a 5xx, nothing to parse — and reports HttpErrorResponse with status: 0</span><span class="tag">a client-side observation, not a server-side one</span></li>
-    <li><span>A naive retry-on-status-0 interceptor sends the identical POST again, with no way to know a previous attempt may have already succeeded</span><span class="tag">where the duplicate user comes from</span></li>
-    <li class="open"><span>An idempotency key changes this: Spring checks "have I seen this key before" and returns the ORIGINAL result instead of creating a second row, even though the client genuinely sent the request twice</span><span class="tag">the only fix that works without guessing</span></li>
-  </ol>
-  <p class="hf-annot">Step 3 is the one to sit with. The failure the <i>client</i> sees (status: 0)
-  and the outcome on the <i>server</i> (did it run or not) are two separate facts that don't have to
-  agree, and nothing in the response can tell you which case you're in after the fact. That's
-  exactly why the fix has to live on the server — an idempotency key it can check — not in a
-  smarter retry condition on the client.</p>
-</div>
-
-<div class="hf-check" data-answer="2">
-  <p class="q">A <code>GET /api/users/42</code> request fails with <code>status: 0</code>. Is it
-  safe for your interceptor to automatically retry it?</p>
-  <button type="button">No — status: 0 could mean the server already started processing it, so retrying risks a duplicate read</button>
-  <button type="button">Only if you add an idempotency key first, the same as you would for a POST</button>
-  <button type="button">Yes — GET doesn't change any data, so running the exact same request again, whether or not the first one "landed," produces no side effect either way</button>
-  <p class="why" data-for="0">GET doesn't have a meaningful "processing" step that changes data —
-  reading a user record twice isn't a duplicate the way creating one twice is. There's no state on
-  the server a second GET could corrupt or duplicate, so this concern, real for POST, doesn't
-  transfer here.</p>
-  <p class="why" data-for="1">Idempotency keys exist to let a server detect and dedupe a
-  <i>repeated write</i>. A GET was never going to write anything in the first place, so there's
-  nothing for a key to deduplicate — it solves a problem this request doesn't have.</p>
-  <p class="why" data-for="2">Right — this is exactly the distinction the mechanism above turns on.
-  GET is safe to retry blindly because running it twice and running it once produce the identical
-  outcome: the current state of <code>/api/users/42</code>, read and discarded. The status: 0
-  danger is specific to methods that change something, not to network failures in general.</p>
-</div>
-
-<div class="hf-kick">Where you've seen this before</div>
-<p class="hf-say">Every system that can lose a response after doing the work solves this the same way.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>Stripe's Idempotency-Key header — the textbook version</h4>
-    <p>Stripe's payments API is the reference implementation of this exact fix: every charge
-    request can carry an <code>Idempotency-Key</code> header, and if the same key shows up twice,
-    Stripe returns the original charge's result instead of charging the card again. It exists
-    because "the response got lost, should I retry the POST" is a problem every payment API has to
-    solve — not an Angular-specific one.</p>
-    <div class="hf-scatter"><span>Idempotency-Key: same problem, bigger stakes</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>TCP's own retransmission, one layer down</h4>
-    <p>TCP faces this exact ambiguity below HTTP: if an ACK is lost, TCP can't tell "my data never
-    arrived" from "it arrived but the ACK got lost," so it retransmits — which is exactly why
-    higher-level protocols that care about duplicates (an HTTP API handling POST) can't just trust
-    the transport layer to sort it out for them. The ambiguity is fundamental to networking, not a
-    framework bug.</p>
-    <div class="hf-scatter"><span>lost ACK ≈ lost HTTP response</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>MFA enrollment, for real</h4>
-    <p>An MFA-enrollment POST that registers a new authenticator with Ping or Entra is a bad place
-    to get this wrong — a naive retry on a dropped connection can register the SAME device twice,
-    and a user ends up with two enrolled authenticators where they expected one, discovered only
-    when they try to remove "the" authenticator and find there are two. This exact status-0 trap is
-    why that endpoint needs a client-generated request ID the identity provider can dedupe on.</p>
-    <div class="hf-scatter"><span>a duplicate authenticator, discovered later</span></div>
-  </div>
-</div>
+<div class="hf-note">The same "status 0 hides the real cause" shape shows up whenever a layer collapses
+several distinct failures into one signal. TCP does it one level down: if an ACK is lost, TCP can't
+tell "my data never arrived" from "it arrived but the ACK got lost," so it just retransmits — the
+ambiguity is fundamental to networking, not a framework bug. Stripe's answer at the HTTP layer is
+an <code>Idempotency-Key</code> header: send the same key twice and Stripe returns the
+<i>original</i> charge's result instead of charging the card again, because "the response got
+lost, should I retry" is a problem every payment API has to solve. <b>Different layer, identical
+fix: stop trusting a lost-response signal to also tell you the cause.</b></div>
 
 <div class="hf-kick">Questions from the back row</div>
 <div class="hf-ask">
@@ -285,13 +260,12 @@ transfer happened. Calling back and asking again is fine if you're checking your
   is conservative enough.</p>
 </div>
 
-<div class="hf-kick">Grab a napkin</div>
-<p class="hf-say">Predict it before you scroll.</p>
-<div class="hf-napkin">
-  A <code>PUT /api/users/42</code> request (a full replacement of the user record) gets
-  <code>status: 0</code>. The interceptor retries it automatically. The first PUT actually did reach
-  Spring and succeeded before the connection dropped. Does the retry cause the same kind of problem
-  the POST example did — a duplicate, corrupted data — or does it do nothing extra?
+<div class="hf-brain">
+  <div class="hf-brain-head">Brain Power</div>
+  <p>You fix the CORS allowlist and the PUT starts working. Two weeks later, someone adds a
+  <code>PATCH /v1/orders/{id}/notes</code> endpoint behind the same gateway. Before you scroll back
+  up: is it automatically covered by the fixed allowlist, or is this the exact same autopsy waiting
+  to happen a second time?</p>
 </div>
 
   <!-- ── EXTREME-VIZ HERO: Error Handling Flow ── -->

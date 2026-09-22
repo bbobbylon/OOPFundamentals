@@ -4084,6 +4084,93 @@ a natural next target for continuing the same track — alongside `track-angular
 only 2 shaped per the last confirmed count, unrechecked this session) as the other large-by-volume
 track worth a fresh `tmp_variety.mjs --track=angular` before picking it up.
 
+**2026-09-22 — `track-angular` picked up (74 total pages, only 2 shaped: `argument` =
+angular-change-detection-visualizer, `questions` = angular-signals-visualizer), the largest
+shaped/total gap of any track after re-verifying the corrected count from the 2026-09-21 entry
+(`node frontend/tmp_variety.mjs --unshaped`, read in full — not piped through `tail`/`head`, per
+that entry's own warning). 10 pages re-staged, all nine shapes `track-angular` didn't yet have,
+one commit.**
+
+Every one of these 10 pages already carried a pre-shapes-system Head First block (built to the old
+"in this order" recipe — verdict pair, ladder, `hf-talk`, `hf-terms`, `hf-napkin`) rather than
+being blank, so the method for each was: read the existing block in full, name the KIND of gotcha
+it already teaches against `docs/HEADFIRST-SHAPES.md`'s trigger column, and either (a) declare it
+`tour` outright when it already earned all four parts — the `debugging-jwt`/`spring-boot-security`
+precedent — or (b) re-stage it: strip the shape's own banned devices and add its must-haves,
+preserving the page's real, already-fact-checked gotcha wherever the shape's silhouette allowed it
+rather than inventing an unrelated one. Two pages qualified for (a); eight needed (b).
+
+| page | shape | the gotcha that chose it |
+|---|---|---|
+| `angular-performance` | `tour` | already earned it — verdict pair (load-vs-runtime perf) + ladder + a real 3-parallel `hf-terms` (a template getter, server-side N+1, a CIAM user table) were already on the page; declared, not rewritten |
+| `angular-di-hierarchy-deep` | `tour` | same call — verdict pair ("two instances, both correct") + ladder + `hf-terms` (JS lexical scope, Spring bean scopes, "scoping is the point") already complete; also genuinely fits `whiteboard` (its block already had an `hf-nest` injector-tree diagram), but `tour` was 0/12 in the track after the first declare and `whiteboard` had a stronger, less-shared candidate below, so the rarer shape and the better diagram fit each went to a different page |
+| `angular-communication` | `receipt` | a real, countable cost the page's own prose already gestured at ("bills you later") but never itemised: threading `[selectedUser]` through 4 layout wrappers that don't care about users costs 4 file edits — and re-bills the same 4 files on *every* new reader — versus 1 file (the new reader alone) once the value lives in a shared store |
+| `angular-view-encapsulation` | `whiteboard` | structural — Emulated encapsulation is not a wall around the component, it's an attribute rewrite on HALF the rules that could touch it; a new `hf-nest` shows the assumed wall shrinking ring by ring down to the real, narrower boundary, with `Brain Power` asked before the figure |
+| `angular-debugging-devtools-deep` | `exhibit` | a real, pasteable console session as the artifact — `ng.getComponent()` / `window.ng` returning a live object in `ng serve` and bare `undefined` in a production build, plus the compiled-output line showing `ngDevMode`-gated code deleted outright by Terser's dead-code elimination, not merely hidden |
+| `angular-http` | `assembly` | a pipeline where one stage lies — `next(reqA)` inside a `catchError`-based token-refresh retry reads like "re-run the chain" and doesn't; nothing upstream (`authInterceptor`, the clone) executes a second time, so the retry resends the exact stale Authorization header that just failed |
+| `angular-rxjs-multicasting` | `timelapse` | true at T0, false five seconds later, nobody watching a clock — `refCount` doesn't remember time, it counts, so a `shareReplay` cache that looks permanent survives right up until the last subscriber's teardown touches zero for one tick during a route transition, re-cast as a real 9:00:00→9:00:06 ladder |
+| `angular-lazy-loading` | `twodoors` | not a bug — a genuine two-sided choice the page's own content already argued both sides of (an admin dashboard vs. a login route) without the `hf-vs`/`.door` framing; the deciding condition, named in the `principle`: what fraction of sessions need this, and how soon |
+| `angular-pipes` | `mnemonic` | a rule to memorize the page's own `hf-ask` entries already stated in prose — any `{…}`/`[…]`/method call sitting directly inside a pipe argument defeats the pure-pipe cache's `===` comparison every single check, while a bare primitive never does — condensed into an `hf-big` catchphrase and two sticky notes |
+| `angular-error-handling-deep` | `autopsy` | a real, copy-exact, googleable console error — `blocked by CORS policy: Response to preflight request doesn't pass access control check…` — worked backwards from the browser's console line to a Spring `CorsConfiguration.setAllowedMethods(List.of("GET","POST"))` that was copied from an earlier read-only endpoint and never updated when PUT/DELETE routes were added behind it |
+
+**Every fact re-checked this session, not assumed:** the ECMAScript/browser rule that a "simple"
+cross-origin request (GET, no custom headers) skips the CORS preflight entirely while a
+`Content-Type: application/json` + `Authorization` PUT/DELETE always triggers one; that a route's
+own `providers:` array in Angular's standalone router creates a genuine child `EnvironmentInjector`
+(confirmed against the page's own already-accurate `hf-ask` entry, not re-derived from memory);
+that `ngDevMode`-gated calls are removed by the production build via a compile-time constant plus
+Terser dead-code elimination, not merely left unreachable at runtime; and the documented
+`@defer`/`shareReplay`/pure-pipe semantics already carried by each page's pre-existing block, which
+were reused rather than re-verified from scratch since they were the pages' own fact-checked
+content. **One real, previously unaudited sitewide contrast bug was caught and fixed, not just
+found on this batch's own pages:** `devhub-hf.css`'s `.hf-slot .ctx code` rule (added for an
+earlier round, `.hf-slot .ctx`'s own light-brown `#a97a4f` ground) was never mirrored onto
+`.hf-nest .core`, which paints the identical background — so a `<code>` placed inside an `hf-nest`
+diagram's core (this batch's `angular-view-encapsulation` whiteboard was the first page ever to do
+that) silently inherited the page's track-accent code colour instead of the box's own ink,
+measuring the exact same **1.57:1** the `.ctx` rule's own comment already named as the failure
+mode. Fixed with the identical, already-established pattern (`.hf-nest .core code{
+color:#241708; background:rgba(255,255,255,.42); border:none; }`) rather than a one-off page-local
+override, so any future page reusing this diagram inherits the fix. Reproduced only when
+`tmp_contrast.mjs --theme=dark` ran the full 10-page batch together, not on the page alone —
+recorded here as a real gate-tooling nuance for whoever hits it next.
+
+**Sitewide shape count after this batch: 112 shaped / 363 unshaped / 62 no-block, 0 declaration
+lies** (`node frontend/tmp_variety.mjs`). `track-angular` went from 2 shaped (both already
+skewed — `argument` and `questions` each 1/2 = 50%, unavoidable at that count) to **12 shaped, all
+eleven shapes represented, every one at 8% or 17% — 0 SKEW warnings** (`tour` 2/12 = 17% against
+its 25% cap, the other ten at 1/12 = 8% each against the 18% cap). All eleven shapes remain alive
+sitewide, no dead shape, `declaration/device MISMATCH: 0`. Full verification before pushing:
+`tmp_vcheck.mjs` (537 pages, clean — one transient warning about a new `<pre>` on
+`angular-debugging-devtools-deep` missing `devhub-syntax.js`, fixed by adding the script tag, then
+re-run clean), `tmp_doccheck.mjs` (341 symbols, 0 undocumented — no shared engine touched this
+batch), `tmp_assetcheck.mjs origin/master` (no teaching assets lost), `tmp_variety.mjs
+--track=angular` (0 skew, 0 mismatches, shown above), `tmp_variety.mjs` full-site (363/62 counts
+confirmed; the overall run still reports FAIL from other tracks' pre-existing 1–5-shaped-page
+skew, unrelated to and unworsened by this batch — `track-angular` itself is the only track this
+batch touched and it is fully clean, 0 LIES, 0 DEAD SHAPE), `tmp_smoke.mjs` on all 10 touched pages
+(clean — no uncaught errors, no overflow; 4 pre-existing per-page clip notices unrelated to this
+batch's new markup, explicitly flagged non-failing by the tool itself), `tmp_cwlines.mjs` (455
+mounts, 0 out-of-range, 0 miscounted as 1-based — this batch didn't touch any CodeWalk `lines:`
+array), `tmp_codecheck.mjs` (676 blocks across 537 files, 0 real errors), and `tmp_contrast.mjs
+--theme=cream` / `--theme=dark` against all 10 touched pages (clean in both themes, after the
+`.hf-nest .core code` fix above — confirmed by re-running the exact batch that first reproduced
+the failure). `tmp_coachcheck.mjs` was not run against this batch's pages — none of the 10 carry a
+Code-With-Me `coach:` entry — and its unrelated pre-existing crash (a hardcoded Windows path from a
+different machine, `tmp_coachcheck.mjs:87`) is orthogonal to this batch and left for whoever owns
+that script next. `tmp_hfaudit.mjs --json=… --top=0`: all 10 pages score 77.6–100, comfortably
+above the 75 floor (`angular-performance`, a declare-only `tour`, lowest at 77.6 since its whole
+page — not just the HF block — is what the score measures; `angular-debugging-devtools-deep`
+highest at a clean 100).
+
+**Remaining scope: 363 pages `hf-deck`-with-no-`data-shape` + 62 pages with no `hf-deck` block at
+all = 425 pages still not through this pass.** `track-angular` still has 63 unshaped pages left (74
+total, 12 done, 2 permanently no-block — `exam-angular`/`flashcards-angular` are practice/reference
+pages, not lessons, and don't carry a Head First block by site convention) — a natural next target
+for continuing the same track, given its remaining volume — alongside `track-java` (44 pages, 2
+shaped) and `track-react` (27 pages, 2 shaped) as the next largest-by-volume tracks still barely
+started, per the per-track counts in this entry's own `tmp_variety.mjs` run.
+
 ---
 
 ### 18. Go GRANULAR on the eight core tracks before scaffolding anything new (Bobby, 2026-09-13)
