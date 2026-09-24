@@ -145,57 +145,10 @@
     </div>
   </div>
 
-<p class="hf-deck">or, an interceptor only ever sees one request — but 401s don't arrive one at a time</p>
+<p class="hf-deck" data-shape="argument">or, an interceptor only ever sees one request — but 401s don't arrive one at a time</p>
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">Five requests got 401 within the same 40ms. Five refresh calls went out.</p>
-
-<div class="hf-card bad">
-  <div class="hf-cardtitle">Every single 401 was handled correctly. That's what caused it</div>
-  <p>Your dashboard fires off users, roles, settings, notifications, and audit-log requests in
-  parallel on load — completely normal. The access token happens to expire right as the page opens,
-  so all five come back 401 almost simultaneously. Your interceptor does exactly what it's supposed
-  to: catch the 401, refresh, retry — except it does that independently, once per failed request.
-  Five interceptor instances, each unaware of the other four, each convinced it's the only one
-  refreshing. The identity provider sees five refresh calls in one moment, using the same refresh
-  token. If your provider rotates refresh tokens on use, the second one to land can invalidate the
-  token the first one just received — and now a request that already succeeded is holding a
-  refresh token that no longer works.</p>
-  <div class="hf-scatter">
-    <span>each 401 individually handled correctly ✓</span>
-    <span>each refresh call, alone, correct ✓</span>
-    <span>5 requests → 5 independent refresh attempts ⚠</span>
-    <span>refresh-token rotation races itself ⚠</span>
-  </div>
-  <p class="hf-foot">Nothing about any single interceptor call is wrong. The bug only exists at the
-  scale of "more than one request failing at once" — which is exactly the scale a real page runs
-  at.</p>
-</div>
-
-<div class="hf-card good">
-  <div class="hf-cardtitle">Let the first 401 refresh; make the rest wait for it</div>
-  <div class="hf-ladder">
-    <b>A shared isRefreshing flag (or Subject) on the auth service — not local to any one interceptor call</b>
-    <i>↓ the first 401 to arrive flips it and starts the one real refresh call</i>
-    <b>Every 401 that arrives while isRefreshing is true subscribes to that SAME in-flight refresh instead of starting a new one</b>
-    <i>↓ exhaustMap (or an equivalent guarded Subject) collapses N calls into 1</i>
-    <b>And every waiting request retries automatically once that one refresh completes</b>
-  </div>
-</div>
-
-<div class="principle" style="text-align:left">
-  <b>An interceptor sees one request at a time — but 401s don't arrive one at a time.</b> Everything
-  you write inside <code>intercept()</code> is correct in isolation, which is exactly what makes
-  this bug invisible in testing: you rarely test five simultaneous 401s by hand. The fix isn't in
-  how you handle a single 401 — it's in making concurrent 401s share one outcome instead of racing
-  to create five.
-</div>
-
-<div class="hf-note">Think of the refresh token like the last badge-office visit five employees all
-need at once, because their badges stopped working at the exact same moment. If each one walks over
-independently, whoever arrives second finds the first one already got a new badge — and now has to
-explain why <i>their</i> new badge doesn't work either. Somebody has to say "wait here, I'm already
-getting us all sorted" — that's what a shared isRefreshing flag does.</div>
 
 <div class="hf-talk">
   <div class="hf-bub">
@@ -203,24 +156,79 @@ getting us all sorted" — that's what a shared isRefreshing flag does.</div>
     <p>I handle 401 in my interceptor. Isn't that enough?</p>
   </div>
   <div class="hf-bub right">
-    <span class="who">Your interceptor</span>
-    <p>For one request, completely. But I don't know about the other four instances of myself
-    running for the other four requests. Each of us independently thinks we're the one handling
-    this.</p>
+    <span class="who">Interceptor #1</span>
+    <p>For request A, completely. I caught the 401, and I'm already calling
+    <code>refresh()</code> on the auth service.</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Interceptor #2</span>
+    <p>Same. I caught request B's 401 four milliseconds later, and I'm calling
+    <code>refresh()</code> too. I have no idea instance #1 exists — we're not different code, just
+    two separate calls to the exact same function.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">You</span>
+    <p>So which one of you is wrong?</p>
+  </div>
+  <div class="hf-bub">
+    <span class="who">Interceptor #1</span>
+    <p>Not me. Catch 401, refresh, retry — that's the whole contract, and I followed every step of
+    it correctly.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">Interceptor #2</span>
+    <p>Not me either. I ran the identical three steps. Nobody told either of us to check with the
+    other first, because nothing in <code>intercept()</code> ever sees more than one request at a
+    time.</p>
+  </div>
+</div>
+
+<div class="hf-brain">
+  <div class="hf-brain-head">Brain Power</div>
+  <p>Every interceptor instance behaved exactly as documented. Every retry was correct. Before you
+  scroll: if nothing in either interceptor's code is wrong, where does the actual failure have to
+  live — in a component you haven't heard from yet, or nowhere at all?</p>
+</div>
+
+<div class="hf-talk">
+  <div class="hf-bub">
+    <span class="who">The identity provider</span>
+    <p>I just saw two <code>POST /oauth/token</code> calls, forty milliseconds apart, both
+    presenting the same refresh token. If you rotate tokens on use, the second one just
+    invalidated the first.</p>
+  </div>
+  <div class="hf-bub right">
+    <span class="who">You</span>
+    <p>So the interceptors are the problem after all?</p>
   </div>
   <div class="hf-bub">
     <span class="who">The identity provider</span>
-    <p>And I just see five refresh calls with the same refresh token, milliseconds apart. Some
-    providers rotate — issue a new refresh token and kill the old one on every use. I'm not
-    colluding with you to prevent that; I'm just answering each call as it arrives.</p>
+    <p>No — I'm the one enforcing the rule, and I'm enforcing it correctly too. Reuse is reuse; I
+    have no way to tell "your own app racing itself" from "a stolen token being replayed," so I
+    treat both the same way, on purpose.</p>
   </div>
   <div class="hf-bub right">
     <span class="who">A shared isRefreshing flag</span>
-    <p>Which is why the fix isn't inside any one interceptor call — I live OUTSIDE all of them, so
-    request two can find out request one is already handling this before it ever calls the
-    provider.</p>
+    <p>Which is why the fix was never in either interceptor's three lines. It's a flag that lives
+    OUTSIDE both of them — so #2 can find out #1 is already handling this, before it ever calls
+    the provider at all.</p>
   </div>
 </div>
+
+<div class="principle" style="text-align:left">
+  <b>An interceptor sees one request at a time — but 401s don't arrive one at a time.</b> Every
+  party in this argument is correct: both interceptor instances, and the identity provider
+  enforcing its rotation rule. The bug lives entirely in the gap between them — in the fact that
+  nothing coordinates what happens when more than one of them fires at once. The fix isn't in how
+  you handle a single 401; it's in making concurrent 401s share one outcome instead of racing to
+  create five.
+</div>
+
+<div class="hf-note">Think of the refresh token like the last badge-office visit five employees all
+need at once, because their badges stopped working at the exact same moment. If each one walks over
+independently, whoever arrives second finds the first one already got a new badge — and now has to
+explain why <i>their</i> new badge doesn't work either. Somebody has to say "wait here, I'm already
+getting us all sorted" — that's what a shared isRefreshing flag does.</div>
 
 <div class="hf-kick">The mechanism</div>
 <p class="hf-say">One flag turns five races into one call and four waiters.</p>
@@ -275,36 +283,13 @@ getting us all sorted" — that's what a shared isRefreshing flag does.</div>
   other request.</p>
 </div>
 
-<div class="hf-kick">Where you've seen this before</div>
-<p class="hf-say">The same collapse-many-into-one shape, three more places.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>Debounced search — the mirror-image operator</h4>
-    <p><code>switchMap</code> on a search box cancels the <i>previous</i> in-flight call when a new
-    one starts; <code>exhaustMap</code> on a refresh does the opposite — it ignores new calls while
-    one is already running. Different operator, same family: RxJS gives you a specific tool for
-    "don't let N of these run at once" depending on which one should win.</p>
-    <div class="hf-scatter"><span>switchMap cancels new; exhaustMap ignores new</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>The cache-stampede problem, same shape</h4>
-    <p>The identical failure appears whenever a cache entry expires under load: a hundred requests
-    miss the cache at once and all hammer the database to regenerate the same value simultaneously.
-    The fix has the same shape too — one request regenerates it while the other 99 wait on that one
-    result instead of triggering 99 regenerations.</p>
-    <div class="hf-scatter"><span>a cache stampede, same fix</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Ping Federate / Entra token refresh, literally this</h4>
-    <p>This is the actual production pattern for a CIAM app talking to Ping or Entra: a shared
-    <code>isRefreshing$</code> (or a <code>BehaviorSubject</code> holding the in-flight refresh
-    Observable) on the token service, checked by every interceptor instance before it calls the
-    token endpoint. Skipping it doesn't just waste a network call — some identity providers flag
-    rapid repeated refresh-token use as suspicious activity.</p>
-    <div class="hf-scatter"><span>rapid re-use can look like token theft</span></div>
-  </div>
-</div>
+<p><b>The same collapse-many-into-one shape, twice more in your own stack.</b>
+<code>switchMap</code> on a search box cancels the <i>previous</i> in-flight call when a new one
+starts; <code>exhaustMap</code> on a refresh does the opposite — it ignores new calls while one is
+already running, which is exactly the operator this fix reaches for. And a cache stampede is the
+identical failure under load: a hundred requests miss an expired cache entry at once and all hammer
+the database to regenerate the same value simultaneously, fixed the same way — one request
+regenerates it while the other 99 wait on that one result instead of triggering 99 regenerations.</p>
 
 <div class="hf-kick">Questions from the back row</div>
 <div class="hf-ask">
@@ -333,14 +318,14 @@ getting us all sorted" — that's what a shared isRefreshing flag does.</div>
   Put auth first, or at least before anything that inspects headers for logging or debugging, so
   everything after it sees the request in its final, fully-formed state.</p>
 </div>
-
-<div class="hf-kick">Grab a napkin</div>
-<p class="hf-say">Predict it before you scroll.</p>
-<div class="hf-napkin">
-  Two tabs of the same CIAM app are open. Tab A's token expires and its interceptor starts a
-  refresh. Before that finishes, Tab B also makes a request and also gets a 401. Does Tab B's
-  <code>isRefreshing</code> flag know Tab A is already refreshing — and what does "shared" actually
-  mean once there are two separate JavaScript runtimes involved?
+<div class="hf-ask">
+  <p class="q">Two tabs of the same app are open. Tab A's token expires and its interceptor starts refreshing. Does Tab B's isRefreshing flag know Tab A is already refreshing?</p>
+  <p class="a">No — "shared" only means shared within one JavaScript runtime. Two tabs are two
+  separate processes with two separate copies of your auth service, so Tab B's flag starts false
+  regardless of what Tab A is doing, and Tab B fires its own refresh call in parallel with Tab A's.
+  The in-tab fix above solves the five-requests-in-one-tab race; a cross-tab lock needs a different
+  mechanism entirely — a <code>BroadcastChannel</code>, shared storage with a lock key, or a
+  service worker acting as the single point of truth.</p>
 </div>
 
   <!-- ===== 1. CLASS VS FUNCTIONAL ===== -->

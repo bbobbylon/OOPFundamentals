@@ -4276,6 +4276,96 @@ alongside `track-angular` (74 pages, 12 shaped, 63 unshaped) and `track-react` (
 as the next largest-by-volume tracks, per the per-track counts in this entry's own `tmp_variety.mjs`
 run.
 
+**2026-09-24 — `track-angular` picked up a second time (74 total pages, 12 shaped after the
+2026-09-22 batch, 63 unshaped and still the single largest-by-volume gap of any track). Re-verified
+the corrected count first (`node frontend/tmp_variety.mjs --unshaped`, read in full — not piped
+through `tail`/`head`): 537 total pages, 121 shaped, 354 unshaped, 62 no-block, confirming the
+figures in the previous entry were still accurate before starting. 10 pages re-staged, one page per
+shape across all ten non-`tour` shapes, one commit.**
+
+Every one of these 10 pages already carried a pre-shapes-system Head First block, so the method was
+the same as every prior batch: read the existing block in full, name the KIND of gotcha it already
+teaches against `docs/HEADFIRST-SHAPES.md`'s trigger column, and re-stage — strip the shape's own
+banned devices, add its must-haves, keep the page's real, already-fact-checked content wherever the
+new silhouette allowed it. No page in this batch already earned a shape outright the way
+`angular-performance`/`angular-di-hierarchy-deep` did in the first angular batch, so all ten were
+genuine re-stages. Two pairs of pages were deliberately kept OUT of the same batch despite fitting
+the same shape well, to avoid teaching the identical gotcha twice under different labels:
+`angular-route-guards-deep` and `angular-functional-guards-visualizer` are both "a client-side
+guard is a courtesy, the server is the real gate," and `angular-token-lifecycle-deep` and
+`angular-interceptors-advanced-visualizer` are both "concurrent 401s, one shared refresh coordinates
+them" — one page from each pair shipped this round (`functional-guards` for its explicit "seven
+gates, one real" pipeline framing; `interceptors-advanced` for its `argument`-shaped "every single
+401 was handled correctly, that's what caused it" opening), the other left unshaped for a future
+batch rather than forcing a second, redundant instance of the same story into this one.
+
+| page | shape | the gotcha that chose it |
+|---|---|---|
+| `angular-debugging-change-detection-deep` | `autopsy` | a real, copy-exact Angular error — `NG0100: ExpressionChangedAfterItHasBeenCheckedError: Expression has changed after it was checked. Previous value for 'title': ''. Current value: 'Ready'.` (wording verified against `angular.dev/errors/NG0100` and a live GitHub issue quoting the identical "Previous value for '…'" format) — worked backwards from the thrown error to the real root cause: `detectChanges()` doesn't relocate the mid-tick mutation, it just wins a race against the one thing that was ever going to report it, so production ships the identical bug silently |
+| `angular-debugging-rxjs-deep` | `exhibit` | the artifact IS the bug — a two-line console transcript (`1: 42`, then permanent silence) that looks identical whether `someOperator` filtered the value or threw one, because a next-only `tap()` only ever wires the `next` handler; three `hf-arrow` annotations point at the exact line that can't distinguish the two causes, plus a second exhibit showing the same input with all three tap channels wired, turning identical input into a named exception |
+| `angular-interceptors-advanced` | `argument` | the strongest fit in the batch — "every single 401 was handled correctly. That's what caused it," already stated almost verbatim in the page's own opening line; two named interceptor instances plus the identity provider each behave completely correctly in isolation, and the bug lives entirely in the gap between them (nobody coordinates what happens when more than one fires at once); expanded to two `hf-talk` blocks (10 bubbles total) with a `Brain Power` predict beat between them |
+| `angular-zoneless-mode` | `receipt` | a real, itemizable cost the page's own prose already stated but never itemized: 3 async events × 200 Default-strategy components = 600 binding comparisons for one keystroke, 597 of which find nothing; contrasted in `hf-vs` against the same console's real "4 checked, 196 skipped" figure once the write is a signal |
+| `angular-zoneless-deep` | `whiteboard` | structural — zoneless decides WHEN a tick starts, `OnPush` decides WHO gets checked once it does, and the page already had an `hf-slot` diagram showing exactly that division; added the `Brain Power` predict beat before the figure and an `hf-hand` real-world CIAM note (a WebSocket-push admin console whose audit-log table never got the `OnPush` memo) |
+| `angular-template-forms` | `questions` | pure misconception, escalating exactly the way the shape wants: "the validator is right, why is Angular lying to me?" through "so does `touched` ever come back on its own?" — condensed the page's pre-existing verdict-pair/ladder/talk framing into a 7-pair `dl.hf-qa`, ending on the same AND/OR aggregation rule (`valid` bubbles up as AND, `dirty`/`touched` as OR) the page's own mechanism section already taught |
+| `angular-binding` | `mnemonic` | the page's own closing paragraph was already a mnemonic — "`[x]` means the parent owns it… `(x)` means the child owns it… `[(x)]` is sugar" — just never framed as one; built around a new `hf-big` ("Brackets read. Parens listen. Banana-in-a-box is both, wearing a trenchcoat.") plus two `hf-note` sticky notes (bracket-as-verb, boolean-attribute presence-not-value) |
+| `angular-functional-guards` | `assembly` | a pipeline where six of seven stages only look like a decision — the page's pre-existing `hf-steps` list ("Seven gates. One of them is real.") already named this exactly; added the page's first `hf-chain` as a compact horizontal strip of the same seven stations and an `hf-mark` on the seventh, the only one not running on the user's laptop |
+| `angular-content-projection` | `twodoors` | a genuine two-sided choice the page's own closing line already stated as a decision rule ("Zero, one, or many. Shown exactly once, always? `ng-content`. Shown zero times or many times? `ng-template`. That's the whole decision.") without ever using the `.door` framing; recast as `.door` panels (never `.bad`/`.good` — neither construct is the mistake) with the deciding condition as the `principle`, keeping the page's real "`*ngIf` around `ng-content` doesn't make it lazy" story as the cautionary case of picking Door 1 for a Door-2 situation |
+| `angular-signals-rxjs-interop-deep` | `timelapse` | three real, distinct moments — `set(2)`, `set(3)`, `set(4)`, each one genuinely changing the signal's stored value — and only the last one ever reaches the Observable side, because `toObservable`'s underlying `effect()` coalesces every write since its last run into one flush; built the page's first `hf-cycle` (Clean → dirty → still dirty → flush) plus a timestamped `hf-ladder` (`09:14:00.000` repeated three times for the three synchronous writes, then `09:14:00.001` for the flush) rather than step numbers, per the shape's own rule that a timelapse ladder's rungs must be times, not steps |
+
+**Every fact re-checked this session, not assumed, via `WebSearch`/`WebFetch` against primary
+sources rather than trusted from the pages' own pre-existing prose:** the exact `NG0100` error
+format (`angular.dev/errors/NG0100` plus a real `angular/components` GitHub issue titled with the
+identical "Previous value for '…': '…'. Current value: '…'." wording — the page's pre-existing text
+had the right error class name but no verbatim message string to check it against, so this was a
+genuine addition, not a correction); that `tap()` given a single bare function is documented RxJS
+behavior equivalent to `tap({ next: fn })`, wiring no `error`/`complete` handler; and Angular's
+router guard execution order (`canMatch` during route recognition, before the `GuardsCheckStart`
+event; `canDeactivate` for the leaving route, then `canActivate`/`canActivateChild` for the entering
+one, all within the guards phase; resolvers in a later `ResolveStart` phase) cross-checked against
+the documented Angular router event sequence (`RoutesRecognized` → `GuardsCheckStart` →
+`ChildActivationStart` → `ActivationStart` → `GuardsCheckEnd` → `ResolveStart`) since `angular.dev`
+itself was unreachable from this session's network (egress-blocked) — the pre-existing page content
+this batch's `assembly` block relies on checked out consistent with that independently-sourced event
+order rather than being taken on faith. No factual error was found in any of the ten pages' existing
+content this round, unlike the two prior batches that each caught one (a backwards Spring
+exception-handling claim, a misquoted JDK exception message) — recorded here because a clean
+fact-check is itself worth logging, not just a caught one.
+
+**Sitewide shape count after this batch: 131 shaped / 344 unshaped / 62 no-block, 0 declaration
+lies** (`node frontend/tmp_variety.mjs`). `track-angular` went from 12 shaped (all eleven shapes
+represented, `tour` at 2/12 = 17%, the other ten at 1/12 = 8% each) to **22 shaped — every one of
+the eleven shapes at exactly 2/22 = 9%, the flattest distribution any batch has produced, 0 SKEW
+warnings** (cap 18%, 25% for `tour`). All eleven shapes remain alive sitewide, no dead shape,
+`declaration/device MISMATCH: 0`. Full verification before pushing: `tmp_vcheck.mjs` (537 pages,
+clean, no new `<pre>` missing `devhub-syntax.js` this round), `tmp_doccheck.mjs` (341 symbols, 0
+undocumented — no shared engine touched this batch), `tmp_assetcheck.mjs origin/master` (no
+teaching assets lost), `tmp_variety.mjs --track=angular` (0 skew, 0 mismatches, shown above),
+`tmp_variety.mjs` full-site (344/62 counts confirmed; the overall run still reports the pre-existing
+FAIL from other tracks' 1–5-shaped-page skew, unrelated to and unworsened by this batch —
+`track-angular` itself is the only track this batch touched and it is fully clean), `tmp_smoke.mjs`
+on all 10 touched pages (clean — no uncaught errors, no overflow; the one CDN-network notice on
+`angular-binding-visualizer` and its one pre-existing `div.flow-diagram` clip notice both confirmed
+via `git stash` to match the page's own pre-edit baseline exactly, unrelated to this batch's
+markup), `tmp_codecheck.mjs` (676 blocks across 537 files, 0 real errors), `tmp_cwlines.mjs` (455
+mounts, 0 out-of-range, 0 miscounted as 1-based — this batch didn't touch any CodeWalk `lines:`
+array), and `tmp_contrast.mjs --theme=cream` / `--theme=dark` against all 10 touched pages (clean in
+both themes). `tmp_coachcheck.mjs` was not run against this batch's pages — none of the 10 carry a
+Code-With-Me `coach:` entry. `tmp_hfaudit.mjs --json=…scratch…, --top=0`: all 10 pages score
+**82.2–99**, comfortably above the 75 floor (`angular-zoneless-mode` lowest at 82.2,
+`angular-zoneless-deep` highest at 99 — unsurprising, since its whiteboard already carried a
+pre-built `hf-slot` diagram before this batch even started).
+
+**Remaining scope: 344 pages `hf-deck`-with-no-`data-shape` + 62 pages with no `hf-deck` block at
+all = 406 pages still not through this pass.** `track-angular` still has 53 unshaped pages left
+(**77** total, not the 74 the previous entry stated — recounted directly by body class this session
+rather than trusted from that figure, since 12+63+2 never actually summed to 74 either; 22 done, 2
+permanently no-block — `exam-angular`/`flashcards-angular`), including the two
+deliberately-deferred pages from this round's redundancy check (`angular-route-guards-deep`,
+`angular-token-lifecycle-deep`) — still the largest-by-volume track and a natural next target for a
+third pass, alongside `track-spring` (40 unshaped, 13 shaped), `track-java` (32 unshaped, 11
+shaped), and `track-react` (25 unshaped, still only 2 shaped) as the other largest-by-volume tracks,
+per this entry's own `tmp_variety.mjs` run.
+
 ---
 
 ### 18. Go GRANULAR on the eight core tracks before scaffolding anything new (Bobby, 2026-09-13)

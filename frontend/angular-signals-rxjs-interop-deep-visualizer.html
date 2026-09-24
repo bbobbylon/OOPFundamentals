@@ -108,10 +108,10 @@
     </div>
   </div>
 
-<p class="hf-deck">or, toObservable() emits once per flush — not once per set()</p>
+<p class="hf-deck" data-shape="timelapse">or, toObservable() emits once per flush — not once per set()</p>
 
 <div class="hf-kick">The problem</div>
-<p class="hf-say">Three set() calls. One value ever left the building.</p>
+<p class="hf-say">Three set() calls, three real moments. One value ever left the building.</p>
 
 <div class="hf-card bad">
   <div class="hf-cardtitle">The funnel-step audit log is missing two steps out of three — and every set() call really did fire</div>
@@ -136,16 +136,52 @@
   just never got asked in time.</p>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">toObservable reflects state at flush time, not a history of writes — if you need history, don't cross the bridge</div>
-  <div class="hf-ladder">
-    <b>steps$ = toObservable(this.currentStep) — one effect, flushed once per batch of writes</b>
-    <i>↓ every set() before the flush updates the same pending value; the effect only ever reads the latest one once it finally runs</i>
-    <b>Better: log inside the setter, not on the far side of a bridge</b>
-    <i>↓ advanceTo(n) { this.currentStep.set(n); audit.record('entered step ' + n); }</i>
-    <b>Now every call is observed exactly once, synchronously, at the only place that actually saw it happen</b>
+<div class="hf-kick">The same three calls, timestamped</div>
+<p class="hf-say">Every rung is a clock reading. The signal's stored value really does change at
+each one — the Observable is asleep for all but the last.</p>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">Clean — currentStep holds 1, no pending effect run</span>
+      <span class="go"><em>set(2) called</em> <span class="arrow">→</span> value becomes 2, toObservable's effect marked dirty</span></div>
+    <div class="stt"><span class="nm">Dirty, one run pending</span>
+      <span class="go"><em>set(3) called, same synchronous stack</em> <span class="arrow">→</span> value becomes 3, effect already dirty — no second run queued</span></div>
+    <div class="stt"><span class="nm">Still dirty, still one run pending</span>
+      <span class="go"><em>set(4) called, same stack</em> <span class="arrow">→</span> value becomes 4, still exactly one pending run</span></div>
+    <div class="stt"><span class="nm">Handler returns → Angular flushes</span>
+      <span class="go"><em>the pending effect finally executes</em> <span class="arrow">→</span> reads currentStep() RIGHT NOW: 4</span></div>
   </div>
+  <p class="hf-annot">This is a cycle, not a one-shot chain, because the identical four-state loop
+  runs on every batch of writes for the rest of the component's life. Nothing here is a bug in
+  <code>toObservable</code> — every arrow is documented effect-coalescing behaviour. The trap is
+  that the middle two states are real, genuinely-occupied moments that nothing downstream was
+  ever watching.</p>
 </div>
+
+<div class="hf-card">
+  <div class="hf-ladder">
+    <b>09:14:00.000 — set(2) runs. currentStep's stored value: 1 → 2. toObservable's internal
+    effect is marked dirty for the first time</b>
+    <i>↓ same synchronous call stack, no time for a flush to sneak in</i>
+    <b>09:14:00.000 — set(3) runs. currentStep: 2 → 3. The effect was already dirty; marking it
+    dirty again does not queue a second run</b>
+    <i>↓ still the same stack</i>
+    <b>09:14:00.000 — set(4) runs. currentStep: 3 → 4. Still exactly one pending run, still
+    unexecuted</b>
+    <i>↓ the synchronous function returns — THIS is the moment that matters</i>
+    <b>09:14:00.000, microtask flush — Angular runs every pending effect, toObservable's included</b>
+    <i>↓ the effect body executes for the first time since before these three writes</i>
+    <b>09:14:00.001 — the effect reads currentStep() as it is RIGHT NOW — 4 — and calls next(4).
+    That is the one and only emission this whole sequence ever produces</b>
+  </div>
+  <p class="hf-annot">Rungs one through three are the ones to stare at: three real, distinct,
+  documented moments where the signal held 2, then 3, then 4 — and every one of them happened
+  before the clock had a chance to move. Read <code>currentStep()</code> directly at any of those
+  timestamps and you'd get the right answer. Nothing was reading it there. The Observable side
+  wasn't asleep by accident; it was never scheduled to look until the flush.</p>
+</div>
+
+<p class="hf-big">The signal is a security-camera timestamp. The Observable is a photograph taken after the room goes quiet.</p>
 
 <div class="principle" style="text-align:left">
   <b>toObservable doesn't watch set() calls — it watches an effect, and effects coalesce.</b>
@@ -166,8 +202,8 @@ a security tape.</div>
 <div class="hf-talk">
   <div class="hf-bub">
     <span class="who">You</span>
-    <p>I called set(2), then set(3), then set(4) — three separate state changes. Why did my
-    Observable only fire once?</p>
+    <p>I called set(2), then set(3), then set(4) — three separate state changes, three separate
+    timestamps if I'd logged them myself. Why did my Observable only fire once?</p>
   </div>
   <div class="hf-bub right">
     <span class="who">toObservable</span>
@@ -185,54 +221,6 @@ a security tape.</div>
     them, because the signal itself doesn't keep them either. It isn't a queue. It's a single box,
     and I only ever look inside it once you've stopped touching it.</p>
   </div>
-</div>
-
-<div class="hf-kick">The mechanism</div>
-<p class="hf-say">One effect, marked dirty three times, runs exactly once.</p>
-
-<div class="hf-card">
-  <ol class="hf-steps">
-    <li><span>The skip-intro helper runs synchronously: <code>currentStep.set(2)</code>. The
-    signal's stored value changes from 1 to 2, and every consumer watching it — including
-    toObservable's internal effect — is marked dirty</span><span class="tag">write #1</span></li>
-    <li class="open"><span>Before Angular ever gets a turn to run that dirty effect, the same
-    function calls <code>currentStep.set(3)</code>. The value changes again, 2 to 3. The effect
-    was already dirty; it doesn't get "more dirty" or queue a second run — there's only one
-    pending run</span><span class="tag">write #2 — no new run scheduled, one is already
-    pending</span></li>
-    <li><span>Immediately after, <code>currentStep.set(4)</code> runs too — same story. The
-    signal now holds 4. The effect is still just: pending, not yet
-    executed</span><span class="tag">write #3 — still one pending run</span></li>
-    <li class="open"><span>The synchronous function returns. Only now does Angular flush pending
-    effects, including toObservable's</span><span class="tag">the flush — this is when "push"
-    actually happens</span></li>
-    <li><span>The effect body runs for the first time since before these writes. It reads
-    <code>currentStep()</code> right now — the live current value, not whatever it was when it
-    first got marked dirty</span><span class="tag">reads current state, not history</span></li>
-    <li class="open"><span>It calls <code>next(4)</code> on the Observable. That's the one and
-    only emission. 2 and 3 were real values the signal genuinely held — but nothing was listening
-    in Observable-land while they were current</span><span class="tag">2 and 3: never emitted,
-    not even briefly</span></li>
-  </ol>
-  <p class="hf-annot">Step 5 is the whole lesson: an effect — and anything built on one, including
-  toObservable — reports CURRENT state, not a history of writes. It behaves like a signal on the
-  way in, even though it hands you an Observable on the way out. If you need every write, the
-  signal is the wrong layer to bridge from; log at the call site instead.</p>
-</div>
-
-<div class="hf-card">
-  <div class="hf-one">
-    <div class="callers">
-      <span>currentStep.set(2)</span><span>currentStep.set(3)</span><span>currentStep.set(4)</span>
-    </div>
-    <div class="funnel">all synchronous, before Angular's next flush ↓</div>
-    <div class="instance">toObservable's effect runs ONCE<small>next(4) — the only value that
-    survives to the Observable side</small></div>
-  </div>
-  <p class="hf-annot">Three writes, one survivor — and it's always whichever one was current at
-  flush time, never whichever one arrived first or mattered most. An audit trail, an analytics
-  funnel, or anything else that needs to know a transient value existed cannot be built on the far
-  side of toObservable. It has to sit at the set() call itself.</p>
 </div>
 
 <div class="hf-check" data-answer="1">
@@ -261,42 +249,19 @@ a security tape.</div>
   current value of anything.</p>
 </div>
 
-<div class="hf-kick">Where you've seen this before</div>
-<p class="hf-say">Three systems, one shape: many writes, one flush, only the last value survives.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>React's setState batching — the exact same coalescing, one framework over</h4>
-    <p>Call <code>setState(1); setState(2); setState(3)</code> inside one React event handler and
-    React doesn't re-render three times — it batches every update inside that handler and
-    re-renders once, with the component reading state as 3. React 18 made this automatic for every
-    code path (promises, timeouts, native handlers), not just React's own events. It's the
-    identical trade: intermediate values are real for one instant, and invisible to anything that
-    only watches for a "re-render," not a "write."</p>
-    <div class="hf-scatter"><span>setState batching ≈ effect coalescing</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>The browser's own render loop does this to your styles</h4>
-    <p><code>el.style.left='10px'; el.style.left='50px'; el.style.left='90px'</code> inside one
-    task doesn't paint three positions — the browser coalesces every style write into one
-    layout/paint pass using whatever the property holds when the task ends. The element visibly
-    jumps straight to 90px; 10px and 50px never existed on screen for even one frame. A screen
-    recorder couldn't catch them, because the browser never rendered them.</p>
-    <div class="hf-scatter"><span>DOM writes coalesce into one paint</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Your privilege-elevation audit trail has this exact hole</h4>
-    <p>A support tool exposes a "sudo as this user for one action" button:
-    <code>elevated.set(true)</code> runs the action, then a <code>finally</code> block runs
-    <code>elevated.set(false)</code> — all synchronous, no <code>await</code> between the two
-    writes. If the compliance audit log is built by piping <code>toObservable(elevated)</code>
-    into a subscriber that logs every transition, it logs ZERO elevation events for any action
-    fast enough to finish inside one synchronous call stack, because the flush only ever sees the
-    final value: false. The one thing security most needs recorded is exactly what this pattern
-    can silently drop.</p>
-    <div class="hf-scatter"><span>elevation on, elevation off, audit log: nothing</span></div>
-  </div>
-</div>
+<p><b>The same shape, twice more, at two very different clock speeds.</b> React's
+<code>setState</code> batching does the identical coalescing one framework over —
+<code>setState(1); setState(2); setState(3)</code> inside one event handler re-renders once,
+reading 3, and React 18 made this automatic for every code path, not just React's own events.
+The browser's own render loop does it to your styles: <code>el.style.left='10px';
+el.style.left='50px'; el.style.left='90px'</code> inside one task paints exactly once, at 90px —
+10px and 50px never existed on screen for even a single frame, and no screen recorder could ever
+have caught them. And a support tool's "sudo as this user for one action" button — <code>elevated.set(true)</code>
+then, synchronously in a <code>finally</code> block, <code>elevated.set(false)</code> — logs
+ZERO elevation events to a <code>toObservable(elevated)</code>-based audit trail for any action
+fast enough to finish inside one call stack, because the flush only ever sees the final value:
+false. The one thing security most needs recorded is exactly what this timing hole can silently
+drop.</p>
 
 <div class="hf-kick">Questions from the back row</div>
 <div class="hf-ask">
@@ -312,26 +277,28 @@ a security tape.</div>
   <p class="a">Log at the call site, not at the far end of a bridge: wrap the setter in a function
   that writes the signal AND records the event in the same synchronous step —
   <code>function elevate(v) { elevated.set(v); audit.record(v); }</code>. That guarantees one log
-  entry per logical intent, independent of whatever Angular's effect scheduler does afterward.</p>
+  entry per logical intent, independent of whatever Angular's effect scheduler does afterward — the
+  timestamp you want is the one at the call site, not the one at the flush.</p>
 </div>
 <div class="hf-ask">
   <p class="q">Does a plain RxJS Subject have this problem too?</p>
   <p class="a">No — a Subject broadcasts synchronously on every single <code>.next()</code> call,
   with no batching layer in between. <code>subject.next(2); subject.next(3);
   subject.next(4)</code> really does produce three separate emissions to every subscriber, in
-  order. The coalescing here is specific to <code>effect()</code> and anything built on it —
-  toObservable included. It's a signals thing, not an RxJS thing.</p>
+  order — three separate timestamps, not one. The coalescing here is specific to
+  <code>effect()</code> and anything built on it — toObservable included. It's a signals thing,
+  not an RxJS thing.</p>
 </div>
 
-<div class="hf-kick">Grab a napkin</div>
-<p class="hf-say">Predict it before you scroll.</p>
-<div class="hf-napkin">
-  A signal holds <code>count = signal(0)</code>. A button's click handler runs a loop:
+<div class="hf-brain">
+  <div class="hf-brain-head">Brain Power</div>
+  <p>A signal holds <code>count = signal(0)</code>. A button's click handler runs a loop:
   <code>for (let i = 1; i &lt;= 5; i++) { count.set(i); }</code> — five synchronous writes.
   <code>toObservable(count)</code> feeds a subscriber that pushes every emitted value into an
-  array. After one click, is the array <code>[1,2,3,4,5]</code>, <code>[5]</code>,
-  <code>[0,5]</code>, or something else — and does wrapping each <code>count.set(i)</code> in its
-  own <code>setTimeout(fn, 0)</code> instead of a plain loop change your answer?
+  array. Before you scroll: after one click, is the array <code>[1,2,3,4,5]</code>,
+  <code>[5]</code>, <code>[0,5]</code>, or something else — and does wrapping each
+  <code>count.set(i)</code> in its own <code>setTimeout(fn, 0)</code> instead of a plain loop
+  change your answer?</p>
 </div>
 
   <!-- ── EXTREME-VIZ HERO: Signals ↔ RxJS Interop Flow ── -->
