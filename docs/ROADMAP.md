@@ -4536,6 +4536,71 @@ all = 389 pages still not through this pass.** `track-spring` still has 32 unsha
 total, 21 done), alongside `track-angular` (53 unshaped, 22 shaped) and `track-java` (32 unshaped, 11
 shaped) as the other largest-by-volume tracks, per this entry's own `tmp_variety.mjs` run.
 
+**2026-09-26 — `track-angular` picked up a third time, RECOVERED from a rate-limit crash mid-batch
+(22 shaped before this entry, 53 unshaped).** The agent that started this batch was killed by a
+session-wide API rate limit before it committed or pushed, leaving 5 files modified in the working
+tree with no commit to check against and no reliable prior summary of what had actually been done.
+Per the `react-testing-visualizer.html` precedent from the earlier `track-react` recovery, this
+entry's first job was reading every file's `git diff` directly rather than trusting any summary,
+then reading the full resulting block for each page against `docs/HEADFIRST-SHAPES.md`'s exact
+must-have/must-not list for its declared shape — not just skimming the diff.
+
+| page | shape | crashed-work verdict | what this entry did |
+|---|---|---|---|
+| `angular-route-guards-deep-visualizer` | `tour` | **genuine one-line "leaving a page alone" case**, same shape as `react-testing-visualizer` | verified the existing block already carries the verdict pair, `hf-ladder`, `hf-talk`, and a 3-parallel `hf-terms` — one of every device the Tour's silhouette calls for; the crashed agent's only edit was `data-shape="tour"` on the existing line. Left as-is. |
+| `angular-lifecycle-visualizer` | `receipt` | **complete** | the crashed agent had correctly swapped the verdict pair + `hf-talk` for a new `hf-receipt` (a worked, explicitly-labeled-as-not-measured estimate of 30 CIAM route shells polling `localStorage` inside `ngDoCheck()` — 3,600 reads/minute for an event that fires "at most once a session") + `hf-vs` + `hf-arrow`, and stripped the old `hf-terms`/`hf-cardtitle`. Verified against `tmp_variety.mjs`'s device inventory: no banned device present, all three required devices present with a real `.row.total`. Nothing needed fixing. |
+| `angular-rxjs-flattening-deep-visualizer` | `argument` | **incomplete — a real gap, not a false alarm** | the crashed agent had correctly stripped the verdict pair + `hf-ladder` and expanded `hf-talk` to a genuine 10-`hf-bub`, 3-named-voice (`exhaustMap` / `resendCode$` / the phone-edit save handler) argument that escalates and resolves — but it left the OLD shape's closing sections completely untouched: a `hf-terms` ("Where you've seen this before," 3 parallels) and a `hf-napkin` ("Grab a napkin") both still in the block, and `argument`'s own must-not list bans both. This would have failed `tmp_variety.mjs` as a declaration lie. Removed both sections (and their `hf-kick`/`hf-say` headers) in this entry; the page's existing `hf-ask` "Questions from the back row" section was untouched since `hf-ask` isn't part of either the required or the banned list. Re-verified against `tmp_variety.mjs`'s inventory after the fix: clean. |
+| `angular-token-lifecycle-deep-visualizer` | `assembly` | **complete** | the crashed agent replaced a 4-`hf-bub` `hf-talk` with a new `hf-chain` (6 stations, station two marked "◀ THE LIAR" in its `hf-steps` tag and via an `hf-mark` span in the accompanying `hf-arrow` paragraph) describing the six-parallel-401s race. `assembly`'s must-not list only bans `hf-talk`/`hf-qa`/`hf-receipt` — unlike most other shapes it does NOT ban the verdict pair, `hf-ladder`, `hf-terms`, or `hf-napkin`, all of which the page still (correctly) carries from its pre-existing block. Confirmed no banned device present. Nothing needed fixing. |
+| `angular-viewchild-visualizer` | `questions` | **complete, despite the alarming diff shape** | this file's diff was flagged going in for its unusual net-negative line count (162 changed, more deletions than insertions) as a likely stripped-but-not-rebuilt page. It was not: the crashed agent had swapped the verdict pair + `hf-ladder` for a new `hf-big` + a genuine 6-pair `hf-qa` (escalating from "why is my reference undefined" through to "how do I even tell which of the two undefined-reference traps I'm looking at" — within the 5–7 range the shape wants), replaced `hf-talk` with an `hf-brain` predict-before-reveal beat, and — critically — also stripped the OLD shape's `hf-terms` and `hf-napkin` sections, both correctly banned for `questions`. The apparent size drop is exactly what re-staging into a device-poorer shape is supposed to look like, not an interrupted edit. Confirmed against `tmp_variety.mjs`'s inventory: all required devices present, nothing banned present. Nothing needed fixing. |
+
+**The one real bug found this round was `angular-rxjs-flattening-deep-visualizer.html`'s leftover
+`hf-terms`/`hf-napkin`, not a truncated rewrite** — the crashed session got interrupted after
+finishing the required half of the re-stage (expanding `hf-talk`) but before doing the forbidden-
+device cleanup half. This is a different failure shape from the `track-react` recovery's finding
+(where the flagged file turned out to need no change at all) and from a stripped-but-not-rebuilt
+page (which this task specifically asked to watch for on `angular-viewchild-visualizer` and did not
+find) — worth recording as a third distinct pattern a rate-limit crash can leave behind.
+
+**No new technical claims were authored this round** — every file's new-or-kept content either
+restates a fact already shipped and fact-checked elsewhere on that same page (the `ngDoCheck`/
+`OnPush` mechanics, the refresh-token-rotation race, the `exhaustMap` blind spot, `static: true`'s
+resolution timing) or is an illustrative worked estimate explicitly labeled as such (the 30-shells/
+3,600-reads-per-minute figure, which says outright it is "a worked estimate, not a measured
+production number"). Re-verified independently via `WebSearch` against primary sources rather than
+trusted from memory: Angular's own `ViewChild`/static-query resolution timing (static resolves once,
+before `ngOnInit`, and never re-resolves for content that didn't exist yet — confirmed across
+angular.dev and multiple independent Angular 8+ writeups); and that OAuth2 refresh-token rotation
+with reuse detection genuinely revokes the whole token family/lineage on a detected reuse, not just
+the reused token, including the real, documented multi-tab false-positive this exact page describes
+(confirmed via the django-oauth-toolkit reuse-detection PR discussion and independent refresh-token-
+rotation writeups). No factual error was found in any of the 5 files' content.
+
+**Sitewide shape count after this batch: 153 shaped / 322 unshaped / 62 no-block, 0 declaration
+lies** (`node frontend/tmp_variety.mjs`). `track-angular` went from 22 shaped (all eleven shapes at
+2/22 = 9%, 0 SKEW) to **27 shaped — `argument`/`receipt`/`tour`/`assembly`/`questions` at 3/27 =
+11%, the other six at 2/27 = 7%, 0 SKEW warnings** (cap 18%, 25% for `tour`). All eleven shapes
+remain alive sitewide, no dead shape, `declaration/device MISMATCH: 0`. Full verification before
+pushing: `tmp_vcheck.mjs` (537 pages, clean), `tmp_doccheck.mjs` (341 symbols, 0 undocumented — no
+shared engine touched this batch), `tmp_assetcheck.mjs origin/master` (no teaching assets lost),
+`tmp_variety.mjs --track=angular` (0 skew, 0 mismatches, shown above), `tmp_variety.mjs` full-site
+(153/322/62 counts confirmed; the overall run still reports the pre-existing FAIL from other
+tracks' 1–3-shaped-page skew, confirmed via `git stash` to be present and identical on `HEAD` before
+this batch — unrelated to and unworsened by this batch), `tmp_smoke.mjs` on all 5 touched pages at
+320px (clean — no uncaught errors, no overflow; the one pre-existing `angular-viewchild-visualizer`
+3-element clip notice confirmed via `git stash` to match the page's own pre-edit `HEAD` baseline
+exactly), `tmp_codecheck.mjs` (676 blocks across 537 files, 0 real errors), `tmp_cwlines.mjs` (455
+mounts, 0 out-of-range, 0 miscounted as 1-based — this batch didn't touch any CodeWalk `lines:`
+array), and `tmp_contrast.mjs --theme=cream` / `--theme=dark` against all 5 touched pages (both
+clean, 0 findings). `tmp_coachcheck.mjs` was not run against this batch's pages — none of the 5
+carry a Code-With-Me `coach:` entry. `tmp_hfaudit.mjs --track=angular`: all 5 touched pages score
+**85.6–100**, comfortably above the 75 floor (`angular-lifecycle-visualizer` lowest at 85.6,
+`angular-token-lifecycle-deep-visualizer` a perfect 100).
+
+**Remaining scope: 322 pages `hf-deck`-with-no-`data-shape` + 62 pages with no `hf-deck` block at
+all = 384 pages still not through this pass.** `track-angular` still has 48 unshaped pages left (75
+total, 27 done), alongside `track-spring` (32 unshaped, 21 shaped) and `track-java` (32 unshaped, 11
+shaped) as the other largest-by-volume tracks, per this entry's own `tmp_variety.mjs` run.
+
 ---
 
 ### 18. Go GRANULAR on the eight core tracks before scaffolding anything new (Bobby, 2026-09-13)
