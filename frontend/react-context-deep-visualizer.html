@@ -29,120 +29,60 @@
   <h1>Context API Deep Dive</h1>
   <p class="sub">Context is a wormhole through the tree — but every consumer re-renders when the value changes, and <code>React.memo</code> can't stop it. The propagation model, the re-render storm, selector workarounds, and the values you should <em>never</em> put in context.</p>
 
-    <p class="hf-deck">or, why useContext returns null while the Provider sits right there in DevTools</p>
+    <p class="hf-deck" data-shape="whiteboard">or, why useContext returns null while the Provider sits right there in DevTools</p>
 
-  <div class="hf-kick">The problem</div>
-  <p class="hf-say">React DevTools shows the Provider wrapping the component, the value prop populated — and useContext still hands back the default.</p>
+  <div class="hf-kick">The whole bug, in one picture</div>
+  <p class="hf-say">Before you scroll to the core: DevTools shows <code>&lt;AuthProvider&gt;</code> wrapping the tree with a real user in its <code>value</code> prop. <code>useAuth()</code> still returns the default. Nothing below is a copy-paste error.</p>
 
-  <div class="hf-card bad">
-    <div class="hf-cardtitle">The AuthProvider that's clearly there and somehow isn't</div>
-    <p>Your company publishes <code>@company/auth-kit</code> internally — <code>AuthContext</code>, <code>AuthProvider</code>, and a <code>useAuth()</code> hook. The main shell app wraps its whole tree in <code>&lt;AuthProvider&gt;</code> and everything works. A separate feature package, <code>@company/user-admin</code>, also depends on <code>auth-kit</code> so its own components can call <code>useAuth()</code> directly. It ships. In the deployed app, every <code>useAuth()</code> call inside <code>user-admin</code>'s components returns the context's default value — <code>user: null, isAuthenticated: false</code> — even though the logged-in user is right there, one click away, in the shell app's own <code>useAuth()</code> calls.</p>
-    <p>You open React DevTools. <code>&lt;AuthProvider&gt;</code> is exactly where it should be, several levels up. Its <code>value</code> prop in the inspector shows a real, populated user object. Every visible signal says this should work. It doesn't — not intermittently, not for some users, for every single component inside <code>user-admin</code>, every time.</p>
-    <div class="hf-scatter">
-      <span>AuthProvider wraps the tree correctly ✓</span>
-      <span>the Provider's value prop is populated correctly ✓</span>
-      <span>useAuth() inside user-admin reads the default anyway ⚠</span>
-    </div>
-    <p class="hf-foot">Nobody forgot a Provider. The tree in DevTools was telling the truth the whole time — just not the truth you needed.</p>
-  </div>
-
-  <div class="hf-card good">
-    <div class="hf-cardtitle">Make sure there's only one AuthContext object, not two that look alike</div>
-    <div class="hf-ladder">
-      <b>Check how many copies of @company/auth-kit actually got installed</b>
-      <i>&darr; a version mismatch between the shell and user-admin can make a package manager nest a second copy instead of sharing one</i>
-      <b>Dedupe it — a peerDependency with a matching semver range, or a workspace override forcing one shared copy</b>
-      <i>&darr; one copy means one createContext() call, which means one context object everyone's useContext() actually matches</i>
-      <b>Confirm with a dependency-tree listing that exactly one resolved version exists, not just that the version numbers look the same</b>
-    </div>
-  </div>
-
-  <div class="principle" style="text-align:left">
-    <b>Two calls to createContext() — even with identical code, identical names, identical shape — produce two completely unrelated context objects.</b> A Provider only ever writes to the specific object it was given; useContext only ever reads from the specific object it was given. If a bundler or package manager hands your Provider and your consumer two different copies of the same module, nothing connects them — no error, no warning, just the default value, silently, forever.
-  </div>
-
-  <div class="hf-note">Think of two walkie-talkies from two different manufacturers, both labeled "Channel 7." They're tuned to genuinely different frequencies — the sticker means nothing to the radio. Your Provider is broadcasting on its Channel 7. Your consumer is listening on a different Channel 7 that just happens to wear the same label. <b>Same name, same shape, different object — context cares only about the object.</b></div>
-
-  <div class="hf-talk">
-    <div class="hf-bub">
-      <span class="who">You</span>
-      <p>DevTools shows AuthProvider wrapping everything, with a real user in its value. Why does useAuth() inside user-admin still see null?</p>
-    </div>
-    <div class="hf-bub right">
-      <span class="who">The context object AuthProvider writes to</span>
-      <p>Because I'm not the one useAuth() is reading. There's a second me — same name, same source file even — living in a nested node_modules folder, and that's the one it imported.</p>
-    </div>
-    <div class="hf-bub">
-      <span class="who">useContext, personified</span>
-      <p>I only ever read the exact object reference I'm handed. I have no idea two objects both claim to be "AuthContext" — nobody told me to compare names, only to look up the one reference I was given.</p>
-    </div>
-    <div class="hf-bub right">
-      <span class="who">Your package manager's dependency resolver</span>
-      <p>That one's on me, sort of. Your shell app and user-admin asked for slightly different version ranges of auth-kit, so I couldn't safely give you one shared copy — I nested a second one instead, exactly the way I'm supposed to when ranges don't overlap.</p>
-    </div>
-  </div>
-
-  <div class="hf-kick">The mechanism</div>
-  <p class="hf-say">Trace one useAuth() call back to the object it's actually reading.</p>
-
-  <div class="hf-card">
-    <ol class="hf-steps">
-      <li><span>The shell app imports <code>AuthProvider</code> from <code>@company/auth-kit</code> — resolved to the hoisted copy at the root <code>node_modules</code></span><span class="tag">shell's import</span></li>
-      <li class="open"><span><code>AuthProvider</code> wraps the app: <code>&lt;AuthContext.Provider value={realUser}&gt;</code> — this writes to the hoisted copy's context object</span><span class="tag">Provider writes</span></li>
-      <li><span><code>user-admin</code>'s <code>package.json</code> pins a slightly different semver range for <code>auth-kit</code> than the shell does</span><span class="tag">version mismatch</span></li>
-      <li class="open"><span>The package manager can't satisfy both ranges with one copy, so it nests a second <code>auth-kit</code> inside <code>user-admin</code>'s own <code>node_modules</code></span><span class="tag">nested copy created</span></li>
-      <li><span>A component inside <code>user-admin</code> imports <code>useAuth()</code> — resolved to that nested copy, which ran its own separate <code>createContext()</code> call</span><span class="tag">consumer's import</span></li>
-      <li class="open"><span><code>useContext</code> inside that <code>useAuth()</code> reads the nested copy's context object — which no Provider ever wrote to — so it returns the untouched default</span><span class="tag">reads the wrong object</span></li>
-    </ol>
-    <p class="hf-annot">Step 4 is the one a dependency-tree listing actually shows you, and the one nobody thinks to check first. The bug isn't in any line of React code — every createContext, every Provider, every useContext call is written correctly. It's in which file each import resolved to, one folder apart from each other.</p>
+  <div class="hf-brain">
+    <div class="hf-brain-head">Brain Power</div>
+    <p><code>AuthProvider</code> writes to a context object. <code>useAuth()</code> reads from a context object. Both are correct, and both point at "AuthContext". Before you look at the figure &mdash; what has to be true for a Provider and a consumer that agree on the name "AuthContext" to still not be connected to each other?</p>
   </div>
 
   <div class="hf-card">
     <div class="hf-nest">
       <div class="ring"><span class="lbl">Your app's dependency graph</span>
-        <div class="ring"><span class="lbl">node_modules/@company/auth-kit — hoisted copy, used by &lt;AuthProvider&gt;</span>
-          <div class="ring"><span class="lbl">user-admin/node_modules/@company/auth-kit — a second copy, nested over a version mismatch</span>
+        <div class="ring"><span class="lbl">node_modules/@company/auth-kit &mdash; the hoisted copy, the one &lt;AuthProvider&gt; writes to</span>
+          <div class="ring"><span class="lbl">user-admin/node_modules/@company/auth-kit &mdash; a SECOND copy, nested over a version mismatch</span>
             <div class="core">useAuth() inside user-admin resolves against THIS copy's AuthContext<small>a different object than the one &lt;AuthProvider&gt; ever wrote to</small></div>
           </div>
         </div>
       </div>
     </div>
-    <p class="hf-annot">The Provider and the consumer are both completely correct in isolation. Neither one can see that the other is talking to a different object — there's no cross-check, because context was never designed to notice a name collision between two unrelated module instances.</p>
+    <div class="hf-arrow up">Outer ring: the shell app's import resolves to the ONE copy hoisted to the project root &mdash; this is the object <code>&lt;AuthContext.Provider value={realUser}&gt;</code> actually writes into.</div>
+    <div class="hf-arrow">Middle ring: <code>user-admin</code>'s own <code>package.json</code> pins a slightly different semver range, so the package manager can't satisfy both requests with one copy &mdash; it nests a second <code>auth-kit</code> instead, exactly as designed.</div>
+    <div class="hf-arrow rose">The core: that nested copy ran its OWN <code>createContext()</code> call. <span class="hf-mark">Same source file, same name, same shape &mdash; a completely different object</span>, and it's the one every component inside user-admin actually imports.</div>
+    <p class="hf-annot">Every ring here is correct in isolation. The Provider correctly wrote to its copy. The consumer correctly read from its copy. Neither one can see that "its copy" is not the same copy &mdash; there's no cross-check, because <code>useContext</code> was never designed to compare names, only to look up the exact object reference it was handed.</p>
   </div>
 
-  <div class="hf-check" data-answer="0">
+  <div class="hf-card">
+    <ol class="hf-steps">
+      <li><span>Shell app imports <code>AuthProvider</code> &mdash; resolves to the hoisted copy at the root <code>node_modules</code></span><span class="tag">shell's import</span></li>
+      <li class="open"><span><code>&lt;AuthProvider value={realUser}&gt;</code> writes to that hoisted copy's context object</span><span class="tag">Provider writes</span></li>
+      <li><span><code>user-admin</code> pins a different semver range for <code>auth-kit</code> than the shell does</span><span class="tag">version mismatch</span></li>
+      <li class="open"><span>The package manager nests a second <code>auth-kit</code> inside <code>user-admin</code>'s own <code>node_modules</code></span><span class="tag">nested copy</span></li>
+      <li><span>A component in <code>user-admin</code> imports <code>useAuth()</code> &mdash; resolved to the nested copy, which ran its own separate <code>createContext()</code></span><span class="tag">consumer's import</span></li>
+      <li class="open"><span><code>useContext</code> reads the nested copy's object &mdash; which no Provider ever wrote to &mdash; and returns the untouched default</span><span class="tag">reads the wrong object</span></li>
+    </ol>
+    <p class="hf-annot">Step 4 is the one a dependency-tree listing actually shows you, and the one nobody thinks to check first, because every <code>createContext</code>, every Provider, every <code>useContext</code> call in this codebase is written correctly. The bug isn't in a line of React code &mdash; it's in which file each import resolved to, one folder apart from each other.</p>
+  </div>
+
+  <p><span class="hf-hand">At work, this exact shape hides in any monorepo or micro-frontend setup where a shared auth/theme/feature-flag context ships as its own package: a design-system context imported by two independently-versioned Angular libraries, or two federated React remotes each bundling their own copy of a shared provider. Grep your lockfile for a duplicate entry of any package that exports a <code>createContext()</code> &mdash; each one is a Provider and a consumer quietly talking to different objects.</span></p>
+
+  <div class="principle" style="text-align:left">
+    <b>Two calls to createContext() &mdash; even with identical code, identical names, identical shape &mdash; produce two completely unrelated context objects.</b> A Provider only ever writes to the specific object it was given; useContext only ever reads from the specific object it was given. If a bundler or package manager hands your Provider and your consumer two different copies of the same module, nothing connects them &mdash; no error, no warning, just the default value, silently, forever.
+  </div>
+
+  <div class="hf-note">Think of two walkie-talkies from two different manufacturers, both labeled "Channel 7." They're tuned to genuinely different frequencies &mdash; the sticker means nothing to the radio. Your Provider is broadcasting on its Channel 7. Your consumer is listening on a different Channel 7 that just happens to wear the same label. <b>Same name, same shape, different object &mdash; context cares only about the object.</b></div>
+
+  <div class="hf-check" data-answer="2">
     <p class="q">Your team fixes this by adding <code>@company/auth-kit</code> as a peerDependency of <code>user-admin</code> instead of a regular dependency, and the package manager now installs exactly one copy for the whole app. Does the existing <code>&lt;AuthContext.Provider value={...}&gt;</code> and <code>useContext(AuthContext)</code> code need to change at all?</p>
-    <button type="button">No — once there's only one copy of the module, both already refer to the same context object; the React code was never the problem</button>
-    <button type="button">Yes — the useContext calls need to be updated to explicitly reference the shell app's copy of AuthContext by path</button>
-    <button type="button">Yes — AuthProvider needs to be wrapped in a second Provider inside user-admin so its local copy also gets a value</button>
-    <p class="why" data-for="0">Exactly. The React code — Provider, useContext, everything — was correct the entire time. The only thing that changed is that both the shell and user-admin now import the same module instance, so createContext() only ever runs once, and there's only one context object in existence to write to or read from.</p>
-    <p class="why" data-for="1">There's no such thing as "referencing a copy by path" for a context object — useContext matches by object identity, not by file location. The fix is making sure only one object exists, not pointing at a specific one among several.</p>
-    <p class="why" data-for="2">That doubles down on the actual bug. Adding a second Provider inside user-admin would write to user-admin's copy of the context object — but the real fix already made that copy disappear. Two Providers for two objects was the disease; one module instance is the cure.</p>
-  </div>
-
-  <div class="hf-kick">Where you have seen this before</div>
-  <p class="hf-say">A name is not an identity — three more places that bite the same way.</p>
-
-  <div class="hf-terms">
-    <div class="hf-card hf-taped">
-      <h4>The same Java class loaded by two different classloaders</h4>
-      <p>Two classloaders can each load <code>MyInterface.class</code> from identical bytecode, and an <code>instanceof</code> check between an object from one and a reference type from the other fails — same fully-qualified name, same bytecode, but the JVM treats them as two different types.</p>
-      <div class="hf-scatter"><span>same class name, different identity, ClassCastException</span></div>
-    </div>
-    <div class="hf-card hf-taped">
-      <h4>Two identity providers both calling their signing key "primary"</h4>
-      <p>A gateway that trusts a token by looking up a key alias instead of comparing the actual public key material can be fooled the same way code is fooled by two objects sharing a name — the label "primary" identifies nothing on its own.</p>
-      <div class="hf-scatter"><span>verify the key material, not the label</span></div>
-    </div>
-    <div class="hf-card hf-taped">
-      <h4>Two database connections both named "prod"</h4>
-      <p>A misconfigured environment file can have a staging deploy's connection string alias itself "prod" — every log line and dashboard says "prod," and none of it is reading from the same database as actual production traffic.</p>
-      <div class="hf-scatter"><span>the label prod doesn't make it production</span></div>
-    </div>
-  </div>
-
-  <div class="hf-napkin">
-    <b>The whole page on a napkin:</b> Context is a wormhole for stable values — any change re-renders every useContext consumer with no built-in selector, so split contexts by update frequency and memoize the value, and reserve context for things that rarely change. <b>The one new sentence this block adds:</b> a Provider and a consumer only actually connect if they share the exact same context object — two separate createContext() calls with the same name produce two unrelated objects, and a duplicated dependency can hand your Provider and your consumer different copies without either one ever throwing an error.
+    <button type="button">Yes &mdash; the useContext calls need to be updated to explicitly reference the shell app's copy of AuthContext by path</button>
+    <button type="button">Yes &mdash; AuthProvider needs to be wrapped in a second Provider inside user-admin so its local copy also gets a value</button>
+    <button type="button">No &mdash; once there's only one copy of the module, both already refer to the same context object; the React code was never the problem</button>
+    <p class="why" data-for="0">There's no such thing as "referencing a copy by path" for a context object &mdash; useContext matches by object identity, not by file location. The fix is making sure only one object exists, not pointing at a specific one among several.</p>
+    <p class="why" data-for="1">That doubles down on the actual bug. Adding a second Provider inside user-admin would write to user-admin's copy of the context object &mdash; but the real fix already made that copy disappear. Two Providers for two objects was the disease; one module instance is the cure.</p>
+    <p class="why" data-for="2">Exactly. The React code &mdash; Provider, useContext, everything &mdash; was correct the entire time. The only thing that changed is that both the shell and user-admin now import the same module instance, so createContext() only ever runs once, and there's only one context object in existence to write to or read from.</p>
   </div>
 
 

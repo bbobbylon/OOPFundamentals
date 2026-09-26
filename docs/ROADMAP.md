@@ -4366,6 +4366,109 @@ third pass, alongside `track-spring` (40 unshaped, 13 shaped), `track-java` (32 
 shaped), and `track-react` (25 unshaped, still only 2 shaped) as the other largest-by-volume tracks,
 per this entry's own `tmp_variety.mjs` run.
 
+**2026-09-26 — `track-react` picked up, RECOVERED from a rate-limit crash mid-batch (2 shaped
+before this entry, 25 unshaped — the largest-by-volume gap after `track-angular`/`track-spring`/
+`track-java`). The agent that started this batch was killed by a session-wide API rate limit
+before it committed or pushed, leaving 9 files modified in the working tree with no commit to
+check against. This entry's first job was verifying that crashed work honestly, file by file,
+against `git diff` directly — not trusting any prior summary of what shape was assigned to
+what.**
+
+`react-testing-visualizer.html` showed only a 1-line diff (`+1/-1`) versus the other 8 files'
+90–140 lines each, flagged going in as possibly an interrupted edit. It was not: the file's
+existing block already had the verdict pair (`hf-card bad` + `hf-card good`), `hf-ladder`,
+`hf-talk`, `hf-terms` (three `hf-taped` parallels), and `hf-napkin` — literally one of every
+device the Tour's silhouette calls for, with nothing to strip and nothing to add. The crashed
+agent's one edit was `data-shape="tour"` on the existing `hf-deck` line, which is exactly
+`docs/HEADFIRST-SHAPES.md`'s own "Leaving a page alone" case: *"If a page's existing block
+genuinely earns tour ... declare it ... that is one edit, not a rewrite."* Verified against the
+shape's own must-have list (`hf-verdict` + `hf-ladder` + `hf-terms`, all present, nothing
+banned) and left as-is — a legitimate one-line fix, not a truncated one.
+
+The other 8 were genuine, complete re-stages, each checked in full against `docs/HEADFIRST-
+SHAPES.md`'s must-have/must-not list for its declared shape before being accepted:
+
+| page | shape | the gotcha that chose it |
+|---|---|---|
+| `react-animation-visualizer` | `timelapse` | the fade-in that doesn't fade is entirely about WHEN two paints happen, not what the CSS says — mount and "visible" landing in the same commit means one paint, not two; re-timestamped the existing ladder to `t=0ms`/`~t=16ms` rungs and added the page's first `hf-cycle` (commit → first paint → transition engine checks for a "from" and finds none) |
+| `react-context-deep-visualizer` | `whiteboard` | pure structure — a Provider and a consumer both correctly reading/writing "AuthContext," and neither can see the other is a different object because a version-mismatched dependency nested a second copy; recast the existing `hf-nest` rings with `hf-hand`/`hf-arrow` annotations and a `Brain Power` predict beat asked before the figure, not after |
+| `react-custom-hooks-visualizer` | `mnemonic` | the payload IS a rule to memorize — `Object.is` compares references, never contents — built around a new `hf-big` ("Object.is checks the box. It never looks inside.") plus two `hf-note` sticky notes (the locker analogy, the Redux `mapStateToProps` parallel folded in from the old `hf-terms` entry) |
+| `react-data-fetching-visualizer` | `exhibit` | the artifact IS the bug — a two-row Network-tab log, 0.4ms apart, both `200`, both correct — three `hf-arrow` annotations point into it and an `hf-mark` calls out the one line that matters; added `devhub-syntax.js` since this is the page's first real `<pre>` |
+| `react-fundamentals-visualizer` | `twodoors` | not a bug — `key={index}` and `key={user.id}` are both correct somewhere, and the page's own existing verdict framing presumed one was simply wrong; recast as `.door` panels (never `.bad`/`.good`) with "can this list's shape change?" as the `principle` naming the deciding condition |
+| `react-redux-zustand-visualizer` | `argument` | two correct parties (the server, genuinely never connected to `localStorage`; the client, genuinely reading it synchronously) with React refereeing between them — expanded to two `hf-talk` blocks (9 `hf-bub` total: You / the server / the client / React / the fixed component) plus a `Brain Power` predict beat between them |
+| `react-server-components-visualizer` | `autopsy` | opens on the real error text (`ReferenceError: window is not defined`, with a full stack trace) before any explanation, then climbs an `hf-ladder` backwards from the symptom to the root cause (nothing in the chain ever wrote `'use client'`) with `↑ which happened because…` rungs; added `devhub-syntax.js` for its first `<pre>` |
+| `react-suspense-error-boundaries-visualizer` | `assembly` | a 5-station `hf-chain` where station three ("has EVERYTHING inside me settled?") looks like a routing checkpoint each child passes on its own and is actually a single shared gate; `hf-mark` on "no from ActivityFeed alone is enough to freeze Header and Sidebar too," `hf-steps` marks the same station "◀ THE LIAR" |
+
+**Every re-stage kept the page's pre-existing, already-fact-checked content wherever the new
+silhouette allowed it** (the `hf-terms`/`hf-napkin` parallels on `react-fundamentals` and
+`react-suspense-error-boundaries` stayed untouched — `twodoors` and `assembly` don't forbid
+either device, so nothing there needed stripping), matching every prior batch's method: read the
+existing block in full, name the KIND of gotcha, re-stage only what the shape's own must-not list
+requires removing.
+
+**Facts re-checked via `WebSearch` against primary/authoritative sources rather than trusted from
+the crashed session's own prose, since none of this content had been fact-checked yet:** React
+18 StrictMode's mount→simulated-unmount(cleanup)→remount sequence, development-only ([react.dev
+Strict Mode docs](https://legacy.reactjs.org/docs/strict-mode.html) and the
+[reactwg/react-18 discussion](https://github.com/reactwg/react-18/discussions/19)); that a
+Suspense boundary commits its whole wrapped subtree as one unit, never child-by-child
+([react.dev `<Suspense>` reference](https://react.dev/reference/react/Suspense)); that
+`ReferenceError: window is not defined` is Node's own real, copy-exact error text for this
+failure mode, satisfying `autopsy`'s "must be the real error, not a paraphrase" bar
+([bobbyhadz.com writeup](https://bobbyhadz.com/blog/javascript-referenceerror-window-is-not-defined),
+corroborated by multiple GitHub issue reports of the identical string); that Zustand's `persist`
+middleware's localStorage read is genuinely synchronous and that this exact SSR/hydration-mismatch
+gotcha, `hasHydrated`/`onFinishHydration` included, is real and documented
+([Zustand's own persisting-store-data docs](https://zustand.docs.pmnd.rs/reference/integrations/persisting-store-data)
+and a [pmndrs/zustand GitHub issue](https://github.com/pmndrs/zustand/issues/938) describing the
+identical race); and that two installed copies of a package produce two unrelated
+`createContext()` objects with no thrown error, only a silent default-value read
+([dev.to's "two-Reacts bug" writeup](https://dev.to/r9v/the-two-reacts-bug-when-packages-arent-singletons-492h)
+and a live `mittwald/flow` GitHub issue reporting the same failure from a pinned dependency). No
+factual error was found in any of the 8 files' new content this round.
+
+**Sitewide shape count after this batch: 140 shaped / 335 unshaped / 62 no-block, 0 declaration
+lies** (`node frontend/tmp_variety.mjs`). `track-react` went from 2 shaped (`receipt` =
+`react-performance`, `questions` = `react-useeffect-deep`, both skewed at 1/2 = 50%, unavoidable
+at that count) to **11 shaped — every one of the eleven shapes at exactly 1/11 = 9%, 0 SKEW
+warnings** (cap 18%, 25% for `tour`) — the same flattest-distribution result the `track-angular`
+and `track-java` batches hit. All eleven shapes remain alive sitewide, no dead shape,
+`declaration/device MISMATCH: 0`. Full verification before pushing: `tmp_vcheck.mjs` (537 pages,
+clean), `tmp_doccheck.mjs` (341 symbols, 0 undocumented — no shared engine touched this batch),
+`tmp_assetcheck.mjs origin/master` (no teaching assets lost), `tmp_variety.mjs --track=react` (0
+skew, 0 mismatches, shown above), `tmp_variety.mjs` full-site (140/335/62 counts confirmed; the
+overall run still reports the pre-existing FAIL from other tracks' 1–5-shaped-page skew,
+independently confirmed via `git stash` to be present and identical on `HEAD` before this batch's
+changes — unrelated to and unworsened by this batch, which touched only `track-react`),
+`tmp_smoke.mjs` on all 9 touched pages at both 320px and 390px (clean — no uncaught errors, no
+overflow; the one pre-existing `div.key-insight` clip notice on `react-data-fetching-visualizer`
+confirmed via `git stash` to match the page's own pre-edit `HEAD` baseline exactly),
+`tmp_codecheck.mjs` (676 blocks across 537 files, 0 real errors), `tmp_cwlines.mjs` (455 mounts, 0
+out-of-range, 0 miscounted as 1-based — this batch didn't touch any CodeWalk `lines:` array), and
+`tmp_contrast.mjs --theme=cream` / `--theme=dark` against all 9 touched pages. Cream came back
+clean; dark flagged one pre-existing, out-of-scope issue — `.subject code` at 1.57:1 on
+`react-fundamentals-visualizer`, inside the page's `hf-cast` figure that this batch's `twodoors`
+re-stage never touched (confirmed identical, byte-for-byte, on `HEAD` before this session) — left
+unfixed rather than patched blind, since it's a shared-component color token
+(`.hf-cast .subject code`) whose blast radius across every other page using the same figure wasn't
+audited this session; flagged here for a future contrast pass rather than silently ignored.
+`tmp_coachcheck.mjs` was not run against this batch's pages — none of the 9 carry a Code-With-Me
+`coach:` entry (the sitewide run also hit a pre-existing, environment-specific path error unrelated
+to any bank content, confirming this). `tmp_hfaudit.mjs --track=react`: all 9 touched pages score
+**81.2–93.3**, comfortably above the 75 floor (`react-animation-visualizer` lowest at 81.2,
+`react-data-fetching-visualizer` highest at 93.3); mean across all 27 `track-react` lesson pages is
+92.7/100, zero pages under 40.
+
+**Remaining scope: 335 pages `hf-deck`-with-no-`data-shape` + 62 pages with no `hf-deck` block at
+all = 397 pages still not through this pass.** `track-react` still has 16 unshaped pages left (27
+total, 11 done — `react-accessibility`, `react-concurrent`, `react-events`, `react-forms`,
+`react-hooks`, `react-jsx-vdom`, `react-nextjs-app-router`, `react-recipe-api-form`,
+`react-reconciliation-fiber`, `react-refs-portals`, `react-rendering-lifecycle`, `react-router`,
+`react-state-management`, `react-styling`, `react-typescript`, `react-usereducer-usecontext`),
+alongside `track-angular` (53 unshaped, 22 shaped), `track-spring` (40 unshaped, 13 shaped), and
+`track-java` (32 unshaped, 11 shaped) as the other largest-by-volume tracks, per this entry's own
+`tmp_variety.mjs` run.
+
 ---
 
 ### 18. Go GRANULAR on the eight core tracks before scaffolding anything new (Bobby, 2026-09-13)

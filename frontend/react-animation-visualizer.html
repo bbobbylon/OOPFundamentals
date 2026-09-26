@@ -58,7 +58,7 @@
     <div class="intro-ciam"><span class="tag">CIAM context:</span> Motion should clarify auth flows, not decorate them — fade/slide a login error in (a tiny shake draws the eye), stagger the admin user list as it loads, and animate a confirmation modal in/out with <code>AnimatePresence</code> so it doesn't pop. <code>layoutId</code> morphs a user row into its detail panel so context is kept, and non-essential motion is gated behind <code>useReducedMotion()</code> — accessibility first.</div>
   </div>
 
-  <p class="hf-deck">or, why your perfectly-written fade-in sometimes just&hellip; doesn't.</p>
+  <p class="hf-deck" data-shape="timelapse">or, why your perfectly-written fade-in sometimes just&hellip; doesn't.</p>
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">You wrote correct CSS, correct JSX, and the fade-in still refuses to fade.</p>
@@ -75,13 +75,43 @@
   <p class="hf-foot">Nothing in your JSX is wrong. The bug is about WHEN the class arrived, not WHAT it says.</p>
 </div>
 
+<div class="hf-kick">One mount, one paint, timestamped</div>
+<p class="hf-say">Every rung below is a clock reading. React really did commit &mdash; the browser just never got a second look to compare against.</p>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">t=0ms &mdash; commit</span>
+      <span class="go"><em>React creates the DOM node</em> <span class="arrow">→</span> both "toast" and "toast-visible" land in the SAME commit</span></div>
+    <div class="stt"><span class="nm">t=0ms &mdash; first paint</span>
+      <span class="go"><em>browser computes styles for a node it has never shown before</em> <span class="arrow">→</span> already at opacity:1 &mdash; there is no earlier frame on record</span></div>
+    <div class="stt"><span class="nm">t=0ms &mdash; transition engine checks for a "from"</span>
+      <span class="go"><em>looks for a previous computed style to interpolate away from</em> <span class="arrow">→</span> finds none, because this element has exactly one paint in its history</span></div>
+  </div>
+  <p class="hf-annot">This is a cycle because the identical three-state collapse happens on every mount that ships its final class in the same render as its first appearance &mdash; a ternary in JSX, a <code>useState(true)</code> seeded already-on, a prop that's already truthy on arrival. Nothing here is a CSS bug; every arrow is the browser doing exactly what a transition contract says: interpolate between TWO real paints, and there was only ever one.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-ladder">
+    <b>t=0ms &mdash; component mounts with <code>className="toast toast-visible"</code> already set, in one render pass</b>
+    <i>↓ same synchronous commit, no frame boundary crossed yet</i>
+    <b>t=0ms &mdash; browser paints frame #1 for this node: opacity 1, because that's the only style it's ever been given</b>
+    <i>↓ THIS is the moment the fix has to land inside</i>
+    <b>the fix: mount plain first &mdash; <code>className="toast"</code> only, opacity 0 &mdash; and let THIS be frame #1</b>
+    <i>↓ requestAnimationFrame schedules the flip for the very next frame, not this one</i>
+    <b>~t=16ms &mdash; the class flips to <code>toast-visible</code>, and the browser paints frame #2: opacity 1</b>
+    <i>↓ two real, distinct computed styles now exist, 16 milliseconds apart</i>
+    <b>the transition engine interpolates between frame #1 (0) and frame #2 (1) across the declared .2s &mdash; the fade actually plays</b>
+  </div>
+  <p class="hf-annot">Rungs one and two are the bug in full: two lines, zero milliseconds apart, both landing in frame #1. Rungs three through five are the entire fix, and notice it costs exactly one frame &mdash; about 16 milliseconds a human will never consciously register, but the only 16 milliseconds a CSS transition engine is able to work with.</p>
+</div>
+
 <div class="hf-card good">
   <div class="hf-cardtitle">Give the browser a real "before" paint to transition from</div>
   <div class="hf-ladder">
     <b>Mount the element in its FROM state only</b>
-    <i>&darr; gives the browser a real first paint to transition away from</i>
+    <i>↓ gives the browser a real first paint to transition away from</i>
     <b>Flip to the TO state on the next frame (e.g. a <code>requestAnimationFrame</code>, or an effect that runs after commit)</b>
-    <i>&darr; forces a genuine second paint, so there are two distinct styles for the browser to interpolate between</i>
+    <i>↓ forces a genuine second paint, so there are two distinct styles for the browser to interpolate between</i>
     <b>And step three: or never unmount the element &mdash; toggle the class on a node that's already painted once</b>
   </div>
 </div>
@@ -92,37 +122,6 @@
 
 <div class="hf-note">It's like taking a photo of a race <b>before</b> the starting gun fires, and a second photo <b>after</b> the runner has already crossed the line &mdash; with no photo in between, there's no motion to show, just two unrelated snapshots. A commit-and-paint is your camera; a transition needs it to click at the starting line, not just at the finish.</div>
 
-<div class="hf-talk">
-  <div class="hf-bub"><span class="who">You</span><p>I added <code>transition: opacity .2s</code> and my toast still just pops in &mdash; no fade at all. What am I missing?</p></div>
-  <div class="hf-bub right"><span class="who">The toast div, personified</span><p>Nothing's wrong with my CSS. I just never got a "before" look &mdash; you rendered me already-visible on my very first frame.</p></div>
-  <div class="hf-bub"><span class="who">The browser's paint engine</span><p>I painted your first frame exactly once, and by then both classes were already on the node. I had nothing to transition FROM.</p></div>
-  <div class="hf-bub right"><span class="who">requestAnimationFrame</span><p>Give me one tick. Mount plain, let ME paint the "before" look, then add the class &mdash; now there are two real frames to interpolate between.</p></div>
-</div>
-
-<div class="hf-kick">The mechanism</div>
-<p class="hf-say">Watch the exact moment a real transition collapses into a single, instant paint.</p>
-
-<div class="hf-card">
-  <ol class="hf-steps">
-    <li><span>You render <code>{show &amp;&amp; &lt;Toast className="toast toast-visible"&gt;}</code></span><span class="tag">mount</span></li>
-    <li class="open"><span>React creates the DOM node and commits BOTH classes in one pass</span><span class="tag">one commit</span></li>
-    <li><span>The browser computes styles for the node's FIRST paint &mdash; already at <code>opacity:1</code></span><span class="tag">paint #1</span></li>
-    <li class="open"><span>No SECOND paint ever showed <code>opacity:0</code> &mdash; there's nothing to transition FROM</span><span class="tag">no baseline</span></li>
-    <li><span>The transition engine has nothing to interpolate, so CSS just renders the end state</span><span class="tag">no-op</span></li>
-    <li class="open"><span>Fix: split the mount into two commits with a real frame between them</span><span class="tag">the fix</span></li>
-  </ol>
-  <p class="hf-annot">Steps 3 and 4 are the whole bug in two lines: the browser only ever painted ONE state for this element, and it happened to be the end state. A CSS transition is fundamentally a diff between two computed styles across two paints &mdash; with only one paint, there is no diff, so there is no animation. That's true whether you're toggling a class, changing an inline style, or using Framer Motion's <code>initial</code>/<code>animate</code> without giving the component a chance to mount in <code>initial</code> first &mdash; which is exactly why Motion's own <code>initial={false}</code> escape hatch exists (see section 1 above).</p>
-</div>
-
-<div class="hf-card">
-  <div class="hf-one">
-    <div class="callers"><span>class added in the same render as mount</span><span><code>useState(true)</code> as the initial value</span><span>a prop that's already true on first render</span></div>
-    <div class="funnel">no second paint before the "final" class lands &darr;</div>
-    <div class="instance">The transition never plays<small>one visual symptom (instant pop-in), three unrelated-looking causes</small></div>
-  </div>
-  <p class="hf-annot">Three totally different-looking bugs &mdash; a ternary in JSX, a <code>useState</code> seeded to <code>true</code>, a prop that arrives already truthy &mdash; are the same bug wearing different clothes. Whenever you're debugging "my animation isn't playing on mount," stop staring at the CSS and ask one question: did this element ever paint in its FROM state before its TO state landed? If the answer is no, that's the entire diagnosis.</p>
-</div>
-
 <div class="hf-check" data-answer="1">
   <p class="q">Your <code>&lt;Toast className={visible ? 'toast toast-visible' : 'toast'}&gt;</code> fades in perfectly the SECOND time a user triggers it, but on first page load &mdash; where a toast is shown immediately &mdash; it just appears with no fade at all. Same component, same CSS. Why does only the first appearance skip the animation?</p>
   <button type="button">The browser hasn't finished loading the stylesheet yet on first load, so the transition rule isn't registered in time</button>
@@ -131,31 +130,6 @@
   <p class="why" data-for="0">Stylesheets are parsed and applied before React ever calls render in a production build &mdash; that's not the timing gap here. Even a slow stylesheet would just delay the first paint, not selectively skip the transition on every single load.</p>
   <p class="why" data-for="1">Exactly. First load = one commit, one paint, already at the end state &mdash; nothing to transition from. Second trigger = the toast is already sitting in the DOM in its "hidden" class from before, so flipping the class is a real second paint the browser can tween between.</p>
   <p class="why" data-for="2">React has no rule that skips CSS transitions on an app's first render &mdash; that isn't a real React or browser behavior. The actual cause is about paint timing on THIS element, not a render counter for the whole app.</p>
-</div>
-
-<div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">The same "no starting frame" bug shows up anywhere a diff-based animation meets a newly-created thing.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>Angular's <code>:enter</code> animation trigger</h4>
-    <p>Angular's <code>@angular/animations</code> hits the identical trap: if an element with a <code>void =&gt; *</code> transition is inserted and made visible within the SAME change-detection cycle its parent is created in, the entry transition can be skipped for the same reason &mdash; the framework needs a genuine committed "void" state before the "true" state, or there's nothing to animate from.</p>
-    <div class="hf-scatter"><span>same root cause: no separate "before" frame</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>CSS's own <code>@starting-style</code> at-rule</h4>
-    <p>Modern CSS added <code>@starting-style</code> specifically because of this exact bug &mdash; it lets you declare the "before" styles explicitly, so the browser guarantees a genuine first frame to transition from, even for an element that's visible from the moment it's inserted.</p>
-    <div class="hf-scatter"><span>the platform eventually had to legislate a fix for this</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Double-buffered rendering in games</h4>
-    <p>Writing the "final" frame straight into the buffer that's about to be presented, without ever showing the previous frame, produces an instant pop instead of smooth motion &mdash; interpolation needs at least two distinct buffer states to blend between, exactly like your CSS transition needs two paints.</p>
-    <div class="hf-scatter"><span>interpolation always needs two real states, not one</span></div>
-  </div>
-</div>
-
-<div class="hf-napkin">
-  <b>The whole page on a napkin:</b> Framer Motion's <code>initial</code>/<code>animate</code>/<code>transition</code> declare a target state and let the library tween the diff, and <code>layout</code>/<code>AnimatePresence</code> extend that same idea to position changes and unmounting. <b>The one new sentence this block adds:</b> that "diff" only exists across two separate paints &mdash; collapse your mount and your "visible" class into the same commit, and there's nothing left for any animation system, CSS or Motion, to animate.
 </div>
 
 <div style="margin:0 0 28px">
