@@ -84,40 +84,48 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> <code>POST /api/auth/login</code> limited by IP (5/min) and username (10/hour); log each failure with IP, masked username, and timestamp. If one username gets &gt;10 failures in 5 min from different IPs, that's a stuffing pattern — notify the user "someone is trying to access your account." Also throttle <code>POST /api/auth/password-reset</code> (3/hour per email) to stop email flooding.</div>
   </div>
 
-<p class="hf-deck">or, the day your rate limiter went from "5 per user" to "5 per planet"</p>
+<p class="hf-deck" data-shape="receipt">or, the day your rate limiter went from "5 per user" to "5 per planet"</p>
 
-<div class="hf-kick">The problem</div>
-<p class="hf-say">The limiter works perfectly on your laptop. Behind the ingress, it throttles your entire user base as if they were one person.</p>
+<p class="hf-say">The limiter works perfectly on your laptop. Behind the ingress, it throttles your
+entire user base as if they were one person. On a normal Monday at 9:01am, here's what actually got
+let through.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">Every login in the company shares a single five-token bucket</div>
-  <p>The filter is textbook: a <code>Map&lt;String,Bucket&gt;</code>, five tokens a minute, keyed on
-  <code>req.getRemoteAddr()</code>, returning <code>429</code> with <code>Retry-After: 60</code>.
-  You test it locally — six rapid logins, the sixth gets a 429 — and ship it.</p>
-  <p>Monday at 9am, support lights up. Users are getting <code>429</code> on their <b>first</b>
-  login attempt of the day, from different offices, different countries, different devices. Nothing
-  in the filter is broken. The problem is that in production your app never sees a user's TCP
-  connection: the browser connects to the ALB, the ALB connects to the ingress, the ingress connects
-  to your pod. <code>getRemoteAddr()</code> reports the peer of the socket it actually has — the
-  ingress, <code>10.0.3.17</code>, every single time. One key. One bucket. Five logins a minute for
-  the entire internet, attacker and customer alike.</p>
-  <div class="hf-scatter">
-    <span>token bucket logic correct ✓</span>
-    <span>429 + Retry-After correct ✓</span>
-    <span>filter ordered before auth ✓</span>
-    <span>one key for every human on earth ⚠</span>
-  </div>
-  <p class="hf-foot">The assumption underneath: that "the remote address" means the person who made
-  the request. It means whoever opened the socket, and in production that is never the person.</p>
+<div class="hf-receipt">
+  <div class="hf-receipt-head">Login attempts, 9:01:00am–9:01:59am — worked example, 200 real employees</div>
+  <div class="row"><span>Employees who tried to log in this minute</span><span>200</span></div>
+  <div class="row"><span>Distinct rate-limit keys the filter actually saw</span><span>1</span></div>
+  <div class="row"><span>Logins the bucket allowed through</span><span>5</span></div>
+  <div class="row"><span>Legitimate employees rejected with 429</span><span>195</span></div>
+  <div class="row total"><span>Effective limit for your ENTIRE company</span><span>5 logins / minute</span></div>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Make the forwarded header trustworthy, then go back to asking the container</div>
+<div class="hf-arrow">Every one of those 195 rejections is a real employee, a real password, a
+<b>first</b> attempt of the day — not an attacker, not a retry storm. The filter's token-bucket
+logic never once misfired; it metered exactly five requests a minute, precisely as configured.</div>
+
+<div class="hf-vs">
+  <div class="bad">
+    <h5>getRemoteAddr() reads the proxy</h5>
+    <p>Behind the ingress, every request's peer address is the SAME one —
+    <code>10.0.3.17</code>. One key. One bucket. Five tokens a minute for two hundred people,
+    attacker and customer alike.</p>
+  </div>
+  <div class="good">
+    <h5>getRemoteAddr() reads the real client</h5>
+    <p><code>server.forward-headers-strategy=native</code> plus a trusted-proxy list restores the
+    true client address, so 200 employees draw from 200 separate buckets — and the limiter goes
+    back to limiting only what it was built to limit.</p>
+  </div>
+</div>
+
+<div class="hf-arrow rose">The instinctive "fix" — read <code>X-Forwarded-For</code> instead — trades this outage for a worse one. That header is client-writable: an attacker sends a fresh made-up address on every single request and mints a brand-new five-token bucket, for free, forever, while your <code>ConcurrentHashMap</code> grows one entry per attempt until the heap gives out.</div>
+
+<div class="hf-card">
   <div class="hf-ladder">
     <b>String ip = req.getRemoteAddr();</b>
-    <i>↓ behind a proxy this is the proxy — one bucket shared by everyone, which is a self-inflicted denial of service</i>
+    <i>↓ behind a proxy this is the proxy — one bucket shared by everyone, a self-inflicted denial of service</i>
     <b>String ip = req.getHeader("X-Forwarded-For");</b>
-    <i>↓ worse: the client writes that header, so an attacker sends a different random value on every request and gets an unlimited supply of fresh buckets</i>
+    <i>↓ worse: the client writes that header, so an attacker gets an unlimited supply of fresh buckets on demand</i>
     <b>Have the edge proxy <i>overwrite</i> the inbound header, then set <code>server.forward-headers-strategy=native</code> with <code>server.tomcat.remoteip.internal-proxies</code> matching your real proxies — and <code>getRemoteAddr()</code> becomes the true client again</b>
   </div>
 </div>
@@ -139,33 +147,6 @@
 the mailroom's handling stamp on it. Ban people by "who handed me this" and you ban the mailroom —
 that is, everyone. Trust the return address instead and anyone can write anything they like on an
 envelope. <b><code>getRemoteAddr()</code> is who handed you the envelope, not who sent it.</b></div>
-
-<div class="hf-talk">
-  <div class="hf-bub">
-    <span class="who">You</span>
-    <p>Five per minute per IP. Why is a user getting 429 on their first attempt of the day?</p>
-  </div>
-  <div class="hf-bub right">
-    <span class="who">The ingress controller</span>
-    <p>Because I made that connection, not them. I terminate the client's TLS and open my own
-    connection to your pod. From your side of the wire there is exactly one client — me — and I
-    forward a few thousand requests a minute through it.</p>
-  </div>
-  <div class="hf-bub">
-    <span class="who">HttpServletRequest</span>
-    <p>And <code>getRemoteAddr()</code> is me reporting the peer of the socket I'm holding. I'm not
-    guessing, or resolving, or interpreting: I'm telling you the literal other end of this TCP
-    connection. If you want a different answer you have to arrange for something upstream to tell me
-    one — that's what <code>server.forward-headers-strategy</code> turns on.</p>
-  </div>
-  <div class="hf-bub right">
-    <span class="who">The attacker's script</span>
-    <p>Please do switch to reading the raw header, though. I send
-    <code>X-Forwarded-For: 198.51.100.&lt;random&gt;</code> on every request. Each one mints me a
-    brand new bucket with five fresh tokens, and your <code>ConcurrentHashMap</code> grows a new
-    entry per attempt until the heap gives out. Two bugs for the price of one.</p>
-  </div>
-</div>
 
 <div class="hf-kick">The mechanism</div>
 <p class="hf-say">One login at 9:01am, three network hops, and the key that quietly collapses.</p>
@@ -237,35 +218,15 @@ envelope. <b><code>getRemoteAddr()</code> is who handed you the envelope, not wh
 </div>
 
 <div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">Three other times a proxy stood between you and the identity you were counting on.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>A gateway that forgets to strip identity headers</h4>
-    <p>The gateway authenticates the caller and forwards <code>X-Authenticated-User: alice</code> to
-    the service, which trusts it. If the gateway <i>appends</i> instead of <i>overwriting</i> — or
-    if the service is reachable directly — anyone can send that header themselves and become
-    whoever they like. Identical rule: a header is only trustworthy where something you control has
-    just overwritten it.</p>
-    <div class="hf-scatter"><span>trust is a property of the hop, not the header</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Your cluster's NAT gateway, from the other side</h4>
-    <p>All egress from your pods leaves through one or two public addresses, so a third-party API
-    that rate-limits per IP sees your whole fleet as a single hyperactive client. Now you are the
-    crowded bucket, and no amount of spreading the calls across pods helps — same collapse of many
-    identities into one key, just pointed at you.</p>
-    <div class="hf-scatter"><span>one egress IP, one shared allowance</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>An audit log full of 10.0.3.17</h4>
-    <p>The same <code>getRemoteAddr()</code> feeds your login audit trail. Six months later, someone
-    asks where a suspicious sign-in came from and every row in the table names the ingress. The bug
-    was never noisy, because logging doesn't fail — it just quietly records the wrong fact until the
-    day you need the right one.</p>
-    <div class="hf-scatter"><span>a wrong key throttles today and lies forever</span></div>
-  </div>
-</div>
+<p>Three other times a proxy stood between you and the identity you were counting on. A gateway
+that authenticates a caller and forwards <code>X-Authenticated-User: alice</code> downstream has the
+identical rule: if it <i>appends</i> instead of <i>overwriting</i> that header — or the service is
+reachable directly — anyone can send it themselves and become whoever they like. Your cluster's NAT
+gateway hits the same collapse from the other side: all egress from your pods leaves through one or
+two public addresses, so a third-party API that rate-limits per IP sees your whole fleet as a single
+hyperactive client. And the same <code>getRemoteAddr()</code> that fed this rate limiter also feeds
+your login audit trail — six months later, someone asks where a suspicious sign-in came from and
+every row in the table names the ingress. A wrong key throttles today and lies forever.</p>
 
 <div class="hf-napkin">
   <b>The whole page on a napkin:</b> auth endpoints need a token-bucket rate limit (bucket4j in a

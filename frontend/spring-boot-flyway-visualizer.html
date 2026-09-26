@@ -166,45 +166,67 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> <code>V1__create_users.sql</code> (users with unique email + status default), <code>V2__create_roles.sql</code> (roles + user_roles join), <code>V3__create_refresh_tokens.sql</code> (family, token hash, expires_at, revoked), <code>V4__create_audit_log.sql</code> (actor, action, target, occurred_at, ip). Every schema-touching feature ships a new versioned migration committed with the code.</div>
   </div>
 
-<p class="hf-deck">or, your schema has no branches and no merges — only forward</p>
+<p class="hf-deck" data-shape="autopsy">or, your schema has no branches and no merges — only forward</p>
 
-<div class="hf-kick">The problem</div>
-<p class="hf-say">You fixed a comment. Production refused to boot.</p>
+<div class="hf-kick">The error</div>
+<p class="hf-say">This is the whole of it. Paste it into a search box and you get the class name; you don't get the fourteen seconds before it that made it happen.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">One character changed, and nothing about the database is different</div>
-  <p>You open <code>V2__add_email_index.sql</code> to fix a typo in a comment — you don't touch a
-  single line of actual SQL — save, commit, deploy. The app never comes up.
-  <code>FlywayException: Migration checksum mismatch for migration version 2</code>. You didn't
-  touch a table, a column, or an index. You touched a comment nobody was ever going to read again,
-  and that was enough.</p>
-  <div class="hf-scatter">
-    <span>only a comment changed ✓</span>
-    <span>the SQL runs identically either way ✓</span>
-    <span>the file's checksum changed anyway ⚠</span>
-    <span>startup refuses to boot ⚠</span>
-  </div>
-  <p class="hf-foot">Flyway never read your SQL for meaning. It hashed the file's bytes the day it
-  ran, and it trusts that hash more than it trusts your judgment about what "harmless" means.</p>
+<div class="hf-card">
+  <pre><code>org.flywaydb.core.api.exception.FlywayValidateException: Validate failed: Migrations have failed validation
+Migration checksum mismatch for migration version 2
+-&gt; Applied to database : 314944264
+-&gt; Resolved locally    : -1560729926
+Either revert the changes to the migration, or run repair to update the schema history.</code></pre>
+  <div class="hf-arrow">"Migration <b>version 2</b>" is the file you just told your teammate was untouched — you only fixed a typo in a comment, not a single line of real SQL.</div>
+  <div class="hf-arrow up"><code>314944264</code> and <code>-1560729926</code> are <span class="hf-mark">CRC32 checksums of the raw bytes</span> in the file — one computed the day V2 first ran, one computed just now. Two different numbers means two different byte sequences. It says nothing about whether those bytes mean the same thing to a human.</div>
+  <div class="hf-arrow rose">The last line's advice is the trap: "run repair" reads like an undo button. It isn't one — see below.</div>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Applied migrations are frozen. Fix forward, never sideways.</div>
+<div class="hf-kick">Working backwards</div>
+<p class="hf-say">Start at the exception and climb the ladder. Each rung is the thing that had to be true for the rung above it to happen.</p>
+
+<div class="hf-card">
   <div class="hf-ladder">
-    <b>Leave V2 exactly as it shipped, typo and all</b>
-    <i>↓ its checksum is a historical fact now, not a draft</i>
-    <b>Write V5__fix_email_index_comment.sql instead</b>
-    <i>↓ a new file earns its own checksum — nothing left to mismatch</i>
-    <b>Save flyway repair() for a migration that failed mid-run — never to "forgive" an edit</b>
+    <b>THE SYMPTOM — production refuses to boot on a redeploy that changed nothing you'd call "real"</b>
+    <i>↑ which happened because…</i>
+    <b>Flyway re-hashed every already-applied file this boot, including V2, and V2's fresh hash didn't match the one stored the day it first ran</b>
+    <i>↑ which happened because…</i>
+    <b>a single byte inside <code>V2__add_email_index.sql</code> changed — one word, inside a <code>--</code> comment — and Flyway hashes bytes, never parsed SQL meaning</b>
+    <i>↑ which happened because…</i>
+    <b>someone opened the file to "fix a typo" and saved the edit in place, instead of treating an already-applied migration as closed</b>
+    <i>↑ which nobody caught in review because…</i>
+    <b>THE ROOT CAUSE — the diff showed zero SQL changes, so it read as obviously harmless, and nothing in the team's process (or Flyway's own permissions) said a merged migration file is supposed to be read-only</b>
   </div>
+  <p class="hf-annot">Notice where the ladder stops being about Flyway. The top three rungs are mechanics you can look up in ten minutes. The bottom two are a process gap — nobody had written down the rule Flyway itself already enforces at the byte level, so a "harmless" edit sailed through code review without anyone thinking to ask whether V2 was still allowed to change at all.</p>
 </div>
 
-<div class="principle" style="text-align:left">
-  <b>A migration file, once applied anywhere, stops being yours to edit.</b> That single rule is
-  the whole reason the checksum error exists, why files are numbered instead of freely renamed,
-  why there's no built-in "undo" on the free tier, and why the fix for a bad migration is always a
-  new migration — never a patch to the old one.
+<div class="hf-brain">
+  <div class="hf-brain-head">Brain Power</div>
+  <p>A teammate makes the outage go away by running <code>flyway repair</code> right after this error. The app boots. Before you scroll: name the one thing <code>repair</code> does <i>not</i> do — about the typo that's still sitting in the file everyone just agreed was fine to ignore.</p>
 </div>
+
+<div class="hf-kick">The autopsy finding</div>
+<p class="hf-say">The exception isn't where the mistake happened. It's where it finally became visible.</p>
+
+<div class="hf-card">
+  <pre><code>$ git diff V2__add_email_index.sql
+- -- speeds up login lookups
++ -- speeds up login lookups (email is unique)
+  CREATE INDEX idx_users_email ON users(email);
+
+$ ./mvnw spring-boot:run
+...FlywayValidateException: Migration checksum mismatch for migration version 2
+
+$ flyway repair            # what "fixes" the boot
+Repair of failed migration in metadata table complete
+$ ./mvnw spring-boot:run   # boots clean now — but look what repair actually did
+...</code></pre>
+  <div class="hf-arrow">The <code>git diff</code> is the whole defect: a one-word comment edit that no reviewer would ever block. No code review catches this, because the problem isn't in the diff — it's that the diff should never have existed at all.</div>
+  <div class="hf-arrow up"><code>flyway repair</code> recomputes V2's checksum from the file <i>as it is right now</i> and overwrites the stored one to match. It does not touch the file, does not undo the edit, and does not warn anyone that V2's history entry no longer represents the file three engineers actually reviewed at merge time. It only makes Flyway stop complaining — going forward, from a fact it just quietly accepted.</div>
+  <div class="hf-arrow rose">The typo is still there, permanently, and now it has a brand-new checksum backing it as if nothing happened. <span class="hf-mark">Repair is for a migration that failed mid-run</span> — a real, no-lie tool for a genuinely broken history table. Reaching for it to "forgive" a clean edit is how a hash that exists specifically to prove nothing changed gets used to prove nothing changed when something did.</div>
+</div>
+
+<p class="hf-big">The write didn't break. It was refused.</p>
 
 <div class="hf-note">Think of <code>flyway_schema_history</code> as a bank's transaction ledger,
 not a to-do list. You don't erase line 47 because you spot a typo — you post a new line that
@@ -212,32 +234,15 @@ corrects it, and both lines stay on the page forever. The ledger's entire value 
 entry, once posted, is provably unaltered; Flyway's checksum is just the database noticing the
 page has been erased and rewritten.</div>
 
-<div class="hf-talk">
-  <div class="hf-bub">
-    <span class="who">You</span>
-    <p>I only fixed a comment. Why is my whole app refusing to start?</p>
-  </div>
-  <div class="hf-bub right">
-    <span class="who">Flyway</span>
-    <p>I don't read comments, and I don't read SQL for meaning. I hash the file's bytes the moment
-    I apply it and store that hash next to the version number. Every boot after, I re-hash the
-    file on disk and compare. One different byte, anywhere, is a mismatch to me — I have no way to
-    tell "cosmetic" from "catastrophic."</p>
-  </div>
-  <div class="hf-bub">
-    <span class="who">The database</span>
-    <p>And nobody asked me anything. My schema is exactly what V2 produced, then and now. Flyway
-    refused to even reach me — it stopped at the door.</p>
-  </div>
-  <div class="hf-bub right">
-    <span class="who">Flyway</span>
-    <p>Which is the whole point. I'd rather block a harmless deploy than silently let a schema
-    drift somewhere I can't see it. A five-second startup failure is cheap. A schema that quietly
-    diverges between two environments is a debugging session six weeks from now.</p>
-  </div>
+<div class="principle" style="text-align:left">
+  <b>A migration file, once applied anywhere, stops being yours to edit.</b> That single rule is
+  the whole reason the checksum error exists, why files are numbered instead of freely renamed,
+  why there's no built-in "undo" on the free tier, and why the fix for a bad migration is always a
+  new migration — never a patch to the old one, and never <code>repair</code> used as a patch in
+  disguise.
 </div>
 
-<div class="hf-kick">The mechanism</div>
+<div class="hf-kick">The mechanism, in full</div>
 <p class="hf-say">Four files on disk. One boot. Flyway re-checks every one of them, not just the new one.</p>
 
 <div class="hf-card">
@@ -285,38 +290,6 @@ page has been erased and rewritten.</div>
   <p class="why" data-for="2">Flyway never replays an applied migration to "catch it up" to something new. Every row in the history table is final the moment it's written — the only two states a version can be in are "already applied, frozen" and "pending." There's no third state where an old migration gets rerun.</p>
 </div>
 
-<div class="hf-kick">Where you've seen this before</div>
-<p class="hf-say">Version-controlled, append-only, checksummed — you've used this shape twice already.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>Git commits, not git diffs</h4>
-    <p>Once a commit is pushed and someone else has it, you don't edit it — you write a new commit
-    that fixes it. Amend-and-force-push rewrites history other people are standing on, which is
-    exactly the failure mode Flyway's checksum exists to catch in a database instead of a
-    repository. Applied migrations get the same protection commits do once they're shared.</p>
-    <div class="hf-scatter"><span>append a fix, don't rewrite the past</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Liquibase's changelog — same rule, different file format</h4>
-    <p>Flyway's main competitor tracks an almost identical ledger in
-    <code>DATABASECHANGELOG</code>, and enforces the same law: every executed changeset's
-    <code>MD5SUM</code> is checked on every run, and editing one that already ran throws a
-    validation error unless you explicitly tell Liquibase to accept the new hash. Different
-    XML/YAML syntax, identical philosophy underneath.</p>
-    <div class="hf-scatter"><span>DATABASECHANGELOG ≈ flyway_schema_history</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Your own identity schema, growing in public</h4>
-    <p><code>V3__create_refresh_tokens.sql</code> shipped with a <code>revoked</code> boolean.
-    Months later, product wants token <i>families</i> for rotation detection. You don't touch V3 —
-    even though "just adding a column" feels harmless — you write
-    <code>V9__add_refresh_token_family.sql</code>, because V3 already ran in every environment your
-    team has, including the one an auditor has already screenshotted.</p>
-    <div class="hf-scatter"><span>the migration history is an audit trail</span></div>
-  </div>
-</div>
-
 <div class="hf-kick">Questions from the back row</div>
 <div class="hf-ask">
   <p class="q">What if the migration genuinely needs to change — like the data it inserted was wrong?</p>
@@ -344,15 +317,6 @@ page has been erased and rewritten.</div>
   executes. For a single-database Spring Boot API, plain SQL usually wins on readability;
   Liquibase earns its extra complexity when one changelog genuinely has to target several database
   vendors.</p>
-</div>
-
-<div class="hf-kick">Grab a napkin</div>
-<p class="hf-say">Predict it before you scroll.</p>
-<div class="hf-napkin">
-  Production has V1 through V6 applied, including V4 from months ago. A teammate accidentally
-  <i>deletes</i> <code>V4__add_order_status.sql</code> from the repo — not edits it, deletes it
-  outright — before the next deploy. What happens on production's next boot? And does your answer
-  change if it's instead a brand-new environment that has never run V4 at all?
 </div>
 
   <!-- ── HERO: animated Flyway migration pipeline · live per-step inspector ── -->
@@ -1393,6 +1357,7 @@ renderNodes(cur);
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-syntax.js"></script>
 <script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>

@@ -97,33 +97,29 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> On password change, revoke all of a user's refresh tokens (every family); on admin deactivation, revoke immediately — their access token dies within 15 min and can't refresh. On reuse, write a security-audit line ("reuse detected for user X from IP Y — all sessions revoked") and email "you were logged out of all devices due to a suspicious attempt" — that email may be the user's first sign they were compromised.</div>
   </div>
 
-  <p class="hf-deck">or, how two honest browser tabs get treated like a stolen token</p>
+  <p class="hf-deck" data-shape="argument">or, how two honest browser tabs get treated like a stolen token</p>
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">Nobody stole anything. Two tabs asked for a new access token within the same 40 milliseconds, and your reuse detection logged both of them out anyway.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">Two legitimate tabs refresh at the same instant — and both get revoked</div>
-  <p>The same user has your Angular app open in two tabs. Both share the same httpOnly refresh-token cookie, because that's the point of a cookie. Both access tokens happen to expire within the same second — they were minted at the same login, with the same TTL. Both tabs' HTTP interceptors independently catch the 401 and fire <code>POST /auth/refresh</code> with the identical refresh token, milliseconds apart.</p>
-  <p>Your server reads the token, confirms it's <code>active</code>, then writes: marks it used, issues a new one. That's a <b>read, then a separate write</b> — and there's a real window between them. Tab A's request reads "active," Tab B's request reads "active" too, because A hasn't committed yet. A commits first: token rotated, new pair issued. Now B's write runs — and finds the token already marked used. From the database's point of view, B just presented a token that is no longer the active one. That is <i>exactly</i> the signal your reuse detector was built to catch. It fires, and revokes the whole family — logging out both tabs, and every other device sharing that lineage.</p>
-  <div class="hf-scatter">
-    <span>token stored and hashed correctly ✓</span>
-    <span>both requests presented the real, still-valid token ✓</span>
-    <span>the thing that is not ⚠ a rotation that's safe under two requests at once</span>
-  </div>
-  <p class="hf-foot">Reuse detection did exactly what it was designed to do. The design just never considered that "not the active token anymore" can mean "you lost a race," not only "you're an attacker."</p>
-</div>
+<p>The same user has your Angular app open in two tabs. Both share the same httpOnly
+refresh-token cookie, because that's the point of a cookie. Both access tokens happen to expire
+within the same second — minted at the same login, same TTL. Both tabs' HTTP interceptors
+independently catch the 401 and fire <code>POST /auth/refresh</code> with the identical refresh
+token, milliseconds apart. Your server reads the token, confirms it's <code>active</code>, then
+writes: marks it used, issues a new one — a <b>read, then a separate write</b>, with a real window
+between them. Everyone below is telling the truth about what they saw.</p>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Remove the race — don't try to out-think it</div>
-  <div class="hf-ladder">
-    <b>Rotate with one atomic conditional UPDATE, not a read then a write</b>
-    <i>↓ UPDATE refresh_tokens SET status='used' WHERE token_hash=? AND status='active', and check the affected row count — only one request can ever win that single statement</i>
-    <b>Give a just-rotated token a short grace window that replays the same new pair</b>
-    <i>↓ a request arriving a few hundred milliseconds behind the winner gets the SAME new token pair back instead of an error — absorbing the race instead of punishing it</i>
-    <b>And add a single-flight refresh mutex on the client</b>
-    <i>↓ one shared in-flight promise per token means your own app never fires two concurrent refresh calls in the first place, race or no race</i>
-  </div>
+<div class="hf-talk">
+  <div class="hf-bub"><span class="who">Tab A</span><p>I read the refresh token. Status: <code>active</code>. I'm rotating it — that's exactly what I'm supposed to do on a 401.</p></div>
+  <div class="hf-bub right"><span class="who">Tab B</span><p>I read the exact same token, forty milliseconds later. Status: <code>active</code> — from where I was standing, nothing had changed yet. I'm rotating it too.</p></div>
+  <div class="hf-bub"><span class="who">The database</span><p>I don't queue your reads against each other. You both asked "is this active" before either of your writes had landed, and I answered honestly, twice. I have no concept of "someone else is mid-flight."</p></div>
+  <div class="hf-bub right"><span class="who">Tab A</span><p>I finished first. <code>UPDATE ... SET status='used' WHERE token_hash=T1</code>, then I inserted the new pair. Done, on my end.</p></div>
+  <div class="hf-bub"><span class="who">Tab B</span><p>Then I ran my own write against T1 — and the row I meant to flip to "used" was already used. I have no way to know that was you thirty milliseconds ago, and not a thief who got here first.</p></div>
+  <div class="hf-bub right"><span class="who">Reuse-detection logic</span><p>Neither do I. A non-active token just got presented to me on a rotation attempt. That's the single strongest signal of theft this whole system has — I was built to fire on exactly this.</p></div>
+  <div class="hf-bub"><span class="who">Reuse-detection logic</span><p>So I revoked the entire family — every token descended from that original login. Both of you are logged out now, along with every other device on the same lineage.</p></div>
+  <div class="hf-bub right"><span class="who">You</span><p>Nobody stole anything. Two honest tabs asked for a new token forty milliseconds apart, and the mechanism built to catch a thief caught a race instead.</p></div>
+  <div class="hf-bub"><span class="who">Reuse-detection logic</span><p>And I'd make the identical call again. I can only ever observe "this token is no longer the active one" — nobody ever gave me a way to ask why.</p></div>
 </div>
 
 <div class="principle" style="text-align:left">
@@ -132,12 +128,11 @@
 
 <div class="hf-note">"<b>The lock only knows someone came in after you — not who.</b>" Reuse detection can't see intent, only sequence — and two legitimate requests produce a sequence indistinguishable from theft.</div>
 
-<div class="hf-talk">
-  <div class="hf-bub"><span class="who">You</span><p>Both of these requests had the real, currently-valid refresh token. How did my server decide one of them was an attacker?</p></div>
-  <div class="hf-bub right"><span class="who">Reuse-detection logic, personified</span><p>I only ever know one thing: whether the token you handed me is still marked active. By the time your second tab's request reached me, your first tab had already rotated it — so from where I sit, you look exactly like someone replaying a token that's already been used.</p></div>
-  <div class="hf-bub"><span class="who">You</span><p>So it isn't actually detecting theft here.</p></div>
-  <div class="hf-bub right"><span class="who">Reuse-detection logic, personified</span><p>I'm detecting "a non-active token was presented." That's the strongest signal I have — and a legitimate race and a real attacker both produce it identically.</p></div>
-</div>
+<div class="hf-note">The fix removes the race instead of out-arguing it: one atomic conditional
+<code>UPDATE refresh_tokens SET status='used' WHERE token_hash=? AND status='active'</code>, checking
+the affected row count — only one request can ever win that single statement. Give the loser a short
+grace window that replays the SAME new pair instead of an error, and add a single-flight refresh
+mutex on the client so your own app never fires two concurrent refresh calls in the first place.</div>
 
 <div class="hf-kick">The mechanism</div>
 <p class="hf-say">Follow both tabs' requests through the exact window where the race lives.</p>
@@ -174,29 +169,16 @@
 </div>
 
 <div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">"Can't tell a legitimate repeat from a malicious one, so make the repeat harmless instead" is a recurring shape in distributed systems.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>Idempotency keys on payment APIs</h4>
-    <p>Stripe-style idempotency keys exist because a client retry after a timed-out response looks identical to a duplicate charge attempt — the fix is a client-generated key that returns the SAME cached result on a repeat, not a smarter fraud check.</p>
-    <div class="hf-scatter"><span>make the repeat safe, don't try to out-guess it</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Optimistic locking's @Version conflict</h4>
-    <p>A legitimate concurrent update to a JPA entity triggers the exact same <code>OptimisticLockException</code> a genuinely conflicting write would — the database can't see intent there either, only "the version changed underneath you."</p>
-    <div class="hf-scatter"><span>same page, same blind spot, different feature</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>At-least-once message delivery</h4>
-    <p>SQS and similar queues can redeliver the same message twice through entirely legitimate means — a visibility timeout expiring before processing finished. Consumers are built idempotent for exactly this reason, instead of trying to detect which delivery is the "real" one.</p>
-    <div class="hf-scatter"><span>redelivery isn't malice, it's the contract</span></div>
-  </div>
-</div>
-
-<div class="hf-napkin">
-  <b>The whole page on a napkin:</b> rotate every refresh token on use, hash it at rest, and revoke the whole family the instant an already-rotated token reappears — because reappearance is the strongest signal of theft you can get. <b>The one new sentence this block adds:</b> that same signal fires on two simultaneous LEGITIMATE requests racing to rotate the identical token, so the real fix removes the race itself — an atomic conditional update on the server, or a single-flight refresh mutex on the client — rather than trying to detect an intent the database was never able to see.
-</div>
+<p>"Can't tell a legitimate repeat from a malicious one, so make the repeat harmless instead" is a
+recurring shape in distributed systems. Stripe-style idempotency keys exist for the identical
+reason: a client retry after a timed-out response looks exactly like a duplicate charge attempt, so
+the fix is a client-generated key that returns the SAME cached result on a repeat, not a smarter
+fraud check. A JPA entity's <code>@Version</code> conflict hits the same blind spot — a legitimate
+concurrent update throws the identical <code>OptimisticLockException</code> a genuinely conflicting
+write would, because the database can't see intent there either, only "the version changed
+underneath you." And SQS-style at-least-once delivery redelivers the same message twice through
+entirely legitimate means — a visibility timeout expiring before processing finished — which is why
+consumers are built idempotent instead of trying to detect which delivery is the "real" one.</p>
 
 <!-- ── EXTREME-VIZ HERO ── -->
   <div style="margin:0 0 28px">

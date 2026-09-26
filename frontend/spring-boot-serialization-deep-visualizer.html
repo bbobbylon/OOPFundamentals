@@ -95,33 +95,26 @@
     <div class="intro-ciam"><span class="tag">CIAM:</span> Standardize early — <code>camelCase</code>, ISO-8601 dates, <code>NON_NULL</code> — so <code>interface UserResponse { id; email; displayName; roleNames: string[]; createdAt: string }</code> matches the wire exactly. Parse <code>createdAt</code> to <code>Date</code> in an Angular interceptor, and never return <code>ZonedDateTime</code>/<code>Instant</code> without a configured timezone (Angular needs UTC or an explicit offset).</div>
   </div>
 
-  <p class="hf-deck">or, why your <code>isActive</code> field ships as <code>active</code> and nobody warned you</p>
+  <p class="hf-deck" data-shape="exhibit">or, why your <code>isActive</code> field ships as <code>active</code> and nobody warned you</p>
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">You wrote <code>private boolean isActive;</code>, Lombok generated the getter, Jackson serialized the DTO — and the JSON key isn't <code>isActive</code>. It's <code>active</code>.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">"isActive" vanishes into "active" — and Angular reads undefined</div>
-  <p>Your <code>AccountDto</code> has one field: <code>private boolean isLocked;</code>. <code>@Data</code> (or a hand-written getter) gives you <code>public boolean isLocked() { return isLocked; }</code>. It compiles clean, nothing warns, and the field is right there in the class, spelled exactly the way you want the JSON key spelled.</p>
-  <p>Jackson doesn't serialize fields — it serializes <b>properties</b>, and it derives a property's name from its <b>getter</b> using the same rule the JDK's own <code>java.beans.Introspector</code> has used for decades: a getter named <code>isXxx()</code> names the property <code>xxx</code>, first letter lowercased, full stop. It never checks whether your FIELD already happened to be spelled <code>isLocked</code> — it just strips the leading <code>is</code> off the METHOD name it sees. So <code>isLocked()</code> maps to the property <code>locked</code>, not <code>isLocked</code> — even though the field, the getter, and the constructor parameter are ALL literally spelled <code>isLocked</code>.</p>
-  <div class="hf-scatter">
-    <span>field is named isLocked ✓</span>
-    <span>getter compiles as isLocked() ✓</span>
-    <span>the thing that is not ⚠ JSON key is "locked"</span>
-  </div>
-  <p class="hf-foot">Your Angular <code>interface AccountDto { isLocked: boolean }</code> isn't wrong syntax — it's just reading a key that was never on the wire.</p>
-</div>
+<div class="hf-card">
+  <pre><code>GET /api/accounts/42 HTTP/1.1
+Accept: application/json
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Force the wire name, or stop guessing it</div>
-  <div class="hf-ladder">
-    <b>Add @JsonProperty("isLocked") to the field</b>
-    <i>↓ field-level @JsonProperty overrides every naming rule Jackson would otherwise apply — the highest-priority lever from Section 3</i>
-    <b>Or rename the field to locked and let the getter read isLocked()</b>
-    <i>↓ now the stripped name ("locked") IS the name you meant, so there's nothing left to fight</i>
-    <b>And add one integration assertion on the literal JSON string</b>
-    <i>↓ assertThat(json).contains("\"isLocked\"") catches this in CI, not in a bug report</i>
-  </div>
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{
+  "id": 42,
+  "email": "j.rivera@example.com",
+  <span class="hf-mark">"locked"</span>: true
+}</code></pre>
+  <div class="hf-arrow">Look at the field on the wire, not the field in your Java source: not <code>isLocked</code>, not <code>is_locked</code> — exactly one word, <span class="hf-mark">locked</span>, survived from a class where every declaration says <code>isLocked</code>.</div>
+  <div class="hf-arrow up">The class this came from is <code>private boolean isLocked;</code> with a getter <code>public boolean isLocked() { return isLocked; }</code> — field, getter, and constructor param all spelled identically. Jackson never reads any of that. It reads the getter's <i>name</i>, matches the <code>isXxx()</code> pattern, and strips "is" — the same JavaBeans <code>Introspector</code> rule the whole JDK uses. The property becomes <code>locked</code> before a single byte is written.</div>
+  <div class="hf-arrow rose">Your Angular <code>interface AccountDto { isLocked: boolean }</code> now reads a key that was never on the wire. <code>response.isLocked</code> comes back <code>undefined</code> — not an error, not a warning, just a field that silently isn't there. A locked account renders as if it weren't.</div>
 </div>
 
 <div class="principle" style="text-align:left">
@@ -129,13 +122,6 @@
 </div>
 
 <div class="hf-note">"<b>Jackson reads the getter's lips, not the field's name tag.</b>" If the getter says <code>isActive()</code>, Jackson hears "active" — every single time, no exceptions.</div>
-
-<div class="hf-talk">
-  <div class="hf-bub"><span class="who">You</span><p>I named the field isLocked so the JSON would obviously say isLocked. Why is it "locked"?</p></div>
-  <div class="hf-bub right"><span class="who">Jackson, personified</span><p>I never looked at your field. I looked at the getter, saw isLocked(), and did what every is-getter has taught me to do since JavaBeans existed: strip the "is", lowercase the rest.</p></div>
-  <div class="hf-bub"><span class="who">You</span><p>So if I'd called the field enabled and generated isEnabled(), I'd have gotten... "enabled"?</p></div>
-  <div class="hf-bub right"><span class="who">Jackson, personified</span><p>Exactly — and you'd never have noticed a mismatch, because that time the strip happened to match what you wanted.</p></div>
-</div>
 
 <div class="hf-kick">The mechanism</div>
 <p class="hf-say">Walk the exact path from your field declaration to the byte on the wire.</p>
@@ -175,26 +161,15 @@
   <p class="why" data-for="2">Jackson always decapitalizes the first letter of the remainder before using it as a property name — the same lowercase-first-letter convention the JDK's own Introspector uses — so a capital-I property name never comes out of this path.</p>
 </div>
 
-<div class="hf-kick">Where you have seen this before</div>
-<p class="hf-say">This exact "the accessor's name is the only truth" rule shows up anywhere reflection-based tooling infers a name instead of reading your literal declaration.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>Lombok's own naming rule</h4>
-    <p>Lombok makes the SAME call for the SAME reason: it also has to decide a getter name from a field name, and it deliberately special-cases <code>isXxx</code> fields so it never emits <code>isIsXxx()</code> — the same is-aware naming logic on the way IN that Jackson is using on the way OUT.</p>
-    <div class="hf-scatter"><span>reflection agrees with itself, twice</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Spring Data JPA derived query methods</h4>
-    <p><code>findByIsActiveTrue()</code> vs <code>findByActiveTrue()</code> — Spring Data has the identical ambiguity resolving a property name from a boolean accessor, which is why the two frameworks usually (but not always) agree on what a boolean is "really" called.</p>
-    <div class="hf-scatter"><span>one naming rule, two frameworks reading it</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>OpenAPI-generated TypeScript clients</h4>
-    <p>Run <code>openapi-generator</code> against a controller returning this DTO and the generated <code>.ts</code> model faithfully says <code>locked</code> — because the generator reads the ACTUAL response schema, not your Java source, which is exactly the discipline Section 6 recommends to stop hand-written interfaces from drifting like this one did.</p>
-    <div class="hf-scatter"><span>generate the model, don't guess it</span></div>
-  </div>
-</div>
+<p>This exact "the accessor's name is the only truth" rule shows up anywhere reflection-based
+tooling infers a name instead of reading your literal declaration — including one place one rung
+closer than you'd expect: <code>findByIsActiveTrue()</code> vs <code>findByActiveTrue()</code> on
+a Spring Data JPA repository hits the identical ambiguity resolving a property name from a boolean
+accessor, which is why the two frameworks usually, but not always, agree on what a boolean is
+"really" called. Run <code>openapi-generator</code> against this exact controller and the
+generated TypeScript model faithfully says <code>locked</code> too, for the same reason: it reads
+the actual response schema, never your Java source — which is the discipline that stops a
+hand-written interface from drifting like this one did.</p>
 
 <div class="hf-napkin">
   <b>The whole page on a napkin:</b> Jackson turns your DTO into JSON using naming, date, and null-handling settings that are contract decisions your Angular interface must mirror exactly. <b>The one new sentence this block adds:</b> for a boolean, that naming contract is decided by your getter's spelling, not your field's — so an <code>isXxx</code> field can ship as <code>xxx</code> even when you did nothing "wrong."
@@ -635,6 +610,7 @@ DevHubCodeWalk.mount('#cw-serial',{
 <script src="devhub-chapters.js"></script>
 <script src="devhub-hf-theme.js"></script>
 <script src="devhub-notebook.js"></script>
+<script src="devhub-syntax.js"></script>
 <script src="devhub-hf-check.js"></script>
 <script src="devhub-transitions.js"></script>
 </body>

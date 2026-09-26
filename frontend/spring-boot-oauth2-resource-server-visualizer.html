@@ -138,7 +138,7 @@
     <div class="intro-ciam"><span class="tag">CIAM / your job:</span> This is the core of your day job — APIs that accept JWTs from both Ping AM and Entra ID. Ping uses <code>scp</code> for scopes; Entra uses <code>scp</code> for delegated but <code>roles</code> for app-role assignments. JWKS URIs: Ping <code>https://am.example.com/oauth2/jwks</code>, Entra <code>https://login.microsoftonline.com/{tenantId}/discovery/v2.0/keys</code>. Accepting both (multi-IdP) needs a custom <code>JwtDecoder</code> that tries multiple issuers — see the multi-idm-claims page. Top production failures: <code>aud</code> mismatch (your client ID must be in <code>aud</code>), clock skew (time drift fails <code>exp</code>), and a key-rotation gap (the JWKS cache refreshing too slowly).</div>
   </div>
 
-<p class="hf-deck">or, your API never asks the identity provider a single question after startup — it just does math</p>
+<p class="hf-deck" data-shape="timelapse">or, your API never asks the identity provider a single question after startup — it just does math</p>
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">You revoked her admin role at 2:03pm. Her token kept working at 2:03, 2:04, and 2:14.</p>
@@ -260,39 +260,36 @@ fast so the resource server never spends cycles validating claims it can't trust
   <p class="why" data-for="2">An unrecognized kid never lowers the bar — it raises it. The resource server still needs a real key that verifies the real signature before it trusts anything in the payload; "I don't recognize this key yet" triggers a refresh, never a bypass.</p>
 </div>
 
-<div class="hf-kick">Where you've seen this before</div>
-<p class="hf-say">Local trust rooted in a cached key, not a live phone call — you've used this shape before.</p>
+<div class="hf-kick">The clock, not the checklist</div>
+<p class="hf-say">Two clocks are running the instant you hit "revoke" — the IdP's, which changes right away, and the token's own, which was already fixed the moment it was minted.</p>
 
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>A browser trusting a TLS certificate</h4>
-    <p>Checking a JWT's signature against a cached JWKS key is structurally the same move as a
-    browser checking a TLS certificate against a trusted root — a chain of trust rooted in a key
-    you already hold, not a live phone call to ask "is this really you?" Neither mechanism revokes
-    instantly either: TLS grew OCSP/CRL for the exact same reason JWTs lean on short lifetimes —
-    revocation was bolted on after the fact, because the fast path never had a "call home" step
-    built in.</p>
-    <div class="hf-scatter"><span>signature trust ≈ certificate trust</span></div>
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">2:03:00pm — token minted at login</span><span class="go"><em>Ping issues it</em> <span class="arrow">→</span> <code>exp</code> is baked in as 2:18:00pm, fifteen minutes out, and never changes again</span></div>
+    <div class="stt on"><span class="nm">2:03:41pm — you revoke her ADMIN role</span><span class="go"><em>admin console, one click</em> <span class="arrow">→</span> Ping's own row updates instantly; the token already sitting in her browser is a separate object Ping no longer has a handle on</span></div>
+    <div class="stt"><span class="nm">2:03:41pm – 2:17:59pm — the gap</span><span class="go"><em>every request in between</em> <span class="arrow">→</span> signature verifies, <code>exp</code> is still in the future, <code>aud</code> matches — 200, every single time</span></div>
+    <div class="stt"><span class="nm">2:18:00pm — natural expiry</span><span class="go"><em><code>exp</code> finally passes</em> <span class="arrow">→</span> the gap closes on its own, exactly fifteen minutes after it opened, whether anyone noticed or not</span></div>
   </div>
-  <div class="hf-card hf-taped">
-    <h4>Session cookies — the thing this pattern replaced</h4>
-    <p>A session cookie is a <i>pointer</i>: the server looks up the session store on every
-    request, so revocation is instant because the server owns the data. A JWT is the
-    <i>data itself</i> — the server has nothing left to look up, which is exactly the speed you
-    gain and the revocation you lose. That trade is the whole reason resource servers exist as a
-    pattern distinct from classic server-side-session Spring MVC apps.</p>
-    <div class="hf-scatter"><span>cookie = pointer, JWT = payload</span></div>
+  <p class="hf-annot">Revocation is instant. The token is not a pointer back to that fact — it's a
+  self-contained receipt of a decision Ping made once, at 2:03:00pm, and everything it says stays
+  true from the resource server's point of view until its own clock (<code>exp</code>) says
+  otherwise. A session cookie doesn't have this gap, because a cookie is a pointer the server
+  re-checks every time; a JWT is the payload itself, checked once and believed until it expires.</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-ladder">
+    <b>2:03:00pm — she logs in; Ping mints a 15-minute access token</b>
+    <i>↓ the token now carries its own answer to "is this valid," good until 2:18:00pm no matter what happens to her account afterward</i>
+    <b>2:03:41pm — you revoke her ADMIN role in Ping's console</b>
+    <i>↓ Ping's database changes correctly and immediately — nothing about this step is slow or broken</i>
+    <b>2:04pm, 2:09pm, 2:14pm — she keeps working, and every request still comes back 200</b>
+    <i>↓ the resource server never once dials back out to Ping to ask "still good?" — that's the entire reason it's fast</i>
+    <b>2:18:00pm — the token's own <code>exp</code> claim finally passes, and the access dies on schedule</b>
   </div>
-  <div class="hf-card hf-taped">
-    <h4>One Ping-issued token, two APIs</h4>
-    <p>Ping can issue a single access token whose <code>aud</code> claim lists more than one
-    resource server — say, both your user-service and your notification-service behind one
-    gateway. Each resource server only accepts a token whose <code>aud</code> contains <i>its own</i>
-    client ID; a token minted for a different downstream API is rejected even with a perfectly
-    valid signature and issuer. Being well-signed was never enough on its own — it also has to be
-    signed <i>for you</i>.</p>
-    <div class="hf-scatter"><span>same signature, different aud, different verdict</span></div>
-  </div>
+  <p class="hf-annot">Nobody's clock was wrong. Ping's said "revoked" at 2:03:41pm and meant it; the
+  resource server's said "valid" until 2:18:00pm and meant that too — they were never disagreeing
+  about the same fact, they were answering two different questions on two different timers.</p>
 </div>
 
 <div class="hf-kick">Questions from the back row</div>
@@ -322,16 +319,6 @@ fast so the resource server never spends cycles validating claims it can't trust
   that's sent far less often, to exactly one endpoint, and can be revoked at the IdP immediately.
   A long-lived access token trades a convenience you rarely need (fewer refresh calls) for a
   security property you always want (a small, predictable blast radius).</p>
-</div>
-
-<div class="hf-kick">Grab a napkin</div>
-<p class="hf-say">Predict it before you scroll.</p>
-<div class="hf-napkin">
-  Your resource server accepts tokens from both Ping and Entra via a
-  <code>JwtIssuerAuthenticationManagerResolver</code>. Someone crafts a JWT with a perfectly valid
-  signature — genuinely signed by Ping's real private key, nothing forged — but sets the
-  <code>iss</code> claim to Entra's issuer URL instead of Ping's own. What happens when it hits
-  your API?
 </div>
 
   <!-- ── HERO: animated Bearer-token validation walk · live per-step inspector of the real header/claims/JWKS/authorities ── -->

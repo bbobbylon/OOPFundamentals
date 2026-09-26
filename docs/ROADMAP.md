@@ -4469,6 +4469,73 @@ alongside `track-angular` (53 unshaped, 22 shaped), `track-spring` (40 unshaped,
 `track-java` (32 unshaped, 11 shaped) as the other largest-by-volume tracks, per this entry's own
 `tmp_variety.mjs` run.
 
+**2026-09-26 — `track-spring` picked up (13 shaped before this entry, 40 unshaped — the largest
+gap after `track-angular`/`track-react`, both already swept in prior batches).** Re-verified the
+397-page figure with a full, untruncated `tmp_variety.mjs --unshaped` run before picking pages (the
+count matched exactly — see this task's own scope-count gotcha warning about piping that output
+through `tail`/`head`). Chose 8 pages, each already carrying a full old-recipe block (verdict pair,
+`hf-talk`, `hf-terms`, `hf-napkin`) whose existing, already-shipped content was read in full first to
+find the KIND of gotcha it already teaches, per `docs/HEADFIRST-SHAPES.md`'s own method — the same
+re-stage-not-rewrite approach every prior batch has used. Deliberately picked shapes to bring
+`track-spring`'s nine 1-shaped-page shapes up to 2 each (leaving `twodoors` at its pre-existing 1),
+rather than force a `twodoors` pick: several candidate pages were read for a genuine "two defensible
+answers" gotcha (RestClient's retry-without-idempotency, resource-server JWT-vs-introspection,
+Client-Credentials-vs-Auth-Code) and every one of them turned out to be a real BUG, not an open
+architectural choice — twodoors requires the ❌ side to be genuinely defensible, and forcing it onto
+a bug page is exactly the mistake `docs/HEADFIRST-SHAPES.md` warns against ("if you find yourself
+writing the ❌ side as stupid, this is not a twodoors").
+
+| page | shape | the gotcha that chose it |
+|---|---|---|
+| `spring-boot-transactions-deep` | `tour` | **declared, not rewritten** — its existing block already had the verdict pair, `hf-ladder`, `hf-talk`, and a 3-parallel `hf-terms` (SQL SAVEPOINT, EJB container-managed transactions, MFA enrollment), a real wrong way/right way/ordered procedure/vocabulary set exactly matching the shape's own "leaving a page alone" case — one-line edit, `docs/HEADFIRST-SHAPES.md`'s own example of when NOT to re-stage |
+| `spring-boot-flyway` | `autopsy` | opens on the real, copy-checked Flyway error text (`FlywayValidateException: ... Migration checksum mismatch ... -> Applied to database : ... -> Resolved locally : ...`, verified against GitHub issues/Baeldung rather than the page's own prior paraphrase) and climbs an `hf-ladder` backwards from "production won't boot" to "nobody had written down that an applied migration file is read-only"; a second exhibit-style `git diff`/terminal artifact shows why `flyway repair` "fixing" the boot is a trap, not a solution |
+| `spring-boot-csrf-deep` | `whiteboard` | pure structure — CSRF's own fork on HTTP method (safe vs unsafe verbs), already drawn as an `hf-slot` diagram, promoted to the top of the block behind an `hf-brain` predict-then-reveal beat (mirroring `entra-oauth-oidc`'s exemplar shape exactly), with `hf-hand` closing the fix |
+| `spring-boot-rate-limiting-deep` | `receipt` | a real, exaggerated cost the page's own scenario already stated — 200 real employees, 5 let through, 195 legitimate 429s in one minute, itemized into an `hf-receipt` bill against an `hf-vs` contrast of `getRemoteAddr()` reading the proxy vs. the real client |
+| `spring-boot-refresh-token-rotation-deep` | `argument` | two individually-correct parties (Tab A, Tab B — both present the real, still-active token, both act correctly) meeting a third (the reuse detector) that can only observe sequence, never intent; expanded to 9 `hf-bub` across 5 voices (Tab A / Tab B / the database / reuse-detection logic / You) |
+| `spring-boot-oauth2-resource-server` | `timelapse` | true at T0 (token minted, valid), false at T1 (role revoked at the IdP), and the resource server never notices until the token's own `exp` catches up 15 minutes later — restaged around a new `hf-cycle` (2:03:00pm mint → 2:03:41pm revoke → the gap → 2:18:00pm natural expiry) and a timestamped `hf-ladder` (Spring's real unknown-`kid` JWKS-refetch behavior in the existing `hf-check` re-verified against a live spring-security GitHub issue before being left untouched) |
+| `spring-boot-serialization-deep` | `exhibit` | the artifact IS the bug — a real HTTP response (`{"locked": true}`) annotated with 3 `hf-arrow`s and an `hf-mark` on the one surviving field name, tracing back to the JavaBeans `Introspector` is-getter-stripping rule (re-verified against FasterXML/Jackson issue reports) |
+| `spring-boot-configuration` | `mnemonic` | the payload IS a rule to memorize — Spring's PropertySource search stops at the first match, it never merges — built around a new `hf-big` ("First answer wins. The rest are never even asked.") plus a second `hf-note` recasting the same rule as a plain five-rung ranking, alongside the page's existing "ask five friends" analogy |
+
+Two real, page-specific `tmp_vcheck.mjs` warnings were caught and fixed mid-batch: adding the
+`flyway`/`serialization-deep` pages' first-ever `<pre>` blocks (the autopsy/exhibit artifacts) tripped
+CLAUDE.md rule 8 — both pages had always used hand-styled spans before, so neither had ever needed
+`devhub-syntax.js` until now; added the script tag to both, matching the `docker-dockerfile`
+precedent from the calibration batch. One transient, non-regression finding during verification:
+batching all 8 pages through one `tmp_contrast.mjs --theme=dark` run flagged `.subject code` at
+1.57:1 on `spring-boot-flyway`'s pre-existing (untouched by this batch) `hf-cast` figure — the
+identical shared-component color token already flagged as a known, deferred issue on
+`react-fundamentals-visualizer.html` in the prior round. Confirmed via `git diff` that this batch
+never touched that `hf-cast` block, and via three repeated single-page re-runs that it passes clean
+in isolation every time (the tool's own documented caveat: "a demo that repaints ... can read fine on
+one load and fail on the next") — a transient/batching artifact surfacing a real but pre-existing,
+sitewide token issue, left for the same future dedicated pass rather than patched blind.
+
+**Sitewide shape count after this batch: 148 shaped / 327 unshaped / 62 no-block, 0 declaration
+lies** (`node frontend/tmp_variety.mjs`). `track-spring` went from 13 shaped (nine shapes skewed at
+1/13 = 8%, two at 2/13 = 15%) to **21 shaped — ten of the eleven shapes at exactly 2/21 = 10%,
+`twodoors` at 1/21 = 5%, 0 SKEW warnings** (cap 18%, 25% for `tour`) — the same flattest-distribution
+result the `track-angular`/`track-java`/`track-react` batches hit. All eleven shapes remain alive
+sitewide, no dead shape, `declaration/device MISMATCH: 0`. Full verification before pushing:
+`tmp_vcheck.mjs` (537 pages, clean after the two `devhub-syntax.js` fixes above), `tmp_doccheck.mjs`
+(341 symbols, 0 undocumented — no shared engine touched this batch), `tmp_assetcheck.mjs
+origin/master` (no teaching assets lost), `tmp_variety.mjs --track=spring` (0 skew, 0 mismatches,
+shown above), `tmp_variety.mjs` full-site (148/327/62 counts confirmed), `tmp_smoke.mjs` on all 8
+touched pages at 320px (clean — no uncaught errors, no overflow; the one pre-existing
+`spring-boot-configuration` `li +63px` clip notice confirmed via `git stash` to match the page's own
+pre-edit `HEAD` baseline exactly), `tmp_codecheck.mjs` (676 blocks across 537 files, 0 real errors —
+the new Flyway/JSON terminal-transcript `<pre>` blocks aren't TS/Java, so they're correctly skipped,
+not falsely flagged), `tmp_cwlines.mjs` (455 mounts, 0 out-of-range — this batch didn't touch any
+CodeWalk `lines:` array), and `tmp_contrast.mjs --theme=cream` / `--theme=dark` against all 8 touched
+pages (cream clean; dark's one transient finding discussed above). `tmp_coachcheck.mjs` was not run
+against this batch's pages — none of the 8 carry a Code-With-Me `coach:` entry. `tmp_hfaudit.mjs`
+(`--json=`, read per-file): all 8 touched pages score **87.8–100**, comfortably above the 75 floor
+(`spring-boot-oauth2-resource-server` lowest at 87.8, three of the eight at a perfect 100).
+
+**Remaining scope: 327 pages `hf-deck`-with-no-`data-shape` + 62 pages with no `hf-deck` block at
+all = 389 pages still not through this pass.** `track-spring` still has 32 unshaped pages left (53
+total, 21 done), alongside `track-angular` (53 unshaped, 22 shaped) and `track-java` (32 unshaped, 11
+shaped) as the other largest-by-volume tracks, per this entry's own `tmp_variety.mjs` run.
+
 ---
 
 ### 18. Go GRANULAR on the eight core tracks before scaffolding anything new (Bobby, 2026-09-13)
