@@ -4601,6 +4601,117 @@ all = 384 pages still not through this pass.** `track-angular` still has 48 unsh
 total, 27 done), alongside `track-spring` (32 unshaped, 21 shaped) and `track-java` (32 unshaped, 11
 shaped) as the other largest-by-volume tracks, per this entry's own `tmp_variety.mjs` run.
 
+**2026-09-28 — `track-angular` picked up a fourth time (27 shaped before this entry, 48
+unshaped — still the largest gap sitewide by a wide margin).** Re-verified the 384-page figure
+with a full, untruncated `tmp_variety.mjs --unshaped` run before picking pages (matched exactly;
+this task's own scope-count gotcha warning about piping that output through `tail`/`head` was
+followed). Checked `track-spring` (32 unshaped) and `track-java` (32 unshaped) too, but
+`track-angular` remained the most under-covered by volume, so it was picked again. Chose 9 pages,
+each already carrying a full old-recipe block, and read every one in full before assigning a
+shape — per `docs/HEADFIRST-SHAPES.md`'s own method, never by topic. Deliberately targeted the
+track's six shapes still sitting at 2 apiece (`mnemonic`, `twodoors`, `autopsy`, `exhibit`,
+`timelapse`, `whiteboard`) to flatten the distribution, while still letting genuine fit win over
+the count — `angular-di-advanced-visualizer` and `angular-routing-visualizer` both landed on
+`argument` (already the track's most-used shape) because both pages' existing content was already
+built around two individually-correct parties arguing past each other, and forcing either into a
+rarer shape instead would have been exactly the "recipe told me the order" mistake this whole
+initiative exists to kill.
+
+| page | shape | the gotcha that chose it |
+|---|---|---|
+| `angular-di-advanced-visualizer` | `argument` | `providers: [X]` on a component and `providedIn: 'root'` are both individually correct — the component's own injector never overrides root, it just never lets the question reach it; expanded the existing 3-`hf-bub` `hf-talk` to 10 bubbles across 3 named voices (PageComponent's injector / the root injector / NavComponent's injector) plus You, escalating from "why does my badge reset" to "so the fix isn't fixing any of us, it's removing the line that gave one of us a reason to stop asking" |
+| `angular-change-detection-deep-visualizer` | `whiteboard` | pure structural containment — `cdr.detach()` doesn't silence one component, it deletes the one road `tick()` used to reach everything beneath it, three components deep; the page's own pre-existing `hf-cast` diagram (subject/fan/obs) was already the exact native fit, promoted to the top behind a new `hf-brain` predict-then-reveal beat and a new `hf-hand` closing note, mirroring `entra-oauth-oidc`'s exemplar shape |
+| `angular-signals-deep-visualizer` | `mnemonic` | the payload IS a rule to memorize — the page's own mechanism heading already read "Push the dirt, pull the value," promoted to a 44px `hf-big` catchphrase behind the existing `principle`, with two new `hf-note` sticky notes (the whiteboard-and-sign-up-sheet analogy for dependency tracking, and the `Object.is` mutation trap restated as its own hook) |
+| `angular-rxjs-operators-visualizer` | `assembly` | a pipeline where one stage lies — `catchError` placed after `switchMap` reads like ordinary recovery and is actually the whole ending, the same "liar station" shape as `spring-boot-security-filter-chain-deep`'s exemplar; built a new `hf-chain` (6 stations, station 4 marked "◀ THE LIAR" via `hf-mark`) reusing the page's already-correct `hf-steps`/`hf-nest` mechanism content underneath it |
+| `angular-forms-visualizer` | `exhibit` | the bug is visible in one real artifact — `form.value`'s actual JSON payload with the `role` key structurally absent, not null, not empty; built a new `<pre>` artifact (real DOM markup next to the real payload) with 3 `hf-arrow` annotations and `hf-mark` on the missing key, in place of the old verdict-pair framing |
+| `angular-pwa-visualizer` | `timelapse` | true at T0 (deploy lands, `VERSION_READY` fires), false at T1 (the open tab is still running the old bundle hours later) and nobody looked; the page's own pre-existing `hf-cycle` (INSTALLING→WAITING→ACTIVATING→ACTIVE) was already the exact native fit, paired with a new timestamped `hf-ladder` (10:00:00am deploy → 10:01:12am `VERSION_READY` → 2:15:00pm still stale) |
+| `angular-material-cdk-visualizer` | `twodoors` | not a bug — a real choice with two defensible answers the page's own deck line already stated ("the components are the part you can replace; the CDK is the part you can't"); built as `.hf-vs > .door` (Material as-is vs. CDK-plus-your-own-skin) rather than `.bad`/`.good`, per the shape's own explicit warning against stamping either side wrong |
+| `angular-lazy-loading-deep-visualizer` | `autopsy` | opens on the real, `WebSearch`-verified error text (`ChunkLoadError: Loading chunk … failed`, wrapped in a `NavigationError`) and climbs an `hf-ladder` backwards from "blank screen at 2pm" to "the chunk map was frozen the instant this morning's `index.html` loaded" — the same reverse-chronology shape as `nosql-document-wide-column`'s exemplar, with a new `hf-brain` beat asking why a retry doesn't fix it before the `<pre>` that shows why |
+| `angular-routing-visualizer` | `argument` | `canActivate` and `canMatch` are both individually correct — `canActivate` genuinely gates activation, it's just asked after the chunk already downloaded; expanded the existing 4-`hf-bub` `hf-talk` to 10 bubbles across 3 named voices (`canActivate` / the Router / `canMatch`) plus You |
+
+**Facts re-checked via `WebSearch` against primary/authoritative sources before writing any new
+content around them, rather than trusted from the pages' own prior prose:** Angular's hierarchical
+DI resolution stopping at the nearest injector with a matching provider ([angular.dev Hierarchical
+injectors](https://angular.dev/guide/di/hierarchical-dependency-injection)); `ChangeDetectorRef
+.detach()` removing a view from the change-detection tree entirely rather than merely skipping a
+dirty check ([angular.dev `ChangeDetectorRef`](https://angular.dev/api/core/ChangeDetectorRef),
+corroborated by a dev.to writeup on detached views); Angular signals' push-dirty/pull-value model
+and default `Object.is` equality cutoff ([angular.dev Signals](https://angular.dev/guide/signals),
+[Angular Experts' push/pull writeup](https://angularexperts.io/blog/angular-signals-push-pull/));
+`catchError` terminating whichever Observable it is directly piped onto, confirmed for both the
+outer-chain and inner-projection placement ([a ReactiveX/rxjs GitHub issue on the exact
+`switchMap`+`catchError` trap](https://github.com/ReactiveX/rxjs/issues/3825)); Reactive Forms'
+`.value` excluding disabled controls while `.getRawValue()` includes them
+([angular.dev Typed Forms](https://angular.dev/guide/forms/typed-forms), corroborated by an
+angular/angular GitHub issue on the same distinction); `SwUpdate`'s `versionUpdates`/
+`VERSION_READY`/`activateUpdate()` API and that `activateUpdate()` alone does not swap code
+already running in an open tab ([angular.dev `SwUpdate`](https://angular.dev/api/service-worker/SwUpdate));
+the CDK Overlay container being appended at `<body>` level specifically to escape ancestor
+`overflow`/`transform` clipping ([Angular Material CDK Overlay
+docs](https://material.angular.dev/cdk/overlay/overview)); `canMatch` returning `false` causing
+the router to treat the route as unmatched and fall through to the next candidate rather than
+raising a `NavigationError` ([angular.dev `CanMatch`](https://angular.dev/api/router/CanMatch));
+and that `ChunkLoadError: Loading chunk … failed` is a real, still-current failure mode for
+Angular's hashed-filename lazy chunks after a deploy, both under the classic webpack builder and
+reported against the newer esbuild-based `application` builder (multiple `angular/angular-cli`
+GitHub issues, including #22525 and #22769). No factual error was found in any of the 9 files'
+prior content, and no invented behavior was introduced.
+
+**A real regression was caught and fixed mid-batch, not just avoided going in: re-staging a shape
+can silently fail `tmp_hfaudit.mjs`'s 75-floor even while passing `tmp_variety.mjs` cleanly**,
+because the two gates score entirely different things — `tmp_variety.mjs` checks the DECLARED
+shape against its own device contract, while `tmp_hfaudit.mjs` scores the WHOLE PAGE against the
+nine-point standard, and several shapes' own "must not" lists ban exactly the devices
+(`hf-napkin`, `hf-terms`, extra `hf-say` framing lines) that were quietly propping up that page's
+`recall` and `hooks` dimensions. Three of the nine pages dropped below the 75 floor purely from
+shape-mandated removal — `angular-di-advanced-visualizer` 82.5→71, `angular-pwa-visualizer` 88→70,
+`angular-routing-visualizer` 83→71.6 — confirmed via `git stash` that the pre-edit score had been
+comfortably above 75 on all three, so this was a real cost of the re-stage, not a pre-existing
+thinness. Fixed by adding devices the new shape does NOT forbid back in: a predict-then-reveal
+`hf-brain` beat on all three (none of `argument`/`whiteboard`/`timelapse` ban it, and it doubles as
+genuine active-recall content, not padding), 2 `hf-mark` spans apiece on real phrases already in
+the prose, and — on `angular-pwa-visualizer` specifically — converting an existing 3-step
+`hf-ladder` fix procedure into an `hf-steps` list instead, since it was genuinely step-shaped, not
+time-shaped, and the page's real timestamped `hf-ladder` lived elsewhere in the block. Re-ran
+`tmp_hfaudit.mjs` after each fix: all three landed back at 82.6, 88, and 83.2 — matching or
+exceeding their pre-edit scores — confirmed via `tmp_variety.mjs --track=angular` and
+`tmp_smoke.mjs` that neither fix reopened a device the shape bans. **Lesson for future batches:
+`tmp_hfaudit.mjs` is not optional post-re-stage verification even when `tmp_variety.mjs` is
+clean — check the page's score before AND after, not just after, since a shape's own "must not"
+list can legitimately gut a dimension the old block was carrying by accident.**
+
+**Sitewide shape count after this batch: 162 shaped / 313 unshaped / 62 no-block, 0 declaration
+lies** (`node frontend/tmp_variety.mjs`). `track-angular` went from 27 shaped (`argument`/
+`receipt`/`tour`/`assembly`/`questions` at 3/27, the other six at 2/27, 0 SKEW) to **36 shaped —
+`argument` at 5/36 = 14%, `assembly` at 4/36 = 11%, the other nine shapes at exactly 3/36 = 8%, 0
+SKEW warnings** (cap 18%, 25% for `tour`) — the flattest distribution the track has hit yet, and
+the first batch to bring every one of the track's eleven shapes to 3 or more. All eleven shapes
+remain alive sitewide, no dead shape, `declaration/device MISMATCH: 0`. Full verification before
+pushing: `tmp_vcheck.mjs` (537 pages, clean after adding `devhub-syntax.js` to
+`angular-rxjs-operators-visualizer` — its first-ever `<pre>` block, same CLAUDE.md rule 8 trap as
+the `flyway`/`serialization-deep` precedent from the `track-spring` batch), `tmp_doccheck.mjs` (341
+symbols, 0 undocumented — no shared engine touched this batch), `tmp_assetcheck.mjs origin/master`
+(no teaching assets lost), `tmp_variety.mjs --track=angular` (0 skew, 0 mismatches, shown above),
+`tmp_variety.mjs` full-site (162/313/62 counts confirmed; the overall run still reports the
+pre-existing 59 SKEW warnings from other tracks' 1–5-shaped-page skew, confirmed via `git stash` to
+be present in identical count on `HEAD` before this batch — unrelated to and unworsened by this
+batch), `tmp_smoke.mjs` on all 9 touched pages at 320px (clean — no uncaught errors, no overflow;
+the one pre-existing `angular-routing-visualizer` `li +6px` clip notice confirmed via `git stash`
+to match the page's own pre-edit `HEAD` baseline exactly), `tmp_codecheck.mjs` (676 blocks across
+537 files, 0 real errors), `tmp_cwlines.mjs` (455 mounts, 0 out-of-range — this batch didn't touch
+any CodeWalk `lines:` array), and `tmp_contrast.mjs --theme=cream` / `--theme=dark` against all 9
+touched pages (both clean, 0 findings). `tmp_coachcheck.mjs` was not run against this batch's
+pages — none of the 9 carry a Code-With-Me `coach:` entry. `tmp_hfaudit.mjs` (`--json=`, read per
+file): all 9 touched pages score **77.9–97.1** after the mid-batch fix above, comfortably above
+the 75 floor (`angular-signals-deep-visualizer` lowest at 77.9, `angular-rxjs-operators-visualizer`
+highest at 97.1) — every one of the three that regressed below 75 mid-batch was caught and restored
+before this entry was written, not left for a future session.
+
+**Remaining scope: 313 pages `hf-deck`-with-no-`data-shape` + 62 pages with no `hf-deck` block at
+all = 375 pages still not through this pass.** `track-angular` still has 39 unshaped pages left (75
+total, 36 done), alongside `track-spring` (32 unshaped, 21 shaped) and `track-java` (32 unshaped, 11
+shaped) as the other largest-by-volume tracks, per this entry's own `tmp_variety.mjs` run.
+
 ---
 
 ### 18. Go GRANULAR on the eight core tracks before scaffolding anything new (Bobby, 2026-09-13)
