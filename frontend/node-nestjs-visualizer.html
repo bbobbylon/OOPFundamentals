@@ -62,39 +62,55 @@
     <div class="intro-ciam"><span class="tag">CIAM Nest API:</span> A Nest resource server validating Ping/Entra tokens uses <code>@nestjs/passport</code> + a JWT strategy that fetches the JWKS and verifies RS256 — a global <code>JwtAuthGuard</code> (≈ Spring's security filter chain) protects every route, and a <code>RolesGuard</code> reading a <code>@Roles('CIAM_ADMIN')</code> decorator does method-level authorization (≈ <code>@PreAuthorize</code>). A <code>ValidationPipe</code> with <code>class-validator</code> DTOs rejects bad bodies with 400 (≈ <code>@Valid</code>), and a global exception filter shapes every error like Spring's <code>@RestControllerAdvice</code>. The mental model transfers wholesale from the day job.</div>
   </div>
 
-<p class="hf-deck">or, one request-scoped provider can make your whole app request-scoped</p>
+<p class="hf-deck" data-shape="receipt">or, one request-scoped provider can make your whole app request-scoped</p>
 
 <div class="hf-kick">The problem</div>
 <p class="hf-say">You scoped ONE service to the request. Now your whole app rebuilds itself, every single request.</p>
 
-<div class="hf-card bad">
-  <div class="hf-cardtitle">Nobody touched the controllers. The controllers changed anyway.</div>
-  <p>You add a small <code>TenantContextService</code> — <code>@Injectable({ scope: Scope.REQUEST })</code>
-  — because it needs to read the tenant id off the live <code>REQUEST</code> object, something a
-  singleton can never see (a singleton is built once, long before any request exists). It's a
-  good, small, focused class. You inject it into <code>AuditLogger</code>, because every write
-  path already logs through <code>AuditLogger</code>. Load testing afterward shows p99 latency up
-  and CPU per request up, even though you didn't touch a single controller or route handler.
-  <code>AuditLogger</code> is used almost everywhere — and everywhere it's used just quietly
-  stopped being a singleton too.</p>
-  <div class="hf-scatter">
-    <span>TenantContextService: one small class ✓</span>
-    <span>no controller code changed ✓</span>
-    <span>AuditLogger now Scope.REQUEST too ⚠</span>
-    <span>everything that injects AuditLogger, also REQUEST ⚠</span>
-  </div>
-  <p class="hf-foot">Scope isn't a property of the class you wrote. It's contagious — it travels up every constructor that depends on it.</p>
+<p>You add a small <code>TenantContextService</code> — <code>@Injectable({ scope: Scope.REQUEST })</code>
+— because it needs to read the tenant id off the live <code>REQUEST</code> object, something a
+singleton can never see (a singleton is built once, long before any request exists). It's a
+good, small, focused class. You inject it into <code>AuditLogger</code>, because every write
+path already logs through <code>AuditLogger</code>. Load testing afterward shows p99 latency up
+and CPU per request up, even though you didn't touch a single controller or route handler.
+<code>AuditLogger</code> is used almost everywhere — and everywhere it's used just quietly
+stopped being a singleton too.</p>
+<div class="hf-scatter">
+  <span>TenantContextService: one small class ✓</span>
+  <span>no controller code changed ✓</span>
+  <span>AuditLogger now Scope.REQUEST too ⚠</span>
+  <span>everything that injects AuditLogger, also REQUEST ⚠</span>
+</div>
+<p class="hf-foot">Scope isn't a property of the class you wrote. It's contagious — it travels up every constructor that depends on it.</p>
+
+<div class="hf-receipt">
+  <div class="hf-receipt-head">Worked example — a 5-class fan-out, ~0.6ms of constructor work each (illustrative, not a measured benchmark)</div>
+  <div class="row"><span>TenantContextService — the one you meant to scope</span><span>0.6ms</span></div>
+  <div class="row"><span>AuditLogger — never scoped on purpose</span><span>0.6ms</span></div>
+  <div class="row"><span>OrdersService — just happens to log</span><span>0.6ms</span></div>
+  <div class="row"><span>UsersService — same</span><span>0.6ms</span></div>
+  <div class="row"><span>PaymentsController — same, one hop further up</span><span>0.6ms</span></div>
+  <div class="row total"><span>Added to EVERY request, forever, from now on</span><span>3.0ms</span></div>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Keep request-scoped providers at the leaves, not the root</div>
-  <div class="hf-ladder">
-    <b>TenantContextService (REQUEST) injected into AuditLogger (used everywhere)</b>
-    <i>↓ scope bubbles up through every constructor parameter that depends on it</i>
-    <b>Better: give AuditLogger the tenant id as a plain argument, not a request-scoped dependency</b>
-    <i>↓ AuditLogger and everything above it goes back to being a singleton, built once</i>
-    <b>Only the one genuinely per-request slice pays the per-request cost</b>
-  </div>
+<div class="hf-arrow up">That 3.0ms isn't the cost of reading a tenant header once — it's five classes' worth of
+constructor work, charged again on every single request, because of one upstream
+<code>Scope.REQUEST</code> provider the other four don't even know exists. NestJS's own docs only
+promise a "properly scoped" app won't lose more than roughly 5% latency — this is what an
+IMPROPERLY scoped one looks like instead.</div>
+
+<div class="hf-vs">
+  <div class="bad"><h5>5 classes rebuilt, every request</h5><p>What actually happens the moment <code>AuditLogger</code> injects a <code>Scope.REQUEST</code> dependency: the whole chain above it loses "build once," silently, with no decorator anyone wrote on four of the five classes.</p></div>
+  <div class="good"><h5>1 class rebuilt, every request</h5><p>What happens once <code>AuditLogger</code> takes the tenant id as a plain constructor argument instead: only <code>TenantContextService</code> itself — the one class that actually needs the live request — pays the per-request price.</p></div>
+</div>
+
+<p><b>Keep request-scoped providers at the leaves, not the root.</b></p>
+<div class="hf-ladder">
+  <b>TenantContextService (REQUEST) injected into AuditLogger (used everywhere)</b>
+  <i>↓ scope bubbles up through every constructor parameter that depends on it</i>
+  <b>Better: give AuditLogger the tenant id as a plain argument, not a request-scoped dependency</b>
+  <i>↓ AuditLogger and everything above it goes back to being a singleton, built once</i>
+  <b>Only the one genuinely per-request slice pays the per-request cost</b>
 </div>
 
 <div class="principle" style="text-align:left">
@@ -112,33 +128,6 @@ customer's order, every dish that touches that station now has to be made fresh 
 ones that never changed their own recipe. Where it stops being accurate: a real kitchen can wall
 off one station. Nest's DI graph has no wall to put between a request-scoped dependency and
 everything built on top of it.</div>
-
-<div class="hf-talk">
-  <div class="hf-bub">
-    <span class="who">You</span>
-    <p>I only changed one small service. Why is my whole app slower under load?</p>
-  </div>
-  <div class="hf-bub right">
-    <span class="who">TenantContextService</span>
-    <p>Because I asked for something a singleton can never have: the live <code>REQUEST</code>
-    object. Nest can't hand out one instance of me and reuse it forever — there's a new request
-    every few milliseconds. So Nest marks me <code>Scope.REQUEST</code> and builds a fresh me,
-    every time.</p>
-  </div>
-  <div class="hf-bub">
-    <span class="who">AuditLogger</span>
-    <p>And I depend on him now. Nest can't hand out one long-lived instance of ME either — if it
-    did, I'd be holding onto whichever request happened to build me first, forever. So Nest
-    quietly scopes me to REQUEST too. I didn't ask for this. Nobody put <code>Scope.REQUEST</code>
-    on my class.</p>
-  </div>
-  <div class="hf-bub right">
-    <span class="who">Every controller that injects AuditLogger</span>
-    <p>Same story, one level up. The bubbling doesn't stop until it runs out of things that depend
-    on him. That's a large slice of the app's controller layer, rebuilt from scratch, on every
-    single request — for the sake of one class that needed to read a tenant id.</p>
-  </div>
-</div>
 
 <div class="hf-kick">The mechanism</div>
 <p class="hf-say">One Scope.REQUEST provider, and the container stops asking "do I already have one of these?"</p>
@@ -209,44 +198,18 @@ everything built on top of it.</div>
   around, so <code>LoggerService</code> has no reason to change scope.</p>
 </div>
 
-<div class="hf-kick">Where you've seen this before</div>
-<p class="hf-say">Three frameworks, one question: what happens when something that lives for one request meets something built to live forever?</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>Spring's request-scoped beans have the identical trap</h4>
-    <p>Spring Boot has the same feature under <code>@Scope("request")</code>, and the same
-    warning: inject a request-scoped bean straight into a singleton and Spring throws a
-    <code>BeanCreationException</code> at startup, because the singleton is built once and the
-    request-scoped bean doesn't exist yet at that point. Spring's fix is a scoped proxy
-    (<code>proxyMode = ScopedProxyMode.TARGET_CLASS</code>) — a stand-in the singleton can hold
-    forever, which resolves the real request-scoped bean fresh on every call. Nest generates the
-    equivalent machinery for you automatically, which is exactly why the cost is so easy to miss
-    until a load test finds it.</p>
-    <div class="hf-scatter"><span>scoped proxy ≈ Nest's automatic Scope.REQUEST rebuilding</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Flask's g / Python's contextvars: no graph to bubble through</h4>
-    <p>Flask and FastAPI solve "give me something scoped to this one request" differently: a
-    <code>g</code> object or a <code>contextvars.ContextVar</code> that any function can read
-    during that request, with no dependency-injection graph for the scope to propagate through.
-    You lose Nest's clean constructor-injection testability, but you also lose the entire bubbling
-    problem, because nothing was ever declared to be "built once" in the first place.</p>
-    <div class="hf-scatter"><span>request-local storage, no DI graph to bubble through</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Your CIAM resource server, under a login storm</h4>
-    <p>A Nest resource server validating Ping/Entra tokens often wants a small
-    <code>CurrentUserService</code> that reads <code>request.user</code> (set by a guard) so
-    business services don't each reach into the raw request. Mark that convenience service
-    <code>Scope.REQUEST</code> and inject it into something broadly shared — a
-    <code>PermissionsService</code> every controller uses for role checks — and the entire
-    authorization layer of the API stops being built once at startup. Under a Monday-morning SSO
-    login storm, that's real, measurable latency added to code every single request already has
-    to run.</p>
-    <div class="hf-scatter"><span>one convenience service, the whole authz layer rebuilt per request</span></div>
-  </div>
-</div>
+<p>Spring Boot's own <code>@Scope("request")</code> beans pay a version of this same bill: inject
+a request-scoped bean straight into a singleton and Spring throws a <code>BeanCreationException</code>
+at startup, because the singleton is built once and the request-scoped bean doesn't exist yet.
+Spring's fix is a scoped proxy (<code>proxyMode = ScopedProxyMode.TARGET_CLASS</code>) that the
+singleton holds forever and that resolves the real bean fresh on every call — Nest generates the
+equivalent machinery for you automatically, which is exactly why this receipt is so easy to never
+see until a load test hands it to you. And in your own CIAM resource server, the same bill arrives
+if a convenience <code>CurrentUserService</code> (reading <code>request.user</code>, set by a
+guard) gets marked <code>Scope.REQUEST</code> and injected into something broadly shared — a
+<code>PermissionsService</code> every controller uses for role checks. Do that, and the entire
+authorization layer stops being built once at startup; under a Monday-morning SSO login storm,
+that's real latency added to code every single request already has to run.</p>
 
 <div class="hf-kick">Questions from the back row</div>
 <div class="hf-ask">

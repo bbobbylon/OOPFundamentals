@@ -56,12 +56,42 @@
     <div class="intro-ciam"><span class="tag">CIAM Node gateway:</span> A Node BFF validating Ping/Entra JWTs is almost all I/O — verify a signature (CPU-cheap), call <code>/userinfo</code>, hit a session store, proxy to a downstream API. The event loop shines here: thousands of in-flight token validations and upstream calls share one thread because each is just a parked callback awaiting I/O. The one rule: never do something CPU-heavy (a giant JSON transform, synchronous crypto over megabytes) on the main loop, or every other request stalls behind it.</div>
   </div>
 
-<p class="hf-deck">or, Node isn't doing ten things at once — it's doing one thing, ten thousand times a second</p>
+<p class="hf-deck" data-shape="whiteboard">or, Node isn't doing ten things at once — it's doing one thing, ten thousand times a second</p>
 
-<div class="hf-kick">The problem</div>
-<p class="hf-say">Your retry helper uses 0% CPU. The server still can't answer a health check.</p>
+<div class="hf-kick">The whole bug, in one picture</div>
+<p class="hf-say">Follow which queue the loop refuses to step past — everything below happens at one phase boundary.</p>
 
-<div class="hf-card bad">
+<div class="hf-brain">
+  <div class="hf-brain-head">Brain Power</div>
+  <p>A retry helper calls <code>process.nextTick(retry)</code> again every time it finds the thing
+  it's waiting on still isn't ready — no backoff, no limit, just "try again, right now." Before you
+  look at the cycle below: does the server's CPU usage climb while this runs? Does an incoming
+  health-check ping ever get answered <i>while</i> the retry is still re-queuing itself?</p>
+</div>
+
+<div class="hf-card">
+  <div class="hf-cycle">
+    <div class="stt on"><span class="nm">RETRY(): not ready yet</span>
+      <span class="go">calls <em>process.nextTick(retry)</em> again before returning <span class="arrow">→</span> RETRY(): not ready yet</span></div>
+    <div class="stt"><span class="nm">RETRY(): finally ready</span>
+      <span class="go">returns WITHOUT re-scheduling itself <span class="arrow">→</span> QUEUE EMPTY</span></div>
+    <div class="stt"><span class="nm">QUEUE EMPTY</span>
+      <span class="go">only now can the loop advance a phase <span class="arrow">→</span> POLL PHASE RUNS</span></div>
+    <div class="stt"><span class="nm">POLL PHASE RUNS</span>
+      <span class="go">every socket that arrived during the retry fires at once <span class="arrow">→</span> RETRY(): not ready yet, next time</span></div>
+  </div>
+  <p class="hf-annot">The top row is the trap, drawn as what it really is: a cycle that only ever
+  points back at itself. Nothing here is slow in the CPU sense — it's slow in the "nobody else gets
+  a turn" sense, which is exactly why a profiler shows idle time while the server looks dead.</p>
+</div>
+
+<div class="hf-hand">you'd assume a quiet, 0%-CPU process can't be <i>blocking</i> anything — nothing
+idle-looking looks dangerous. What a recursive <code>process.nextTick</code> call actually does is
+keep one specific queue above zero, and Node's rule for the loop is absolute: your health check
+doesn't get answered until that queue hits zero, no matter how little CPU the thing holding it open
+is using.</div>
+
+<div class="hf-card">
   <div class="hf-cardtitle">Nothing is slow — nothing else is running</div>
   <p>You wrote a small helper that retries a not-quite-ready operation by calling
   <code>process.nextTick(retry)</code> at the end of itself — it felt like the fast choice, since
@@ -78,15 +108,13 @@
   <p class="hf-foot">The bug isn't that something is doing too much work. It's that the loop is never being handed back.</p>
 </div>
 
-<div class="hf-card good">
-  <div class="hf-cardtitle">Let the loop advance between attempts</div>
-  <div class="hf-ladder">
-    <b>setImmediate(retry) instead of process.nextTick(retry)</b>
-    <i>↓ the check phase runs AFTER poll, so queued sockets and health-check pings get serviced first</i>
-    <b>Better: setTimeout(retry, backoffMs) with a real backoff</b>
-    <i>↓ a slow dependency gets an actual pause instead of a queue-jump — and the delay shows up in a trace</i>
-    <b>The health check answers on time, every time</b>
-  </div>
+<p><b>Let the loop advance between attempts.</b></p>
+<div class="hf-ladder">
+  <b>setImmediate(retry) instead of process.nextTick(retry)</b>
+  <i>↓ the check phase runs AFTER poll, so queued sockets and health-check pings get serviced first</i>
+  <b>Better: setTimeout(retry, backoffMs) with a real backoff</b>
+  <i>↓ a slow dependency gets an actual pause instead of a queue-jump — and the delay shows up in a trace</i>
+  <b>The health check answers on time, every time</b>
 </div>
 
 <div class="principle" style="text-align:left">
@@ -105,30 +133,6 @@ they want, with no rule stopping them. The teller can't call the next number unt
 finally stops. It stops being a fair comparison the moment you remember a real customer eventually
 runs out of one-more-things; a recursive <code>nextTick</code> callback might not.</div>
 
-<div class="hf-talk">
-  <div class="hf-bub">
-    <span class="who">You</span>
-    <p>My retry function does almost nothing — no loops, no big JSON, no crypto. Why is the whole server frozen?</p>
-  </div>
-  <div class="hf-bub right">
-    <span class="who">process.nextTick</span>
-    <p>Because I never said I was doing a lot of work. I said I go <b>first</b> — before every
-    promise, before every timer, before the loop even thinks about checking a socket. Call me
-    again from inside myself and I will happily keep going first, forever. Nobody told me to stop.</p>
-  </div>
-  <div class="hf-bub">
-    <span class="who">The event loop</span>
-    <p>And I can't argue with him. My rule is simple: his queue empties completely before I'm
-    allowed to move to the next phase. I don't peek ahead and I don't get impatient — I just wait.</p>
-  </div>
-  <div class="hf-bub right">
-    <span class="who">setImmediate</span>
-    <p>Which is the whole reason I exist. I run in the check phase — one stop AFTER poll, where I/O
-    callbacks live. Schedule your retry with me instead of him, and every socket that showed up
-    gets serviced before your next attempt even starts.</p>
-  </div>
-</div>
-
 <div class="hf-kick">The mechanism</div>
 <p class="hf-say">Zero re-scheduled callbacks — that's the only number that decides when the loop moves on.</p>
 
@@ -146,22 +150,6 @@ runs out of one-more-things; a recursive <code>nextTick</code> callback might no
   re-adds itself before returning keeps that number above zero indefinitely, and every phase after
   it — poll, check, close — simply never gets a turn. That's a starvation bug with no exception
   thrown and no CPU spike to find it by.</p>
-</div>
-
-<div class="hf-card">
-  <div class="hf-cycle">
-    <div class="stt on"><span class="nm">RETRY(): not ready yet</span>
-      <span class="go">calls <em>process.nextTick(retry)</em> again before returning <span class="arrow">→</span> RETRY(): not ready yet</span></div>
-    <div class="stt"><span class="nm">RETRY(): finally ready</span>
-      <span class="go">returns WITHOUT re-scheduling itself <span class="arrow">→</span> QUEUE EMPTY</span></div>
-    <div class="stt"><span class="nm">QUEUE EMPTY</span>
-      <span class="go">only now can the loop advance a phase <span class="arrow">→</span> POLL PHASE RUNS</span></div>
-    <div class="stt"><span class="nm">POLL PHASE RUNS</span>
-      <span class="go">every socket that arrived during the retry fires at once <span class="arrow">→</span> RETRY(): not ready yet, next time</span></div>
-  </div>
-  <p class="hf-annot">The top row is the trap, drawn as what it really is: a cycle that only ever
-  points back at itself. Nothing here is slow in the CPU sense — it's slow in the "nobody else gets
-  a turn" sense, which is exactly why a profiler shows idle time while the server looks dead.</p>
 </div>
 
 <div class="hf-check" data-answer="1">
@@ -190,40 +178,15 @@ runs out of one-more-things; a recursive <code>nextTick</code> callback might no
   before Node even glances at a queue.</p>
 </div>
 
-<div class="hf-kick">Where you've seen this before</div>
-<p class="hf-say">Three systems, one trap: a queue that never lets go doesn't need a big computation to hurt you.</p>
-
-<div class="hf-terms">
-  <div class="hf-card hf-taped">
-    <h4>The browser has this too — with one fewer queue</h4>
-    <p>Every JS engine, browser or Node, drains its microtask queue (promises, <code>queueMicrotask</code>)
-    completely between every macrotask — that's the ECMAScript spec, not a Node feature. The
-    browser just doesn't have <code>process.nextTick</code>: that third, even-higher-priority queue
-    is a Node-only API stacked on top of the same rule. A recursive <code>queueMicrotask()</code>
-    loop starves a browser tab's rendering exactly the way a recursive nextTick starves a Node
-    server's sockets.</p>
-    <div class="hf-scatter"><span>same trap, one browser API lighter</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Java: a starved thread needs no queue at all</h4>
-    <p>Java has no single-threaded loop to starve, but it produces the identical symptom from a
-    different cause: a thread holding a <code>synchronized</code> lock, or a pool sized too small
-    for the load, makes every other thread wait indefinitely while the CPU itself sits barely busy.
-    Same diagnosis either way — "nothing is slow, but nothing else is running" — and the same first
-    instinct fails: a profiler shows near-idle time in both cases, because the problem is
-    scheduling, not computation.</p>
-    <div class="hf-scatter"><span>lock contention ≈ nextTick starvation</span></div>
-  </div>
-  <div class="hf-card hf-taped">
-    <h4>Your CIAM gateway, retrying a flaky /userinfo call</h4>
-    <p>A Node backend-for-frontend validates a Ping or Entra JWT, then calls the identity
-    provider's <code>/userinfo</code> endpoint to hydrate the session. Write the retry-on-timeout
-    logic as <code>process.nextTick(retry)</code> instead of a real backoff, and one slow identity
-    call can pin the nextTick queue busy — every other tenant's login request queues up behind it
-    on the same process, because of a helper function nobody thought was "doing work."</p>
-    <div class="hf-scatter"><span>one retry helper, every login stalls</span></div>
-  </div>
-</div>
+<p>If you ever debug this exact symptom outside Node, you'll find it costs nothing to reproduce: a
+Java thread holding a <code>synchronized</code> lock, or a pool sized too small for your load,
+makes every other thread wait indefinitely while the CPU itself sits barely busy — "nothing is
+slow, but nothing else is running," the same diagnosis this page opened on, from a completely
+different mechanism. And in your own CIAM stack, write a Node BFF's retry-on-timeout logic against
+a flaky <code>/userinfo</code> call as <code>process.nextTick(retry)</code> instead of a real
+backoff, and one slow identity-provider response pins your nextTick queue busy — every other
+tenant's login request queues up behind it on the <em>same process</em>, because of a helper
+function nobody thought was "doing work."</p>
 
 <div class="hf-kick">Questions from the back row</div>
 <div class="hf-ask">
@@ -252,16 +215,6 @@ runs out of one-more-things; a recursive <code>nextTick</code> callback might no
   but climbing event-loop-delay numbers, plus connections that time out even though nothing in
   <code>top</code> looks busy. Idle CPU paired with an unresponsive server is the fingerprint of a
   scheduling starvation, not a computation problem.</p>
-</div>
-
-<div class="hf-kick">Grab a napkin</div>
-<p class="hf-say">Predict it before you scroll.</p>
-<div class="hf-napkin">
-  A retry loop reschedules itself with <code>process.nextTick</code> until a <code>ready</code>
-  flag flips true. <b>Case one:</b> the flag flips inside an <code>fs.readFile</code> callback.
-  <b>Case two:</b> the flag flips inside a second <code>process.nextTick</code> call, scheduled
-  once, at the very start, right alongside the first retry. In which case does the loop ever end on
-  its own — and why does the other one hang forever?
 </div>
 
   <div style="margin:0 0 28px">
