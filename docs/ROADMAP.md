@@ -4712,6 +4712,92 @@ all = 375 pages still not through this pass.** `track-angular` still has 39 unsh
 total, 36 done), alongside `track-spring` (32 unshaped, 21 shaped) and `track-java` (32 unshaped, 11
 shaped) as the other largest-by-volume tracks, per this entry's own `tmp_variety.mjs` run.
 
+**2026-10-16 — `track-nodejs` batch landed without a ROADMAP entry (commit `9dc4480`); noted here
+so the record stays accurate rather than silently gapped.** That commit declared
+`node-fastify-visualizer` as `tour` (earned, left alone) and re-staged `node-fundamentals-visualizer`
+to `whiteboard` and `node-nestjs-visualizer` to `receipt`, taking `track-nodejs` from 3 shaped pages
+to 6 (162 → 165 shaped sitewide, 313 → 310 unshaped) — confirmed against this session's own fresh
+`tmp_variety.mjs` run, which is where the 165/310/62 baseline below comes from. The commit's own
+message has the per-page verification; it just never made it into this file. Lesson restated once
+more because it keeps recurring: a batch is not done until its ROADMAP entry exists, same commit.
+
+**2026-10-16/17 — `track-sql` picked up, full track now clean (2 shaped → 6 shaped, 0 SKEW).**
+Session start: re-fetched `origin/claude/multi-repo-continuation-l6xwuq` (confirmed already
+fast-forward, nothing new to merge) and ran a fresh, untruncated `tmp_variety.mjs` rather than
+trusting the 165/310/62 figure above secondhand. Checked several small (2-shaped-page) tracks first
+— `track-ai-dev`, `track-azure`, `track-cloud`, `track-csharp`, etc. — but every one of those SKEW
+warnings is pure small-sample math (1/2 = 50%, mathematically unfixable without growing the track
+past 5 shaped pages), not a real editorial problem. `track-sql` was the better target: 2 shaped
+pages (`autopsy` = `nosql-document-wide-column`, `argument` = `nosql-redis`, both outside the 9
+`sql-*` pages) and exactly 9 `hf-deck`-with-a-block, unshaped `sql-*` pages — a track small enough
+to bring to FULL coverage (11 total pages) in one batch, which only 4 new shapes away from the 18%
+cap (1/6 = 16.7%) made achievable without diluting quality. Read all 9 candidate pages' existing
+blocks in full before picking; confirmed each with `psql` against a real local PostgreSQL 16.15
+instance (started via `pg_ctlcluster`) rather than trusting the pre-existing prose, since the task
+requires fact-checking any claim before it ships — see the per-page verification list below. Four
+pages landed, one per distinct shape, none reused:
+
+| page | shape | the gotcha that chose it |
+|---|---|---|
+| `sql-indexes-visualizer` | `whiteboard` | pure containment — a composite index `(tenant_id, status, created_at)` is one physical sort order, enterable only from the outside in; built a new `hf-nest` (ring=tenant_id, ring=status, core=created_at) behind a new predict-first `hf-brain`, with a new `hf-hand` closing note. Dropped the `hf-card bad`/`hf-card good` verdict pair and `hf-talk` (both forbidden for `whiteboard`); folded the removed `hf-talk`'s write-cost point and the removed `hf-terms`' three CIAM parallels (sessions table, Angular admin grid, `audit_events`) into two short paragraphs instead of losing them outright |
+| `sql-transactions-visualizer` | `timelapse` | a lost update is `true at T0, false at T1, nobody looked` — textbook timelapse trigger; built a new `hf-cycle` (MVCC's row-version lifecycle: LIVE → DEAD-but-visible → vacuumed → LIVE again, a genuine repeating loop, not a one-shot sequence) and converted the existing step-labelled `hf-ladder` into one with every rung a real clock time (10:00:00.000 → 10:00:00.052), reproducing the exact race. `timelapse` does **not** forbid the verdict pair or `hf-talk`, so both stayed — only `hf-terms` and `hf-napkin` (both forbidden) came out, and a new predict-first `hf-brain` replaced the napkin's active-recall role |
+| `sql-normalization-visualizer` | `questions` | pure misconception — "I passed 1NF/2NF/3NF/BCNF, so my schema can't have an anomaly" is false, and the page already argued this via its `hf-talk`; converted that into a 7-pair `dl.hf-qa` (new `hf-big`: *"Passing every rule on the checklist doesn't mean the checklist covered your bug"*) escalating from "how can this still be wrong" to "where else does this exact trap recur" (folded the removed `hf-terms`' OWASP-Top-10 and 100%-line-coverage parallels straight into two of the dt/dd pairs, so neither was lost, just re-homed). Dropped the verdict pair, `hf-ladder`, `hf-talk`, `hf-napkin` — all forbidden — and added a predict-first `hf-brain` to recover the active-recall point the napkin had been carrying |
+| `sql-advanced-queries-visualizer` | `assembly` | a 7-stage pipeline (`FROM → WHERE → GROUP BY → HAVING → window → SELECT → ORDER BY`) where one stage — `WHERE`, station two — is the one everyone blames the bug on even though `SELECT` (station six) is where the alias they expected was actually born; built a new `hf-chain` with `hf-mark` on the `WHERE` station, kept the pre-existing detailed `hf-steps` card underneath it (both devices required, not either/or). Only `hf-talk` came out (forbidden); `assembly` does not forbid `hf-terms`/`hf-napkin`/the verdict pair, so the three-parallel terms section, the closing napkin, and all three `hf-ask` Q&As were left exactly as they were |
+
+**Every fact re-verified against a real PostgreSQL 16.15 instance in this session's sandbox, not
+trusted from the pages' pre-existing prose:** composite-index leftmost-prefix behaviour (`EXPLAIN`
+confirmed a full index hit on `tenant_id, status, created_at` together and a `Seq Scan` the moment
+the leading column is dropped, on a real 200k-row table); a plain `email` predicate using
+`idx_users_email` via `Index Scan` while the identical row reached through `lower(email) = ?`
+fell back to `Seq Scan`, and recovered by a functional index on `lower(email)`; the lost-update
+race itself, reproduced with two real concurrent `psql` sessions on a shared row — both
+transactions' `UPDATE`s committed cleanly under default READ COMMITTED (no error, final balance
+0, confirming the "$200 walked out the door" claim) and the second one failed with the exact
+string `could not serialize access due to concurrent update` when the same race was re-run under
+REPEATABLE READ; `WHERE` rejecting a `SELECT`-list alias (`column "n" does not exist`) while
+`HAVING` and `ORDER BY` both accept it, and `ROW_NUMBER() OVER (...)` likewise unreachable from
+`WHERE`; and the 4NF row-count arithmetic (2 roles × 2 MFA factors forces 4 rows; 3 × 2 forces 6)
+confirmed by actually building and populating the cross-product table. No new error, numeric
+claim, or behavioural claim was invented — every one was run for real first.
+
+**`tmp_hfaudit.mjs` before/after each page (JSON rows diffed, not eyeballed from the terminal) —
+all four IMPROVED, none regressed below the pre-edit score, let alone the 75 floor:**
+
+| page | before | after |
+|---|---|---|
+| `sql-indexes-visualizer` | 83.3 | 90.7 |
+| `sql-transactions-visualizer` | 88.0 | 96.0 |
+| `sql-normalization-visualizer` | 93.5 | 96.8 (after one mid-batch fix — see below) |
+| `sql-advanced-queries-visualizer` | 83.3 | 89.3 |
+
+`sql-normalization-visualizer`'s first draft actually scored 89.9, a `recall` dip from 100 to 67 —
+removing `hf-napkin` (forbidden for `questions`) cost the page one of the three active-recall
+signals `tmp_hfaudit.mjs` checks for (`hf-check` + `hf-napkin`/`hf-brain` + a quiz/flashcard tag),
+and the rewrite hadn't added a replacement. Added one `hf-brain` predict-before-reveal beat
+(legal for `questions` — not on its banned list) right after the opening `hf-say`, re-ran
+`tmp_hfaudit.mjs`, and it landed at 96.8 — this is the exact "re-staging costs teaching, check
+before AND after" lesson the 2026-09-28 `track-angular` entry above already recorded, confirmed
+again on a different shape this time.
+
+**Full verification gate, run clean before pushing:** `tmp_vcheck.mjs` (537 pages, 521 registered,
+green); `tmp_doccheck.mjs` (341 symbols, 0 undocumented — no shared engine touched this batch);
+`tmp_variety.mjs` full-site (169 shaped / 306 unshaped / 62 no-block, **0 declaration/device
+mismatches**; `track-sql` now **6/6 shaped pages clean, 0 SKEW** — every one of
+`autopsy`/`argument`/`whiteboard`/`timelapse`/`questions`/`assembly` sits at exactly 1/6 = 16.7%,
+under the 18% cap, the first batch this track has cleared); `tmp_smoke.mjs` on all 4 touched pages
+at both 320px (the tool's own stricter default) and 390px (clean both widths, no uncaught errors,
+no overflow); `tmp_codecheck.mjs` (676 blocks across 537 files, 0 real errors — unchanged, this
+batch added no new `<pre>` blocks); `tmp_cwlines.mjs` (455 mounts, 0 out-of-range — unchanged, no
+CodeWalk `lines:` array touched); `tmp_assetcheck.mjs origin/master` (0 teaching assets lost);
+`tmp_contrast.mjs --theme=cream` and `--theme=dark` against all 4 touched pages (both clean, 0
+findings). `tmp_coachcheck.mjs` not run — none of the 4 pages carry a `coach:` entry. Sitewide
+`tmp_hfaudit.mjs` mean score held at 90.8 → 90.9, `thin`/`has-parts` bands unchanged at 0/0 — no
+regression anywhere else on the site, since no other page was touched.
+
+**Remaining scope: 169 shaped / 306 unshaped / 62 no-block.** `track-sql` is now fully clear (0
+SKEW). The next-largest unshaped tracks by volume are unchanged from the prior entry:
+`track-angular` (39 unshaped of 75), `track-spring` (32 of 53) and `track-java` (32 of 43).
+
 ---
 
 ### 18. Go GRANULAR on the eight core tracks before scaffolding anything new (Bobby, 2026-09-13)
